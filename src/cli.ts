@@ -31,6 +31,7 @@ export function parseArgs(argv: string[]): ParsedArgs {
 
 import { dirname, join } from 'node:path';
 import { homedir } from 'node:os';
+import { randomBytes } from 'node:crypto';
 import { loadOrCreateIdentity } from './identity.js';
 import { loadConfig } from './config.js';
 import { openIndexStore } from './indexstore.js';
@@ -38,12 +39,24 @@ import { createLocalExecutor } from './executor.js';
 import { filterIndexedEntries, parseIgnoreRules } from './ignore.js';
 import { createSyncPeer } from './peer.js';
 import { splitIntoBlocks } from './blockstore.js';
-import { readFileSync } from 'node:fs';
+import { readFileSync, existsSync, writeFileSync } from 'node:fs';
 import { startPeerServer } from './net/server.js';
 import { connectPeer } from './net/client.js';
 import { startDiscovery } from './net/discovery.js';
 import { makePeerTransport, attachPeerMessages } from './net/wire.js';
+import { createControlServer } from './api.js';
+import { buildStatus } from './status.js';
 import type { WebSocket } from 'ws';
+
+function loadOrCreateToken(configDir: string): string {
+  const file = join(configDir, 'control.token');
+  if (existsSync(file)) {
+    return readFileSync(file, 'utf8').trim();
+  }
+  const token = randomBytes(24).toString('hex');
+  writeFileSync(file, token, { mode: 0o600 });
+  return token;
+}
 
 /**
  * Run a command against the daemon's data directory. The lifecycle is kept
@@ -121,9 +134,32 @@ export async function run(args: ParsedArgs): Promise<void> {
       .catch((error) => console.error(`connect to ${peer.deviceId} failed: ${error.message}`));
   });
 
+  // 本地控制 API:localhost + token,提供 /api/status 与 Web UI
+  const token = loadOrCreateToken(configDir);
+  const uiHtml = readFileSync(new URL('../ui/index.html', import.meta.url), 'utf8');
+  const control = createControlServer({
+    token,
+    uiHtml,
+    getStatus: () =>
+      buildStatus(
+        identity,
+        config,
+        (() => {
+          const all = index.listEntries();
+          return {
+            entries: all.filter((e) => !e.deleted).length,
+            tombstones: all.filter((e) => e.deleted).length,
+          };
+        })(),
+      ),
+  });
+  control.listen(8384, '127.0.0.1');
+
   console.log(`syncx daemon started (device ${identity.deviceId}, port ${server.port})`);
+  console.log(`control UI: http://127.0.0.1:8384 (token in ${join(configDir, 'control.token')})`);
   await new Promise<void>((resolve) => {
     const shutdown = (): void => {
+      control.close();
       discovery.close();
       server.close();
       index.close();

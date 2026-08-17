@@ -1,0 +1,166 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>syncx 状态</title>
+  <style>
+    :root {
+      --bg: #0f1117;
+      --card: #1a1d27;
+      --text: #e6e8ee;
+      --muted: #8b90a0;
+      --accent: #4f8cff;
+      --border: #2a2e3b;
+    }
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+    body {
+      background: var(--bg);
+      color: var(--text);
+      font-family: system-ui, -apple-system, "Segoe UI", sans-serif;
+      padding: 24px;
+      line-height: 1.5;
+    }
+    .container { max-width: 720px; margin: 0 auto; }
+    h1 { font-size: 22px; margin-bottom: 16px; }
+    .card {
+      background: var(--card);
+      border: 1px solid var(--border);
+      border-radius: 10px;
+      padding: 18px;
+      margin-bottom: 16px;
+    }
+    .muted { color: var(--muted); font-size: 13px; }
+    .stat-row { display: flex; gap: 24px; margin-top: 8px; }
+    .stat b { display: block; font-size: 22px; }
+    table { width: 100%; border-collapse: collapse; margin-top: 8px; }
+    th, td { text-align: left; padding: 6px 8px; border-bottom: 1px solid var(--border); }
+    th { color: var(--muted); font-weight: 500; }
+    input {
+      background: var(--bg);
+      color: var(--text);
+      border: 1px solid var(--border);
+      border-radius: 6px;
+      padding: 8px 10px;
+      width: 100%;
+      margin-top: 8px;
+    }
+    button {
+      background: var(--accent);
+      color: #fff;
+      border: none;
+      border-radius: 6px;
+      padding: 8px 14px;
+      cursor: pointer;
+      margin-top: 10px;
+    }
+    button:hover { opacity: 0.9; }
+    #error { color: #ff6b6b; margin-top: 10px; }
+  </style>
+</head>
+<body>
+  <div class="container">
+    <h1>syncx 状态</h1>
+
+    <div class="card">
+      <div class="muted">控制 token(保存在本浏览器)</div>
+      <input id="token" type="password" placeholder="输入 token 后点击加载">
+      <div>
+        <button id="load">加载状态</button>
+      </div>
+      <div id="error"></div>
+    </div>
+
+    <div class="card" id="status" hidden>
+      <div class="muted">本机设备</div>
+      <div id="deviceId" style="font-size:18px;font-weight:600;"></div>
+      <div class="stat-row">
+        <div class="stat"><b id="entries"></b>索引条目</div>
+        <div class="stat"><b id="tombstones"></b>墓碑</div>
+        <div class="stat"><b id="folderCount"></b>共享目录</div>
+      </div>
+    </div>
+
+    <div class="card" id="folders" hidden>
+      <div class="muted">共享目录</div>
+      <table>
+        <thead>
+          <tr><th>路径</th><th>已配对设备</th></tr>
+        </thead>
+        <tbody id="folderRows"></tbody>
+      </table>
+    </div>
+  </div>
+
+  <script>
+    const TOKEN_KEY = 'syncx.controlToken';
+    const tokenInput = document.getElementById('token');
+    const statusCard = document.getElementById('status');
+    const foldersCard = document.getElementById('folders');
+    const errorDiv = document.getElementById('error');
+
+    function showError(message) {
+      errorDiv.textContent = message;
+    }
+
+    function clearError() {
+      errorDiv.textContent = '';
+    }
+
+    async function loadStatus() {
+      clearError();
+      const token = tokenInput.value.trim();
+      if (!token) {
+        showError('请先输入控制 token');
+        return;
+      }
+      localStorage.setItem(TOKEN_KEY, token);
+
+      try {
+        const res = await fetch('/api/status', {
+          headers: { Authorization: `Bearer ${token}` },
+        });
+        if (res.status === 401) {
+          showError('token 无效,请检查后重试');
+          return;
+        }
+        if (!res.ok) {
+          showError('请求失败:HTTP ' + res.status);
+          return;
+        }
+        const data = await res.json();
+
+        document.getElementById('deviceId').textContent = data.deviceId;
+        document.getElementById('entries').textContent = String(data.entries);
+        document.getElementById('tombstones').textContent = String(data.tombstones);
+        document.getElementById('folderCount').textContent = String(data.folders.length);
+        statusCard.hidden = false;
+
+        const tbody = document.getElementById('folderRows');
+        tbody.innerHTML = '';
+        for (const folder of data.folders) {
+          const tr = document.createElement('tr');
+          const tdPath = document.createElement('td');
+          tdPath.textContent = folder.path;
+          const tdDevices = document.createElement('td');
+          tdDevices.textContent = folder.devices.join(', ');
+          tr.appendChild(tdPath);
+          tr.appendChild(tdDevices);
+          tbody.appendChild(tr);
+        }
+        foldersCard.hidden = false;
+      } catch (err) {
+        showError('无法连接控制 API:' + err.message);
+      }
+    }
+
+    const savedToken = localStorage.getItem(TOKEN_KEY);
+    if (savedToken) {
+      tokenInput.value = savedToken;
+      loadStatus();
+    }
+
+    document.getElementById('load').addEventListener('click', loadStatus);
+  </script>
+</body>
+</html>
