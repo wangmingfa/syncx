@@ -1,0 +1,3 @@
+# Built-in node:sqlite instead of a third-party driver
+
+Metadata and indexes (file versions, tombstones, ignore rules) are stored in SQLite via Node's built-in `node:sqlite` module rather than better-sqlite3 or a JSON-file store. This pins the project to Node >= 22.13 (where the module needs no flag) in exchange for zero native dependencies, which keeps `npm install` painless on NAS boxes and other odd platforms — worth more to a personal LAN tool than the module's still-experimental status (Release Candidate as of Node 24/25). The storage layer stays behind a small interface so swapping drivers later remains cheap.

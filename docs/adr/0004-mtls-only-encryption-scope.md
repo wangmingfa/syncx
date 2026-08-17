@@ -1,0 +1,3 @@
+# Encryption scope: mTLS transport only, no untrusted-device content encryption
+
+All device-to-device traffic is encrypted and authenticated with mTLS backed by the Ed25519 device keypairs. Syncthing-style "untrusted device" content encryption (opaque metadata, encrypted files on peers you don't trust) is explicitly out of scope: syncx targets an individual's own devices on a trusted LAN, where that mode would dramatically complicate the index and conflict logic for near-zero benefit. If an untrusted-peer scenario ever appears, the protocol leaves room to add it later rather than designing it in now.
