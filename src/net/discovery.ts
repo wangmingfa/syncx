@@ -1,4 +1,5 @@
 import multicastDNS, { type ResponsePacket } from 'multicast-dns';
+import { hostname } from 'node:os';
 import type { DeviceIdentity } from '../identity.js';
 import { deriveDeviceIdFromPublicKey } from '../handshake.js';
 
@@ -37,7 +38,7 @@ export function startDiscovery(
             priority: 0,
             weight: 0,
             port,
-            target: SERVICE,
+            target: hostname(),
           },
         },
         {

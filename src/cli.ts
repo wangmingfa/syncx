@@ -34,6 +34,16 @@ import { homedir } from 'node:os';
 import { loadOrCreateIdentity } from './identity.js';
 import { loadConfig } from './config.js';
 import { openIndexStore } from './indexstore.js';
+import { createLocalExecutor } from './executor.js';
+import { filterIndexedEntries, parseIgnoreRules } from './ignore.js';
+import { createSyncPeer } from './peer.js';
+import { splitIntoBlocks } from './blockstore.js';
+import { readFileSync } from 'node:fs';
+import { startPeerServer } from './net/server.js';
+import { connectPeer } from './net/client.js';
+import { startDiscovery } from './net/discovery.js';
+import { makePeerTransport, attachPeerMessages } from './net/wire.js';
+import type { WebSocket } from 'ws';
 
 /**
  * Run a command against the daemon's data directory. The lifecycle is kept
@@ -53,9 +63,69 @@ export async function run(args: ParsedArgs): Promise<void> {
     return;
   }
 
-  console.log(`syncx daemon started (device ${identity.deviceId})`);
+  const folder = config.sharedFolders[0];
+  if (!folder) {
+    console.error('no shared folders configured; add one to config.json first');
+    index.close();
+    return;
+  }
+
+  const folderPath = folder.path;
+  const executor = createLocalExecutor(folder.path, index);
+  // 忽略规则每设备本地,从共享目录的 .syncxignore 读取(不存在则为空)
+  let ignoreLines: string[] = [];
+  try {
+    ignoreLines = readFileSync(join(folderPath, '.syncxignore'), 'utf8').split('\n');
+  } catch {
+    // no ignore file
+  }
+  const localIndex = new Map(
+    filterIndexedEntries(parseIgnoreRules(ignoreLines), index.listEntries()).map((e) => [e.path, e]),
+  );
+
+  /** 在一个 socket 上建立同步会话:peer 接线 + 主动发送本地索引。 */
+  function startSyncSession(socket: WebSocket, remoteDeviceId: string): void {
+    const transport = makePeerTransport(socket);
+    const peer = createSyncPeer({
+      transport,
+      localIndex,
+      executor,
+      readLocalBlock: (path, blockIndex) => {
+        const blocks = splitIntoBlocks(readFileSync(join(folderPath, path)));
+        return blocks[blockIndex]!;
+      },
+      deviceId: identity.deviceId,
+      remoteDeviceId,
+    });
+    attachPeerMessages(peer, socket);
+    transport.sendEntries([...localIndex.values()]);
+  }
+
+  const server = startPeerServer(
+    identity,
+    {
+      onPeerConnected(socket, remoteDeviceId) {
+        startSyncSession(socket, remoteDeviceId);
+      },
+      onError(error) {
+        console.error(error.message);
+      },
+    },
+    args.port ?? 22000,
+  );
+
+  // mDNS 自动发现:发现对端后自动发起连接并建立会话
+  const discovery = startDiscovery(identity, server.port, (peer) => {
+    void connectPeer(identity, `ws://${peer.host}:${peer.port}`)
+      .then((socket) => startSyncSession(socket, peer.deviceId))
+      .catch((error) => console.error(`connect to ${peer.deviceId} failed: ${error.message}`));
+  });
+
+  console.log(`syncx daemon started (device ${identity.deviceId}, port ${server.port})`);
   await new Promise<void>((resolve) => {
     const shutdown = (): void => {
+      discovery.close();
+      server.close();
       index.close();
       resolve();
     };
