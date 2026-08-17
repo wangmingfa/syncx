@@ -10,6 +10,7 @@ function entry(path: string, version: Array<[string, number]>, size = 100, delet
     version: new Map(version),
     size,
     deleted,
+    blocks: [],
   };
 }
 

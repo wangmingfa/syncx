@@ -7,6 +7,7 @@ function entry(version: Array<[string, number]>, size = 100, deleted = false) {
     version: new Map(version),
     size,
     deleted,
+    blocks: [],
   };
 }
 

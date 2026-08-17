@@ -6,6 +6,8 @@ export interface IndexEntry {
   version: VersionVector;
   size: number;
   deleted: boolean;
+  /** SHA-256 hashes of the 1MB blocks that make up the file content. */
+  blocks: string[];
 }
 
 export type FileStateRelation = 'equal' | 'local-newer' | 'remote-newer' | 'conflict';

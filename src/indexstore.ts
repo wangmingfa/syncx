@@ -24,6 +24,7 @@ function rowToEntry(row: Record<string, unknown>): IndexEntry {
     version: deserializeVersion(row.version as string),
     size: row.size as number,
     deleted: (row.deleted as number) === 1,
+    blocks: JSON.parse(row.blocks as string) as string[],
   };
 }
 
@@ -34,20 +35,27 @@ export function openIndexStore(dbPath: string): IndexStore {
       path TEXT PRIMARY KEY,
       version TEXT NOT NULL,
       size INTEGER NOT NULL,
-      deleted INTEGER NOT NULL
+      deleted INTEGER NOT NULL,
+      blocks TEXT NOT NULL
     );
   `);
 
   const saveEntry = db.prepare(
-    'INSERT OR REPLACE INTO entries (path, version, size, deleted) VALUES (?, ?, ?, ?)',
+    'INSERT OR REPLACE INTO entries (path, version, size, deleted, blocks) VALUES (?, ?, ?, ?, ?)',
   );
-  const getEntry = db.prepare('SELECT path, version, size, deleted FROM entries WHERE path = ?');
-  const listEntries = db.prepare('SELECT path, version, size, deleted FROM entries');
+  const getEntry = db.prepare('SELECT path, version, size, deleted, blocks FROM entries WHERE path = ?');
+  const listEntries = db.prepare('SELECT path, version, size, deleted, blocks FROM entries');
   const removeEntry = db.prepare('DELETE FROM entries WHERE path = ?');
 
   return {
     saveEntry(entry: IndexEntry): void {
-      saveEntry.run(entry.path, serializeVersion(entry.version), entry.size, entry.deleted ? 1 : 0);
+      saveEntry.run(
+        entry.path,
+        serializeVersion(entry.version),
+        entry.size,
+        entry.deleted ? 1 : 0,
+        JSON.stringify(entry.blocks),
+      );
     },
     getEntry(path: string): IndexEntry | undefined {
       const row = getEntry.get(path) as Record<string, unknown> | undefined;
