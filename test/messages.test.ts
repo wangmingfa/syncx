@@ -1,5 +1,12 @@
 import { describe, expect, it } from 'vitest';
-import { encodeIndex, decodeIndex } from '../src/messages.js';
+import {
+  encodeIndex,
+  decodeIndex,
+  encodeBlockRequest,
+  decodeBlockRequest,
+  encodeBlockResponse,
+  decodeBlockResponse,
+} from '../src/messages.js';
 
 function entry(
   path: string,
@@ -37,5 +44,35 @@ describe('index message codec', () => {
 
     expect(decoded[0]!.version).toBeInstanceOf(Map);
     expect(decoded[0]!.version.get('dev-a')).toBe(3);
+  });
+});
+
+describe('block message codec', () => {
+  it('round-trips a block request', () => {
+    const request = {
+      deviceId: 'DEV1234567',
+      path: 'docs/plan.md',
+      blockIndex: 2,
+      hash: 'abc123',
+    };
+
+    expect(decodeBlockRequest(encodeBlockRequest(request))).toEqual(request);
+  });
+
+  it('round-trips a block response with binary data', () => {
+    const response = {
+      deviceId: 'DEV1234567',
+      path: 'docs/plan.md',
+      blockIndex: 0,
+      hash: 'abc123',
+      data: Buffer.from('hello block content'),
+    };
+
+    const decoded = decodeBlockResponse(encodeBlockResponse(response));
+    expect(decoded.deviceId).toBe(response.deviceId);
+    expect(decoded.path).toBe(response.path);
+    expect(decoded.blockIndex).toBe(response.blockIndex);
+    expect(decoded.hash).toBe(response.hash);
+    expect(decoded.data).toEqual(response.data);
   });
 });

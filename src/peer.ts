@@ -1,0 +1,206 @@
+import type { IndexEntry } from './index.js';
+import { buildPlan } from './plan.js';
+import type { BlockRequest, BlockResponse } from './messages.js';
+import type { LocalExecutor } from './executor.js';
+import { verifyBlock } from './blockstore.js';
+
+export interface RoundPlan {
+  send: IndexEntry[];
+  /** Blocks to request; the peer session fills in deviceId later. */
+  requestBlocks: Array<Omit<BlockRequest, 'deviceId'>>;
+}
+
+/**
+ * Plan one sync round from the local perspective: which entries to send
+ * to the remote, and which blocks to request from the remote.
+ */
+export function planSyncRound(
+  local: Map<string, IndexEntry>,
+  remote: Map<string, IndexEntry>,
+): RoundPlan {
+  const actions = buildPlan(local, remote);
+  const send: IndexEntry[] = [];
+  const requestBlocks: Array<Omit<BlockRequest, 'deviceId'>> = [];
+
+  for (const action of actions) {
+    switch (action.kind) {
+      case 'send':
+        send.push(action.entry);
+        break;
+      case 'delete': {
+        const localEntry = local.get(action.path);
+        if (localEntry?.deleted) {
+          send.push(localEntry);
+        }
+        break;
+      }
+      case 'receive':
+        action.entry.blocks.forEach((hash, blockIndex) => {
+          requestBlocks.push({
+            path: action.path,
+            blockIndex,
+            hash,
+          });
+        });
+        break;
+      case 'conflict':
+        // conflict 由会话层处理:拉远端块,完成后生成冲突副本
+        break;
+    }
+  }
+
+  return { send, requestBlocks };
+}
+
+export interface PeerTransport {
+  sendEntries(entries: IndexEntry[]): void;
+  sendBlockRequest(request: BlockRequest): void;
+  sendBlockResponse(response: BlockResponse): void;
+}
+
+export interface SyncPeerDeps {
+  transport: PeerTransport;
+  localIndex: Map<string, IndexEntry>;
+  executor?: LocalExecutor;
+  readLocalBlock(path: string, blockIndex: number): Buffer;
+  deviceId: string;
+  /** Peer device ID, used to name conflict copies. */
+  remoteDeviceId?: string;
+}
+
+export interface SyncPeer {
+  onPeerIndex(entries: IndexEntry[]): Promise<void>;
+  onBlockRequest(request: BlockRequest): void;
+  onBlockResponse(response: BlockResponse): Promise<void>;
+}
+
+interface PendingEntry {
+  kind: 'receive' | 'conflict';
+  /** The remote entry to land. */
+  entry: IndexEntry;
+  /** The local entry, only for conflicts. */
+  local?: IndexEntry;
+  blocks: Array<Buffer | undefined>;
+  received: number;
+}
+
+/**
+ * Wire one sync round over an injected transport: on receiving the peer's
+ * index, send newer local entries, request missing blocks, apply deletions
+ * and prepare conflict copies; collect block responses until a file is
+ * complete, then apply it via the executor.
+ */
+export function createSyncPeer(deps: SyncPeerDeps): SyncPeer {
+  const { transport, localIndex, executor, readLocalBlock, deviceId, remoteDeviceId } = deps;
+  const pending = new Map<string, PendingEntry>();
+
+  function requestAllBlocks(entry: IndexEntry): void {
+    entry.blocks.forEach((hash, blockIndex) => {
+      transport.sendBlockRequest({ deviceId, path: entry.path, blockIndex, hash });
+    });
+  }
+
+  return {
+    async onPeerIndex(entries: IndexEntry[]): Promise<void> {
+      const remote = new Map(entries.map((e) => [e.path, e]));
+      const actions = buildPlan(localIndex, remote);
+      const sends: IndexEntry[] = [];
+
+      for (const action of actions) {
+        switch (action.kind) {
+          case 'send':
+            sends.push(action.entry);
+            break;
+          case 'delete': {
+            const localEntry = localIndex.get(action.path);
+            const remoteEntry = remote.get(action.path);
+            if (localEntry?.deleted) {
+              // 本地墓碑:传播给对端
+              sends.push(localEntry);
+            } else if (remoteEntry?.deleted) {
+              // 对端墓碑:本地删除
+              await executor?.applyDelete(action.path, remoteEntry);
+            }
+            break;
+          }
+          case 'receive': {
+            const remoteEntry = remote.get(action.path);
+            if (remoteEntry) {
+              pending.set(remoteEntry.path, {
+                kind: 'receive',
+                entry: remoteEntry,
+                blocks: new Array<Buffer | undefined>(remoteEntry.blocks.length),
+                received: 0,
+              });
+              requestAllBlocks(remoteEntry);
+            }
+            break;
+          }
+          case 'conflict': {
+            const remoteEntry = remote.get(action.path);
+            const localEntry = localIndex.get(action.path);
+            if (remoteEntry && localEntry) {
+              pending.set(remoteEntry.path, {
+                kind: 'conflict',
+                entry: remoteEntry,
+                local: localEntry,
+                blocks: new Array<Buffer | undefined>(remoteEntry.blocks.length),
+                received: 0,
+              });
+              requestAllBlocks(remoteEntry);
+            }
+            break;
+          }
+        }
+      }
+
+      transport.sendEntries(sends);
+    },
+
+    onBlockRequest(request: BlockRequest): void {
+      let data: Buffer;
+      try {
+        data = readLocalBlock(request.path, request.blockIndex);
+      } catch {
+        // 本地文件可能在块请求在途时被删除或重命名(如同步冲突处理),
+        // 对端会在下一轮索引交换中收敛;忽略该请求即可。
+        return;
+      }
+      transport.sendBlockResponse({
+        deviceId,
+        path: request.path,
+        blockIndex: request.blockIndex,
+        hash: request.hash,
+        data,
+      });
+    },
+
+    async onBlockResponse(response: BlockResponse): Promise<void> {
+      const item = pending.get(response.path);
+      if (!item) return;
+      if (!verifyBlock(response.data, response.hash)) return;
+
+      item.blocks[response.blockIndex] = response.data;
+      item.received += 1;
+
+      if (item.received !== item.entry.blocks.length) return;
+
+      pending.delete(response.path);
+      const provider = {
+        getBlocks: async (): Promise<Buffer[]> => item.blocks.map((b) => b ?? Buffer.alloc(0)),
+      };
+
+      if (item.kind === 'conflict' && item.local) {
+        await executor?.applyConflict(
+          response.path,
+          item.local,
+          item.entry,
+          provider,
+          remoteDeviceId ?? '',
+        );
+      } else {
+        await executor?.applyReceive(item.entry, provider);
+      }
+    },
+  };
+}
