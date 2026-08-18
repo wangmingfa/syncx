@@ -11,7 +11,9 @@
     "test": "vitest run",
     "test:watch": "vitest",
     "typecheck": "tsc --noEmit",
-    "build": "tsc"
+    "build": "npm run build:app && npm run build:ssr",
+    "build:app": "tsc",
+    "build:ssr": "vite build --config vite.config.ts"
   },
   "license": "MIT",
   "devDependencies": {
@@ -23,7 +25,11 @@
     "vitest": "^4.1.10"
   },
   "dependencies": {
+    "@vitejs/plugin-vue": "^6.0.8",
+    "@vue/server-renderer": "^3.5.41",
     "multicast-dns": "^7.2.5",
+    "vite": "^8.2.1",
+    "vue": "^3.5.41",
     "ws": "^8.21.3"
   }
 }

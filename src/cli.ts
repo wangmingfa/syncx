@@ -62,6 +62,22 @@ import type { IndexEntry } from './index.js';
 import { splitIntoBlocks } from './blockstore.js';
 import { readFileSync, existsSync, writeFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
+import type { ControlServerDeps } from './api.js';
+
+/** Vite SSR bundle location; resolved at runtime so tsx dev can import it. */
+const SSR_ENTRY = new URL('../dist/ui/server.js', import.meta.url);
+
+async function controlRenderSsr(
+  data: { status?: unknown; error?: string; message?: string },
+): Promise<string> {
+  try {
+    const { render } = await import(SSR_ENTRY.href);
+    return render(data.status ? 'status' : 'login', data);
+  } catch {
+    return '<!DOCTYPE html><html><head><title>syncx</title></head><body><h1>syncx</h1><p>web ui unavailable — build with npm run build</p></body></html>';
+  }
+}
+
 import { startPeerServer } from './net/server.js';
 import { connectPeer } from './net/client.js';
 import { startDiscovery } from './net/discovery.js';
@@ -159,10 +175,9 @@ export async function run(args: ParsedArgs): Promise<void> {
 
   // 本地控制 API 先启动(无论是否有共享目录),让用户能在 Web UI 里添加第一个目录
   const token = loadOrCreateToken(configDir);
-  const uiHtml = readFileSync(new URL('../ui/index.html', import.meta.url), 'utf8');
   const control = createControlServer({
     token,
-    uiHtml,
+    renderSsr: controlRenderSsr,
     addFolder: (path, devices) => {
       addSharedFolder(configPath, path, devices);
       console.log(`shared folder added: ${path}`);

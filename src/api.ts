@@ -3,19 +3,30 @@ import { createServer, type Server, type IncomingMessage, type ServerResponse } 
 export interface ControlServerDeps {
   token: string;
   getStatus: () => unknown;
-  /** Static index page served at `/`; API endpoints stay token-protected. */
-  uiHtml?: string;
-  /** POST /api/folders handler: add a shared folder. */
   addFolder?: (path: string, devices: string[]) => void;
-  /** DELETE /api/folders handler: remove a shared folder by path. */
   removeFolder?: (path: string) => void;
+  /** Render the SSR app; may be undefined (e.g. in tests) and falls back to a 404. */
+  renderSsr?: (data: { status?: unknown; error?: string; message?: string }) => Promise<string>;
 }
 
+const COOKIE_NAME = 'syncx_session';
+
 function readToken(req: IncomingMessage): string | undefined {
-  const header = req.headers.authorization;
-  if (!header) return undefined;
-  const match = header.match(/^Bearer (.+)$/);
-  return match?.[1];
+  const auth = req.headers.authorization;
+  if (auth) {
+    const match = auth.match(/^Bearer (.+)$/);
+    if (match) return match[1];
+  }
+  const cookie = req.headers.cookie ?? '';
+  for (const part of cookie.split(';')) {
+    const trimmed = part.trim();
+    const eqIdx = trimmed.indexOf('=');
+    if (eqIdx < 0) continue;
+    const k = trimmed.slice(0, eqIdx);
+    const v = trimmed.slice(eqIdx + 1);
+    if (k === COOKIE_NAME) return v;
+  }
+  return undefined;
 }
 
 function sendJson(res: ServerResponse, status: number, body: unknown): void {
@@ -28,59 +39,124 @@ function sendHtml(res: ServerResponse, html: string): void {
   res.end(html);
 }
 
-function readBody(req: IncomingMessage): Promise<unknown> {
+function redirect(res: ServerResponse, location: string): void {
+  res.writeHead(302, { Location: location });
+  res.end();
+}
+
+function readBody(req: IncomingMessage): Promise<string> {
   return new Promise((resolve, reject) => {
     let data = '';
-    req.on('data', (chunk) => {
-      data += chunk;
-    });
-    req.on('end', () => {
-      try {
-        resolve(data === '' ? {} : JSON.parse(data));
-      } catch (error) {
-        reject(error);
-      }
-    });
+    req.on('data', (chunk) => { data += chunk; });
+    req.on('end', () => resolve(data));
     req.on('error', reject);
   });
 }
 
+async function ensureSsr(renderSsr?: ControlServerDeps['renderSsr']): Promise<ControlServerDeps['renderSsr'] | undefined> {
+  if (renderSsr) return renderSsr;
+  try {
+    const { render } = await import('./web/server.js');
+    const r = (data: { status?: unknown; error?: string; message?: string }) =>
+      render(data.status ? 'status' : 'login', data);
+    return r;
+  } catch {
+    return undefined;
+  }
+}
+
 /**
- * Local control API on localhost. Every API endpoint requires
- * `Authorization: Bearer <token>`; unknown paths return 404.
+ * Local control API on localhost. Auth accepts Bearer token (legacy) or
+ * the HttpOnly `syncx_session` cookie. Form POSTs redirect back to the
+ * SSR page; unknown paths return 404.
  */
 export function createControlServer(deps: ControlServerDeps): Server {
-  const { token, getStatus, uiHtml, addFolder, removeFolder } = deps;
+  const { token, getStatus, addFolder, removeFolder, renderSsr } = deps;
 
   return createServer(async (req, res) => {
-    // 静态页面不需要 token(它自己从 /api/status 拉数据时带 token)
-    if (req.method === 'GET' && req.url === '/' && uiHtml !== undefined) {
-      sendHtml(res, uiHtml);
-      return;
-    }
-
     const reqToken = readToken(req);
-    if (reqToken !== token) {
-      sendJson(res, 401, { error: 'unauthorized' });
+    const authenticated = reqToken === token;
+
+    const r = await ensureSsr(renderSsr);
+
+    // GET / : SSR status page (auth required) or login form
+    if (req.method === 'GET' && req.url === '/' && r) {
+      if (authenticated) {
+        sendHtml(res, await r({ status: getStatus() }));
+      } else {
+        sendHtml(res, await r({ error: undefined }));
+      }
       return;
     }
 
+    // GET /login : always render the login form
+    if (req.method === 'GET' && req.url === '/login' && r) {
+      const error = reqToken !== undefined && reqToken !== token ? 'token 无效,请重试' : undefined;
+      sendHtml(res, await r({ error }));
+      return;
+    }
+
+    // POST /login : set HttpOnly session cookie and redirect
+    if (req.method === 'POST' && req.url === '/login' && r) {
+      const body = await readBody(req);
+      const match = new URLSearchParams(body).get('token');
+      if (match === token) {
+        res.writeHead(302, {
+          Location: '/',
+          'Set-Cookie': `${COOKIE_NAME}=${token}; HttpOnly; SameSite=Lax`,
+        });
+        res.end();
+      } else {
+        sendHtml(res, await r({ error: 'token 无效,请重试' }));
+      }
+      return;
+    }
+
+    if (!authenticated) {
+      res.writeHead(401, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ error: 'unauthorized' }));
+      return;
+    }
+
+    // GET /api/status
     if (req.method === 'GET' && req.url === '/api/status') {
       sendJson(res, 200, getStatus());
       return;
     }
 
-    if (req.method === 'POST' && req.url === '/api/folders' && addFolder !== undefined) {
+    // Form POST /folders : add or (via _method=DELETE) remove a folder
+    if (req.method === 'POST' && req.url === '/folders') {
+      const params = new URLSearchParams(await readBody(req));
+      const method = params.get('_method');
+      if (method === 'DELETE' && removeFolder) {
+        const path = params.get('path');
+        if (path) removeFolder(path);
+        redirect(res, '/');
+        return;
+      }
+      const path = params.get('path') ?? '';
+      const devicesRaw = params.get('devices') ?? '';
+      const devices = devicesRaw.split(',').map((s) => s.trim()).filter(Boolean);
+      if (path && addFolder) {
+        addFolder(path, devices);
+        redirect(res, '/?msg=shared folder added');
+        return;
+      }
+      res.writeHead(400, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ error: 'path is required' }));
+      return;
+    }
+
+    // Legacy JSON API: POST /api/folders
+    if (req.method === 'POST' && req.url === '/api/folders' && addFolder) {
       try {
-        const body = (await readBody(req)) as { path?: unknown; devices?: unknown };
-        if (typeof body.path !== 'string' || body.path === '') {
+        const raw = await readBody(req);
+        const body = raw === '' ? {} : JSON.parse(raw);
+        if (typeof (body as any).path !== 'string' || (body as any).path === '') {
           sendJson(res, 400, { error: 'path is required' });
           return;
         }
-        const devices = Array.isArray(body.devices)
-          ? body.devices.filter((d): d is string => typeof d === 'string')
-          : [];
-        addFolder(body.path, devices);
+        addFolder((body as any).path, ((body as any).devices ?? []).filter((d: unknown): d is string => typeof d === 'string'));
         sendJson(res, 201, { ok: true });
       } catch {
         sendJson(res, 400, { error: 'invalid json body' });
@@ -88,7 +164,8 @@ export function createControlServer(deps: ControlServerDeps): Server {
       return;
     }
 
-    if (req.method === 'DELETE' && req.url?.startsWith('/api/folders') && removeFolder !== undefined) {
+    // Legacy JSON API: DELETE /api/folders
+    if (req.method === 'DELETE' && req.url?.startsWith('/api/folders') && removeFolder) {
       const url = new URL(req.url, 'http://localhost');
       const path = url.searchParams.get('path');
       if (path === null || path === '') {
