@@ -100,6 +100,29 @@ export function createSyncPeer(deps: SyncPeerDeps): SyncPeer {
     });
   }
 
+  /** 收齐全部块(或空文件本身)后把条目落地;未就绪则无操作。 */
+  async function completeIfReady(path: string): Promise<void> {
+    const item = pending.get(path);
+    if (!item || item.received !== item.entry.blocks.length) return;
+
+    pending.delete(path);
+    const provider = {
+      getBlocks: async (): Promise<Buffer[]> => item.blocks.map((b) => b ?? Buffer.alloc(0)),
+    };
+
+    if (item.kind === 'conflict' && item.local) {
+      await executor?.applyConflict(
+        path,
+        item.local,
+        item.entry,
+        provider,
+        remoteDeviceId ?? '',
+      );
+    } else {
+      await executor?.applyReceive(item.entry, provider);
+    }
+  }
+
   return {
     async onPeerIndex(entries: IndexEntry[]): Promise<void> {
       const remote = new Map(entries.map((e) => [e.path, e]));
@@ -133,6 +156,8 @@ export function createSyncPeer(deps: SyncPeerDeps): SyncPeer {
                 received: 0,
               });
               requestAllBlocks(remoteEntry);
+              // 空文件(0 块)不产生块请求,直接落地
+              await completeIfReady(remoteEntry.path);
             }
             break;
           }
@@ -148,6 +173,7 @@ export function createSyncPeer(deps: SyncPeerDeps): SyncPeer {
                 received: 0,
               });
               requestAllBlocks(remoteEntry);
+              await completeIfReady(remoteEntry.path);
             }
             break;
           }
@@ -179,28 +205,13 @@ export function createSyncPeer(deps: SyncPeerDeps): SyncPeer {
       const item = pending.get(response.path);
       if (!item) return;
       if (!verifyBlock(response.data, response.hash)) return;
+      // 重复响应(如重传)不重复计数,避免虚增提前落地不完整文件
+      if (item.blocks[response.blockIndex] !== undefined) return;
 
       item.blocks[response.blockIndex] = response.data;
       item.received += 1;
 
-      if (item.received !== item.entry.blocks.length) return;
-
-      pending.delete(response.path);
-      const provider = {
-        getBlocks: async (): Promise<Buffer[]> => item.blocks.map((b) => b ?? Buffer.alloc(0)),
-      };
-
-      if (item.kind === 'conflict' && item.local) {
-        await executor?.applyConflict(
-          response.path,
-          item.local,
-          item.entry,
-          provider,
-          remoteDeviceId ?? '',
-        );
-      } else {
-        await executor?.applyReceive(item.entry, provider);
-      }
+      await completeIfReady(response.path);
     },
   };
 }

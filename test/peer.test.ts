@@ -77,7 +77,7 @@ describe('sync peer session', () => {
     };
   }
 
-  it('sends newer local entries and requests remote blocks on peer index', () => {
+  it('sends newer local entries and requests remote blocks on peer index', async () => {
     const { transport, sentEntries, requests } = fakeTransport();
     const local = new Map([['local.txt', entry('local.txt', [['dev-a', 2]], ['l1'])]]);
     const peer = createSyncPeer({
@@ -92,7 +92,7 @@ describe('sync peer session', () => {
       entry('local.txt', [['dev-a', 1]], ['l0']),
       entry('remote.txt', [['dev-b', 3]], ['r1', 'r2'], 200),
     ];
-    peer.onPeerIndex(remote);
+    await peer.onPeerIndex(remote);
 
     expect(sentEntries).toEqual([entry('local.txt', [['dev-a', 2]], ['l1'])]);
     expect(requests).toEqual([
@@ -118,7 +118,9 @@ describe('sync peer session', () => {
       deviceId: 'DEV-A',
     });
 
-    peer.onPeerIndex([entry('incoming.txt', [['dev-b', 1]], [hashBlock(content)], content.length)]);
+    await peer.onPeerIndex([
+      entry('incoming.txt', [['dev-b', 1]], [hashBlock(content)], content.length),
+    ]);
 
     // 收到对端返回的所有块后,文件应落地
     peer.onBlockResponse({
@@ -132,6 +134,69 @@ describe('sync peer session', () => {
     await new Promise((r) => setTimeout(r, 10));
     expect(readFileSync(join(root, 'incoming.txt'))).toEqual(content);
     expect(index.getEntry('incoming.txt')?.version.get('dev-b')).toBe(1);
+
+    index.close();
+    rmSync(dir, { recursive: true, force: true });
+  });
+
+  it('lands empty files (0 blocks) without any block round-trip', async () => {
+    const dir = mkdtempSync(join(tmpdir(), 'syncx-peer-'));
+    const root = join(dir, 'share');
+    mkdirSync(root, { recursive: true });
+    const index = openIndexStore(join(dir, 'index.db'));
+    const executor = createLocalExecutor(root, index);
+    const { transport, requests } = fakeTransport();
+
+    const peer = createSyncPeer({
+      transport,
+      localIndex: new Map(),
+      executor,
+      readLocalBlock: () => Buffer.from(''),
+      deviceId: 'DEV-A',
+    });
+
+    // 空文件:blocks 为 [],不应发送任何块请求,文件应直接落地
+    await peer.onPeerIndex([entry('empty.txt', [['dev-b', 1]], [], 0)]);
+
+    expect(requests).toEqual([]);
+    expect(readFileSync(join(root, 'empty.txt'))).toEqual(Buffer.from(''));
+    expect(index.getEntry('empty.txt')?.version.get('dev-b')).toBe(1);
+
+    index.close();
+    rmSync(dir, { recursive: true, force: true });
+  });
+
+  it('ignores duplicate block responses instead of over-counting', async () => {
+    const dir = mkdtempSync(join(tmpdir(), 'syncx-peer-'));
+    const root = join(dir, 'share');
+    mkdirSync(root, { recursive: true });
+    const index = openIndexStore(join(dir, 'index.db'));
+    const executor = createLocalExecutor(root, index);
+    const { transport } = fakeTransport();
+
+    const content = Buffer.from('dedupe me');
+    const peer = createSyncPeer({
+      transport,
+      localIndex: new Map(),
+      executor,
+      readLocalBlock: () => Buffer.from(''),
+      deviceId: 'DEV-A',
+    });
+
+    peer.onPeerIndex([entry('dup.txt', [['dev-b', 1]], [hashBlock(content)], content.length)]);
+    const response = {
+      deviceId: 'DEV-B',
+      path: 'dup.txt',
+      blockIndex: 0,
+      hash: hashBlock(content),
+      data: content,
+    };
+    peer.onBlockResponse(response);
+    // 同一块重复收到:不应让 received 虚增导致提前落地不完整文件
+    peer.onBlockResponse(response);
+
+    await new Promise((r) => setTimeout(r, 10));
+    expect(readFileSync(join(root, 'dup.txt'))).toEqual(content);
 
     index.close();
     rmSync(dir, { recursive: true, force: true });

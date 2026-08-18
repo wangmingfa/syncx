@@ -38,7 +38,7 @@ export function parseArgs(argv: string[]): ParsedArgs {
   return result;
 }
 
-import { dirname, join } from 'node:path';
+import { dirname, join, relative, isAbsolute } from 'node:path';
 import { homedir } from 'node:os';
 import { randomBytes } from 'node:crypto';
 import { loadOrCreateIdentity } from './identity.js';
@@ -197,8 +197,18 @@ export async function run(args: ParsedArgs): Promise<void> {
       localIndex,
       executor,
       readLocalBlock: (path, blockIndex) => {
-        const blocks = splitIntoBlocks(readFileSync(join(folderPath, path)));
-        return blocks[blockIndex]!;
+        // 防止对端用 ../ 等路径穿越读取共享目录外的文件
+        const abs = join(folderPath, path);
+        const rel = relative(folderPath, abs);
+        if (rel.startsWith('..') || isAbsolute(rel)) {
+          throw new Error(`unsafe path: ${path}`);
+        }
+        const blocks = splitIntoBlocks(readFileSync(abs));
+        const block = blocks[blockIndex];
+        if (!block) {
+          throw new Error(`block ${blockIndex} out of range for ${path}`);
+        }
+        return block;
       },
       deviceId: identity.deviceId,
       remoteDeviceId,

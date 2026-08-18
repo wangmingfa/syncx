@@ -16,6 +16,24 @@ import { hashBlock } from '../../src/blockstore.js';
 
 const children: ChildProcess[] = [];
 
+/** 停掉所有子进程并等待退出;避免进程仍持有文件导致清理竞态(ENOTEMPTY)。 */
+async function stopChildren(): Promise<void> {
+  await Promise.all(
+    children.map(
+      (child) =>
+        new Promise<void>((resolve) => {
+          if (child.exitCode !== null || child.signalCode !== null) {
+            resolve();
+            return;
+          }
+          child.once('exit', () => resolve());
+          child.kill('SIGTERM');
+        }),
+    ),
+  );
+  children.length = 0;
+}
+
 afterEach(() => {
   for (const child of children) {
     child.kill('SIGTERM');
@@ -133,6 +151,8 @@ describe('two real daemons sync over peers config', () => {
       expect(readFileSync(join(b.share, 'a.txt'))).toEqual(Buffer.from('content from A'));
       expect(readFileSync(join(a.share, 'b.txt'))).toEqual(Buffer.from('content from B'));
 
+      // 先停掉 daemon 再清理临时目录,避免进程写文件导致 ENOTEMPTY
+      await stopChildren();
       rmSync(a.dir, { recursive: true, force: true });
       rmSync(b.dir, { recursive: true, force: true });
     },
