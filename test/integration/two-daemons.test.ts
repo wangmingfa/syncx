@@ -240,4 +240,36 @@ describe('two real daemons sync over peers config', () => {
     },
     30000,
   );
+
+  it(
+    'propagates a deletion to the peer and persists the local tombstone',
+    async () => {
+      const a = setupDaemon('a', [
+        { path: 'temp.txt', content: Buffer.from('delete me') },
+      ]);
+      const b = setupDaemon('b', []);
+
+      startDaemon(a, [`ws://127.0.0.1:${b.peerPort}`], [b.deviceId]);
+      startDaemon(b, [`ws://127.0.0.1:${a.peerPort}`], [a.deviceId]);
+
+      // B 先收到 temp.txt
+      await waitFor(() => existsSync(join(b.share, 'temp.txt')));
+      expect(readFileSync(join(b.share, 'temp.txt'))).toEqual(Buffer.from('delete me'));
+
+      // A 侧删除文件,等待墓碑传播到 B
+      rmSync(join(a.share, 'temp.txt'));
+      await waitFor(() => !existsSync(join(b.share, 'temp.txt')), 15000);
+
+      // 停掉 daemon 后读取 A 的本地索引库,确认删除已持久化为墓碑
+      // (修复前:删除只广播不落库,本地库仍记录存活条目)
+      await stopChildren();
+      const aIndex = openIndexStore(folderIndexPath(a.dir, 'main'));
+      expect(aIndex.getEntry('temp.txt')?.deleted).toBe(true);
+      aIndex.close();
+
+      rmSync(a.dir, { recursive: true, force: true });
+      rmSync(b.dir, { recursive: true, force: true });
+    },
+    30000,
+  );
 });

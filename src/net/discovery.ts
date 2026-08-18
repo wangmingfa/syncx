@@ -15,19 +15,28 @@ export interface Discovery {
   close(): void;
 }
 
+/** mDNS 实例类型( multicast-dns 默认导出的返回值)。便于测试时注入假对象。 */
+export type MdnsInstance = ReturnType<typeof multicastDNS>;
+
 /**
  * Thin mDNS discovery: advertises this device (deviceId derived from the
  * public key, service port in SRV), and reports peers that advertise the
- * same service. Real pairing/connection logic is a later batch.
+ * same service. Advertisement is refreshed periodically and we also query
+ * for the service, so a daemon that starts after peers are already running
+ * still discovers them (a one-shot announce would miss late joiners).
+ *
+ * `createMdns` 可注入(默认新建真实 mDNS 实例),便于在测试中替换假实现。
  */
 export function startDiscovery(
   identity: DeviceIdentity,
   port: number,
   onPeerFound: (peer: DiscoveredPeer) => void,
+  createMdns: () => MdnsInstance = multicastDNS,
 ): Discovery {
-  const mdns = multicastDNS();
+  const mdns = createMdns();
+  let timer: ReturnType<typeof setInterval> | undefined;
 
-  mdns.on('ready', () => {
+  const advertise = (): void => {
     mdns.respond({
       answers: [
         {
@@ -49,6 +58,18 @@ export function startDiscovery(
         },
       ],
     });
+  };
+
+  mdns.on('ready', () => {
+    advertise();
+    // 周期重播并主动查询:保证后加入节点既能被发现,也能发现已运行的节点
+    timer = setInterval(() => {
+      advertise();
+      mdns.query([
+        { name: SERVICE, type: 'SRV' },
+        { name: SERVICE, type: 'TXT' },
+      ]);
+    }, 30000);
   });
 
   mdns.on('response', (response: ResponsePacket) => {
@@ -71,6 +92,7 @@ export function startDiscovery(
 
   return {
     close(): void {
+      if (timer) clearInterval(timer);
       mdns.destroy();
     },
   };

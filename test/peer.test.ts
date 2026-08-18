@@ -201,4 +201,48 @@ describe('sync peer session', () => {
     index.close();
     rmSync(dir, { recursive: true, force: true });
   });
+
+  it('keeps the in-memory index in sync so a repeated peer index does not re-request received files', async () => {
+    const dir = mkdtempSync(join(tmpdir(), 'syncx-peer-'));
+    const root = join(dir, 'share');
+    mkdirSync(root, { recursive: true });
+    const index = openIndexStore(join(dir, 'index.db'));
+    const executor = createLocalExecutor(root, index);
+    // 共享的内存索引:模拟 daemon 在会话内复用的同一个 Map
+    const localIndex = new Map();
+    const { transport, requests } = fakeTransport();
+
+    const peer = createSyncPeer({
+      transport,
+      localIndex,
+      executor,
+      readLocalBlock: () => Buffer.from(''),
+      deviceId: 'DEV-A',
+    });
+
+    const content = Buffer.from('repeat test');
+    const remote = [entry('r.txt', [['dev-b', 1]], [hashBlock(content)], content.length)];
+
+    // 第一次:收到对端索引 → 请求块 → 落地
+    await peer.onPeerIndex(remote);
+    peer.onBlockResponse({
+      deviceId: 'DEV-B',
+      path: 'r.txt',
+      blockIndex: 0,
+      hash: hashBlock(content),
+      data: content,
+    });
+    await new Promise((r) => setTimeout(r, 10));
+
+    // 内存索引应已反映收到的文件(修复:之前永不更新,导致后续重复下载)
+    expect(localIndex.get('r.txt')?.version.get('dev-b')).toBe(1);
+
+    // 对端再次发来相同索引:本地已是最新,不应再发任何块请求
+    const before = requests.length;
+    await peer.onPeerIndex(remote);
+    expect(requests.length).toBe(before);
+
+    index.close();
+    rmSync(dir, { recursive: true, force: true });
+  });
 });

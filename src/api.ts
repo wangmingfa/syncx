@@ -1,4 +1,5 @@
 import { createServer, type Server, type IncomingMessage, type ServerResponse } from 'node:http';
+import { timingSafeEqual } from 'node:crypto';
 
 export interface ControlServerDeps {
   token: string;
@@ -44,10 +45,29 @@ function redirect(res: ServerResponse, location: string): void {
   res.end();
 }
 
-function readBody(req: IncomingMessage): Promise<string> {
+/** 常量时间比较,避免 token 校验被时序侧信道利用。 */
+function tokenMatches(a: string, b: string): boolean {
+  const ab = Buffer.from(a);
+  const bb = Buffer.from(b);
+  if (ab.length !== bb.length) return false;
+  return timingSafeEqual(ab, bb);
+}
+
+/** 读取请求体,超过 maxBytes 直接拒绝,防止大请求体耗尽内存。 */
+function readBody(req: IncomingMessage, maxBytes = 1_000_000): Promise<string> {
   return new Promise((resolve, reject) => {
     let data = '';
-    req.on('data', (chunk) => { data += chunk; });
+    let size = 0;
+    const onData = (chunk: Buffer): void => {
+      size += chunk.length;
+      if (size > maxBytes) {
+        req.removeListener('data', onData);
+        reject(new Error('request body too large'));
+        return;
+      }
+      data += chunk.toString('utf8');
+    };
+    req.on('data', onData);
     req.on('end', () => resolve(data));
     req.on('error', reject);
   });
@@ -73,9 +93,11 @@ async function ensureSsr(renderSsr?: ControlServerDeps['renderSsr']): Promise<Co
 export function createControlServer(deps: ControlServerDeps): Server {
   const { token, getStatus, addFolder, removeFolder, renderSsr } = deps;
 
-  return createServer(async (req, res) => {
+  return createServer((req, res) => {
+    void (async () => {
+      try {
     const reqToken = readToken(req);
-    const authenticated = reqToken === token;
+    const authenticated = tokenMatches(reqToken ?? '', token);
 
     const r = await ensureSsr(renderSsr);
 
@@ -91,7 +113,7 @@ export function createControlServer(deps: ControlServerDeps): Server {
 
     // GET /login : always render the login form
     if (req.method === 'GET' && req.url === '/login' && r) {
-      const error = reqToken !== undefined && reqToken !== token ? 'token 无效,请重试' : undefined;
+      const error = reqToken !== undefined && !tokenMatches(reqToken, token) ? 'token 无效,请重试' : undefined;
       sendHtml(res, await r({ error }));
       return;
     }
@@ -100,10 +122,10 @@ export function createControlServer(deps: ControlServerDeps): Server {
     if (req.method === 'POST' && req.url === '/login' && r) {
       const body = await readBody(req);
       const match = new URLSearchParams(body).get('token');
-      if (match === token) {
+      if (match && tokenMatches(match, token)) {
         res.writeHead(302, {
           Location: '/',
-          'Set-Cookie': `${COOKIE_NAME}=${token}; HttpOnly; SameSite=Lax`,
+          'Set-Cookie': `${COOKIE_NAME}=${token}; HttpOnly; SameSite=Lax; Path=/`,
         });
         res.end();
       } else {
@@ -178,5 +200,13 @@ export function createControlServer(deps: ControlServerDeps): Server {
     }
 
     sendJson(res, 404, { error: 'not found' });
+      } catch {
+        // 读取请求体失败(如超出大小上限):尚未响应时返回 413,避免连接挂起
+        if (!res.headersSent) {
+          res.writeHead(413, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify({ error: 'request body too large' }));
+        }
+      }
+    })();
   });
 }

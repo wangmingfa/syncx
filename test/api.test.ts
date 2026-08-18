@@ -205,3 +205,61 @@ describe('control api folder config', () => {
     server.close();
   });
 });
+
+describe('control api hardening', () => {
+  it('rejects an oversized request body with 413 instead of hanging', async () => {
+    const server = createControlServer({
+      token: 'secret',
+      getStatus: () => ({ ok: true }),
+      addFolder: () => {},
+    });
+    server.listen(0, '127.0.0.1');
+    await once(server, 'listening');
+    const port = (server.address() as AddressInfo).port;
+
+    // 约 2MB 的 body,超过 1MB 上限。/folders 表单端点的 readBody 未被内层
+    // try/catch 包裹,会走到外层的 413 拒绝,而不是让连接挂起。
+    const res = await fetchJson(port, '/folders', 'secret', {
+      method: 'POST',
+      body: 'x'.repeat(2_000_000),
+    });
+
+    expect(res.status).toBe(413);
+
+    server.close();
+  });
+
+  it('sets an HttpOnly, Path=/ session cookie on successful login', async () => {
+    const server = createControlServer({ token: 'secret', getStatus: () => ({ ok: true }) });
+    server.listen(0, '127.0.0.1');
+    await once(server, 'listening');
+    const port = (server.address() as AddressInfo).port;
+
+    const cookies = await new Promise<string[]>((resolve, reject) => {
+      const req = request(
+        {
+          host: '127.0.0.1',
+          port,
+          path: '/login',
+          method: 'POST',
+          headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+        },
+        (res) => {
+          resolve((res.headers['set-cookie'] as string[] | undefined) ?? []);
+          res.resume();
+        },
+      );
+      req.on('error', reject);
+      req.write('token=secret');
+      req.end();
+    });
+
+    expect(
+      cookies.some(
+        (c) => c.includes('syncx_session=secret') && c.includes('HttpOnly') && c.includes('Path=/'),
+      ),
+    ).toBe(true);
+
+    server.close();
+  });
+});

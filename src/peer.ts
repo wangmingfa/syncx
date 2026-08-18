@@ -3,6 +3,7 @@ import { buildPlan } from './plan.js';
 import type { BlockRequest, BlockResponse } from './messages.js';
 import type { LocalExecutor } from './executor.js';
 import { verifyBlock } from './blockstore.js';
+import { mergeVersions } from './version.js';
 
 export interface RoundPlan {
   send: IndexEntry[];
@@ -118,8 +119,11 @@ export function createSyncPeer(deps: SyncPeerDeps): SyncPeer {
         provider,
         remoteDeviceId ?? '',
       );
+      // 同步内存索引,使后续规划基于最新本地状态
+      localIndex.set(path, { ...item.entry, version: mergeVersions(item.local.version, item.entry.version) });
     } else {
       await executor?.applyReceive(item.entry, provider);
+      localIndex.set(path, item.entry);
     }
   }
 
@@ -143,6 +147,7 @@ export function createSyncPeer(deps: SyncPeerDeps): SyncPeer {
             } else if (remoteEntry?.deleted) {
               // 对端墓碑:本地删除
               await executor?.applyDelete(action.path, remoteEntry);
+              localIndex.set(action.path, remoteEntry);
             }
             break;
           }

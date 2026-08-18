@@ -60,6 +60,7 @@ import { createSyncPeer, type PeerTransport, type SyncPeer } from './peer.js';
 import { scanFolder } from './scanner.js';
 import type { IndexEntry } from './index.js';
 import { splitIntoBlocks } from './blockstore.js';
+import { broadcastFolderUpdates } from './broadcast.js';
 import { readFileSync, existsSync, writeFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import type { ControlServerDeps } from './api.js';
@@ -231,7 +232,7 @@ export async function run(args: ParsedArgs): Promise<void> {
     const localIndex = new Map(
       filterIndexedEntries(parseIgnoreRules(ignoreLines), index.listEntries()).map((e) => [e.path, e]),
     );
-    return { id, path: f.path, index, executor, localIndex, ignoreLines };
+    return { id, path: f.path, index, executor, localIndex, ignoreLines, transports: [] as PeerTransport[] };
   });
 
   if (folderStates.length === 0) {
@@ -257,15 +258,15 @@ export async function run(args: ParsedArgs): Promise<void> {
     return allowed;
   }
 
-  /** 活跃对端 transport,本地变更扫描后向其广播新索引。 */
-  const peerTransports = new Set<PeerTransport>();
-
   /** 在一个 socket 上建立同步会话:为每个共享目录建 peer,按 folder 路由。 */
   function startSyncSession(socket: WebSocket, remoteDeviceId: string, key: Buffer): void {
     const peers = new Map<string, SyncPeer>();
+    // 记录本次会话为各目录创建的 transport,便于 socket 断开时从对应目录中清理
+    const sessionTransports: Array<{ folder: (typeof folderStates)[number]; transport: PeerTransport }> = [];
     for (const folder of folderStates) {
       const transport = makePeerTransport(socket, key, folder.id);
-      peerTransports.add(transport);
+      folder.transports.push(transport);
+      sessionTransports.push({ folder, transport });
       const peer = createSyncPeer({
         transport,
         localIndex: folder.localIndex,
@@ -291,6 +292,12 @@ export async function run(args: ParsedArgs): Promise<void> {
       transport.sendEntries([...folder.localIndex.values()]);
     }
     attachPeerMessages(peers, socket, key);
+    socket.on('close', () => {
+      for (const { folder, transport } of sessionTransports) {
+        const idx = folder.transports.indexOf(transport);
+        if (idx >= 0) folder.transports.splice(idx, 1);
+      }
+    });
   }
 
   const server = startPeerServer(
@@ -354,18 +361,29 @@ export async function run(args: ParsedArgs): Promise<void> {
           parseIgnoreRules(folder.ignoreLines),
           identity.deviceId,
         );
+        // 本地删除 → 持久化墓碑(修复:之前只广播不落库,重启后重复广播)并同步内存索引
+        for (const tomb of diff.tombstones) {
+          try {
+            await folder.executor.applyDelete(tomb.path, tomb);
+            folder.localIndex.set(tomb.path, tomb);
+          } catch {
+            // 索引写入失败,下一轮扫描重试
+          }
+        }
         const sends: IndexEntry[] = [...diff.tombstones];
         for (const path of diff.changed) {
           try {
-            sends.push(await folder.executor.applySend(path, identity.deviceId));
+            const updated = await folder.executor.applySend(path, identity.deviceId);
+            // 同步内存索引,保证会话内规划不再基于过期快照
+            folder.localIndex.set(path, updated);
+            sends.push(updated);
           } catch {
             // 文件在扫描后被删除/重命名,下一轮扫描处理
           }
         }
         if (sends.length > 0) {
-          for (const transport of peerTransports) {
-            transport.sendEntries(sends);
-          }
+          // 仅向同目录的 transport 广播,避免把目录 A 的增量错发到目录 B 的对等端
+          broadcastFolderUpdates(folder, sends);
         }
       }
     })();
