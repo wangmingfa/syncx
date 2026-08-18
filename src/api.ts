@@ -1,5 +1,6 @@
 import { createServer, type Server, type IncomingMessage, type ServerResponse } from 'node:http';
 import { timingSafeEqual } from 'node:crypto';
+import { renderControlFallback } from './ui-fallback.js';
 
 export interface ControlServerDeps {
   token: string;
@@ -81,7 +82,8 @@ async function ensureSsr(renderSsr?: ControlServerDeps['renderSsr']): Promise<Co
       render(data.status ? 'status' : 'login', data);
     return r;
   } catch {
-    return undefined;
+    // SSR 包缺失时回退到内置渲染器,保证控制页可用
+    return (data) => Promise.resolve(renderControlFallback(data));
   }
 }
 

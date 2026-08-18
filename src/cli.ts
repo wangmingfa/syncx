@@ -75,7 +75,8 @@ async function controlRenderSsr(
     const { render } = await import(SSR_ENTRY.href);
     return render(data.status ? 'status' : 'login', data);
   } catch {
-    return '<!DOCTYPE html><html><head><title>syncx</title></head><body><h1>syncx</h1><p>web ui unavailable — build with npm run build</p></body></html>';
+    // SSR 包缺失(未执行 npm run build)时,回退到内置渲染器,保证控制页可用
+    return renderControlFallback(data);
   }
 }
 
@@ -90,6 +91,7 @@ import { createInviteCode, parseInviteCode } from './invite.js';
 import { folderIdFor, folderIndexPath } from './config.js';
 import { getLanAddresses, formatHost } from './net/addresses.js';
 import { renderSystemdUnit, renderLaunchdPlist, renderWindowsService } from './install.js';
+import { renderControlFallback } from './ui-fallback.js';
 import type { WebSocket } from 'ws';
 
 function loadOrCreateToken(configDir: string): string {
@@ -168,9 +170,12 @@ export async function run(args: ParsedArgs): Promise<void> {
     addSharedFolder(configPath, localPath, [invite.deviceId]);
     console.log(`paired with device ${invite.deviceId} (invited folder ${invite.folder})`);
     console.log(`shared folder added: ${localPath}`);
-    console.log(
-      `your device id: ${identity.deviceId} — share it so ${invite.deviceId} can whitelist you`,
-    );
+    // 关系是双向的:本机已信任对方,但对方尚未把本机加入白名单,
+    // 必须也让对方 join 本机生成的邀请码,否则对方会拒绝本机连接。
+    const reciprocal = createInviteCode(identity, localPath);
+    console.log('');
+    console.log(`share this code with ${invite.deviceId} so they can whitelist you:`);
+    console.log(reciprocal);
     return;
   }
 

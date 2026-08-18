@@ -47,7 +47,7 @@ describe('local executor receive', () => {
     await executor.applyReceive(remote, provider);
 
     expect(readFileSync(join(root, 'docs/plan.md'))).toEqual(content);
-    expect(index.getEntry('docs/plan.md')).toEqual(remote);
+    expect(index.getEntry('docs/plan.md')).toMatchObject(remote);
 
     index.close();
     rmSync(dir, { recursive: true, force: true });
@@ -73,7 +73,7 @@ describe('local executor receive', () => {
 
     expect(readFileSync(target)).toEqual(newContent);
     expect(existsSync(`${target}.syncx-tmp`)).toBe(false);
-    expect(index.getEntry('doc.txt')).toEqual(remote);
+    expect(index.getEntry('doc.txt')).toMatchObject(remote);
 
     index.close();
     rmSync(dir, { recursive: true, force: true });

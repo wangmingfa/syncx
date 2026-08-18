@@ -64,13 +64,23 @@ export function scanFolder(
       seen.add(rel);
       const prev = index.getEntry(rel);
       if (prev && !prev.deleted) {
-        let size = -1;
+        let stat: { size: number; mtimeMs: number } | undefined;
         try {
-          size = statSync(abs).size;
+          const s = statSync(abs);
+          stat = { size: s.size, mtimeMs: s.mtimeMs };
         } catch {
           continue; // 文件在扫描途中被删
         }
-        if (size === prev.size && !contentChanged(prev, abs)) continue;
+        // 免哈希快速路径:大小与修改时间都未变则视为未改动,跳过整文件重算
+        if (
+          stat.size === prev.size &&
+          prev.mtime !== undefined &&
+          stat.mtimeMs === prev.mtime
+        ) {
+          continue;
+        }
+        // 大小相同但 mtime 变化(或旧数据无 mtime)才做内容哈希对比
+        if (stat.size === prev.size && !contentChanged(prev, abs)) continue;
       }
       changed.push(rel);
     }

@@ -39,4 +39,31 @@ describe('install templates', () => {
     expect(service).toContain('C:\\syncx\\syncx.exe');
     expect(service).toContain('--config C:\\syncx\\config.json');
   });
+
+  it('escapes spaces in systemd ExecStart paths', () => {
+    const unit = renderSystemdUnit({
+      executable: '/opt/my app/syncx',
+      configPath: '/home/me/sync dir/config.json',
+    });
+    expect(unit).toContain('ExecStart=/opt/my\\ app/syncx start --config /home/me/sync\\ dir/config.json');
+  });
+
+  it('escapes XML special characters in the launchd plist', () => {
+    const plist = renderLaunchdPlist({
+      executable: '/Applications/syncx & co/syncx',
+      configPath: '/Users/me/<config>.json',
+    });
+    expect(plist).toContain('/Applications/syncx &amp; co/syncx');
+    expect(plist).toContain('/Users/me/&lt;config&gt;.json');
+    expect(plist).not.toContain('<config>');
+  });
+
+  it('escapes embedded double quotes in the Windows service command', () => {
+    const service = renderWindowsService({
+      executable: 'C:\\pro"gram\\syncx.exe',
+      configPath: 'C:\\my"config.json',
+    });
+    expect(service).toContain('C:\\pro\\"gram\\syncx.exe');
+    expect(service).toContain('C:\\my\\"config.json');
+  });
 });

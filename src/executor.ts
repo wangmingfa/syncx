@@ -51,7 +51,9 @@ export function createLocalExecutor(root: string, index: IndexStore): LocalExecu
       writeFileSync(tmp, Buffer.concat(blocks));
       renameSync(tmp, target);
 
-      index.saveEntry(entry);
+      // 记录落盘后的 mtime,供扫描免哈希快速跳过未变更文件
+      const mtime = statSync(target).mtimeMs;
+      index.saveEntry({ ...entry, mtime });
     },
     async applyDelete(path: string, tombstone: IndexEntry): Promise<void> {
       const target = resolvePath(path);
@@ -92,8 +94,9 @@ export function createLocalExecutor(root: string, index: IndexStore): LocalExecu
       writeFileSync(tmp, Buffer.concat(blocks));
       renameSync(tmp, target);
 
-      // 索引记录合并版本(双方修改都保留)
-      index.saveEntry({ ...remote, version: mergeVersions(local.version, remote.version) });
+      // 索引记录合并版本(双方修改都保留),并写入落地后的 mtime
+      const mtime = statSync(target).mtimeMs;
+      index.saveEntry({ ...remote, version: mergeVersions(local.version, remote.version), mtime });
     },
     async applySend(path: string, deviceId: string): Promise<IndexEntry> {
       const target = resolvePath(path);
@@ -112,6 +115,7 @@ export function createLocalExecutor(root: string, index: IndexStore): LocalExecu
         size: data.length,
         deleted: false,
         blocks,
+        mtime: statSync(target).mtimeMs,
       };
       index.saveEntry(updated);
       return updated;

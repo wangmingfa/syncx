@@ -1,24 +1,12 @@
 import { createHash, createPrivateKey, createPublicKey, diffieHellman, generateKeyPairSync, sign, verify } from 'node:crypto';
-
-const BASE32 = 'ABCDEFGHIJKLMNOPQRSTUVWXYZ234567';
+import { deriveDeviceId } from './identity.js';
 
 /**
- * Derive the 10-character Device ID from an Ed25519 public key (PEM):
- * sha256 of the key, first 6 bytes, base32-encoded.
+ * Derive the 10-character Device ID from an Ed25519 public key (PEM).
+ * Delegates to the canonical implementation in identity.ts so the two
+ * code paths cannot drift apart.
  */
-export function deriveDeviceIdFromPublicKey(publicKeyPem: string): string {
-  const hash = createHash('sha256').update(publicKeyPem).digest();
-  let value = 0n;
-  for (let i = 0; i < 6; i++) {
-    value = (value << 8n) | BigInt(hash[i]!);
-  }
-  let out = '';
-  for (let i = 0; i < 10; i++) {
-    out = BASE32[Number(value & 31n)]! + out;
-    value >>= 5n;
-  }
-  return out;
-}
+export const deriveDeviceIdFromPublicKey = deriveDeviceId;
 
 export function signChallenge(privateKeyPem: string, challenge: Buffer): Buffer {
   return sign(null, challenge, privateKeyPem);

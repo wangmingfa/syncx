@@ -25,6 +25,9 @@ function rowToEntry(row: Record<string, unknown>): IndexEntry {
     size: row.size as number,
     deleted: (row.deleted as number) === 1,
     blocks: JSON.parse(row.blocks as string) as string[],
+    mtime: row.mtime !== undefined && row.mtime !== null && row.mtime !== 0
+      ? (row.mtime as number)
+      : undefined,
   };
 }
 
@@ -39,12 +42,18 @@ export function openIndexStore(dbPath: string): IndexStore {
       blocks TEXT NOT NULL
     );
   `);
+  // 旧库可能没有 mtime 列,安全追加(已存在则忽略)
+  try {
+    db.exec('ALTER TABLE entries ADD COLUMN mtime INTEGER NOT NULL DEFAULT 0');
+  } catch {
+    // duplicate column — schema already current
+  }
 
   const saveEntry = db.prepare(
-    'INSERT OR REPLACE INTO entries (path, version, size, deleted, blocks) VALUES (?, ?, ?, ?, ?)',
+    'INSERT OR REPLACE INTO entries (path, version, size, deleted, blocks, mtime) VALUES (?, ?, ?, ?, ?, ?)',
   );
-  const getEntry = db.prepare('SELECT path, version, size, deleted, blocks FROM entries WHERE path = ?');
-  const listEntries = db.prepare('SELECT path, version, size, deleted, blocks FROM entries');
+  const getEntry = db.prepare('SELECT path, version, size, deleted, blocks, mtime FROM entries WHERE path = ?');
+  const listEntries = db.prepare('SELECT path, version, size, deleted, blocks, mtime FROM entries');
   const removeEntry = db.prepare('DELETE FROM entries WHERE path = ?');
 
   return {
@@ -55,6 +64,7 @@ export function openIndexStore(dbPath: string): IndexStore {
         entry.size,
         entry.deleted ? 1 : 0,
         JSON.stringify(entry.blocks),
+        entry.mtime ?? 0,
       );
     },
     getEntry(path: string): IndexEntry | undefined {

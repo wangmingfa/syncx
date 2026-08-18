@@ -8,6 +8,11 @@ export interface IndexEntry {
   deleted: boolean;
   /** SHA-256 hashes of the 1MB blocks that make up the file content. */
   blocks: string[];
+  /**
+   * 本地文件的修改时间(毫秒),由扫描/落盘时记录,用于免哈希快速跳过未变更文件。
+   * 可选:跨设备的索引(线上协议)不带此字段,旧数据缺省为 undefined。
+   */
+  mtime?: number;
 }
 
 export type FileStateRelation = 'equal' | 'local-newer' | 'remote-newer' | 'conflict';

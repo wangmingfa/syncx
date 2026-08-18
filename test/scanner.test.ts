@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { mkdtempSync, rmSync, mkdirSync, writeFileSync, rmSync as rm } from 'node:fs';
+import { mkdtempSync, rmSync, mkdirSync, writeFileSync, rmSync as rm, statSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { scanFolder } from '../src/scanner.js';
@@ -83,6 +83,27 @@ describe('scanFolder', () => {
 
     expect(changed).toEqual([]);
     expect(tombstones).toEqual([]);
+    rmSync(dir, { recursive: true, force: true });
+  });
+
+  it('skips re-hashing when size and mtime are unchanged (fast path)', () => {
+    const { dir, root, index } = setup();
+    writeFileSync(join(root, 'a.txt'), 'content');
+    const s = statSync(join(root, 'a.txt'));
+    // 已落盘状态:索引记录了正确的 mtime,但块哈希故意写错以验证快速路径
+    index.saveEntry({
+      path: 'a.txt',
+      version: new Map([['DEV-A', 1]]),
+      size: s.size,
+      deleted: false,
+      blocks: ['stale-hash'],
+      mtime: s.mtimeMs,
+    });
+
+    const { changed } = scanFolder(root, index, [], 'DEV-A');
+
+    // mtime 命中快速路径,不再重算哈希,因此即便块哈希过期也判定为未变更
+    expect(changed).toEqual([]);
     rmSync(dir, { recursive: true, force: true });
   });
 });

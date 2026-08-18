@@ -11,7 +11,15 @@ export interface DeviceIdentity {
   privateKey: string;
 }
 
-function deriveDeviceId(publicKeyPem: string): string {
+/**
+ * Derive the 10-character Device ID from an Ed25519 public key (PEM):
+ * sha256 of the key, first 6 bytes (48 bits), base32-encoded.
+ *
+ * 48 bits yields ~2.8e14 distinct IDs; for LAN-scoped pairing the
+ * birthday-bound collision probability stays negligible even at thousands
+ * of devices, and the short code stays human-readable on invites.
+ */
+export function deriveDeviceId(publicKeyPem: string): string {
   const hash = createHash('sha256').update(publicKeyPem).digest();
   let value = 0n;
   for (let i = 0; i < 6; i++) {
