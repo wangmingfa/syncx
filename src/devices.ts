@@ -1,5 +1,5 @@
-import { existsSync, readFileSync, writeFileSync } from 'node:fs';
-import { loadConfig, saveConfig, type SharedFolderConfig } from './config.js';
+import { existsSync } from 'node:fs';
+import { loadConfig, saveConfig, DEFAULT_CONFIG, type SharedFolderConfig } from './config.js';
 
 /** 列出共享目录配置(已配对设备包含在每条记录的 devices 中)。 */
 export function listDevices(configPath: string): SharedFolderConfig[] {
@@ -27,6 +27,6 @@ export function removeSharedFolder(configPath: string, path: string): void {
 
 export function ensureConfigFile(configPath: string): void {
   if (!existsSync(configPath)) {
-    saveConfig(configPath, { sharedFolders: [] });
+    saveConfig(configPath, structuredClone(DEFAULT_CONFIG));
   }
 }

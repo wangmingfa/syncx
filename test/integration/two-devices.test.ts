@@ -147,7 +147,8 @@ async function connectPair(
     port,
   );
 
-  const bSocket = await connectPeer(bIdentity, `ws://127.0.0.1:${port}`);
+  const bConnected = await connectPeer(bIdentity, `ws://127.0.0.1:${port}`);
+  const bSocket = bConnected.socket;
   await waitFor(() => aSocket !== undefined, 3000);
 
   const aTransport = makeTransport(aSocket!);

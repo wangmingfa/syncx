@@ -35,6 +35,8 @@ export function startPeerServer(
         return;
       }
       socket.off('message', onMessage);
+      // 双向握手:回发自己的公钥,让对端也能推导本机 Device ID
+      socket.send(identity.publicKey);
       handlers.onPeerConnected(socket, deviceId);
     };
     socket.on('message', onMessage);

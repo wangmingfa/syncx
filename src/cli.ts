@@ -191,9 +191,19 @@ export async function run(args: ParsedArgs): Promise<void> {
   // mDNS 自动发现:发现对端后自动发起连接并建立会话
   const discovery = startDiscovery(identity, server.port, (peer) => {
     void connectPeer(identity, `ws://${peer.host}:${peer.port}`)
-      .then((socket) => startSyncSession(socket, peer.deviceId))
+      .then(({ socket, remoteDeviceId }) => startSyncSession(socket, remoteDeviceId))
       .catch((error) => console.error(`connect to ${peer.deviceId} failed: ${error.message}`));
   });
+
+  // 手动配置的对端(mDNS 不可用时的回退):启动时主动连接,失败仅日志
+  for (const peerUrl of config.peers) {
+    void connectPeer(identity, peerUrl)
+      .then(({ socket, remoteDeviceId }) => {
+        console.log(`connected to configured peer ${remoteDeviceId} (${peerUrl})`);
+        startSyncSession(socket, remoteDeviceId);
+      })
+      .catch((error) => console.error(`connect to configured peer ${peerUrl} failed: ${error.message}`));
+  }
 
   console.log(`syncx daemon started (device ${identity.deviceId}, peer port ${server.port})`);
   console.log('peer sync (ws://ip:port):');
