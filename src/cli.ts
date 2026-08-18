@@ -7,6 +7,8 @@ export interface ParsedArgs {
   controlPort?: number;
   /** Control API/Web UI bind host; default 127.0.0.1 (localhost only). */
   host?: string;
+  /** 日志文件路径;不指定则仅输出到 stdout。 */
+  logFile?: string;
 }
 
 const COMMANDS = new Set(['start', 'status', 'install', 'invite', 'join']);
@@ -37,6 +39,9 @@ export function parseArgs(argv: string[]): ParsedArgs {
       i++;
     } else if (flag === '--host') {
       result.host = value;
+      i++;
+    } else if (flag === '--log-file') {
+      result.logFile = value;
       i++;
     } else if (flag.startsWith('-')) {
       throw new Error(`unknown option: ${flag}`);
@@ -93,6 +98,7 @@ import { getLanAddresses, formatHost } from './net/addresses.js';
 import { renderSystemdUnit, renderLaunchdPlist, renderWindowsService } from './install.js';
 import { renderControlFallback } from './ui-fallback.js';
 import type { WebSocket } from 'ws';
+import { createLogger } from './logger.js';
 
 function loadOrCreateToken(configDir: string): string {
   const file = join(configDir, 'control.token');
@@ -113,6 +119,9 @@ export async function run(args: ParsedArgs): Promise<void> {
   // 身份/索引/token 等数据仍存放在配置文件所在目录。
   const configPath = args.configPath ?? join(homedir(), '.syncx', 'config.json');
   const configDir = dirname(configPath);
+  // 日志实例在身份/配置加载后初始化,CLI 一次性命令(status/install/invite/join)
+  // 仍用 console.log 直接打印给用户;仅 daemon 运行期用 logger 持久化。
+  const logger = createLogger(args.logFile);
 
   const identity = loadOrCreateIdentity(configDir);
   const config = loadConfig(configPath);
@@ -186,11 +195,11 @@ export async function run(args: ParsedArgs): Promise<void> {
     renderSsr: controlRenderSsr,
     addFolder: (path, devices) => {
       addSharedFolder(configPath, path, devices);
-      console.log(`shared folder added: ${path}`);
+      logger.info(`shared folder added: ${path}`);
     },
     removeFolder: (path) => {
       removeSharedFolder(configPath, path);
-      console.log(`shared folder removed: ${path}`);
+      logger.info(`shared folder removed: ${path}`);
     },
     // 实时读取配置,Web UI 添加/移除目录后刷新可见
     getStatus: () =>
@@ -214,11 +223,11 @@ export async function run(args: ParsedArgs): Promise<void> {
   control.listen(controlPort, controlHost);
 
   const lanAddresses = getLanAddresses();
-  console.log(`control UI (token in ${join(configDir, 'control.token')}):`);
-  console.log(`  http://${controlHost === '0.0.0.0' ? 'localhost' : controlHost}:${controlPort}`);
+  logger.info(`control UI (token in ${join(configDir, 'control.token')}):`);
+  logger.info(`  http://${controlHost === '0.0.0.0' ? 'localhost' : controlHost}:${controlPort}`);
   if (controlHost === '0.0.0.0') {
     for (const lan of lanAddresses) {
-      console.log(`  http://${formatHost(lan.address, lan.family)}:${controlPort}`);
+      logger.info(`  http://${formatHost(lan.address, lan.family)}:${controlPort}`);
     }
   }
 
@@ -241,7 +250,7 @@ export async function run(args: ParsedArgs): Promise<void> {
   });
 
   if (folderStates.length === 0) {
-    console.log('no shared folders configured yet; add one via the web UI, then restart the daemon');
+    logger.info('no shared folders configured yet; add one via the web UI, then restart the daemon');
     await new Promise<void>((resolve) => {
       const shutdown = (): void => {
         control.close();
@@ -257,7 +266,7 @@ export async function run(args: ParsedArgs): Promise<void> {
   function acceptPeer(socket: WebSocket, remoteDeviceId: string): boolean {
     const allowed = isPeerAllowed(remoteDeviceId, loadConfig(configPath).sharedFolders);
     if (!allowed) {
-      console.log(`rejected unauthorized peer ${remoteDeviceId}`);
+      logger.warn(`rejected unauthorized peer ${remoteDeviceId}`);
       socket.close();
     }
     return allowed;
@@ -316,7 +325,7 @@ export async function run(args: ParsedArgs): Promise<void> {
     const attempts = (reconnectAttempts.get(deviceId) ?? 0) + 1;
     reconnectAttempts.set(deviceId, attempts);
     const delay = Math.min(RECONNECT_BASE_MS * 2 ** (attempts - 1), RECONNECT_MAX_MS);
-    console.log(`peer ${deviceId} disconnected, reconnecting in ${delay}ms`);
+    logger.info(`peer ${deviceId} disconnected, reconnecting in ${delay}ms`);
     const timer = setTimeout(() => {
       reconnectTimers.delete(deviceId);
       void connectPeer(identity, url)
@@ -370,9 +379,9 @@ export async function run(args: ParsedArgs): Promise<void> {
       transport.sendEntries([...folder.localIndex.values()]);
     }
     attachPeerMessages(peers, socket, key);
-    socket.on('error', (error) => console.log(`[debug] socket error for peer ${remoteDeviceId}: ${error.message}`));
+    socket.on('error', (error) => logger.debug(`socket error for peer ${remoteDeviceId}: ${error.message}`));
     socket.on('close', (code, reason) => {
-      console.log(`[debug] socket closed for peer ${remoteDeviceId}, code=${code}, reason=${reason?.toString('utf8') ?? '(empty)'}`);
+      logger.debug(`socket closed for peer ${remoteDeviceId}, code=${code}, reason=${reason?.toString('utf8') ?? '(empty)'}`);
       peerSockets.delete(socket);
       for (const { folder, transport } of sessionTransports) {
         const idx = folder.transports.indexOf(transport);
@@ -386,7 +395,7 @@ export async function run(args: ParsedArgs): Promise<void> {
     identity,
     {
       onPeerConnected(socket, remoteDeviceId, key) {
-        console.log(`[debug] inbound peer connected: ${remoteDeviceId}, count=${peerConnectionCount.get(remoteDeviceId) ?? 0}`);
+        logger.debug(`inbound peer connected: ${remoteDeviceId}, count=${peerConnectionCount.get(remoteDeviceId) ?? 0}`);
         if (peerConnectionCount.get(remoteDeviceId) >= MAX_CONNECTIONS_PER_PEER) {
           socket.close();
           return;
@@ -396,7 +405,7 @@ export async function run(args: ParsedArgs): Promise<void> {
         }
       },
       onError(error) {
-        console.error(error.message);
+        logger.error(error.message);
       },
     },
     args.port ?? 22000,
@@ -412,7 +421,7 @@ export async function run(args: ParsedArgs): Promise<void> {
           startSyncSession(socket, remoteDeviceId, key, url);
         }
       })
-      .catch((error) => console.error(`connect to ${peer.deviceId} failed: ${error.message}`));
+      .catch((error) => logger.error(`connect to ${peer.deviceId} failed: ${error.message}`));
   });
 
   // 手动配置的对端(mDNS 不可用时的回退):启动时主动连接,失败仅日志
@@ -420,20 +429,20 @@ export async function run(args: ParsedArgs): Promise<void> {
   for (const peerUrl of config.peers) {
     void connectPeer(identity, peerUrl)
       .then(({ socket, remoteDeviceId, key }) => {
-        console.log(`[debug] outbound connected to ${remoteDeviceId} at ${peerUrl}`);
-        console.log(`connected to configured peer ${remoteDeviceId} (${peerUrl})`);
+        logger.debug(`outbound connected to ${remoteDeviceId} at ${peerUrl}`);
+        logger.info(`connected to configured peer ${remoteDeviceId} (${peerUrl})`);
         if (acceptPeer(socket, remoteDeviceId)) {
           startSyncSession(socket, remoteDeviceId, key, peerUrl);
         }
       })
-      .catch((error) => console.error(`connect to configured peer ${peerUrl} failed: ${error.message}`));
+      .catch((error) => logger.error(`connect to configured peer ${peerUrl} failed: ${error.message}`));
   }
 
-  console.log(`syncx daemon started (device ${identity.deviceId}, peer port ${server.port})`);
-  console.log('peer sync (ws://ip:port):');
-  console.log(`  ws://localhost:${server.port}`);
+  logger.info(`syncx daemon started (device ${identity.deviceId}, peer port ${server.port})`);
+  logger.info('peer sync (ws://ip:port):');
+  logger.info(`  ws://localhost:${server.port}`);
   for (const lan of lanAddresses) {
-    console.log(`  ws://${formatHost(lan.address, lan.family)}:${server.port}`);
+    logger.info(`  ws://${formatHost(lan.address, lan.family)}:${server.port}`);
   }
 
   // 本地变更检测:周期扫描所有共享目录,把变化(新增/修改/删除)传播给已连接对端
