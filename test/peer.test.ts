@@ -1,11 +1,11 @@
 import { describe, expect, it } from 'vitest';
-import { mkdtempSync, rmSync, readFileSync, mkdirSync, writeFileSync } from 'node:fs';
+import { mkdtempSync, rmSync, readFileSync, mkdirSync, writeFileSync, existsSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { planSyncRound, createSyncPeer, type PeerTransport } from '../src/peer.js';
 import { createLocalExecutor } from '../src/executor.js';
 import { openIndexStore } from '../src/indexstore.js';
-import { hashBlock } from '../src/blockstore.js';
+import { hashBlock, BLOCK_SIZE } from '../src/blockstore.js';
 
 function entry(
   path: string,
@@ -244,5 +244,68 @@ describe('sync peer session', () => {
 
     index.close();
     rmSync(dir, { recursive: true, force: true });
+  });
+
+  it('ignores out-of-range, non-integer, and oversized block responses', async () => {
+    const dir = mkdtempSync(join(tmpdir(), 'syncx-peer-'));
+    const root = join(dir, 'share');
+    mkdirSync(root, { recursive: true });
+    const index = openIndexStore(join(dir, 'index.db'));
+    const executor = createLocalExecutor(root, index);
+    const { transport } = fakeTransport();
+
+    const peer = createSyncPeer({
+      transport,
+      localIndex: new Map(),
+      executor,
+      readLocalBlock: () => Buffer.from(''),
+      deviceId: 'DEV-A',
+    });
+
+    const content = Buffer.from('bounded');
+    const hash = hashBlock(content);
+    peer.onPeerIndex([entry('f.txt', [['dev-b', 1]], [hash], content.length)]);
+
+    // 越界 / 负数 / 非整数 / 超大块:都应被忽略,不写文件、不崩溃
+    peer.onBlockResponse({ deviceId: 'DEV-B', path: 'f.txt', blockIndex: 99, hash, data: content });
+    peer.onBlockResponse({ deviceId: 'DEV-B', path: 'f.txt', blockIndex: -1, hash, data: content });
+    peer.onBlockResponse({ deviceId: 'DEV-B', path: 'f.txt', blockIndex: 1.5, hash, data: content });
+    peer.onBlockResponse({
+      deviceId: 'DEV-B',
+      path: 'f.txt',
+      blockIndex: 0,
+      hash,
+      data: Buffer.alloc(BLOCK_SIZE + 1000),
+    });
+
+    await new Promise((r) => setTimeout(r, 10));
+    expect(existsSync(join(root, 'f.txt'))).toBe(false);
+
+    // 合法的块仍应正常落地
+    peer.onBlockResponse({ deviceId: 'DEV-B', path: 'f.txt', blockIndex: 0, hash, data: content });
+    await new Promise((r) => setTimeout(r, 10));
+    expect(readFileSync(join(root, 'f.txt'))).toEqual(content);
+
+    index.close();
+    rmSync(dir, { recursive: true, force: true });
+  });
+
+  it('rejects out-of-range block requests without reading', async () => {
+    const { transport, requests } = fakeTransport();
+    const peer = createSyncPeer({
+      transport,
+      localIndex: new Map(),
+      executor: null as never,
+      // 若越界索引未被拦截,这里会抛错使测试失败
+      readLocalBlock: (): Buffer => {
+        throw new Error('readLocalBlock should not be called for out-of-range index');
+      },
+      deviceId: 'DEV-A',
+    });
+
+    peer.onBlockRequest({ deviceId: 'DEV-B', path: 'f.txt', blockIndex: -1, hash: 'h' });
+    peer.onBlockRequest({ deviceId: 'DEV-B', path: 'f.txt', blockIndex: 1.5, hash: 'h' });
+
+    expect(requests).toEqual([]);
   });
 });

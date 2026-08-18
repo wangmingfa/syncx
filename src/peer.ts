@@ -2,7 +2,7 @@ import type { IndexEntry } from './index.js';
 import { buildPlan } from './plan.js';
 import type { BlockRequest, BlockResponse } from './messages.js';
 import type { LocalExecutor } from './executor.js';
-import { verifyBlock } from './blockstore.js';
+import { verifyBlock, BLOCK_SIZE } from './blockstore.js';
 import { mergeVersions } from './version.js';
 
 export interface RoundPlan {
@@ -189,6 +189,8 @@ export function createSyncPeer(deps: SyncPeerDeps): SyncPeer {
     },
 
     onBlockRequest(request: BlockRequest): void {
+      // 越界/非整数索引直接拒绝,避免对本地文件做无谓的整文件读取
+      if (!Number.isInteger(request.blockIndex) || request.blockIndex < 0) return;
       let data: Buffer;
       try {
         data = readLocalBlock(request.path, request.blockIndex);
@@ -209,6 +211,18 @@ export function createSyncPeer(deps: SyncPeerDeps): SyncPeer {
     async onBlockResponse(response: BlockResponse): Promise<void> {
       const item = pending.get(response.path);
       if (!item) return;
+      // 边界校验:非法/越界 blockIndex 会撑大 pending.blocks 数组,造成内存耗尽型 DoS
+      if (
+        !Number.isInteger(response.blockIndex) ||
+        response.blockIndex < 0 ||
+        response.blockIndex >= item.entry.blocks.length
+      ) {
+        return;
+      }
+      // 块内容必须与本次请求期望的哈希一致(防对端回填自洽但错误的块)
+      if (response.hash !== item.entry.blocks[response.blockIndex]) return;
+      // 大小上限:合法块不会超过 BLOCK_SIZE,超大块直接丢弃,避免哈希前先撑爆内存
+      if (response.data.length > BLOCK_SIZE) return;
       if (!verifyBlock(response.data, response.hash)) return;
       // 重复响应(如重传)不重复计数,避免虚增提前落地不完整文件
       if (item.blocks[response.blockIndex] !== undefined) return;
