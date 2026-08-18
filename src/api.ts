@@ -5,6 +5,10 @@ export interface ControlServerDeps {
   getStatus: () => unknown;
   /** Static index page served at `/`; API endpoints stay token-protected. */
   uiHtml?: string;
+  /** POST /api/folders handler: add a shared folder. */
+  addFolder?: (path: string, devices: string[]) => void;
+  /** DELETE /api/folders handler: remove a shared folder by path. */
+  removeFolder?: (path: string) => void;
 }
 
 function readToken(req: IncomingMessage): string | undefined {
@@ -24,14 +28,31 @@ function sendHtml(res: ServerResponse, html: string): void {
   res.end(html);
 }
 
+function readBody(req: IncomingMessage): Promise<unknown> {
+  return new Promise((resolve, reject) => {
+    let data = '';
+    req.on('data', (chunk) => {
+      data += chunk;
+    });
+    req.on('end', () => {
+      try {
+        resolve(data === '' ? {} : JSON.parse(data));
+      } catch (error) {
+        reject(error);
+      }
+    });
+    req.on('error', reject);
+  });
+}
+
 /**
  * Local control API on localhost. Every API endpoint requires
  * `Authorization: Bearer <token>`; unknown paths return 404.
  */
 export function createControlServer(deps: ControlServerDeps): Server {
-  const { token, getStatus, uiHtml } = deps;
+  const { token, getStatus, uiHtml, addFolder, removeFolder } = deps;
 
-  return createServer((req, res) => {
+  return createServer(async (req, res) => {
     // 静态页面不需要 token(它自己从 /api/status 拉数据时带 token)
     if (req.method === 'GET' && req.url === '/' && uiHtml !== undefined) {
       sendHtml(res, uiHtml);
@@ -46,6 +67,36 @@ export function createControlServer(deps: ControlServerDeps): Server {
 
     if (req.method === 'GET' && req.url === '/api/status') {
       sendJson(res, 200, getStatus());
+      return;
+    }
+
+    if (req.method === 'POST' && req.url === '/api/folders' && addFolder !== undefined) {
+      try {
+        const body = (await readBody(req)) as { path?: unknown; devices?: unknown };
+        if (typeof body.path !== 'string' || body.path === '') {
+          sendJson(res, 400, { error: 'path is required' });
+          return;
+        }
+        const devices = Array.isArray(body.devices)
+          ? body.devices.filter((d): d is string => typeof d === 'string')
+          : [];
+        addFolder(body.path, devices);
+        sendJson(res, 201, { ok: true });
+      } catch {
+        sendJson(res, 400, { error: 'invalid json body' });
+      }
+      return;
+    }
+
+    if (req.method === 'DELETE' && req.url?.startsWith('/api/folders') && removeFolder !== undefined) {
+      const url = new URL(req.url, 'http://localhost');
+      const path = url.searchParams.get('path');
+      if (path === null || path === '') {
+        sendJson(res, 400, { error: 'path is required' });
+        return;
+      }
+      removeFolder(path);
+      sendJson(res, 200, { ok: true });
       return;
     }
 

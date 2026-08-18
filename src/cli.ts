@@ -46,6 +46,7 @@ import { startDiscovery } from './net/discovery.js';
 import { makePeerTransport, attachPeerMessages } from './net/wire.js';
 import { createControlServer } from './api.js';
 import { buildStatus } from './status.js';
+import { addSharedFolder, removeSharedFolder } from './devices.js';
 import type { WebSocket } from 'ws';
 
 function loadOrCreateToken(configDir: string): string {
@@ -136,10 +137,19 @@ export async function run(args: ParsedArgs): Promise<void> {
 
   // 本地控制 API:localhost + token,提供 /api/status 与 Web UI
   const token = loadOrCreateToken(configDir);
+  const configPath = join(configDir, 'config.json');
   const uiHtml = readFileSync(new URL('../ui/index.html', import.meta.url), 'utf8');
   const control = createControlServer({
     token,
     uiHtml,
+    addFolder: (path, devices) => {
+      addSharedFolder(configPath, path, devices);
+      console.log(`shared folder added: ${path}`);
+    },
+    removeFolder: (path) => {
+      removeSharedFolder(configPath, path);
+      console.log(`shared folder removed: ${path}`);
+    },
     getStatus: () =>
       buildStatus(
         identity,

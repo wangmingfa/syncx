@@ -4,14 +4,24 @@ import { once } from 'node:events';
 import type { AddressInfo } from 'node:net';
 import { createControlServer } from '../src/api.js';
 
-function fetchJson(port: number, path: string, token?: string): Promise<{ status: number; body: unknown }> {
+function fetchJson(
+  port: number,
+  path: string,
+  token?: string,
+  options: { method?: string; body?: unknown } = {},
+): Promise<{ status: number; body: unknown }> {
   return new Promise((resolve, reject) => {
+    const body = options.body === undefined ? undefined : JSON.stringify(options.body);
     const req = request(
       {
         host: '127.0.0.1',
         port,
         path,
-        headers: token ? { Authorization: `Bearer ${token}` } : undefined,
+        method: options.method ?? 'GET',
+        headers: {
+          ...(token ? { Authorization: `Bearer ${token}` } : {}),
+          ...(body ? { 'Content-Type': 'application/json' } : {}),
+        },
       },
       (res) => {
         let data = '';
@@ -27,6 +37,7 @@ function fetchJson(port: number, path: string, token?: string): Promise<{ status
       },
     );
     req.on('error', reject);
+    if (body) req.write(body);
     req.end();
   });
 }
@@ -84,6 +95,112 @@ describe('control api', () => {
     const res = await fetchJson(port, '/api/nope', 'secret');
 
     expect(res.status).toBe(404);
+
+    server.close();
+  });
+});
+
+describe('control api folder config', () => {
+  it('adds a folder via POST /api/folders with a valid token', async () => {
+    const added: Array<{ path: string; devices: string[] }> = [];
+    const server = createControlServer({
+      token: 'secret',
+      getStatus: () => ({ ok: true }),
+      addFolder: (path, devices) => {
+        added.push({ path, devices });
+      },
+    });
+    server.listen(0, '127.0.0.1');
+    await once(server, 'listening');
+    const port = (server.address() as AddressInfo).port;
+
+    const res = await fetchJson(port, '/api/folders', 'secret', {
+      method: 'POST',
+      body: { path: '/data/docs', devices: ['DEV1234567'] },
+    });
+
+    expect(res.status).toBe(201);
+    expect(added).toEqual([{ path: '/data/docs', devices: ['DEV1234567'] }]);
+
+    server.close();
+  });
+
+  it('rejects POST /api/folders without a token', async () => {
+    const server = createControlServer({
+      token: 'secret',
+      getStatus: () => ({ ok: true }),
+      addFolder: () => {},
+    });
+    server.listen(0, '127.0.0.1');
+    await once(server, 'listening');
+    const port = (server.address() as AddressInfo).port;
+
+    const res = await fetchJson(port, '/api/folders', undefined, {
+      method: 'POST',
+      body: { path: '/data/docs', devices: [] },
+    });
+
+    expect(res.status).toBe(401);
+
+    server.close();
+  });
+
+  it('rejects POST /api/folders without a path', async () => {
+    const server = createControlServer({
+      token: 'secret',
+      getStatus: () => ({ ok: true }),
+      addFolder: () => {},
+    });
+    server.listen(0, '127.0.0.1');
+    await once(server, 'listening');
+    const port = (server.address() as AddressInfo).port;
+
+    const res = await fetchJson(port, '/api/folders', 'secret', {
+      method: 'POST',
+      body: { devices: [] },
+    });
+
+    expect(res.status).toBe(400);
+
+    server.close();
+  });
+
+  it('removes a folder via DELETE /api/folders?path=', async () => {
+    const removed: string[] = [];
+    const server = createControlServer({
+      token: 'secret',
+      getStatus: () => ({ ok: true }),
+      removeFolder: (path) => {
+        removed.push(path);
+      },
+    });
+    server.listen(0, '127.0.0.1');
+    await once(server, 'listening');
+    const port = (server.address() as AddressInfo).port;
+
+    const res = await fetchJson(port, '/api/folders?path=%2Fdata%2Fdocs', 'secret', {
+      method: 'DELETE',
+    });
+
+    expect(res.status).toBe(200);
+    expect(removed).toEqual(['/data/docs']);
+
+    server.close();
+  });
+
+  it('rejects DELETE /api/folders without a path', async () => {
+    const server = createControlServer({
+      token: 'secret',
+      getStatus: () => ({ ok: true }),
+      removeFolder: () => {},
+    });
+    server.listen(0, '127.0.0.1');
+    await once(server, 'listening');
+    const port = (server.address() as AddressInfo).port;
+
+    const res = await fetchJson(port, '/api/folders', 'secret', { method: 'DELETE' });
+
+    expect(res.status).toBe(400);
 
     server.close();
   });

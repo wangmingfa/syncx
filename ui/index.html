@@ -85,10 +85,19 @@
       <div class="muted">共享目录</div>
       <table>
         <thead>
-          <tr><th>路径</th><th>已配对设备</th></tr>
+          <tr><th>路径</th><th>已配对设备</th><th></th></tr>
         </thead>
         <tbody id="folderRows"></tbody>
       </table>
+    </div>
+
+    <div class="card">
+      <div class="muted">添加共享目录</div>
+      <input id="folderPath" placeholder="本地目录绝对路径,如 /home/me/Documents">
+      <input id="folderDevices" placeholder="允许的设备 ID,逗号分隔,如 DEV1234567,DEVABCDEFG">
+      <div>
+        <button id="addFolder">添加</button>
+      </div>
     </div>
   </div>
 
@@ -144,13 +153,73 @@
           tdPath.textContent = folder.path;
           const tdDevices = document.createElement('td');
           tdDevices.textContent = folder.devices.join(', ');
+          const tdActions = document.createElement('td');
+          const removeBtn = document.createElement('button');
+          removeBtn.textContent = '移除';
+          removeBtn.style.margin = '0';
+          removeBtn.addEventListener('click', () => removeFolder(folder.path));
+          tdActions.appendChild(removeBtn);
           tr.appendChild(tdPath);
           tr.appendChild(tdDevices);
+          tr.appendChild(tdActions);
           tbody.appendChild(tr);
         }
         foldersCard.hidden = false;
       } catch (err) {
         showError('无法连接控制 API:' + err.message);
+      }
+    }
+
+    async function apiFetch(path, options) {
+      const token = tokenInput.value.trim();
+      const res = await fetch(path, {
+        ...options,
+        headers: {
+          Authorization: `Bearer ${token}`,
+          ...(options.body ? { 'Content-Type': 'application/json' } : {}),
+        },
+      });
+      if (res.status === 401) {
+        showError('token 无效,请检查后重试');
+        return false;
+      }
+      if (!res.ok) {
+        showError('请求失败:HTTP ' + res.status);
+        return false;
+      }
+      return true;
+    }
+
+    async function addFolder() {
+      clearError();
+      const path = document.getElementById('folderPath').value.trim();
+      if (!path) {
+        showError('请输入共享目录路径');
+        return;
+      }
+      const devices = document
+        .getElementById('folderDevices')
+        .value.split(',')
+        .map((s) => s.trim())
+        .filter(Boolean);
+      const ok = await apiFetch('/api/folders', {
+        method: 'POST',
+        body: JSON.stringify({ path, devices }),
+      });
+      if (ok) {
+        document.getElementById('folderPath').value = '';
+        document.getElementById('folderDevices').value = '';
+        await loadStatus();
+      }
+    }
+
+    async function removeFolder(path) {
+      clearError();
+      const ok = await apiFetch('/api/folders?path=' + encodeURIComponent(path), {
+        method: 'DELETE',
+      });
+      if (ok) {
+        await loadStatus();
       }
     }
 
@@ -161,6 +230,7 @@
     }
 
     document.getElementById('load').addEventListener('click', loadStatus);
+    document.getElementById('addFolder').addEventListener('click', addFolder);
   </script>
 </body>
 </html>
