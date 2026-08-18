@@ -85,6 +85,15 @@ interface PendingEntry {
   received: number;
 }
 
+/** 单个块请求的超时与重试状态。 */
+interface PendingBlockRequest {
+  timeout: ReturnType<typeof setTimeout>;
+  retries: number;
+}
+
+const BLOCK_REQUEST_TIMEOUT_MS = 5000;
+const MAX_BLOCK_RETRIES = 3;
+
 /**
  * Wire one sync round over an injected transport: on receiving the peer's
  * index, send newer local entries, request missing blocks, apply deletions
@@ -94,11 +103,32 @@ interface PendingEntry {
 export function createSyncPeer(deps: SyncPeerDeps): SyncPeer {
   const { transport, localIndex, executor, readLocalBlock, deviceId, remoteDeviceId } = deps;
   const pending = new Map<string, PendingEntry>();
+  // 逐块跟踪超时重试:块响应丢失/丢弃时自动重发,避免文件永远收不齐
+  const pendingBlocks = new Map<string, PendingBlockRequest>();
+
+  function blockKey(path: string, blockIndex: number): string {
+    return `${path}:${blockIndex}`;
+  }
+
+  /** 发送单个块请求并设置超时重试。 */
+  function requestBlock(path: string, blockIndex: number, hash: string): void {
+    const key = blockKey(path, blockIndex);
+    const existing = pendingBlocks.get(key);
+    if (existing) {
+      clearTimeout(existing.timeout);
+      if (existing.retries >= MAX_BLOCK_RETRIES) {
+        pendingBlocks.delete(key);
+        return;
+      }
+    }
+    transport.sendBlockRequest({ deviceId, path, blockIndex, hash });
+    const retries = existing?.retries ?? 0;
+    const timeout = setTimeout(() => requestBlock(path, blockIndex, hash), BLOCK_REQUEST_TIMEOUT_MS);
+    pendingBlocks.set(key, { retries, timeout });
+  }
 
   function requestAllBlocks(entry: IndexEntry): void {
-    entry.blocks.forEach((hash, blockIndex) => {
-      transport.sendBlockRequest({ deviceId, path: entry.path, blockIndex, hash });
-    });
+    entry.blocks.forEach((hash, blockIndex) => requestBlock(entry.path, blockIndex, hash));
   }
 
   /** 收齐全部块(或空文件本身)后把条目落地;未就绪则无操作。 */
@@ -129,6 +159,9 @@ export function createSyncPeer(deps: SyncPeerDeps): SyncPeer {
 
   return {
     async onPeerIndex(entries: IndexEntry[]): Promise<void> {
+      // 新索引到达(如重连后)时清除旧块请求,避免基于过期条目重试
+      for (const bReq of pendingBlocks.values()) clearTimeout(bReq.timeout);
+      pendingBlocks.clear();
       const remote = new Map(entries.map((e) => [e.path, e]));
       const actions = buildPlan(localIndex, remote);
       const sends: IndexEntry[] = [];
@@ -229,6 +262,14 @@ export function createSyncPeer(deps: SyncPeerDeps): SyncPeer {
 
       item.blocks[response.blockIndex] = response.data;
       item.received += 1;
+
+      // 块已收到,清除对应的超时重试
+      const bKey = blockKey(response.path, response.blockIndex);
+      const bReq = pendingBlocks.get(bKey);
+      if (bReq) {
+        clearTimeout(bReq.timeout);
+        pendingBlocks.delete(bKey);
+      }
 
       await completeIfReady(response.path);
     },

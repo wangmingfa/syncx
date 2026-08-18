@@ -263,8 +263,81 @@ export async function run(args: ParsedArgs): Promise<void> {
     return allowed;
   }
 
+  // --- 对端连接去重与断线重连 ---
+  // mDNS 重播 + config.peers 主动连接可能在同一对端上建立多条连接;
+  // 按 deviceId 计数,保证每个对端最多保留两条连接(入站 + 出站各一)。
+  // 双方同时主动连接时两条都保留,任一断开后另一条仍可用。
+  const peerConnectionCount = new Map<string, number>();
+  // 记录由本机主动发起(outbound)的连接的 URL,断线后可按 URL 重连;
+  // 入站连接(url 未知)依赖对端重连。
+  const outboundPeerUrls = new Map<string, string>();
+  const reconnectTimers = new Map<string, ReturnType<typeof setTimeout>>();
+  const reconnectAttempts = new Map<string, number>();
+  // 跟踪所有 peer socket(入站 + 出站),关闭时统一断开,避免客户端 socket
+  // 保持事件循环活跃导致进程无法退出。
+  const peerSockets = new Set<WebSocket>();
+  const RECONNECT_BASE_MS = 1000;
+  const RECONNECT_MAX_MS = 30000;
+  const MAX_CONNECTIONS_PER_PEER = 2;
+
+  function isPeerConnected(deviceId: string): boolean {
+    return (peerConnectionCount.get(deviceId) ?? 0) > 0;
+  }
+
+  function registerPeer(deviceId: string, url?: string): void {
+    peerConnectionCount.set(deviceId, (peerConnectionCount.get(deviceId) ?? 0) + 1);
+    if (url) {
+      outboundPeerUrls.set(deviceId, url);
+      reconnectAttempts.delete(deviceId);
+    }
+  }
+
+  function unregisterPeer(deviceId: string): void {
+    const count = (peerConnectionCount.get(deviceId) ?? 1) - 1;
+    if (count <= 0) {
+      peerConnectionCount.delete(deviceId);
+    } else {
+      peerConnectionCount.set(deviceId, count);
+    }
+    const timer = reconnectTimers.get(deviceId);
+    if (timer) {
+      clearTimeout(timer);
+      reconnectTimers.delete(deviceId);
+    }
+    // 仅当该对端所有连接都断开时才重连
+    if (count <= 0) {
+      scheduleReconnect(deviceId);
+    }
+  }
+
+  function scheduleReconnect(deviceId: string): void {
+    const url = outboundPeerUrls.get(deviceId);
+    if (!url) return;
+    const attempts = (reconnectAttempts.get(deviceId) ?? 0) + 1;
+    reconnectAttempts.set(deviceId, attempts);
+    const delay = Math.min(RECONNECT_BASE_MS * 2 ** (attempts - 1), RECONNECT_MAX_MS);
+    console.log(`peer ${deviceId} disconnected, reconnecting in ${delay}ms`);
+    const timer = setTimeout(() => {
+      reconnectTimers.delete(deviceId);
+      void connectPeer(identity, url)
+        .then(({ socket, remoteDeviceId, key }) => {
+          if (isPeerConnected(remoteDeviceId)) {
+            socket.close();
+            return;
+          }
+          if (acceptPeer(socket, remoteDeviceId)) {
+            startSyncSession(socket, remoteDeviceId, key, url);
+          }
+        })
+        .catch(() => scheduleReconnect(deviceId));
+    }, delay);
+    reconnectTimers.set(deviceId, timer);
+  }
+
   /** 在一个 socket 上建立同步会话:为每个共享目录建 peer,按 folder 路由。 */
-  function startSyncSession(socket: WebSocket, remoteDeviceId: string, key: Buffer): void {
+  function startSyncSession(socket: WebSocket, remoteDeviceId: string, key: Buffer, url?: string): void {
+    registerPeer(remoteDeviceId, url);
+    peerSockets.add(socket);
     const peers = new Map<string, SyncPeer>();
     // 记录本次会话为各目录创建的 transport,便于 socket 断开时从对应目录中清理
     const sessionTransports: Array<{ folder: (typeof folderStates)[number]; transport: PeerTransport }> = [];
@@ -297,11 +370,15 @@ export async function run(args: ParsedArgs): Promise<void> {
       transport.sendEntries([...folder.localIndex.values()]);
     }
     attachPeerMessages(peers, socket, key);
-    socket.on('close', () => {
+    socket.on('error', (error) => console.log(`[debug] socket error for peer ${remoteDeviceId}: ${error.message}`));
+    socket.on('close', (code, reason) => {
+      console.log(`[debug] socket closed for peer ${remoteDeviceId}, code=${code}, reason=${reason?.toString('utf8') ?? '(empty)'}`);
+      peerSockets.delete(socket);
       for (const { folder, transport } of sessionTransports) {
         const idx = folder.transports.indexOf(transport);
         if (idx >= 0) folder.transports.splice(idx, 1);
       }
+      unregisterPeer(remoteDeviceId);
     });
   }
 
@@ -309,6 +386,11 @@ export async function run(args: ParsedArgs): Promise<void> {
     identity,
     {
       onPeerConnected(socket, remoteDeviceId, key) {
+        console.log(`[debug] inbound peer connected: ${remoteDeviceId}, count=${peerConnectionCount.get(remoteDeviceId) ?? 0}`);
+        if (peerConnectionCount.get(remoteDeviceId) >= MAX_CONNECTIONS_PER_PEER) {
+          socket.close();
+          return;
+        }
         if (acceptPeer(socket, remoteDeviceId)) {
           startSyncSession(socket, remoteDeviceId, key);
         }
@@ -322,22 +404,26 @@ export async function run(args: ParsedArgs): Promise<void> {
 
   // mDNS 自动发现:发现对端后自动发起连接并建立会话
   const discovery = startDiscovery(identity, server.port, (peer) => {
-    void connectPeer(identity, `ws://${peer.host}:${peer.port}`)
+    if (isPeerConnected(peer.deviceId)) return;
+    const url = `ws://${peer.host}:${peer.port}`;
+    void connectPeer(identity, url)
       .then(({ socket, remoteDeviceId, key }) => {
         if (acceptPeer(socket, remoteDeviceId)) {
-          startSyncSession(socket, remoteDeviceId, key);
+          startSyncSession(socket, remoteDeviceId, key, url);
         }
       })
       .catch((error) => console.error(`connect to ${peer.deviceId} failed: ${error.message}`));
   });
 
   // 手动配置的对端(mDNS 不可用时的回退):启动时主动连接,失败仅日志
+  // 去重由服务端 onPeerConnected 负责:若对端已连,服务端会关闭重复 socket
   for (const peerUrl of config.peers) {
     void connectPeer(identity, peerUrl)
       .then(({ socket, remoteDeviceId, key }) => {
+        console.log(`[debug] outbound connected to ${remoteDeviceId} at ${peerUrl}`);
         console.log(`connected to configured peer ${remoteDeviceId} (${peerUrl})`);
         if (acceptPeer(socket, remoteDeviceId)) {
-          startSyncSession(socket, remoteDeviceId, key);
+          startSyncSession(socket, remoteDeviceId, key, peerUrl);
         }
       })
       .catch((error) => console.error(`connect to configured peer ${peerUrl} failed: ${error.message}`));
@@ -395,16 +481,30 @@ export async function run(args: ParsedArgs): Promise<void> {
   }, SCAN_INTERVAL_MS);
 
   await new Promise<void>((resolve) => {
-    const shutdown = (): void => {
-      clearInterval(scanTimer);
-      control.close();
-      discovery.close();
-      server.close();
-      for (const folder of folderStates) {
-        folder.index.close();
+const shutdown = (): void => {
+    clearInterval(scanTimer);
+    for (const timer of reconnectTimers.values()) clearTimeout(timer);
+    reconnectTimers.clear();
+    // 关闭所有 peer socket(入站 + 出站),否则客户端 socket 保持事件循环活跃
+    // 导致进程收到 SIGTERM 后无法退出。用 terminate() 强制断开 TCP 连接,
+    // 避免 close 握手在对端同时关闭时挂起。
+    for (const socket of peerSockets) {
+      try {
+        socket.terminate();
+      } catch {
+        // socket 可能已关闭
       }
-      resolve();
-    };
+    }
+    peerSockets.clear();
+    control.close();
+    discovery.close();
+    server.close();
+    for (const folder of folderStates) {
+      folder.index.close();
+    }
+    // 显式退出,确保所有 handle 关闭后进程立即结束
+    process.exit(0);
+  };
     process.on('SIGINT', shutdown);
     process.on('SIGTERM', shutdown);
   });
