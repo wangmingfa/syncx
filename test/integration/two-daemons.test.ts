@@ -59,7 +59,7 @@ function setupDaemon(
   const share = join(dir, 'share');
   mkdirSync(share, { recursive: true });
 
-  const identity = loadOrCreateIdentity(join(dir, 'config'));
+  const identity = loadOrCreateIdentity(dir);
   const index = openIndexStore(join(dir, 'index.db'));
   for (const file of seedFiles) {
     writeFileSync(join(share, file.path), file.content);
@@ -83,11 +83,11 @@ function setupDaemon(
   };
 }
 
-function startDaemon(setup: DaemonSetup, peers: string[]): void {
+function startDaemon(setup: DaemonSetup, peers: string[], peerDeviceIds: string[]): void {
   writeFileSync(
     setup.configPath,
     JSON.stringify({
-      sharedFolders: [{ path: setup.share, devices: [] }],
+      sharedFolders: [{ path: setup.share, devices: peerDeviceIds }],
       peers,
     }),
   );
@@ -122,9 +122,9 @@ describe('two real daemons sync over peers config', () => {
         { path: 'b.txt', content: Buffer.from('content from B') },
       ]);
 
-      // 两个 daemon 互相把对方配为手动对端
-      startDaemon(a, [`ws://127.0.0.1:${b.peerPort}`]);
-      startDaemon(b, [`ws://127.0.0.1:${a.peerPort}`]);
+      // 两个 daemon 互相把对方配为手动对端,并互相加入 devices 白名单
+      startDaemon(a, [`ws://127.0.0.1:${b.peerPort}`], [b.deviceId]);
+      startDaemon(b, [`ws://127.0.0.1:${a.peerPort}`], [a.deviceId]);
 
       // 双向同步:B 应收到 a.txt,A 应收到 b.txt
       await waitFor(() => existsSync(join(b.share, 'a.txt')));

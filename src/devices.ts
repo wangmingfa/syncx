@@ -30,3 +30,9 @@ export function ensureConfigFile(configPath: string): void {
     saveConfig(configPath, structuredClone(DEFAULT_CONFIG));
   }
 }
+
+/** 对端设备 ID 是否被任一共享目录授权。空 ID 或空列表一律拒绝。 */
+export function isPeerAllowed(peerId: string, sharedFolders: SharedFolderConfig[]): boolean {
+  if (!peerId || sharedFolders.length === 0) return false;
+  return sharedFolders.some((f) => f.devices.includes(peerId));
+}

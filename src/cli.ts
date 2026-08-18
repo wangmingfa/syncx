@@ -56,7 +56,7 @@ import { startDiscovery } from './net/discovery.js';
 import { makePeerTransport, attachPeerMessages } from './net/wire.js';
 import { createControlServer } from './api.js';
 import { buildStatus } from './status.js';
-import { addSharedFolder, removeSharedFolder } from './devices.js';
+import { addSharedFolder, removeSharedFolder, isPeerAllowed } from './devices.js';
 import { getLanAddresses, formatHost } from './net/addresses.js';
 import { renderSystemdUnit, renderLaunchdPlist, renderWindowsService } from './install.js';
 import type { WebSocket } from 'ws';
@@ -166,6 +166,16 @@ export async function run(args: ParsedArgs): Promise<void> {
     return;
   }
 
+  /** 校验对端设备是否被任一共享目录授权;未授权则关闭 socket 并打日志。 */
+  function acceptPeer(socket: WebSocket, remoteDeviceId: string): boolean {
+    const allowed = isPeerAllowed(remoteDeviceId, loadConfig(configPath).sharedFolders);
+    if (!allowed) {
+      console.log(`rejected unauthorized peer ${remoteDeviceId}`);
+      socket.close();
+    }
+    return allowed;
+  }
+
   const folderPath = folder.path;
   const executor = createLocalExecutor(folder.path, index);
   // 忽略规则每设备本地,从共享目录的 .syncxignore 读取(不存在则为空)
@@ -201,7 +211,9 @@ export async function run(args: ParsedArgs): Promise<void> {
     identity,
     {
       onPeerConnected(socket, remoteDeviceId) {
-        startSyncSession(socket, remoteDeviceId);
+        if (acceptPeer(socket, remoteDeviceId)) {
+          startSyncSession(socket, remoteDeviceId);
+        }
       },
       onError(error) {
         console.error(error.message);
@@ -213,7 +225,11 @@ export async function run(args: ParsedArgs): Promise<void> {
   // mDNS 自动发现:发现对端后自动发起连接并建立会话
   const discovery = startDiscovery(identity, server.port, (peer) => {
     void connectPeer(identity, `ws://${peer.host}:${peer.port}`)
-      .then(({ socket, remoteDeviceId }) => startSyncSession(socket, remoteDeviceId))
+      .then(({ socket, remoteDeviceId }) => {
+        if (acceptPeer(socket, remoteDeviceId)) {
+          startSyncSession(socket, remoteDeviceId);
+        }
+      })
       .catch((error) => console.error(`connect to ${peer.deviceId} failed: ${error.message}`));
   });
 
@@ -222,7 +238,9 @@ export async function run(args: ParsedArgs): Promise<void> {
     void connectPeer(identity, peerUrl)
       .then(({ socket, remoteDeviceId }) => {
         console.log(`connected to configured peer ${remoteDeviceId} (${peerUrl})`);
-        startSyncSession(socket, remoteDeviceId);
+        if (acceptPeer(socket, remoteDeviceId)) {
+          startSyncSession(socket, remoteDeviceId);
+        }
       })
       .catch((error) => console.error(`connect to configured peer ${peerUrl} failed: ${error.message}`));
   }

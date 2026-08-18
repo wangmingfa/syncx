@@ -2,7 +2,8 @@ import { describe, expect, it } from 'vitest';
 import { mkdtempSync, rmSync, readFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { addSharedFolder, removeSharedFolder } from '../src/devices.js';
+import { addSharedFolder, removeSharedFolder, isPeerAllowed } from '../src/devices.js';
+import type { SharedFolderConfig } from '../src/config.js';
 
 function tempDir(): string {
   return mkdtempSync(join(tmpdir(), 'syncx-devices-'));
@@ -50,5 +51,30 @@ describe('shared folder configuration', () => {
     expect(raw.sharedFolders).toEqual([{ path: '/data/photos', devices: ['DEV1234567'] }]);
 
     rmSync(dir, { recursive: true, force: true });
+  });
+});
+
+describe('isPeerAllowed', () => {
+  const folders: SharedFolderConfig[] = [
+    { path: '/docs', devices: ['AA', 'BB'] },
+    { path: '/pics', devices: ['BB', 'CC'] },
+  ];
+
+  it('allows a peer matching any shared folder devices list', () => {
+    expect(isPeerAllowed('AA', folders)).toBe(true);
+    expect(isPeerAllowed('BB', folders)).toBe(true);
+    expect(isPeerAllowed('CC', folders)).toBe(true);
+  });
+
+  it('rejects a peer not present in any devices list', () => {
+    expect(isPeerAllowed('XX', folders)).toBe(false);
+  });
+
+  it('rejects when sharedFolders is empty', () => {
+    expect(isPeerAllowed('AA', [])).toBe(false);
+  });
+
+  it('rejects empty peer id', () => {
+    expect(isPeerAllowed('', folders)).toBe(false);
   });
 });
