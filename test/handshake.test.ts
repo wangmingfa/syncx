@@ -1,6 +1,15 @@
 import { describe, expect, it } from 'vitest';
 import { generateKeyPairSync, createHash } from 'node:crypto';
-import { deriveDeviceIdFromPublicKey, signChallenge, verifyChallenge } from '../src/handshake.js';
+import {
+  deriveDeviceIdFromPublicKey,
+  signChallenge,
+  verifyChallenge,
+  generateX25519KeyPair,
+  x25519PublicDer,
+  deriveSessionKey,
+  buildKxMessage,
+  verifyKxMessage,
+} from '../src/handshake.js';
 
 function makeKeypair() {
   const { publicKey, privateKey } = generateKeyPairSync('ed25519', {
@@ -52,5 +61,50 @@ describe('handshake verification', () => {
 
     const signature = signChallenge(privateKey, Buffer.from('nonce-123'));
     expect(verifyChallenge(publicKey, Buffer.from('nonce-999'), signature)).toBe(false);
+  });
+});
+
+describe('session key exchange', () => {
+  it('derives the same session key on both sides of the ECDH', () => {
+    const a = generateX25519KeyPair();
+    const b = generateX25519KeyPair();
+
+    const keyA = deriveSessionKey(a.privateKeyPem, b.publicKeyPem);
+    const keyB = deriveSessionKey(b.privateKeyPem, a.publicKeyPem);
+
+    expect(keyA).toEqual(keyB);
+    expect(keyA.length).toBe(32);
+  });
+
+  it('binds the kx message to the device identity with a valid signature', () => {
+    const identity = makeKeypair();
+    const session = generateX25519KeyPair();
+
+    const kx = buildKxMessage(session, identity.privateKey);
+    expect(kx.type).toBe('kx');
+
+    const peerX25519Pem = verifyKxMessage(kx, identity.publicKey);
+    expect(peerX25519Pem).toBe(session.publicKeyPem);
+  });
+
+  it('rejects a kx message signed by a different device', () => {
+    const identityA = makeKeypair();
+    const identityB = makeKeypair();
+    const session = generateX25519KeyPair();
+
+    const kx = buildKxMessage(session, identityA.privateKey);
+    expect(() => verifyKxMessage(kx, identityB.publicKey)).toThrow('invalid key exchange');
+  });
+
+  it('rejects a tampered kx message', () => {
+    const identity = makeKeypair();
+    const session = generateX25519KeyPair();
+
+    const kx = buildKxMessage(session, identity.privateKey);
+    // 篡改 X25519 公钥字节(翻转首字节),签名校验应失败
+    const der = x25519PublicDer(session.publicKeyPem);
+    der[0] ^= 0xff;
+    const tampered = { ...kx, x25519: der.toString('base64') };
+    expect(() => verifyKxMessage(tampered, identity.publicKey)).toThrow();
   });
 });

@@ -1,16 +1,25 @@
 import { WebSocket } from 'ws';
 import type { DeviceIdentity } from '../identity.js';
 import { deriveDeviceIdFromPublicKey } from '../handshake.js';
+import {
+  buildKxMessage,
+  decodeKxMessage,
+  deriveSessionKey,
+  generateX25519KeyPair,
+  verifyKxMessage,
+} from '../handshake.js';
 
 export interface ConnectedPeer {
   socket: WebSocket;
   remoteDeviceId: string;
+  /** AES-256-GCM 会话密钥(协商完成后可用)。 */
+  key: Buffer;
 }
 
 /**
- * Thin WebSocket client: opens a connection, presents the local public key
- * PEM as the first message, then waits for the server's public key so both
- * sides know each other's Device ID.
+ * WebSocket client handshake: presents the local Ed25519 public key, waits
+ * for the server's key, then performs a signed X25519 key exchange so both
+ * sides share an AES-256-GCM session key.
  */
 export function connectPeer(identity: DeviceIdentity, url: string): Promise<ConnectedPeer> {
   return new Promise((resolve, reject) => {
@@ -19,17 +28,51 @@ export function connectPeer(identity: DeviceIdentity, url: string): Promise<Conn
     socket.once('open', () => {
       socket.send(identity.publicKey);
     });
-    socket.once('message', (data) => {
-      const pem = data.toString('utf8');
-      let remoteDeviceId: string;
-      try {
-        remoteDeviceId = deriveDeviceIdFromPublicKey(pem);
-      } catch (error) {
-        reject(error);
-        socket.close();
+
+    let remotePublicKeyPem: string | undefined;
+
+    socket.on('message', (data) => {
+      const raw = data instanceof ArrayBuffer ? Buffer.from(data) : Buffer.from(data as Buffer);
+      const text = raw.toString('utf8');
+
+      if (remotePublicKeyPem === undefined) {
+        // 第一阶段:服务端公钥 → 设备 ID,然后发起密钥交换
+        let remoteDeviceId: string;
+        try {
+          remoteDeviceId = deriveDeviceIdFromPublicKey(text);
+        } catch (error) {
+          reject(error);
+          socket.close();
+          return;
+        }
+        remotePublicKeyPem = text;
+
+        const sessionPair = generateX25519KeyPair();
+        socket.send(encodeKx(buildKxMessage(sessionPair, identity.privateKey)));
+
+        // 等待服务端的 kx 消息
+        const onKx = (kxData: Buffer): void => {
+          let peerX25519Pem: string;
+          try {
+            peerX25519Pem = verifyKxMessage(
+              decodeKxMessage(kxData.toString('utf8')),
+              remotePublicKeyPem!,
+            );
+          } catch (error) {
+            reject(error);
+            socket.close();
+            return;
+          }
+          const key = deriveSessionKey(sessionPair.privateKeyPem, peerX25519Pem);
+          resolve({ socket, remoteDeviceId, key });
+        };
+        socket.once('message', (kxData: Buffer) => onKx(kxData));
         return;
       }
-      resolve({ socket, remoteDeviceId });
     });
   });
+}
+
+function encodeKx(kx: { type: 'kx'; x25519: string; sig: string }): string {
+  return JSON.stringify(kx);
 }

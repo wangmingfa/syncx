@@ -1,8 +1,26 @@
 import { existsSync, readFileSync, writeFileSync } from 'node:fs';
+import { join } from 'node:path';
+import { createHash } from 'node:crypto';
 
 export interface SharedFolderConfig {
   path: string;
   devices: string[];
+  /**
+   * 稳定的目录标识,跨设备约定一致(wire 消息用它在同一 socket 上区分目录)。
+   * 缺省时回退为 path(单机 Web UI 添加的目录;跨设备同步请显式配置相同 id)。
+   */
+  id?: string;
+}
+
+/** 目录的 wire 标识:优先 id,缺省用 path。 */
+export function folderIdFor(folder: SharedFolderConfig): string {
+  return folder.id ?? folder.path;
+}
+
+/** 每个共享目录独立的索引库文件路径(按 folderId 的哈希命名,避免路径字符问题)。 */
+export function folderIndexPath(configDir: string, folderId: string): string {
+  const hash = createHash('sha1').update(folderId).digest('hex').slice(0, 16);
+  return join(configDir, `index-${hash}.db`);
 }
 
 export interface Config {

@@ -6,6 +6,8 @@ import {
   writeFileSync,
   mkdirSync,
   existsSync,
+  readdirSync,
+  createWriteStream,
 } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -13,6 +15,7 @@ import { spawn, type ChildProcess } from 'node:child_process';
 import { loadOrCreateIdentity } from '../../src/identity.js';
 import { openIndexStore } from '../../src/indexstore.js';
 import { hashBlock } from '../../src/blockstore.js';
+import { folderIndexPath } from '../../src/config.js';
 
 const children: ChildProcess[] = [];
 
@@ -78,7 +81,7 @@ function setupDaemon(
   mkdirSync(share, { recursive: true });
 
   const identity = loadOrCreateIdentity(dir);
-  const index = openIndexStore(join(dir, 'index.db'));
+  const index = openIndexStore(folderIndexPath(dir, 'main'));
   for (const file of seedFiles) {
     writeFileSync(join(share, file.path), file.content);
     index.saveEntry({
@@ -105,7 +108,7 @@ function startDaemon(setup: DaemonSetup, peers: string[], peerDeviceIds: string[
   writeFileSync(
     setup.configPath,
     JSON.stringify({
-      sharedFolders: [{ path: setup.share, devices: peerDeviceIds }],
+      sharedFolders: [{ id: 'main', path: setup.share, devices: peerDeviceIds }],
       peers,
     }),
   );
@@ -124,9 +127,27 @@ function startDaemon(setup: DaemonSetup, peers: string[], peerDeviceIds: string[
       '--control-port',
       String(setup.controlPort),
     ],
-    { cwd: process.cwd(), stdio: 'pipe' },
+    { cwd: process.cwd(), stdio: ['ignore', 'pipe', 'pipe'] },
   );
+  // 捕获 daemon 输出,失败时可读日志定位
+  child.stdout?.pipe(createWriteStream(join(setup.dir, 'daemon.out.log')));
+  child.stderr?.pipe(createWriteStream(join(setup.dir, 'daemon.err.log')));
   children.push(child);
+}
+
+/** 失败时打印 daemon 日志与目录内容,辅助定位。 */
+function dumpLogs(...setups: DaemonSetup[]): void {
+  for (const s of setups) {
+    console.log(`--- ${s.dir} share:`, readdirSync(s.share));
+    for (const f of ['daemon.out.log', 'daemon.err.log']) {
+      try {
+        console.log(`--- ${s.dir}/${f} ---`);
+        console.log(readFileSync(join(s.dir, f), 'utf8'));
+      } catch {
+        // no log yet
+      }
+    }
+  }
 }
 
 describe('two real daemons sync over peers config', () => {
@@ -152,6 +173,67 @@ describe('two real daemons sync over peers config', () => {
       expect(readFileSync(join(a.share, 'b.txt'))).toEqual(Buffer.from('content from B'));
 
       // 先停掉 daemon 再清理临时目录,避免进程写文件导致 ENOTEMPTY
+      await stopChildren();
+      rmSync(a.dir, { recursive: true, force: true });
+      rmSync(b.dir, { recursive: true, force: true });
+    },
+    30000,
+  );
+
+  it(
+    'propagates files created while the daemons are running',
+    async () => {
+      const a = setupDaemon('a', []);
+      const b = setupDaemon('b', []);
+
+      startDaemon(a, [`ws://127.0.0.1:${b.peerPort}`], [b.deviceId]);
+      startDaemon(b, [`ws://127.0.0.1:${a.peerPort}`], [a.deviceId]);
+
+      // 等连接建立(握手 + 加密会话 + 初始索引交换)
+      await new Promise((r) => setTimeout(r, 2000));
+      console.log('[test] after initial wait, writing live.txt');
+
+      // daemon 运行中在 A 侧新建文件:周期扫描应发现并传播到 B
+      writeFileSync(join(a.share, 'live.txt'), 'created while running');
+      console.log('[test] live.txt written, entering waitFor');
+
+      try {
+        await waitFor(() => existsSync(join(b.share, 'live.txt')), 8000);
+        console.log('[test] live.txt synced');
+      } catch (error) {
+        console.log('[test] waitFor failed, dumping logs');
+        dumpLogs(a, b);
+        throw error;
+      }
+      expect(readFileSync(join(b.share, 'live.txt'))).toEqual(
+        Buffer.from('created while running'),
+      );
+
+      await stopChildren();
+      rmSync(a.dir, { recursive: true, force: true });
+      rmSync(b.dir, { recursive: true, force: true });
+    },
+    30000,
+  );
+
+  it(
+    'rejects a peer that is not in the devices whitelist',
+    async () => {
+      const a = setupDaemon('a', [{ path: 'secret.txt', content: Buffer.from('top secret') }]);
+      const b = setupDaemon('b', []);
+
+      // B 的白名单不含 A → A 连接 B 时(加密握手后)应被拒绝,文件不应到达 B
+      startDaemon(a, [`ws://127.0.0.1:${b.peerPort}`], [b.deviceId]);
+      startDaemon(b, [`ws://127.0.0.1:${a.peerPort}`], []);
+
+      // 留足时间:握手 + A 侧扫描(5s) + B 侧拒绝
+      await new Promise((r) => setTimeout(r, 6000));
+
+      expect(existsSync(join(b.share, 'secret.txt'))).toBe(false);
+
+      const bLog = readFileSync(join(b.dir, 'daemon.out.log'), 'utf8');
+      expect(bLog).toContain('rejected unauthorized peer');
+
       await stopChildren();
       rmSync(a.dir, { recursive: true, force: true });
       rmSync(b.dir, { recursive: true, force: true });

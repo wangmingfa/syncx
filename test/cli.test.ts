@@ -9,6 +9,7 @@ describe('cli parseArgs', () => {
       port: undefined,
       controlPort: undefined,
       host: undefined,
+      positionals: [],
     });
   });
 
@@ -19,6 +20,7 @@ describe('cli parseArgs', () => {
       port: undefined,
       controlPort: undefined,
       host: undefined,
+      positionals: [],
     });
   });
 
@@ -29,6 +31,7 @@ describe('cli parseArgs', () => {
       port: 22000,
       controlPort: undefined,
       host: undefined,
+      positionals: [],
     });
   });
 
@@ -41,6 +44,7 @@ describe('cli parseArgs', () => {
       port: 22000,
       controlPort: 8385,
       host: undefined,
+      positionals: [],
     });
   });
 
@@ -53,6 +57,7 @@ describe('cli parseArgs', () => {
       port: undefined,
       controlPort: undefined,
       host: '0.0.0.0',
+      positionals: [],
     });
   });
 
@@ -63,10 +68,44 @@ describe('cli parseArgs', () => {
       port: undefined,
       controlPort: undefined,
       host: undefined,
+      positionals: [],
     });
   });
 
   it('rejects an unknown command', () => {
     expect(() => parseArgs(['frobnicate'])).toThrow(/unknown command/);
+  });
+
+  it('parses the invite command with a positional folder path', () => {
+    expect(parseArgs(['invite', '/data/docs'])).toEqual({
+      command: 'invite',
+      configPath: undefined,
+      port: undefined,
+      controlPort: undefined,
+      host: undefined,
+      positionals: ['/data/docs'],
+    });
+  });
+
+  it('parses the join command with code and local path positionals', () => {
+    expect(parseArgs(['join', 'SOMECODE123', '/local/path'])).toEqual({
+      command: 'join',
+      configPath: undefined,
+      port: undefined,
+      controlPort: undefined,
+      host: undefined,
+      positionals: ['SOMECODE123', '/local/path'],
+    });
+  });
+
+  it('collects positionals alongside flags for invite', () => {
+    expect(parseArgs(['invite', '/data/docs', '--config', '/etc/syncx.json'])).toEqual({
+      command: 'invite',
+      configPath: '/etc/syncx.json',
+      port: undefined,
+      controlPort: undefined,
+      host: undefined,
+      positionals: ['/data/docs'],
+    });
   });
 });
