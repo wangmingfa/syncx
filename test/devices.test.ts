@@ -52,6 +52,30 @@ describe('shared folder configuration', () => {
 
     rmSync(dir, { recursive: true, force: true });
   });
+
+  it('rejects a relative path', () => {
+    const dir = tempDir();
+    const configPath = join(dir, 'config.json');
+
+    expect(() => addSharedFolder(configPath, 'relative/path', ['DEV1234567'])).toThrow('must be absolute');
+    expect(() => addSharedFolder(configPath, './relative', ['DEV1234567'])).toThrow('must be absolute');
+
+    rmSync(dir, { recursive: true, force: true });
+  });
+
+  it('rejects system and privacy-sensitive paths', () => {
+    const dir = tempDir();
+    const configPath = join(dir, 'config.json');
+
+    expect(() => addSharedFolder(configPath, '/etc', ['DEV1234567'])).toThrow('not allowed');
+    expect(() => addSharedFolder(configPath, '/etc/nginx', ['DEV1234567'])).toThrow('not allowed');
+    expect(() => addSharedFolder(configPath, '/usr/local', ['DEV1234567'])).toThrow('not allowed');
+    expect(() => addSharedFolder(configPath, '/root/.ssh', ['DEV1234567'])).toThrow('not allowed');
+    expect(() => addSharedFolder(configPath, '/home/user/.ssh', ['DEV1234567'])).toThrow('not allowed');
+    expect(() => addSharedFolder(configPath, '/home/user/.gnupg', ['DEV1234567'])).toThrow('not allowed');
+
+    rmSync(dir, { recursive: true, force: true });
+  });
 });
 
 describe('isPeerAllowed', () => {

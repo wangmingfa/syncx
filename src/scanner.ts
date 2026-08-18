@@ -7,6 +7,16 @@ import { isIgnored } from './ignore.js';
 import { hashBlock, splitIntoBlocks } from './blockstore.js';
 import { incrementVersion } from './version.js';
 
+/** FAT32 mtime 精度为 2 秒,免哈希快速路径用容忍窗口避免误判。 */
+const MTIME_TOLERANCE_MS = 2000;
+
+/** 免哈希快速路径:大小与修改时间都在容忍窗口内则视为未改动,跳过整文件重算。 */
+function isUnchanged(entry: IndexEntry, stat: { size: number; mtimeMs: number }): boolean {
+  if (stat.size !== entry.size) return false;
+  if (entry.mtime === undefined) return false;
+  return Math.abs(stat.mtimeMs - entry.mtime) <= MTIME_TOLERANCE_MS;
+}
+
 /** executor 原子写用的临时文件后缀,扫描时跳过。 */
 const TMP_SUFFIX = '.syncx-tmp';
 
@@ -71,16 +81,12 @@ export function scanFolder(
         } catch {
           continue; // 文件在扫描途中被删
         }
-        // 免哈希快速路径:大小与修改时间都未变则视为未改动,跳过整文件重算
-        if (
-          stat.size === prev.size &&
-          prev.mtime !== undefined &&
-          stat.mtimeMs === prev.mtime
-        ) {
+        // 免哈希快速路径:大小与 mtime 在容忍窗口内则视为未改动(兼容 FAT32 2s 精度)
+        if (stat && isUnchanged(prev, stat)) {
           continue;
         }
         // 大小相同但 mtime 变化(或旧数据无 mtime)才做内容哈希对比
-        if (stat.size === prev.size && !contentChanged(prev, abs)) continue;
+        if (stat && stat.size === prev.size && !contentChanged(prev, abs)) continue;
       }
       changed.push(rel);
     }

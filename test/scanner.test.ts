@@ -106,4 +106,46 @@ describe('scanFolder', () => {
     expect(changed).toEqual([]);
     rmSync(dir, { recursive: true, force: true });
   });
+
+  it('tolerates mtime drift within 2s for FAT32 compatibility', () => {
+    const { dir, root, index } = setup();
+    writeFileSync(join(root, 'a.txt'), 'content');
+    const s = statSync(join(root, 'a.txt'));
+    // 索引记录的 mtime 与文件实际 mtime 相差 1.5s(FAT32 2s 精度场景)
+    index.saveEntry({
+      path: 'a.txt',
+      version: new Map([['DEV-A', 1]]),
+      size: s.size,
+      deleted: false,
+      blocks: ['stale-hash'],
+      mtime: s.mtimeMs - 1500,
+    });
+
+    const { changed } = scanFolder(root, index, [], 'DEV-A');
+
+    // 在容忍窗口内,不重算哈希
+    expect(changed).toEqual([]);
+    rmSync(dir, { recursive: true, force: true });
+  });
+
+  it('detects change when mtime drift exceeds 2s tolerance', () => {
+    const { dir, root, index } = setup();
+    writeFileSync(join(root, 'a.txt'), 'content');
+    const s = statSync(join(root, 'a.txt'));
+    // 索引记录的 mtime 与文件实际 mtime 相差 3s,超出容忍窗口
+    index.saveEntry({
+      path: 'a.txt',
+      version: new Map([['DEV-A', 1]]),
+      size: s.size,
+      deleted: false,
+      blocks: ['stale-hash'],
+      mtime: s.mtimeMs - 3000,
+    });
+
+    const { changed } = scanFolder(root, index, [], 'DEV-A');
+
+    // 超出容忍窗口,进入哈希对比路径,块哈希不匹配 → 判定为变更
+    expect(changed).toEqual(['a.txt']);
+    rmSync(dir, { recursive: true, force: true });
+  });
 });
