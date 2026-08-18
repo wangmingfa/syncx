@@ -56,6 +56,16 @@ describe('cli parseArgs', () => {
     });
   });
 
+  it('parses the install command with defaults', () => {
+    expect(parseArgs(['install'])).toEqual({
+      command: 'install',
+      configPath: undefined,
+      port: undefined,
+      controlPort: undefined,
+      host: undefined,
+    });
+  });
+
   it('rejects an unknown command', () => {
     expect(() => parseArgs(['frobnicate'])).toThrow(/unknown command/);
   });

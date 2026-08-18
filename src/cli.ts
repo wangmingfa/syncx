@@ -1,5 +1,5 @@
 export interface ParsedArgs {
-  command: 'start' | 'status';
+  command: 'start' | 'status' | 'install';
   configPath?: string;
   port?: number;
   controlPort?: number;
@@ -10,8 +10,8 @@ export interface ParsedArgs {
 export function parseArgs(argv: string[]): ParsedArgs {
   const [command, ...rest] = argv;
 
-  const result: ParsedArgs = { command: command as 'start' | 'status' };
-  if (result.command !== 'start' && result.command !== 'status') {
+  const result: ParsedArgs = { command: command as 'start' | 'status' | 'install' };
+  if (result.command !== 'start' && result.command !== 'status' && result.command !== 'install') {
     throw new Error(`unknown command: ${String(command)}`);
   }
 
@@ -49,6 +49,7 @@ import { filterIndexedEntries, parseIgnoreRules } from './ignore.js';
 import { createSyncPeer } from './peer.js';
 import { splitIntoBlocks } from './blockstore.js';
 import { readFileSync, existsSync, writeFileSync } from 'node:fs';
+import { fileURLToPath } from 'node:url';
 import { startPeerServer } from './net/server.js';
 import { connectPeer } from './net/client.js';
 import { startDiscovery } from './net/discovery.js';
@@ -57,6 +58,7 @@ import { createControlServer } from './api.js';
 import { buildStatus } from './status.js';
 import { addSharedFolder, removeSharedFolder } from './devices.js';
 import { getLanAddresses, formatHost } from './net/addresses.js';
+import { renderSystemdUnit, renderLaunchdPlist, renderWindowsService } from './install.js';
 import type { WebSocket } from 'ws';
 
 function loadOrCreateToken(configDir: string): string {
@@ -74,10 +76,13 @@ function loadOrCreateToken(configDir: string): string {
  * thin on purpose: real daemon integration tests are a later batch.
  */
 export async function run(args: ParsedArgs): Promise<void> {
-  const configDir = args.configPath ? dirname(args.configPath) : join(homedir(), '.syncx');
+  // --config 指向完整配置文件路径;默认 ~/.syncx/config.json。
+  // 身份/索引/token 等数据仍存放在配置文件所在目录。
+  const configPath = args.configPath ?? join(homedir(), '.syncx', 'config.json');
+  const configDir = dirname(configPath);
 
   const identity = loadOrCreateIdentity(configDir);
-  const config = loadConfig(join(configDir, 'config.json'));
+  const config = loadConfig(configPath);
   const index = openIndexStore(join(configDir, 'index.db'));
 
   if (args.command === 'status') {
@@ -87,9 +92,26 @@ export async function run(args: ParsedArgs): Promise<void> {
     return;
   }
 
+  if (args.command === 'install') {
+    // 生成系统服务模板:systemd(linux)/launchd(macOS)/sc(Windows)
+    const mainPath = fileURLToPath(new URL('./main.js', import.meta.url));
+    const target = {
+      executable: `${process.execPath} ${mainPath}`,
+      configPath,
+    };
+    const template =
+      process.platform === 'darwin'
+        ? renderLaunchdPlist(target)
+        : process.platform === 'win32'
+          ? renderWindowsService(target)
+          : renderSystemdUnit(target);
+    console.log(template);
+    index.close();
+    return;
+  }
+
   // 本地控制 API 先启动(无论是否有共享目录),让用户能在 Web UI 里添加第一个目录
   const token = loadOrCreateToken(configDir);
-  const configPath = join(configDir, 'config.json');
   const uiHtml = readFileSync(new URL('../ui/index.html', import.meta.url), 'utf8');
   const control = createControlServer({
     token,
