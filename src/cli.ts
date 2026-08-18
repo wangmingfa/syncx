@@ -2,6 +2,9 @@ export interface ParsedArgs {
   command: 'start' | 'status';
   configPath?: string;
   port?: number;
+  controlPort?: number;
+  /** Control API/Web UI bind host; default 127.0.0.1 (localhost only). */
+  host?: string;
 }
 
 export function parseArgs(argv: string[]): ParsedArgs {
@@ -20,6 +23,12 @@ export function parseArgs(argv: string[]): ParsedArgs {
       i++;
     } else if (flag === '--port') {
       result.port = Number(value);
+      i++;
+    } else if (flag === '--control-port') {
+      result.controlPort = Number(value);
+      i++;
+    } else if (flag === '--host') {
+      result.host = value;
       i++;
     } else {
       throw new Error(`unknown option: ${flag}`);
@@ -47,6 +56,7 @@ import { makePeerTransport, attachPeerMessages } from './net/wire.js';
 import { createControlServer } from './api.js';
 import { buildStatus } from './status.js';
 import { addSharedFolder, removeSharedFolder } from './devices.js';
+import { getLanAddresses, formatHost } from './net/addresses.js';
 import type { WebSocket } from 'ws';
 
 function loadOrCreateToken(configDir: string): string {
@@ -77,10 +87,60 @@ export async function run(args: ParsedArgs): Promise<void> {
     return;
   }
 
+  // 本地控制 API 先启动(无论是否有共享目录),让用户能在 Web UI 里添加第一个目录
+  const token = loadOrCreateToken(configDir);
+  const configPath = join(configDir, 'config.json');
+  const uiHtml = readFileSync(new URL('../ui/index.html', import.meta.url), 'utf8');
+  const control = createControlServer({
+    token,
+    uiHtml,
+    addFolder: (path, devices) => {
+      addSharedFolder(configPath, path, devices);
+      console.log(`shared folder added: ${path}`);
+    },
+    removeFolder: (path) => {
+      removeSharedFolder(configPath, path);
+      console.log(`shared folder removed: ${path}`);
+    },
+    // 实时读取配置,Web UI 添加/移除目录后刷新可见
+    getStatus: () =>
+      buildStatus(
+        identity,
+        loadConfig(configPath),
+        (() => {
+          const all = index.listEntries();
+          return {
+            entries: all.filter((e) => !e.deleted).length,
+            tombstones: all.filter((e) => e.deleted).length,
+          };
+        })(),
+      ),
+  });
+  const controlPort = args.controlPort ?? 8384;
+  const controlHost = args.host ?? '127.0.0.1';
+  control.listen(controlPort, controlHost);
+
+  const lanAddresses = getLanAddresses();
+  console.log(`control UI (token in ${join(configDir, 'control.token')}):`);
+  console.log(`  http://${controlHost === '0.0.0.0' ? 'localhost' : controlHost}:${controlPort}`);
+  if (controlHost === '0.0.0.0') {
+    for (const lan of lanAddresses) {
+      console.log(`  http://${formatHost(lan.address, lan.family)}:${controlPort}`);
+    }
+  }
+
   const folder = config.sharedFolders[0];
   if (!folder) {
-    console.error('no shared folders configured; add one to config.json first');
-    index.close();
+    console.log('no shared folders configured yet; add one via the web UI, then restart the daemon');
+    await new Promise<void>((resolve) => {
+      const shutdown = (): void => {
+        control.close();
+        index.close();
+        resolve();
+      };
+      process.on('SIGINT', shutdown);
+      process.on('SIGTERM', shutdown);
+    });
     return;
   }
 
@@ -135,38 +195,12 @@ export async function run(args: ParsedArgs): Promise<void> {
       .catch((error) => console.error(`connect to ${peer.deviceId} failed: ${error.message}`));
   });
 
-  // 本地控制 API:localhost + token,提供 /api/status 与 Web UI
-  const token = loadOrCreateToken(configDir);
-  const configPath = join(configDir, 'config.json');
-  const uiHtml = readFileSync(new URL('../ui/index.html', import.meta.url), 'utf8');
-  const control = createControlServer({
-    token,
-    uiHtml,
-    addFolder: (path, devices) => {
-      addSharedFolder(configPath, path, devices);
-      console.log(`shared folder added: ${path}`);
-    },
-    removeFolder: (path) => {
-      removeSharedFolder(configPath, path);
-      console.log(`shared folder removed: ${path}`);
-    },
-    getStatus: () =>
-      buildStatus(
-        identity,
-        config,
-        (() => {
-          const all = index.listEntries();
-          return {
-            entries: all.filter((e) => !e.deleted).length,
-            tombstones: all.filter((e) => e.deleted).length,
-          };
-        })(),
-      ),
-  });
-  control.listen(8384, '127.0.0.1');
-
-  console.log(`syncx daemon started (device ${identity.deviceId}, port ${server.port})`);
-  console.log(`control UI: http://127.0.0.1:8384 (token in ${join(configDir, 'control.token')})`);
+  console.log(`syncx daemon started (device ${identity.deviceId}, peer port ${server.port})`);
+  console.log('peer sync (ws://ip:port):');
+  console.log(`  ws://localhost:${server.port}`);
+  for (const lan of lanAddresses) {
+    console.log(`  ws://${formatHost(lan.address, lan.family)}:${server.port}`);
+  }
   await new Promise<void>((resolve) => {
     const shutdown = (): void => {
       control.close();

@@ -35,4 +35,16 @@ describe('device identity', () => {
 
     rmSync(dir, { recursive: true, force: true });
   });
+
+  it('creates the config directory when it does not exist', () => {
+    const base = tempDir();
+    const configDir = join(base, 'nested', 'config');
+
+    const identity = loadOrCreateIdentity(configDir);
+
+    expect(existsSync(join(configDir, 'device.key'))).toBe(true);
+    expect(identity.deviceId).toMatch(/^[A-Z2-7]{10}$/);
+
+    rmSync(base, { recursive: true, force: true });
+  });
 });

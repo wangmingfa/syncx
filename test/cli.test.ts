@@ -7,6 +7,8 @@ describe('cli parseArgs', () => {
       command: 'start',
       configPath: undefined,
       port: undefined,
+      controlPort: undefined,
+      host: undefined,
     });
   });
 
@@ -15,6 +17,8 @@ describe('cli parseArgs', () => {
       command: 'status',
       configPath: undefined,
       port: undefined,
+      controlPort: undefined,
+      host: undefined,
     });
   });
 
@@ -23,6 +27,32 @@ describe('cli parseArgs', () => {
       command: 'start',
       configPath: '/etc/syncx.json',
       port: 22000,
+      controlPort: undefined,
+      host: undefined,
+    });
+  });
+
+  it('parses the --control-port option', () => {
+    expect(
+      parseArgs(['start', '--config', '/etc/syncx.json', '--port', '22000', '--control-port', '8385']),
+    ).toEqual({
+      command: 'start',
+      configPath: '/etc/syncx.json',
+      port: 22000,
+      controlPort: 8385,
+      host: undefined,
+    });
+  });
+
+  it('parses the --host option', () => {
+    expect(
+      parseArgs(['start', '--config', '/etc/syncx.json', '--host', '0.0.0.0']),
+    ).toEqual({
+      command: 'start',
+      configPath: '/etc/syncx.json',
+      port: undefined,
+      controlPort: undefined,
+      host: '0.0.0.0',
     });
   });
 

@@ -1,5 +1,5 @@
 import { generateKeyPairSync, createHash } from 'node:crypto';
-import { existsSync, readFileSync, writeFileSync } from 'node:fs';
+import { existsSync, readFileSync, writeFileSync, mkdirSync } from 'node:fs';
 import { join } from 'node:path';
 
 const IDENTITY_FILE = 'device.key';
@@ -42,6 +42,7 @@ function generateIdentity(): DeviceIdentity {
  * a fresh Ed25519 keypair on first start.
  */
 export function loadOrCreateIdentity(configDir: string): DeviceIdentity {
+  mkdirSync(configDir, { recursive: true });
   const file = join(configDir, IDENTITY_FILE);
   if (existsSync(file)) {
     return JSON.parse(readFileSync(file, 'utf8')) as DeviceIdentity;
