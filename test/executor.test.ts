@@ -184,6 +184,110 @@ describe('local executor conflict', () => {
     index.close();
     rmSync(dir, { recursive: true, force: true });
   });
+
+  it('keep-local policy preserves the local version and ignores remote', async () => {
+    const dir = mkdtempSync(join(tmpdir(), 'syncx-exec-'));
+    const root = join(dir, 'share');
+    mkdirSync(root, { recursive: true });
+    const index = openIndexStore(join(dir, 'index.db'));
+
+    const executor = createLocalExecutor(root, index);
+    const target = join(root, 'doc.txt');
+    const localContent = Buffer.from('local edit');
+    writeFileSync(target, localContent);
+    index.saveEntry(
+      entry('doc.txt', [['dev-a', 2]], [hashBlock(localContent)], localContent.length),
+    );
+
+    const remoteContent = Buffer.from('remote edit');
+    const remote = entry('doc.txt', [['dev-b', 2]], [hashBlock(remoteContent)], remoteContent.length);
+    const provider = {
+      getBlocks: async (): Promise<Buffer[]> => [remoteContent],
+    };
+
+    await executor.applyConflict('doc.txt', index.getEntry('doc.txt')!, remote, provider, 'dev-b', 'keep-local');
+
+    // 本地版本不变,无冲突副本,无远端落地
+    expect(readFileSync(target)).toEqual(localContent);
+    expect(readdirSync(root)).toEqual(['doc.txt']);
+    expect(index.getEntry('doc.txt')?.blocks).toEqual([hashBlock(localContent)]);
+
+    index.close();
+    rmSync(dir, { recursive: true, force: true });
+  });
+
+  it('keep-newest policy keeps the newer version by mtime', async () => {
+    const dir = mkdtempSync(join(tmpdir(), 'syncx-exec-'));
+    const root = join(dir, 'share');
+    mkdirSync(root, { recursive: true });
+    const index = openIndexStore(join(dir, 'index.db'));
+
+    const executor = createLocalExecutor(root, index);
+    const target = join(root, 'doc.txt');
+    const localContent = Buffer.from('local newer');
+    writeFileSync(target, localContent);
+    const now = Date.now();
+    index.saveEntry({
+      path: 'doc.txt',
+      version: new Map([['dev-a', 2]]),
+      size: localContent.length,
+      deleted: false,
+      blocks: [hashBlock(localContent)],
+      mtime: now + 5000, // 本地较新
+    });
+
+    const remoteContent = Buffer.from('remote older');
+    const remote = {
+      path: 'doc.txt',
+      version: new Map([['dev-b', 2]]),
+      size: remoteContent.length,
+      deleted: false,
+      blocks: [hashBlock(remoteContent)],
+      mtime: now, // 远端较旧
+    };
+    const provider = {
+      getBlocks: async (): Promise<Buffer[]> => [remoteContent],
+    };
+
+    await executor.applyConflict('doc.txt', index.getEntry('doc.txt')!, remote, provider, 'dev-b', 'keep-newest');
+
+    // 本地较新,保留本地
+    expect(readFileSync(target)).toEqual(localContent);
+    expect(readdirSync(root)).toEqual(['doc.txt']);
+
+    index.close();
+    rmSync(dir, { recursive: true, force: true });
+  });
+
+  it('keep-larger policy keeps the larger version', async () => {
+    const dir = mkdtempSync(join(tmpdir(), 'syncx-exec-'));
+    const root = join(dir, 'share');
+    mkdirSync(root, { recursive: true });
+    const index = openIndexStore(join(dir, 'index.db'));
+
+    const executor = createLocalExecutor(root, index);
+    const target = join(root, 'doc.txt');
+    const localContent = Buffer.from('local larger content here');
+    writeFileSync(target, localContent);
+    index.saveEntry(
+      entry('doc.txt', [['dev-a', 2]], [hashBlock(localContent)], localContent.length),
+    );
+
+    const remoteContent = Buffer.from('short');
+    const remote = entry('doc.txt', [['dev-b', 2]], [hashBlock(remoteContent)], remoteContent.length);
+    const provider = {
+      getBlocks: async (): Promise<Buffer[]> => [remoteContent],
+    };
+
+    await executor.applyConflict('doc.txt', index.getEntry('doc.txt')!, remote, provider, 'dev-b', 'keep-larger');
+
+    // 本地较大,保留本地
+    expect(readFileSync(target)).toEqual(localContent);
+    expect(readdirSync(root)).toEqual(['doc.txt']);
+
+    index.close();
+    rmSync(dir, { recursive: true, force: true });
+  });
 });
 
 describe('local executor send', () => {

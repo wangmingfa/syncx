@@ -4,6 +4,7 @@ import type { IndexEntry } from '../index.js';
 import type { BlockRequest, BlockResponse } from '../messages.js';
 import { encodeIndex, decodeIndex } from '../messages.js';
 import type { PeerTransport, SyncPeer } from '../peer.js';
+import { RateLimiter } from '../ratelimit.js';
 
 export type WireMessage =
   | { type: 'index'; folder: string; payload: string }
@@ -50,10 +51,30 @@ export function decryptMessage(key: Buffer, raw: string): WireMessage {
  * Send-side transport bound to one shared folder: every message carries
  * the folder path so a single socket can multiplex several folders.
  */
-export function makePeerTransport(socket: WebSocket, key: Buffer, folderPath: string): PeerTransport {
+export function makePeerTransport(
+  socket: WebSocket,
+  key: Buffer,
+  folderPath: string,
+  rateLimiter?: RateLimiter,
+): PeerTransport {
+  const limiter = rateLimiter ?? new RateLimiter(0);
+
+  function trySend(data: string): void {
+    const bytes = Buffer.byteLength(data);
+    if (limiter.tryConsume(bytes)) {
+      socket.send(data);
+      return;
+    }
+    const wait = limiter.waitTime(bytes);
+    setTimeout(() => {
+      limiter.refill();
+      socket.send(data);
+    }, wait);
+  }
+
   return {
     sendEntries(entries: IndexEntry[]): void {
-      socket.send(
+      trySend(
         encryptMessage(key, {
           type: 'index',
           folder: folderPath,
@@ -62,10 +83,10 @@ export function makePeerTransport(socket: WebSocket, key: Buffer, folderPath: st
       );
     },
     sendBlockRequest(request: BlockRequest): void {
-      socket.send(encryptMessage(key, { type: 'block-request', folder: folderPath, payload: request }));
+      trySend(encryptMessage(key, { type: 'block-request', folder: folderPath, payload: request }));
     },
     sendBlockResponse(response: BlockResponse): void {
-      socket.send(
+      trySend(
         encryptMessage(key, {
           type: 'block-response',
           folder: folderPath,

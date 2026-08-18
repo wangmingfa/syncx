@@ -10,6 +10,19 @@ export interface SharedFolderConfig {
    * 缺省时回退为 path(单机 Web UI 添加的目录;跨设备同步请显式配置相同 id)。
    */
   id?: string;
+  /**
+   * 冲突解决策略:
+   * - keep-conflict-copy: 保留本地冲突副本,落地远端版本(默认)
+   * - keep-newest: 保留 mtime 较新的版本,删除另一方
+   * - keep-larger: 保留文件较大的版本,删除另一方
+   * - keep-local: 保留本地版本,忽略远端
+   */
+  conflictPolicy?: 'keep-conflict-copy' | 'keep-newest' | 'keep-larger' | 'keep-local';
+  /**
+   * 同步带宽上限,单位 KB/s。0 或不设置表示不限速。
+   * 限制单个对端的发送速率,防止大文件同步占满 LAN 带宽。
+   */
+  maxBandwidthKbps?: number;
 }
 
 /** 目录的 wire 标识:优先 id,缺省用 path。 */

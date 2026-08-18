@@ -67,6 +67,8 @@ export interface SyncPeerDeps {
   deviceId: string;
   /** Peer device ID, used to name conflict copies. */
   remoteDeviceId?: string;
+  /** Conflict resolution policy for this folder. */
+  conflictPolicy?: 'keep-conflict-copy' | 'keep-newest' | 'keep-larger' | 'keep-local';
 }
 
 export interface SyncPeer {
@@ -101,7 +103,7 @@ const MAX_BLOCK_RETRIES = 3;
  * complete, then apply it via the executor.
  */
 export function createSyncPeer(deps: SyncPeerDeps): SyncPeer {
-  const { transport, localIndex, executor, readLocalBlock, deviceId, remoteDeviceId } = deps;
+  const { transport, localIndex, executor, readLocalBlock, deviceId, remoteDeviceId, conflictPolicy } = deps;
   const pending = new Map<string, PendingEntry>();
   // 逐块跟踪超时重试:块响应丢失/丢弃时自动重发,避免文件永远收不齐
   const pendingBlocks = new Map<string, PendingBlockRequest>();
@@ -148,6 +150,7 @@ export function createSyncPeer(deps: SyncPeerDeps): SyncPeer {
         item.entry,
         provider,
         remoteDeviceId ?? '',
+        conflictPolicy,
       );
       // 同步内存索引,使后续规划基于最新本地状态
       localIndex.set(path, { ...item.entry, version: mergeVersions(item.local.version, item.entry.version) });

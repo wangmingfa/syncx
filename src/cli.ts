@@ -89,6 +89,7 @@ import { startPeerServer } from './net/server.js';
 import { connectPeer } from './net/client.js';
 import { startDiscovery } from './net/discovery.js';
 import { makePeerTransport, attachPeerMessages } from './net/wire.js';
+import { RateLimiter } from './ratelimit.js';
 import { createControlServer } from './api.js';
 import { buildStatus } from './status.js';
 import { addSharedFolder, removeSharedFolder, isPeerAllowed } from './devices.js';
@@ -246,7 +247,7 @@ export async function run(args: ParsedArgs): Promise<void> {
     const localIndex = new Map(
       filterIndexedEntries(parseIgnoreRules(ignoreLines), index.listEntries()).map((e) => [e.path, e]),
     );
-    return { id, path: f.path, index, executor, localIndex, ignoreLines, transports: [] as PeerTransport[] };
+    return { id, path: f.path, index, executor, localIndex, ignoreLines, transports: [] as PeerTransport[], config: f };
   });
 
   if (folderStates.length === 0) {
@@ -351,7 +352,10 @@ export async function run(args: ParsedArgs): Promise<void> {
     // 记录本次会话为各目录创建的 transport,便于 socket 断开时从对应目录中清理
     const sessionTransports: Array<{ folder: (typeof folderStates)[number]; transport: PeerTransport }> = [];
     for (const folder of folderStates) {
-      const transport = makePeerTransport(socket, key, folder.id);
+      const rateLimiter = folder.config?.maxBandwidthKbps
+        ? new RateLimiter(folder.config.maxBandwidthKbps)
+        : undefined;
+      const transport = makePeerTransport(socket, key, folder.id, rateLimiter);
       folder.transports.push(transport);
       sessionTransports.push({ folder, transport });
       const peer = createSyncPeer({
@@ -374,6 +378,7 @@ export async function run(args: ParsedArgs): Promise<void> {
         },
         deviceId: identity.deviceId,
         remoteDeviceId,
+        conflictPolicy: folder.config?.conflictPolicy,
       });
       peers.set(folder.id, peer);
       transport.sendEntries([...folder.localIndex.values()]);
