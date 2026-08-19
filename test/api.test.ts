@@ -485,3 +485,128 @@ describe('control api rescan and reconnect', () => {
     server.close();
   });
 });
+
+describe('routes tolerate query strings', () => {
+  it('GET /api/status with a query string returns status', async () => {
+    const server = createControlServer({
+      token: 'secret',
+      getStatus: () => ({ ok: true, folders: 1 }),
+    });
+    server.listen(0, '127.0.0.1');
+    await once(server, 'listening');
+    const port = (server.address() as AddressInfo).port;
+
+    // Web UI 轮询常带缓存破坏参数(如 ?t=timestamp),修复前精确匹配返回 404
+    const res = await fetchJson(port, '/api/status?t=123456', 'secret');
+
+    expect(res.status).toBe(200);
+    expect(res.body).toEqual({ ok: true, folders: 1 });
+
+    server.close();
+  });
+
+  it('POST /api/rescan with a query string triggers rescan', async () => {
+    let rescanCalled = false;
+    const server = createControlServer({
+      token: 'secret',
+      getStatus: () => ({ ok: true }),
+      rescan: () => {
+        rescanCalled = true;
+      },
+    });
+    server.listen(0, '127.0.0.1');
+    await once(server, 'listening');
+    const port = (server.address() as AddressInfo).port;
+
+    const res = await fetchJson(port, '/api/rescan?x=1', 'secret', { method: 'POST' });
+
+    expect(res.status).toBe(200);
+    expect(rescanCalled).toBe(true);
+
+    server.close();
+  });
+
+  it('POST /actions with a query string triggers rescan (form)', async () => {
+    let rescanCalled = false;
+    const server = createControlServer({
+      token: 'secret',
+      getStatus: () => ({ ok: true }),
+      rescan: () => {
+        rescanCalled = true;
+      },
+    });
+    server.listen(0, '127.0.0.1');
+    await once(server, 'listening');
+    const port = (server.address() as AddressInfo).port;
+
+    await new Promise<void>((resolve, reject) => {
+      const body = 'action=rescan';
+      const req = request(
+        {
+          host: '127.0.0.1',
+          port,
+          path: '/actions?source=web',
+          method: 'POST',
+          headers: {
+            Authorization: 'Bearer secret',
+            'Content-Type': 'application/x-www-form-urlencoded',
+            'Content-Length': Buffer.byteLength(body),
+          },
+        },
+        (res) => {
+          expect(res.statusCode).toBe(302);
+          res.resume();
+          resolve();
+        },
+      );
+      req.on('error', reject);
+      req.end(body);
+    });
+
+    expect(rescanCalled).toBe(true);
+
+    server.close();
+  });
+
+  it('POST /folders with a query string adds a folder (form)', async () => {
+    const added: Array<{ path: string; devices: string[] }> = [];
+    const server = createControlServer({
+      token: 'secret',
+      getStatus: () => ({ ok: true }),
+      addFolder: (path, devices) => {
+        added.push({ path, devices });
+      },
+    });
+    server.listen(0, '127.0.0.1');
+    await once(server, 'listening');
+    const port = (server.address() as AddressInfo).port;
+
+    await new Promise<void>((resolve, reject) => {
+      const body = 'path=/data/docs&devices=DEV1234567';
+      const req = request(
+        {
+          host: '127.0.0.1',
+          port,
+          path: '/folders?source=web',
+          method: 'POST',
+          headers: {
+            Authorization: 'Bearer secret',
+            'Content-Type': 'application/x-www-form-urlencoded',
+            'Content-Length': Buffer.byteLength(body),
+          },
+        },
+        (res) => {
+          expect(res.statusCode).toBe(302);
+          res.resume();
+          resolve();
+        },
+      );
+      req.on('error', reject);
+      req.end(body);
+    });
+
+    expect(added).toEqual([{ path: '/data/docs', devices: ['DEV1234567'] }]);
+
+    server.close();
+  });
+});

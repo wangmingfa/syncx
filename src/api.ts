@@ -128,7 +128,7 @@ export function createControlServer(deps: ControlServerDeps): Server {
     const r = await ensureSsr(renderSsr);
 
     // GET / : SSR status page (auth required) or login form
-    if (req.method === 'GET' && req.url === '/' && r) {
+    if (req.method === 'GET' && req.url && pathname(req.url) === '/' && r) {
       if (authenticated) {
         sendHtml(res, await r({ status: getStatus() }));
       } else {
@@ -138,14 +138,14 @@ export function createControlServer(deps: ControlServerDeps): Server {
     }
 
     // GET /login : always render the login form
-    if (req.method === 'GET' && req.url === '/login' && r) {
+    if (req.method === 'GET' && req.url && pathname(req.url) === '/login' && r) {
       const error = reqToken !== undefined && !tokenMatches(reqToken, token) ? 'token 无效,请重试' : undefined;
       sendHtml(res, await r({ error }));
       return;
     }
 
     // POST /login : set HttpOnly session cookie and redirect
-    if (req.method === 'POST' && req.url === '/login' && r) {
+    if (req.method === 'POST' && req.url && pathname(req.url) === '/login' && r) {
       const body = await readBody(req);
       const match = new URLSearchParams(body).get('token');
       if (match && tokenMatches(match, token)) {
@@ -167,13 +167,13 @@ export function createControlServer(deps: ControlServerDeps): Server {
     }
 
     // GET /api/status
-    if (req.method === 'GET' && req.url === '/api/status') {
+    if (req.method === 'GET' && req.url && pathname(req.url) === '/api/status') {
       sendJson(res, 200, getStatus());
       return;
     }
 
     // Form POST /folders : add or (via _method=DELETE) remove a folder
-    if (req.method === 'POST' && req.url === '/folders') {
+    if (req.method === 'POST' && req.url && pathname(req.url) === '/folders') {
       const params = new URLSearchParams(await readBody(req));
       const method = params.get('_method');
       if (method === 'DELETE' && removeFolder) {
@@ -196,7 +196,7 @@ export function createControlServer(deps: ControlServerDeps): Server {
     }
 
     // Form POST /actions : 手动重扫或重连(需认证)
-    if (req.method === 'POST' && req.url === '/actions') {
+    if (req.method === 'POST' && req.url && pathname(req.url) === '/actions') {
       const params = new URLSearchParams(await readBody(req));
       const action = params.get('action');
       if (action === 'rescan' && rescan) {
@@ -245,7 +245,7 @@ export function createControlServer(deps: ControlServerDeps): Server {
     }
 
     // POST /api/rescan : 手动触发一轮扫描
-    if (req.method === 'POST' && req.url === '/api/rescan' && rescan) {
+    if (req.method === 'POST' && req.url && pathname(req.url) === '/api/rescan' && rescan) {
       rescan();
       sendJson(res, 200, { ok: true });
       return;
