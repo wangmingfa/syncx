@@ -29,6 +29,7 @@ export function connectPeer(identity: DeviceIdentity, url: string): Promise<Conn
       settled = true;
       socket.off('close', onSocketClose);
       socket.off('error', onSocketError);
+      socket.off('message', onMainMessage);
     };
 
     const onSocketError = (err: Error): void => {
@@ -50,7 +51,7 @@ export function connectPeer(identity: DeviceIdentity, url: string): Promise<Conn
 
     let remotePublicKeyPem: string | undefined;
 
-    socket.on('message', (data) => {
+    const onMainMessage = (data: Buffer): void => {
       const raw = data instanceof ArrayBuffer ? Buffer.from(data) : Buffer.from(data as Buffer);
       const text = raw.toString('utf8');
 
@@ -90,7 +91,8 @@ export function connectPeer(identity: DeviceIdentity, url: string): Promise<Conn
         socket.once('message', (kxData: Buffer) => onKx(kxData));
         return;
       }
-    });
+    };
+    socket.on('message', onMainMessage);
   });
 }
 

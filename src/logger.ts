@@ -73,6 +73,15 @@ export function createRotatingStream(
     }
   }
 
+  function openWs(): WriteStream {
+    const stream = openStream(currentFile);
+    // 缓存流常驻:吞掉底层流错误(磁盘满、轮转重开失败等),避免依赖
+    // main.ts 的 uncaughtException 兜底
+    stream.on('error', () => {});
+    ws = stream;
+    return stream;
+  }
+
   function rotate(): void {
     try {
       // 先关闭旧流再改名,否则缓存流会继续写到改名后的 .1 文件
@@ -88,7 +97,7 @@ export function createRotatingStream(
     } catch {
       // 轮转失败(如磁盘满)不影响写入,继续追加
     }
-    ws = openStream(currentFile);
+    openWs();
   }
 
   return new Writable({
@@ -100,10 +109,8 @@ export function createRotatingStream(
       } catch {
         // stat 失败继续写入
       }
-      if (!ws) {
-        ws = openStream(currentFile);
-      }
-      ws.write(chunk, () => cb());
+      const target = ws ?? openWs();
+      target.write(chunk, () => cb());
     },
     final(cb: (error?: Error | null) => void): void {
       if (ws) {

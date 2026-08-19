@@ -159,6 +159,22 @@ describe('connectPeer handshake', () => {
     rmSync(dir, { recursive: true, force: true });
   });
 
+  it('cleans up the handshake message listener after a successful handshake', async () => {
+    const dir = mkdtempSync(join(tmpdir(), 'syncx-client-'));
+    const identity = loadOrCreateIdentity(dir);
+    const server = await startTestPeerServer();
+
+    const { socket } = await connectPeer(identity, `ws://127.0.0.1:${server.port}`);
+
+    // 修复前:主 message 处理器在 resolve 后仍是永久 no-op 监听(对每条
+    // 对端连接挂一个永不工作的处理器);修复后应被移除
+    expect(socket.listenerCount('message')).toBe(0);
+
+    socket.close();
+    await server.close();
+    rmSync(dir, { recursive: true, force: true });
+  });
+
   it('rejects when the peer closes the socket mid-handshake', async () => {
     const dir = mkdtempSync(join(tmpdir(), 'syncx-client-'));
     const identity = loadOrCreateIdentity(dir);

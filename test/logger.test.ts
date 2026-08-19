@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { mkdtempSync, rmSync, readFileSync, existsSync, statSync, createWriteStream } from 'node:fs';
+import { mkdtempSync, rmSync, readFileSync, existsSync, statSync, createWriteStream, type WriteStream } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { createRotatingStream } from '../src/logger.js';
@@ -30,6 +30,33 @@ describe('rotating log stream', () => {
 
     expect(opened).toHaveLength(1);
     expect(readFileSync(logFile, 'utf8').split('\n').filter(Boolean)).toHaveLength(50);
+
+    rmSync(dir, { recursive: true, force: true });
+  });
+
+  it('attaches an error handler to the underlying WriteStream', async () => {
+    const dir = mkdtempSync(join(tmpdir(), 'syncx-log-'));
+    const logFile = join(dir, 'syncx.log');
+    const created: WriteStream[] = [];
+    const stream = createRotatingStream(
+      logFile,
+      { maxSizeBytes: 1024 * 1024, maxFiles: 3 },
+      (path) => {
+        const ws = createWriteStream(path, { flags: 'a' });
+        created.push(ws);
+        return ws;
+      },
+    );
+
+    await new Promise<void>((resolve, reject) => {
+      stream.write(Buffer.from('hello\n'), (err) => (err ? reject(err) : resolve()));
+    });
+    await new Promise<void>((resolve) => stream.end(() => resolve()));
+
+    // 缓存流常驻:磁盘满/轮转重开失败时 fs 流会 emit 'error',必须有处理器,
+    // 否则依赖 main.ts 的 uncaughtException 兜底(修复前 created[0] 无 error 监听)
+    expect(created).toHaveLength(1);
+    expect(created[0]!.listenerCount('error')).toBeGreaterThan(0);
 
     rmSync(dir, { recursive: true, force: true });
   });
