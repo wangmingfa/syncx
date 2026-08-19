@@ -66,7 +66,7 @@ import { scanFolder } from './scanner.js';
 import type { IndexEntry } from './index.js';
 import { splitIntoBlocks } from './blockstore.js';
 import { broadcastFolderUpdates } from './broadcast.js';
-import { readFileSync, existsSync, writeFileSync } from 'node:fs';
+import { readFileSync, existsSync, writeFileSync, watch } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import type { ControlServerDeps } from './api.js';
 
@@ -176,7 +176,7 @@ export async function run(args: ParsedArgs): Promise<void> {
     if (!code || !localPath) {
       throw new Error('usage: syncx join <invite-code> <local-path>');
     }
-    const invite = parseInviteCode(code);
+    const invite = parseInviteCode(code, configDir);
     addSharedFolder(configPath, localPath, [invite.deviceId]);
     console.log(`paired with device ${invite.deviceId} (invited folder ${invite.folder})`);
     console.log(`shared folder added: ${localPath}`);
@@ -494,9 +494,37 @@ export async function run(args: ParsedArgs): Promise<void> {
     })();
   }, SCAN_INTERVAL_MS);
 
+  // 配置热重载:监听 config.json 变更,重新加载对端列表
+  // 新增/移除对端无需重启 daemon
+  const configWatcher = watch(configPath, (_eventType, _filename) => {
+    try {
+      const newConfig = loadConfig(configPath);
+      const newPeers = new Set(newConfig.peers);
+      const oldPeers = new Set(config.peers);
+      // 新增对端:主动连接
+      for (const peerUrl of newConfig.peers) {
+        if (!oldPeers.has(peerUrl)) {
+          logger.info(`config updated: connecting to new peer ${peerUrl}`);
+          void connectPeer(identity, peerUrl)
+            .then(({ socket, remoteDeviceId, key }) => {
+              if (acceptPeer(socket, remoteDeviceId)) {
+                startSyncSession(socket, remoteDeviceId, key, peerUrl);
+              }
+            })
+            .catch((error) => logger.error(`connect to new peer ${peerUrl} failed: ${error.message}`));
+        }
+      }
+      // 更新内存中的 peers 列表
+      config.peers = newConfig.peers;
+    } catch (error) {
+      logger.error(`config reload failed: ${error instanceof Error ? error.message : String(error)}`);
+    }
+  });
+
   await new Promise<void>((resolve) => {
 const shutdown = (): void => {
     clearInterval(scanTimer);
+    configWatcher.close();
     for (const timer of reconnectTimers.values()) clearTimeout(timer);
     reconnectTimers.clear();
     // 关闭所有 peer socket(入站 + 出站),否则客户端 socket 保持事件循环活跃

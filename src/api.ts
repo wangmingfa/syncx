@@ -57,19 +57,19 @@ function tokenMatches(a: string, b: string): boolean {
 /** 读取请求体,超过 maxBytes 直接拒绝,防止大请求体耗尽内存。 */
 function readBody(req: IncomingMessage, maxBytes = 1_000_000): Promise<string> {
   return new Promise((resolve, reject) => {
-    let data = '';
+    const chunks: Buffer[] = [];
     let size = 0;
     const onData = (chunk: Buffer): void => {
+      chunks.push(chunk);
       size += chunk.length;
       if (size > maxBytes) {
         req.removeListener('data', onData);
         reject(new Error('request body too large'));
         return;
       }
-      data += chunk.toString('utf8');
     };
     req.on('data', onData);
-    req.on('end', () => resolve(data));
+    req.on('end', () => resolve(Buffer.concat(chunks).toString('utf8')));
     req.on('error', reject);
   });
 }
