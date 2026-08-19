@@ -92,7 +92,14 @@ export function scanFolder(
           continue;
         }
         // 大小相同但 mtime 变化(或旧数据无 mtime)才做内容哈希对比
-        if (stat && stat.size === prev.size && !contentChanged(prev, abs)) continue;
+        if (stat && stat.size === prev.size && !contentChanged(prev, abs)) {
+          // 内容未变仅 mtime 变化:写回新 mtime,避免下次扫描重复整文件哈希。
+          // mtime 不在同步协议内,不递增版本、不触发广播。
+          if (prev.mtime === undefined || Math.abs(stat.mtimeMs - prev.mtime) > MTIME_TOLERANCE_MS) {
+            index.saveEntry({ ...prev, mtime: stat.mtimeMs });
+          }
+          continue;
+        }
       }
       changed.push(rel);
     }

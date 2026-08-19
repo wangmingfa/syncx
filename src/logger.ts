@@ -1,11 +1,11 @@
 import pino, { type Logger } from 'pino';
 import pretty from 'pino-pretty';
-import { mkdirSync, statSync, renameSync, unlinkSync, existsSync, createWriteStream } from 'node:fs';
+import { mkdirSync, statSync, renameSync, unlinkSync, existsSync, createWriteStream, type WriteStream } from 'node:fs';
 import { dirname } from 'node:path';
 import { Writable } from 'node:stream';
 
 /** 日志轮转配置。 */
-interface LogRotation {
+export interface LogRotation {
   /** 单文件最大字节数,默认 10 MB。 */
   maxSizeBytes: number;
   /** 保留的轮转文件数,默认 5。 */
@@ -53,14 +53,30 @@ export function createLogger(logFile?: string): Logger {
 }
 
 /**
- * 基于 pino-pretty 的轮转 WriteStream:每次写入前检查文件大小,
- * 超过 maxSizeBytes 则按 .1/.2/... 轮转,保留 maxFiles 份。
+ * 基于 pino-pretty 的轮转 WriteStream:复用单个 WriteStream,每次写入前
+ * 检查文件大小,超过 maxSizeBytes 则按 .1/.2/... 轮转,保留 maxFiles 份。
+ * 修复前:每次写日志都新建/销毁 WriteStream,高频日志下浪费句柄与系统调用。
+ * openStream 参数仅供测试注入流工厂计数,默认用 fs.createWriteStream。
  */
-function createRotatingStream(logFile: string, rotation: LogRotation): Writable {
+export function createRotatingStream(
+  logFile: string,
+  rotation: LogRotation,
+  openStream: (path: string) => WriteStream = (p) => createWriteStream(p, { flags: 'a' }),
+): Writable {
   let currentFile = logFile;
+  let ws: WriteStream | undefined;
+
+  function closeStream(): void {
+    if (ws) {
+      ws.end();
+      ws = undefined;
+    }
+  }
 
   function rotate(): void {
     try {
+      // 先关闭旧流再改名,否则缓存流会继续写到改名后的 .1 文件
+      closeStream();
       for (let i = rotation.maxFiles - 1; i >= 1; i--) {
         const old = `${logFile}.${i}`;
         const newer = `${logFile}.${i + 1}`;
@@ -72,25 +88,29 @@ function createRotatingStream(logFile: string, rotation: LogRotation): Writable 
     } catch {
       // 轮转失败(如磁盘满)不影响写入,继续追加
     }
+    ws = openStream(currentFile);
   }
 
   return new Writable({
     write(chunk: Buffer, _encoding: string, cb: (error?: Error | null) => void): void {
       try {
-        if (existsSync(currentFile)) {
-          const stat = statSync(currentFile);
-          if (stat.size >= rotation.maxSizeBytes) {
-            rotate();
-          }
+        if (existsSync(currentFile) && statSync(currentFile).size >= rotation.maxSizeBytes) {
+          rotate();
         }
       } catch {
         // stat 失败继续写入
       }
-      const ws = createWriteStream(currentFile, { flags: 'a' });
-      ws.write(chunk, () => {
-        ws.end();
+      if (!ws) {
+        ws = openStream(currentFile);
+      }
+      ws.write(chunk, () => cb());
+    },
+    final(cb: (error?: Error | null) => void): void {
+      if (ws) {
+        ws.end(() => cb());
+      } else {
         cb();
-      });
+      }
     },
   });
 }

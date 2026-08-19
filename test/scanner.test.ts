@@ -168,4 +168,31 @@ describe('scanFolder', () => {
     index.close();
     rmSync(dir, { recursive: true, force: true });
   });
+
+  it('writes back a newer mtime when content is unchanged', () => {
+    const { dir, root, index } = setup();
+    const content = 'stable content';
+    writeFileSync(join(root, 'a.txt'), content);
+    // 索引记录旧 mtime(超出 2s 容忍窗口),内容未变
+    index.saveEntry({
+      path: 'a.txt',
+      version: new Map([['DEV-A', 1]]),
+      size: content.length,
+      deleted: false,
+      blocks: [hashBlock(Buffer.from(content))],
+      mtime: Date.now() - 10_000,
+    });
+
+    const { changed, tombstones } = scanFolder(root, index, [], 'DEV-A');
+    expect(changed).toEqual([]); // 内容未变,不触发重新发送
+    expect(tombstones).toEqual([]);
+    // 修复前:mtime 不写回,每次扫描重复整文件哈希;修复后写回新 mtime,
+    // 下次扫描走免哈希快速路径
+    expect(index.getEntry('a.txt')?.mtime).toBeGreaterThan(Date.now() - 5_000);
+    // 版本不变(mtime 不在同步协议内,不递增版本、不触发广播)
+    expect(index.getEntry('a.txt')?.version.get('DEV-A')).toBe(1);
+
+    index.close();
+    rmSync(dir, { recursive: true, force: true });
+  });
 });
