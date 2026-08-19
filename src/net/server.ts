@@ -120,8 +120,18 @@ export function startPeerServer(
   });
   wss.on('error', handlers.onError);
 
+  // 端口被占用等导致监听失败时,address() 同步返回 null;直接读取会抛
+  // "Cannot read properties of null" 的误导性 TypeError,无法定位根因。
+  // 改为抛出清晰的端口不可用错误,并保留异步 EADDRINUSE 事件到 onError。
+  const address = wss.address();
+  if (address === null) {
+    throw new Error(
+      `peer server port ${port} is not available (EADDRINUSE: address already in use)`,
+    );
+  }
+
   return {
-    port: (wss.address() as AddressInfo).port,
+    port: (address as AddressInfo).port,
     close(): void {
       // 先关闭所有客户端连接,否则 http server 的 close 会等待连接结束,
       // 导致 daemon 收到 SIGTERM 后进程挂起不退出

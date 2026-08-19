@@ -17,6 +17,11 @@ export interface ControlServerDeps {
 
 const COOKIE_NAME = 'syncx_session';
 
+/** 提取请求路径(去掉查询串),用于精确路由匹配。 */
+function pathname(rawUrl: string): string {
+  return new URL(rawUrl, 'http://localhost').pathname;
+}
+
 function readToken(req: IncomingMessage): string | undefined {
   const auth = req.headers.authorization;
   if (auth) {
@@ -227,7 +232,7 @@ export function createControlServer(deps: ControlServerDeps): Server {
     }
 
     // Legacy JSON API: DELETE /api/folders
-    if (req.method === 'DELETE' && req.url?.startsWith('/api/folders') && removeFolder) {
+    if (req.method === 'DELETE' && req.url && pathname(req.url) === '/api/folders' && removeFolder) {
       const url = new URL(req.url, 'http://localhost');
       const path = url.searchParams.get('path');
       if (path === null || path === '') {
@@ -247,7 +252,7 @@ export function createControlServer(deps: ControlServerDeps): Server {
     }
 
     // POST /api/reconnect?deviceId=xxx : 手动重连指定对端
-    if (req.method === 'POST' && req.url?.startsWith('/api/reconnect') && reconnect) {
+    if (req.method === 'POST' && req.url && pathname(req.url) === '/api/reconnect' && reconnect) {
       const url = new URL(req.url, 'http://localhost');
       const deviceId = url.searchParams.get('deviceId');
       if (!deviceId) {

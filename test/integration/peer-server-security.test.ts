@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import { mkdtempSync, rmSync } from 'node:fs';
+import { createServer } from 'node:http';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { WebSocket } from 'ws';
@@ -94,5 +95,37 @@ describe('peer WebSocket server hardening', () => {
       server.close();
       rmSync(dir, { recursive: true, force: true });
     }
+  });
+
+  it('fails with a clear error when the peer port is already in use', async () => {
+    const dir = mkdtempSync(join(tmpdir(), 'syncx-sec-'));
+    const identity = loadOrCreateIdentity(dir);
+    // 先占住一个端口
+    const blocker = createServer();
+    await new Promise<void>((r) => blocker.listen(0, '127.0.0.1', () => r()));
+    const port = (blocker.address() as { port: number }).port;
+
+    let onErrorMessage: string | undefined;
+    // 修复前:同步阶段抛 "Cannot read properties of null (reading 'port')" ——
+    // 误导性的 TypeError,无法定位是端口被占用
+    expect(() =>
+      startPeerServer(
+        identity,
+        {
+          onPeerConnected() {},
+          onError: (e) => {
+            onErrorMessage = e.message;
+          },
+        },
+        port,
+      ),
+    ).toThrow(/in use|not available|EADDRINUSE/i);
+
+    // 异步的 EADDRINUSE 事件仍应到达 onError(不能被吞掉导致未处理错误)
+    await new Promise((r) => setTimeout(r, 50));
+    expect(onErrorMessage).toMatch(/EADDRINUSE|address already in use/i);
+
+    blocker.close();
+    rmSync(dir, { recursive: true, force: true });
   });
 });

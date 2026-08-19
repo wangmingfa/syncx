@@ -45,8 +45,13 @@ export function openIndexStore(dbPath: string): IndexStore {
   // 旧库可能没有 mtime 列,安全追加(已存在则忽略)
   try {
     db.exec('ALTER TABLE entries ADD COLUMN mtime INTEGER NOT NULL DEFAULT 0');
-  } catch {
-    // duplicate column — schema already current
+  } catch (error) {
+    // 仅容忍 duplicate column(旧库已带 mtime 列);其它错误(只读库、锁、
+    // schema 损坏等)必须向上抛出,避免带坏 schema 继续运行、保存时才炸
+    const message = error instanceof Error ? error.message : String(error);
+    if (!message.includes('duplicate column name')) {
+      throw error;
+    }
   }
 
   const saveEntry = db.prepare(

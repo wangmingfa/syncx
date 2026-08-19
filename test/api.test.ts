@@ -204,6 +204,53 @@ describe('control api folder config', () => {
 
     server.close();
   });
+
+  it('does not treat /api/foldersX as the folders endpoint', async () => {
+    const removed: string[] = [];
+    const server = createControlServer({
+      token: 'secret',
+      getStatus: () => ({ ok: true }),
+      removeFolder: (path) => {
+        removed.push(path);
+      },
+    });
+    server.listen(0, '127.0.0.1');
+    await once(server, 'listening');
+    const port = (server.address() as AddressInfo).port;
+
+    // startsWith 前缀匹配会让 /api/foldersX 也被当成目录接口
+    const res = await fetchJson(port, '/api/foldersX?path=%2Fdata%2Fdocs', 'secret', {
+      method: 'DELETE',
+    });
+
+    expect(res.status).toBe(404);
+    expect(removed).toEqual([]);
+
+    server.close();
+  });
+
+  it('does not treat /api/reconnectX as the reconnect endpoint', async () => {
+    let reconnected: string | undefined;
+    const server = createControlServer({
+      token: 'secret',
+      getStatus: () => ({ ok: true }),
+      reconnect: (deviceId) => {
+        reconnected = deviceId;
+      },
+    });
+    server.listen(0, '127.0.0.1');
+    await once(server, 'listening');
+    const port = (server.address() as AddressInfo).port;
+
+    const res = await fetchJson(port, '/api/reconnectX?deviceId=DEV1234567', 'secret', {
+      method: 'POST',
+    });
+
+    expect(res.status).toBe(404);
+    expect(reconnected).toBeUndefined();
+
+    server.close();
+  });
 });
 
 describe('control api hardening', () => {

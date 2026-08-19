@@ -25,16 +25,57 @@ export function parseIgnoreRules(lines: string[]): IgnoreRule[] {
   return rules;
 }
 
+/**
+ * Convert a gitignore-style pattern to a RegExp matching the FULL relative
+ * path. Implements the same semantics as gitignore:
+ * - `*` matches any characters except `/`
+ * - `**` matches zero or more path segments but only when adjacent to `/`
+ * - `?` matches a single non-`/` character
+ * - otherwise characters are literal
+ *
+ * Example patterns (written without a literal star-slash sequence so the
+ * parser does not misread the JSDoc):
+ *   a/STAR-STAR/b  matches a/b, a/x/b, a/x/y/b
+ *   a/STAR-STAR    matches a/foo, a/foo/bar
+ *   STAR.log       matches app.log, src/app.log
+ *   /root.txt      matches only root.txt at the root
+ */
 function toRegex(pattern: string): RegExp {
+  // 单独的 ** :匹配任意层级与文件名
+  if (pattern === '**') return /^.*$/;
   let body = '';
   for (let i = 0; i < pattern.length; i++) {
     const c = pattern[i] ?? '';
     if (c === '*') {
       if (pattern[i + 1] === '*') {
-        body += '.*';
+        // 跳过 "**" 的第二个 *
         i++;
+        const next = pattern[i + 1] ?? '';
+        // prev 是第一个 * 之前的字符(现在 i 指向第二个 *,前两个位置才是第一个 * 之前的字符)
+        const prev = i >= 2 ? pattern[i - 2] ?? '' : '';
+        // atStart:模式以 "**" 开头
+        const atStart = i === 1;
+        if (prev === '/' && next === '/') {
+          // 中间 ** (a/**/b):匹配零个或多个中间目录;各组不含前导斜杠,
+          // 因为分隔斜杠已由字面量输出(a/ 与末尾 /b)
+          body += '([^\\/]+\\/)*';
+          i++; // 吃掉紧跟的 /
+        } else if (atStart && next === '/') {
+          // 开头 ** (**/foo):匹配任意深度下的 foo,零级也匹配
+          body += '([^\\/]+\\/)*';
+          i++; // 吃掉紧跟的 /
+        } else if (prev === '/' && i + 1 === pattern.length) {
+          // 末尾 ** (a/**):前面的 / 已作为字面量输出,这里匹配任意后缀
+          body += '.*';
+        } else if (atStart && i + 1 === pattern.length) {
+          // ** 单独出现(已在函数开头处理),此处兜底
+          body += '.*';
+        } else {
+          // 不在分隔符旁的 **,与单 * 等价(如 a*b 这种文件名模式)
+          body += '[^\\/]*';
+        }
       } else {
-        body += '[^/]*';
+        body += '[^\\/]*';
       }
     } else if (c === '?') {
       body += '[^/]';

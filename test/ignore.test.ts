@@ -51,6 +51,15 @@ describe('ignore rules', () => {
     expect(isIgnored(rules, 'src/build/app.js', false)).toBe(false);
   });
 
+  it('matches a/**/b against a/b (zero-level) and deeper paths', () => {
+    const rules = parseIgnoreRules(['a/**/b']);
+    // gitignore: **/ 可匹配零个或多个层级,a/**/b 应同时匹配 a/b 和 a/x/b
+    expect(isIgnored(rules, 'a/b', false)).toBe(true);
+    expect(isIgnored(rules, 'a/x/b', false)).toBe(true);
+    expect(isIgnored(rules, 'a/x/y/b', false)).toBe(true);
+    expect(isIgnored(rules, 'c/b', false)).toBe(false);
+  });
+
   it('lets a negation rule un-ignore a path', () => {
     const rules = parseIgnoreRules(['*.log', '!keep.log']);
     expect(isIgnored(rules, 'keep.log', false)).toBe(false);

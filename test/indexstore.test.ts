@@ -1,7 +1,8 @@
 import { describe, expect, it } from 'vitest';
-import { mkdtempSync, rmSync } from 'node:fs';
+import { mkdtempSync, rmSync, chmodSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import { DatabaseSync } from 'node:sqlite';
 import { openIndexStore } from '../src/indexstore.js';
 
 function entry(path: string, version: Array<[string, number]>, size = 100, deleted = false) {
@@ -74,6 +75,26 @@ describe('index store', () => {
     const reopened = openIndexStore(dbPath);
     expect(reopened.getEntry('persisted.txt')).toEqual(entry('persisted.txt', [['dev-a', 5]]));
     reopened.close();
+
+    rmSync(dir, { recursive: true, force: true });
+  });
+
+  it('rethrows ALTER TABLE errors that are not a duplicate mtime column', () => {
+    const dir = mkdtempSync(join(tmpdir(), 'syncx-index-'));
+    const dbPath = join(dir, 'index.db');
+
+    // 建一个缺 mtime 列的 entries 表,再把文件置为只读:
+    // CREATE TABLE IF NOT EXISTS 成功(no-op),ALTER TABLE 抛
+    // "attempt to write a readonly database"(非 duplicate column)。
+    // 修复前:该错误被吞掉,store 构造继续走到 prepare,抛出的是下游的
+    // "no column named mtime";修复后:ALTER 的迁移错误直接向上抛出。
+    // 断言错误信息,确保冒出来的是迁移错误本身。
+    const raw = new DatabaseSync(dbPath);
+    raw.exec('CREATE TABLE entries (path TEXT PRIMARY KEY, version TEXT NOT NULL, size INTEGER NOT NULL, deleted INTEGER NOT NULL, blocks TEXT NOT NULL)');
+    raw.close();
+    chmodSync(dbPath, 0o444);
+
+    expect(() => openIndexStore(`file:${dbPath}?mode=ro`)).toThrow(/readonly/i);
 
     rmSync(dir, { recursive: true, force: true });
   });

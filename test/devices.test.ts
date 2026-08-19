@@ -73,6 +73,11 @@ describe('shared folder configuration', () => {
     expect(() => addSharedFolder(configPath, '/root/.ssh', ['DEV1234567'])).toThrow('not allowed');
     expect(() => addSharedFolder(configPath, '/home/user/.ssh', ['DEV1234567'])).toThrow('not allowed');
     expect(() => addSharedFolder(configPath, '/home/user/.gnupg', ['DEV1234567'])).toThrow('not allowed');
+    expect(() => addSharedFolder(configPath, '/home/user/.aws', ['DEV1234567'])).toThrow('not allowed');
+    expect(() => addSharedFolder(configPath, '/home/user/.kube', ['DEV1234567'])).toThrow('not allowed');
+    expect(() => addSharedFolder(configPath, '/home/user/.docker', ['DEV1234567'])).toThrow('not allowed');
+    expect(() => addSharedFolder(configPath, '/home/user/.local', ['DEV1234567'])).toThrow('not allowed');
+    expect(() => addSharedFolder(configPath, '/home/user/.cache', ['DEV1234567'])).toThrow('not allowed');
 
     rmSync(dir, { recursive: true, force: true });
   });
