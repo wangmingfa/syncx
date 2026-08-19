@@ -91,7 +91,7 @@ import { startDiscovery } from './net/discovery.js';
 import { makePeerTransport, attachPeerMessages } from './net/wire.js';
 import { RateLimiter } from './ratelimit.js';
 import { createControlServer } from './api.js';
-import { buildStatus } from './status.js';
+import { buildStatus, type PeerStatus, type SyncProgress } from './status.js';
 import { addSharedFolder, removeSharedFolder, isPeerAllowed } from './devices.js';
 import { createInviteCode, parseInviteCode } from './invite.js';
 import { folderIdFor, folderIndexPath } from './config.js';
@@ -191,37 +191,8 @@ export async function run(args: ParsedArgs): Promise<void> {
 
   // 本地控制 API 先启动(无论是否有共享目录),让用户能在 Web UI 里添加第一个目录
   const token = loadOrCreateToken(configDir);
-  const control = createControlServer({
-    token,
-    renderSsr: controlRenderSsr,
-    addFolder: (path, devices) => {
-      addSharedFolder(configPath, path, devices);
-      logger.info(`shared folder added: ${path}`);
-    },
-    removeFolder: (path) => {
-      removeSharedFolder(configPath, path);
-      logger.info(`shared folder removed: ${path}`);
-    },
-    // 实时读取配置,Web UI 添加/移除目录后刷新可见
-    getStatus: () =>
-      buildStatus(
-        identity,
-        loadConfig(configPath),
-        (() => {
-          let entries = 0;
-          let tombstones = 0;
-          for (const folder of folderStates) {
-            const all = folder.index.listEntries();
-            entries += all.filter((e) => !e.deleted).length;
-            tombstones += all.filter((e) => e.deleted).length;
-          }
-          return { entries, tombstones };
-        })(),
-      ),
-  });
   const controlPort = args.controlPort ?? 8384;
   const controlHost = args.host ?? '127.0.0.1';
-  control.listen(controlPort, controlHost);
 
   const lanAddresses = getLanAddresses();
   logger.info(`control UI (token in ${join(configDir, 'control.token')}):`);
@@ -247,7 +218,7 @@ export async function run(args: ParsedArgs): Promise<void> {
     const localIndex = new Map(
       filterIndexedEntries(parseIgnoreRules(ignoreLines), index.listEntries()).map((e) => [e.path, e]),
     );
-    return { id, path: f.path, index, executor, localIndex, ignoreLines, transports: [] as PeerTransport[], config: f };
+    return { id, path: f.path, index, executor, localIndex, ignoreLines, transports: [] as PeerTransport[], peers: new Map<string, SyncPeer>(), config: f };
   });
 
   if (folderStates.length === 0) {
@@ -344,6 +315,69 @@ export async function run(args: ParsedArgs): Promise<void> {
     reconnectTimers.set(deviceId, timer);
   }
 
+  /** 手动触发一轮扫描:与定时扫描逻辑一致。 */
+  async function runScan(): Promise<void> {
+    for (const folder of folderStates) {
+      try {
+        folder.ignoreLines = readFileSync(join(folder.path, '.syncxignore'), 'utf8').split('\n');
+      } catch {
+        // no ignore file
+      }
+      const diff = scanFolder(
+        folder.path,
+        folder.index,
+        parseIgnoreRules(folder.ignoreLines),
+        identity.deviceId,
+      );
+      for (const tomb of diff.tombstones) {
+        try {
+          await folder.executor.applyDelete(tomb.path, tomb);
+          folder.localIndex.set(tomb.path, tomb);
+        } catch {
+          // 索引写入失败,下一轮扫描重试
+        }
+      }
+      const sends: IndexEntry[] = [...diff.tombstones];
+      for (const path of diff.changed) {
+        try {
+          const updated = await folder.executor.applySend(path, identity.deviceId);
+          folder.localIndex.set(path, updated);
+          sends.push(updated);
+        } catch {
+          // 文件在扫描后被删除/重命名,下一轮扫描处理
+        }
+      }
+      if (sends.length > 0) {
+        broadcastFolderUpdates(folder, sends);
+      }
+    }
+  }
+
+  /** 手动强制重连:立即尝试连接,不走指数退避;失败后回退到正常重连调度。 */
+  function forceReconnect(deviceId: string): void {
+    if (isPeerConnected(deviceId)) return;
+    const url = outboundPeerUrls.get(deviceId);
+    if (!url) return;
+    const timer = reconnectTimers.get(deviceId);
+    if (timer) {
+      clearTimeout(timer);
+      reconnectTimers.delete(deviceId);
+    }
+    reconnectAttempts.delete(deviceId);
+    logger.info(`manually reconnecting to peer ${deviceId}`);
+    void connectPeer(identity, url)
+      .then(({ socket, remoteDeviceId, key }) => {
+        if (isPeerConnected(remoteDeviceId)) {
+          socket.close();
+          return;
+        }
+        if (acceptPeer(socket, remoteDeviceId)) {
+          startSyncSession(socket, remoteDeviceId, key, url);
+        }
+      })
+      .catch(() => scheduleReconnect(deviceId));
+  }
+
   /** 在一个 socket 上建立同步会话:为每个共享目录建 peer,按 folder 路由。 */
   function startSyncSession(socket: WebSocket, remoteDeviceId: string, key: Buffer, url?: string): void {
     registerPeer(remoteDeviceId, url);
@@ -381,6 +415,7 @@ export async function run(args: ParsedArgs): Promise<void> {
         conflictPolicy: folder.config?.conflictPolicy,
       });
       peers.set(folder.id, peer);
+      folder.peers.set(remoteDeviceId, peer);
       transport.sendEntries([...folder.localIndex.values()]);
     }
     attachPeerMessages(peers, socket, key);
@@ -391,17 +426,81 @@ export async function run(args: ParsedArgs): Promise<void> {
       for (const { folder, transport } of sessionTransports) {
         const idx = folder.transports.indexOf(transport);
         if (idx >= 0) folder.transports.splice(idx, 1);
+        folder.peers.delete(remoteDeviceId);
       }
       unregisterPeer(remoteDeviceId);
     });
   }
+
+  // 控制 API:在 peer 状态和同步进度可用后创建
+  const control = createControlServer({
+    token,
+    renderSsr: controlRenderSsr,
+    addFolder: (path, devices) => {
+      addSharedFolder(configPath, path, devices);
+      logger.info(`shared folder added: ${path}`);
+    },
+    removeFolder: (path) => {
+      removeSharedFolder(configPath, path);
+      logger.info(`shared folder removed: ${path}`);
+    },
+    getStatus: () => {
+      // 收集所有已配置对端的在线状态
+      const allDeviceIds = new Set<string>();
+      for (const f of loadConfig(configPath).sharedFolders) {
+        for (const d of f.devices ?? []) {
+          allDeviceIds.add(d);
+        }
+      }
+      const peers: PeerStatus[] = [];
+      for (const deviceId of allDeviceIds) {
+        peers.push({
+          deviceId,
+          online: isPeerConnected(deviceId),
+          url: outboundPeerUrls.get(deviceId),
+        });
+      }
+      // 收集各目录同步进度
+      const syncProgress: SyncProgress[] = [];
+      for (const folder of folderStates) {
+        for (const peer of folder.peers.values()) {
+          const progress = peer.getSyncProgress();
+          if (progress.pending > 0 || progress.sending > 0 || progress.receiving > 0) {
+            syncProgress.push({
+              folder: folder.id,
+              ...progress,
+            });
+          }
+        }
+      }
+      let entries = 0;
+      let tombstones = 0;
+      for (const folder of folderStates) {
+        const all = folder.index.listEntries();
+        entries += all.filter((e) => !e.deleted).length;
+        tombstones += all.filter((e) => e.deleted).length;
+      }
+      return buildStatus(
+        identity,
+        loadConfig(configPath),
+        { entries, tombstones },
+        peers,
+        syncProgress,
+      );
+    },
+    rescan: () => {
+      void runScan();
+    },
+    reconnect: (deviceId) => forceReconnect(deviceId),
+  });
+  control.listen(controlPort, controlHost);
 
   const server = startPeerServer(
     identity,
     {
       onPeerConnected(socket, remoteDeviceId, key) {
         logger.debug(`inbound peer connected: ${remoteDeviceId}, count=${peerConnectionCount.get(remoteDeviceId) ?? 0}`);
-        if (peerConnectionCount.get(remoteDeviceId) >= MAX_CONNECTIONS_PER_PEER) {
+        if (peerConnectionCount.get(remoteDeviceId) ?? 0 >= MAX_CONNECTIONS_PER_PEER) {
           socket.close();
           return;
         }
@@ -453,45 +552,7 @@ export async function run(args: ParsedArgs): Promise<void> {
   // 本地变更检测:周期扫描所有共享目录,把变化(新增/修改/删除)传播给已连接对端
   const SCAN_INTERVAL_MS = 5000;
   const scanTimer = setInterval(() => {
-    void (async () => {
-      for (const folder of folderStates) {
-        try {
-          folder.ignoreLines = readFileSync(join(folder.path, '.syncxignore'), 'utf8').split('\n');
-        } catch {
-          // no ignore file
-        }
-        const diff = scanFolder(
-          folder.path,
-          folder.index,
-          parseIgnoreRules(folder.ignoreLines),
-          identity.deviceId,
-        );
-        // 本地删除 → 持久化墓碑(修复:之前只广播不落库,重启后重复广播)并同步内存索引
-        for (const tomb of diff.tombstones) {
-          try {
-            await folder.executor.applyDelete(tomb.path, tomb);
-            folder.localIndex.set(tomb.path, tomb);
-          } catch {
-            // 索引写入失败,下一轮扫描重试
-          }
-        }
-        const sends: IndexEntry[] = [...diff.tombstones];
-        for (const path of diff.changed) {
-          try {
-            const updated = await folder.executor.applySend(path, identity.deviceId);
-            // 同步内存索引,保证会话内规划不再基于过期快照
-            folder.localIndex.set(path, updated);
-            sends.push(updated);
-          } catch {
-            // 文件在扫描后被删除/重命名,下一轮扫描处理
-          }
-        }
-        if (sends.length > 0) {
-          // 仅向同目录的 transport 广播,避免把目录 A 的增量错发到目录 B 的对等端
-          broadcastFolderUpdates(folder, sends);
-        }
-      }
-    })();
+    void runScan();
   }, SCAN_INTERVAL_MS);
 
   // 配置热重载:监听 config.json 变更,重新加载对端列表

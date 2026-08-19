@@ -75,6 +75,7 @@ export interface SyncPeer {
   onPeerIndex(entries: IndexEntry[]): Promise<void>;
   onBlockRequest(request: BlockRequest): void;
   onBlockResponse(response: BlockResponse): Promise<void>;
+  getSyncProgress(): { pending: number; sending: number; receiving: number };
 }
 
 interface PendingEntry {
@@ -107,6 +108,8 @@ export function createSyncPeer(deps: SyncPeerDeps): SyncPeer {
   const pending = new Map<string, PendingEntry>();
   // 逐块跟踪超时重试:块响应丢失/丢弃时自动重发,避免文件永远收不齐
   const pendingBlocks = new Map<string, PendingBlockRequest>();
+  // 本轮待发送条目数(上次 onPeerIndex 产生的 sends 数量),用于同步进度展示
+  let pendingSendCount = 0;
 
   function blockKey(path: string, blockIndex: number): string {
     return `${path}:${blockIndex}`;
@@ -165,6 +168,7 @@ export function createSyncPeer(deps: SyncPeerDeps): SyncPeer {
       // 新索引到达(如重连后)时清除旧块请求,避免基于过期条目重试
       for (const bReq of pendingBlocks.values()) clearTimeout(bReq.timeout);
       pendingBlocks.clear();
+      pendingSendCount = 0;
       const remote = new Map(entries.map((e) => [e.path, e]));
       const actions = buildPlan(localIndex, remote);
       const sends: IndexEntry[] = [];
@@ -222,6 +226,7 @@ export function createSyncPeer(deps: SyncPeerDeps): SyncPeer {
       }
 
       transport.sendEntries(sends);
+      pendingSendCount = sends.length;
     },
 
     onBlockRequest(request: BlockRequest): void {
@@ -275,6 +280,18 @@ export function createSyncPeer(deps: SyncPeerDeps): SyncPeer {
       }
 
       await completeIfReady(response.path);
+    },
+
+    getSyncProgress(): { pending: number; sending: number; receiving: number } {
+      let receiving = 0;
+      for (const item of pending.values()) {
+        if (item.kind === 'receive') receiving += 1;
+      }
+      return {
+        pending: pending.size,
+        sending: pendingSendCount,
+        receiving,
+      };
     },
   };
 }

@@ -263,3 +263,152 @@ describe('control api hardening', () => {
     server.close();
   });
 });
+
+describe('control api rescan and reconnect', () => {
+  it('triggers rescan via POST /api/rescan', async () => {
+    let rescanCalled = false;
+    const server = createControlServer({
+      token: 'secret',
+      getStatus: () => ({ ok: true }),
+      rescan: () => {
+        rescanCalled = true;
+      },
+    });
+    server.listen(0, '127.0.0.1');
+    await once(server, 'listening');
+    const port = (server.address() as AddressInfo).port;
+
+    const res = await fetchJson(port, '/api/rescan', 'secret', { method: 'POST' });
+
+    expect(res.status).toBe(200);
+    expect(res.body).toEqual({ ok: true });
+    expect(rescanCalled).toBe(true);
+
+    server.close();
+  });
+
+  it('triggers reconnect via POST /api/reconnect?deviceId=', async () => {
+    const reconnected: string[] = [];
+    const server = createControlServer({
+      token: 'secret',
+      getStatus: () => ({ ok: true }),
+      reconnect: (deviceId) => {
+        reconnected.push(deviceId);
+      },
+    });
+    server.listen(0, '127.0.0.1');
+    await once(server, 'listening');
+    const port = (server.address() as AddressInfo).port;
+
+    const res = await fetchJson(port, '/api/reconnect?deviceId=PEER234567', 'secret', { method: 'POST' });
+
+    expect(res.status).toBe(200);
+    expect(res.body).toEqual({ ok: true });
+    expect(reconnected).toEqual(['PEER234567']);
+
+    server.close();
+  });
+
+  it('rejects POST /api/reconnect without deviceId', async () => {
+    const server = createControlServer({
+      token: 'secret',
+      getStatus: () => ({ ok: true }),
+      reconnect: () => {},
+    });
+    server.listen(0, '127.0.0.1');
+    await once(server, 'listening');
+    const port = (server.address() as AddressInfo).port;
+
+    const res = await fetchJson(port, '/api/reconnect', 'secret', { method: 'POST' });
+
+    expect(res.status).toBe(400);
+
+    server.close();
+  });
+
+  it('triggers rescan via POST /actions form', async () => {
+    let rescanCalled = false;
+    const server = createControlServer({
+      token: 'secret',
+      getStatus: () => ({ ok: true }),
+      rescan: () => {
+        rescanCalled = true;
+      },
+    });
+    server.listen(0, '127.0.0.1');
+    await once(server, 'listening');
+    const port = (server.address() as AddressInfo).port;
+
+    await new Promise<void>((resolve, reject) => {
+      const body = 'action=rescan';
+      const req = request(
+        {
+          host: '127.0.0.1',
+          port,
+          path: '/actions',
+          method: 'POST',
+          headers: {
+            Authorization: `Bearer secret`,
+            'Content-Type': 'application/x-www-form-urlencoded',
+            'Content-Length': Buffer.byteLength(body),
+          },
+        },
+        (res) => {
+          expect(res.statusCode).toBe(302);
+          res.resume();
+          resolve();
+        },
+      );
+      req.on('error', reject);
+      req.end(body);
+    });
+
+    expect(rescanCalled).toBe(true);
+
+    expect(rescanCalled).toBe(true);
+
+    server.close();
+  });
+
+  it('triggers reconnect via POST /actions form', async () => {
+    const reconnected: string[] = [];
+    const server = createControlServer({
+      token: 'secret',
+      getStatus: () => ({ ok: true }),
+      reconnect: (deviceId) => {
+        reconnected.push(deviceId);
+      },
+    });
+    server.listen(0, '127.0.0.1');
+    await once(server, 'listening');
+    const port = (server.address() as AddressInfo).port;
+
+    await new Promise<void>((resolve, reject) => {
+      const body = 'action=reconnect&deviceId=PEER234567';
+      const req = request(
+        {
+          host: '127.0.0.1',
+          port,
+          path: '/actions',
+          method: 'POST',
+          headers: {
+            Authorization: `Bearer secret`,
+            'Content-Type': 'application/x-www-form-urlencoded',
+            'Content-Length': Buffer.byteLength(body),
+          },
+        },
+        (res) => {
+          expect(res.statusCode).toBe(302);
+          res.resume();
+          resolve();
+        },
+      );
+      req.on('error', reject);
+      req.end(body);
+    });
+
+    expect(reconnected).toEqual(['PEER234567']);
+
+    server.close();
+  });
+});

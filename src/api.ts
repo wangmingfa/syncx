@@ -7,6 +7,10 @@ export interface ControlServerDeps {
   getStatus: () => unknown;
   addFolder?: (path: string, devices: string[]) => void;
   removeFolder?: (path: string) => void;
+  /** 手动触发一轮扫描。 */
+  rescan?: () => void;
+  /** 手动重连指定对端。 */
+  reconnect?: (deviceId: string) => void;
   /** Render the SSR app; may be undefined (e.g. in tests) and falls back to a 404. */
   renderSsr?: (data: { status?: unknown; error?: string; message?: string }) => Promise<string>;
 }
@@ -93,7 +97,7 @@ async function ensureSsr(renderSsr?: ControlServerDeps['renderSsr']): Promise<Co
  * SSR page; unknown paths return 404.
  */
 export function createControlServer(deps: ControlServerDeps): Server {
-  const { token, getStatus, addFolder, removeFolder, renderSsr } = deps;
+  const { token, getStatus, addFolder, removeFolder, rescan, reconnect, renderSsr } = deps;
 
   return createServer((req, res) => {
     void (async () => {
@@ -171,6 +175,25 @@ export function createControlServer(deps: ControlServerDeps): Server {
       return;
     }
 
+    // Form POST /actions : 手动重扫或重连(需认证)
+    if (req.method === 'POST' && req.url === '/actions') {
+      const params = new URLSearchParams(await readBody(req));
+      const action = params.get('action');
+      if (action === 'rescan' && rescan) {
+        rescan();
+        redirect(res, '/?msg=' + encodeURIComponent('扫描已触发'));
+        return;
+      }
+      if (action === 'reconnect' && reconnect) {
+        const deviceId = params.get('deviceId');
+        if (deviceId) reconnect(deviceId);
+        redirect(res, '/?msg=' + encodeURIComponent('重连已触发'));
+        return;
+      }
+      redirect(res, '/');
+      return;
+    }
+
     // Legacy JSON API: POST /api/folders
     if (req.method === 'POST' && req.url === '/api/folders' && addFolder) {
       try {
@@ -197,6 +220,26 @@ export function createControlServer(deps: ControlServerDeps): Server {
         return;
       }
       removeFolder(path);
+      sendJson(res, 200, { ok: true });
+      return;
+    }
+
+    // POST /api/rescan : 手动触发一轮扫描
+    if (req.method === 'POST' && req.url === '/api/rescan' && rescan) {
+      rescan();
+      sendJson(res, 200, { ok: true });
+      return;
+    }
+
+    // POST /api/reconnect?deviceId=xxx : 手动重连指定对端
+    if (req.method === 'POST' && req.url?.startsWith('/api/reconnect') && reconnect) {
+      const url = new URL(req.url, 'http://localhost');
+      const deviceId = url.searchParams.get('deviceId');
+      if (!deviceId) {
+        sendJson(res, 400, { error: 'deviceId is required' });
+        return;
+      }
+      reconnect(deviceId);
       sendJson(res, 200, { ok: true });
       return;
     }

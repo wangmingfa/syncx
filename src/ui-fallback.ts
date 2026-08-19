@@ -14,11 +14,12 @@ function escapeHtml(value: string): string {
 }
 
 const STYLE = `
-  :root { --bg:#0f1117; --card:#1a1d27; --text:#e6e8ee; --muted:#8b90a0; --accent:#4f8cff; --border:#2a2e3b; }
+  :root { --bg:#0f1117; --card:#1a1d27; --text:#e6e8ee; --muted:#8b90a0; --accent:#4f8cff; --border:#2a2e3b; --online:#7ee787; --offline:#ff6b6b; }
   * { box-sizing: border-box; margin: 0; padding: 0; }
   body { background: var(--bg); color: var(--text); font-family: system-ui, sans-serif; padding: 24px; line-height: 1.5; }
   .container { max-width: 720px; margin: 0 auto; }
   h1 { font-size: 22px; margin-bottom: 16px; }
+  h2 { font-size: 16px; margin-bottom: 10px; }
   .card { background: var(--card); border: 1px solid var(--border); border-radius: 10px; padding: 18px; margin-bottom: 16px; }
   .muted { color: var(--muted); font-size: 13px; }
   .message { color: #7ee787; margin-bottom: 12px; font-size: 14px; }
@@ -30,7 +31,17 @@ const STYLE = `
   th, td { text-align: left; padding: 6px 8px; border-bottom: 1px solid var(--border); }
   th { color: var(--muted); font-weight: 500; }
   input { background: var(--bg); color: var(--text); border: 1px solid var(--border); border-radius: 6px; padding: 8px 10px; width: 100%; margin-top: 8px; }
-  button { background: var(--accent); color: #fff; border: none; border-radius: 6px; padding: 6px 12px; cursor: pointer; margin-top: 10px; }
+  button { background: var(--accent); color: #fff; border: none; border-radius: 6px; padding: 6px 12px; cursor: pointer; margin-top: 10px; font-size: 13px; }
+  button:hover { opacity: 0.85; }
+  .btn-sm { padding: 4px 8px; font-size: 12px; margin-top: 0; }
+  .online { color: var(--online); }
+  .offline { color: var(--offline); }
+  .dot { display: inline-block; width: 8px; height: 8px; border-radius: 50%; margin-right: 6px; }
+  .dot-online { background: var(--online); }
+  .dot-offline { background: var(--offline); }
+  .actions { display: flex; gap: 8px; margin-top: 12px; flex-wrap: wrap; }
+  .progress-bar { background: var(--bg); border-radius: 4px; height: 6px; margin-top: 4px; overflow: hidden; }
+  .progress-fill { background: var(--accent); height: 100%; border-radius: 4px; }
 `;
 
 function shell(content: string): string {
@@ -42,6 +53,8 @@ interface FallbackStatus {
   folders?: Array<{ path: string; devices?: string[]; id?: string }>;
   entries?: number;
   tombstones?: number;
+  peers?: Array<{ deviceId: string; online: boolean; url?: string }>;
+  syncProgress?: Array<{ folder: string; pending: number; sending: number; receiving: number }>;
 }
 
 export function renderControlFallback(data: {
@@ -73,6 +86,30 @@ export function renderControlFallback(data: {
   const message = data.message ? `<p class="message">${escapeHtml(data.message)}</p>` : '';
   const error = data.error ? `<p class="error">${escapeHtml(data.error)}</p>` : '';
 
+  // 对端连接状态列表
+  const peers = (status.peers ?? []);
+  const peerRows = peers.length > 0
+    ? peers.map((p) => {
+        const onlineClass = p.online ? 'dot-online' : 'dot-offline';
+        const statusText = p.online ? '在线' : '离线';
+        const statusClass = p.online ? 'online' : 'offline';
+        const reconnectBtn = p.online
+          ? ''
+          : `<form method="post" action="/actions" style="display:inline"><input type="hidden" name="action" value="reconnect"><input type="hidden" name="deviceId" value="${escapeHtml(p.deviceId)}"><button type="submit" class="btn-sm">重连</button></form>`;
+        return `<tr><td><span class="dot ${onlineClass}"></span>${escapeHtml(p.deviceId)}</td><td class="${statusClass}">${statusText}</td><td>${reconnectBtn}</td></tr>`;
+      }).join('')
+    : '<tr><td colspan="3" class="muted">暂无对端</td></tr>';
+
+  // 同步进度列表
+  const syncProgress = (status.syncProgress ?? []);
+  const progressRows = syncProgress.length > 0
+    ? syncProgress.map((p) => {
+        const total = p.pending + p.sending + p.receiving;
+        const pct = total > 0 ? Math.round((p.receiving / total) * 100) : 0;
+        return `<tr><td>${escapeHtml(p.folder)}</td><td>${p.pending}</td><td>${p.sending}</td><td>${p.receiving}</td><td><div class="progress-bar"><div class="progress-fill" style="width:${pct}%"></div></div></td></tr>`;
+      }).join('')
+    : '<tr><td colspan="5" class="muted">同步中无待处理任务</td></tr>';
+
   return shell(`
     <h1>syncx</h1>
     <div class="card">
@@ -83,10 +120,26 @@ export function renderControlFallback(data: {
         <div class="stat"><b>${status.tombstones ?? 0}</b><span class="muted">墓碑</span></div>
         <div class="stat"><b>${(status.folders ?? []).length}</b><span class="muted">目录</span></div>
       </div>
+      <div class="actions">
+        <form method="post" action="/actions" style="display:inline">
+          <input type="hidden" name="action" value="rescan">
+          <button type="submit">手动扫描</button>
+        </form>
+      </div>
     </div>
     ${message}${error}
     <div class="card">
-      <h1>共享目录</h1>
+      <h2>对端连接</h2>
+      <table><thead><tr><th>设备</th><th>状态</th><th>操作</th></tr></thead>
+      <tbody>${peerRows}</tbody></table>
+    </div>
+    <div class="card">
+      <h2>同步进度</h2>
+      <table><thead><tr><th>目录</th><th>待处理</th><th>发送中</th><th>接收中</th><th>进度</th></tr></thead>
+      <tbody>${progressRows}</tbody></table>
+    </div>
+    <div class="card">
+      <h2>共享目录</h2>
       <table><thead><tr><th>路径</th><th>设备</th></tr></thead>
       <tbody>${folders || '<tr><td colspan="2" class="muted">暂无共享目录</td></tr>'}</tbody></table>
       <form method="post" action="/folders">
