@@ -17,6 +17,7 @@ import { loadOrCreateIdentity } from '../../src/identity.js';
 import { openIndexStore } from '../../src/indexstore.js';
 import { hashBlock } from '../../src/blockstore.js';
 import { folderIdFor, folderIndexPath } from '../../src/config.js';
+import { allocatePort } from './ports.js';
 
 const children: ChildProcess[] = [];
 
@@ -38,14 +39,13 @@ async function stopChildren(): Promise<void> {
   children.length = 0;
 }
 
-afterEach(() => {
-  for (const child of children) {
-    child.kill('SIGTERM');
-  }
-  children.length = 0;
+afterEach(async () => {
+  // 等待子进程真正退出,避免旧 daemon 的优雅关闭与下一个测试的启动窗口
+  // 重叠,导致扫描/同步被挤占而超时(间歇性 flaky 的根因)
+  await stopChildren();
 });
 
-function waitFor(condition: () => boolean, timeoutMs = 15000): Promise<void> {
+function waitFor(condition: () => boolean, timeoutMs = 30000): Promise<void> {
   return new Promise((resolve, reject) => {
     const start = Date.now();
     const check = (): void => {
@@ -73,10 +73,10 @@ interface DaemonSetup {
 }
 
 /** 创建 daemon 配置目录 + 预置索引条目,返回设置(不启动进程)。 */
-function setupDaemon(
+async function setupDaemon(
   name: string,
   seedFiles: Array<{ path: string; content: Buffer }>,
-): DaemonSetup {
+): Promise<DaemonSetup> {
   const dir = mkdtempSync(join(tmpdir(), `syncx-daemon-${name}-`));
   const share = join(dir, 'share');
   mkdirSync(share, { recursive: true });
@@ -95,12 +95,15 @@ function setupDaemon(
   }
   index.close();
 
+  // 并行测试文件的随机端口区间会互相碰撞,改用系统分配的临时端口
+  const [peerPort, controlPort] = await Promise.all([allocatePort(), allocatePort()]);
+
   return {
     dir,
     share,
     configPath: join(dir, 'config.json'),
-    peerPort: 25000 + Math.floor(Math.random() * 10000),
-    controlPort: 26000 + Math.floor(Math.random() * 10000),
+    peerPort,
+    controlPort,
     deviceId: identity.deviceId,
   };
 }
@@ -175,10 +178,10 @@ describe('two real daemons sync over peers config', () => {
   it(
     'propagates files in both directions between two processes',
     async () => {
-      const a = setupDaemon('a', [
+      const a = await setupDaemon('a', [
         { path: 'a.txt', content: Buffer.from('content from A') },
       ]);
-      const b = setupDaemon('b', [
+      const b = await setupDaemon('b', [
         { path: 'b.txt', content: Buffer.from('content from B') },
       ]);
 
@@ -198,14 +201,14 @@ describe('two real daemons sync over peers config', () => {
       rmSync(a.dir, { recursive: true, force: true });
       rmSync(b.dir, { recursive: true, force: true });
     },
-    30000,
+    60000,
   );
 
   it(
     'propagates files created while the daemons are running',
     async () => {
-      const a = setupDaemon('a', []);
-      const b = setupDaemon('b', []);
+      const a = await setupDaemon('a', []);
+      const b = await setupDaemon('b', []);
 
       startDaemon(a, [`ws://127.0.0.1:${b.peerPort}`], [b.deviceId]);
       startDaemon(b, [`ws://127.0.0.1:${a.peerPort}`], [a.deviceId]);
@@ -219,7 +222,7 @@ describe('two real daemons sync over peers config', () => {
       console.log('[test] live.txt written, entering waitFor');
 
       try {
-        await waitFor(() => existsSync(join(b.share, 'live.txt')), 8000);
+        await waitFor(() => existsSync(join(b.share, 'live.txt')), 20000);
         console.log('[test] live.txt synced');
       } catch (error) {
         console.log('[test] waitFor failed, dumping logs');
@@ -234,14 +237,14 @@ describe('two real daemons sync over peers config', () => {
       rmSync(a.dir, { recursive: true, force: true });
       rmSync(b.dir, { recursive: true, force: true });
     },
-    30000,
+    45000,
   );
 
   it(
     'rejects a peer that is not in the devices whitelist',
     async () => {
-      const a = setupDaemon('a', [{ path: 'secret.txt', content: Buffer.from('top secret') }]);
-      const b = setupDaemon('b', []);
+      const a = await setupDaemon('a', [{ path: 'secret.txt', content: Buffer.from('top secret') }]);
+      const b = await setupDaemon('b', []);
 
       // B 的白名单不含 A → A 连接 B 时(加密握手后)应被拒绝,文件不应到达 B
       startDaemon(a, [`ws://127.0.0.1:${b.peerPort}`], [b.deviceId]);
@@ -265,10 +268,10 @@ describe('two real daemons sync over peers config', () => {
   it(
     'propagates a deletion to the peer and persists the local tombstone',
     async () => {
-      const a = setupDaemon('a', [
+      const a = await setupDaemon('a', [
         { path: 'temp.txt', content: Buffer.from('delete me') },
       ]);
-      const b = setupDaemon('b', []);
+      const b = await setupDaemon('b', []);
 
       startDaemon(a, [`ws://127.0.0.1:${b.peerPort}`], [b.deviceId]);
       startDaemon(b, [`ws://127.0.0.1:${a.peerPort}`], [a.deviceId]);
@@ -279,7 +282,13 @@ describe('two real daemons sync over peers config', () => {
 
       // A 侧删除文件,等待墓碑传播到 B
       rmSync(join(a.share, 'temp.txt'));
-      await waitFor(() => !existsSync(join(b.share, 'temp.txt')), 15000);
+      try {
+        await waitFor(() => !existsSync(join(b.share, 'temp.txt')), 30000);
+      } catch (error) {
+        console.log('[test] deletion waitFor failed, dumping logs');
+        dumpLogs(a, b);
+        throw error;
+      }
 
       // 停掉 daemon 后读取 A 的本地索引库,确认删除已持久化为墓碑
       // (修复前:删除只广播不落库,本地库仍记录存活条目)
@@ -291,13 +300,13 @@ describe('two real daemons sync over peers config', () => {
       rmSync(a.dir, { recursive: true, force: true });
       rmSync(b.dir, { recursive: true, force: true });
     },
-    30000,
+    45000,
   );
 
   it(
     'picks up a new shared folder when config.json is replaced atomically (rename-save)',
     async () => {
-      const a = setupDaemon('a', []);
+      const a = await setupDaemon('a', []);
       const shareB = join(a.dir, 'share-b');
       mkdirSync(shareB, { recursive: true });
 

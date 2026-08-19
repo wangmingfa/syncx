@@ -50,7 +50,7 @@ describe('cli parseArgs', () => {
 
   it('parses the --host option', () => {
     expect(
-      parseArgs(['start', '--config', '/etc/syncx.json', '--host', '0.0.0.0']),
+      parseArgs(['start', '--config', '/etc/syncx.json', '--host', '0.0.0.0', '--expose-control']),
     ).toEqual({
       command: 'start',
       configPath: '/etc/syncx.json',
@@ -59,6 +59,21 @@ describe('cli parseArgs', () => {
       host: '0.0.0.0',
       positionals: [],
     });
+  });
+
+  it('rejects a non-loopback --host unless --expose-control is given', () => {
+    // 非回环地址意味着控制 API 以明文 HTTP 暴露在 LAN 上,token 可被嗅探。
+    // 必须显式 --expose-control 才允许,否则启动即拒绝。
+    expect(() => parseArgs(['start', '--host', '0.0.0.0'])).toThrow(/expose-control/);
+    expect(() => parseArgs(['start', '--host', '192.168.1.5'])).toThrow(/expose-control/);
+    expect(() => parseArgs(['start', '--host', '0.0.0.0', '--config', '/etc/syncx.json'])).toThrow(
+      /expose-control/,
+    );
+  });
+
+  it('allows a loopback --host without --expose-control', () => {
+    expect(parseArgs(['start', '--host', '127.0.0.1']).host).toBe('127.0.0.1');
+    expect(parseArgs(['start', '--host', 'localhost']).host).toBe('localhost');
   });
 
   it('parses the install command with defaults', () => {

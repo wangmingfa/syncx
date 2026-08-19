@@ -13,6 +13,9 @@ export interface ParsedArgs {
 
 const COMMANDS = new Set(['start', 'status', 'install', 'invite', 'join', 'revoke']);
 
+/** 控制 API 可安全绑定的回环地址;非回环地址必须显式 --expose-control。 */
+const LOOPBACK_HOSTS = new Set(['127.0.0.1', '::1', 'localhost']);
+
 export function parseArgs(argv: string[]): ParsedArgs {
   const [command, ...rest] = argv;
 
@@ -24,6 +27,7 @@ export function parseArgs(argv: string[]): ParsedArgs {
     throw new Error(`unknown command: ${String(command)}`);
   }
 
+  let exposeControl = false;
   for (let i = 0; i < rest.length; i++) {
     const flag = rest[i];
     if (flag === undefined) break;
@@ -43,11 +47,21 @@ export function parseArgs(argv: string[]): ParsedArgs {
     } else if (flag === '--log-file') {
       result.logFile = value;
       i++;
+    } else if (flag === '--expose-control') {
+      exposeControl = true;
     } else if (flag.startsWith('-')) {
       throw new Error(`unknown option: ${flag}`);
     } else {
       result.positionals.push(flag);
     }
+  }
+
+  // 控制 API 暴露防护:非回环地址把控制端点以明文 HTTP 暴露到 LAN,token 可被
+  // 嗅探。必须显式 --expose-control 才允许,否则拒绝启动。
+  if (result.host !== undefined && !LOOPBACK_HOSTS.has(result.host) && !exposeControl) {
+    throw new Error(
+      `--host ${result.host} exposes the control API over plain HTTP on the LAN; pass --expose-control to allow it`,
+    );
   }
 
   return result;

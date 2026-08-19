@@ -131,10 +131,10 @@ async function connectPair(
   const aExec = createLocalExecutor(aRoot, aIndex);
   const bExec = createLocalExecutor(bRoot, bIndex);
 
-  const port = 24000 + Math.floor(Math.random() * 10000);
   let aSocket: WebSocket | undefined;
 
-  startPeerServer(
+  // 进程内服务用端口 0 让系统分配,避免并行测试文件的随机端口区间互相碰撞
+  const aServer = startPeerServer(
     aIdentity,
     {
       onPeerConnected(socket) {
@@ -144,10 +144,10 @@ async function connectPair(
         // ignore
       },
     },
-    port,
+    0,
   );
 
-  const bConnected = await connectPeer(bIdentity, `ws://127.0.0.1:${port}`);
+  const bConnected = await connectPeer(bIdentity, `ws://127.0.0.1:${aServer.port}`);
   const bSocket = bConnected.socket;
   await waitFor(() => aSocket !== undefined, 3000);
 
