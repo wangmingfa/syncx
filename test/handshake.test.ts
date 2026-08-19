@@ -116,6 +116,49 @@ describe('session key exchange', () => {
 });
 
 describe('connectPeer handshake', () => {
+  /** 完整两阶段握手的测试服务端:回发公钥 → 校验并回发 kx。 */
+  function startTestPeerServer(): Promise<{ port: number; close(): Promise<void> }> {
+    const serverIdentity = makeKeypair();
+    const wss = new WebSocketServer({ port: 0, host: '127.0.0.1' });
+    return new Promise((resolve) => {
+      wss.on('listening', () =>
+        resolve({
+          port: (wss.address() as { port: number }).port,
+          close: () => new Promise<void>((r) => wss.close(() => r())),
+        }),
+      );
+      wss.on('connection', (socket) => {
+        let sentKey = false;
+        socket.on('message', (data) => {
+          const text = Buffer.from(data as Buffer).toString('utf8');
+          if (!sentKey) {
+            sentKey = true;
+            socket.send(serverIdentity.publicKey);
+            return;
+          }
+          const sessionPair = generateX25519KeyPair();
+          socket.send(JSON.stringify(buildKxMessage(sessionPair, serverIdentity.privateKey)));
+        });
+      });
+    });
+  }
+
+  it('cleans up the handshake error listener after a successful handshake', async () => {
+    const dir = mkdtempSync(join(tmpdir(), 'syncx-client-'));
+    const identity = loadOrCreateIdentity(dir);
+    const server = await startTestPeerServer();
+
+    const { socket } = await connectPeer(identity, `ws://127.0.0.1:${server.port}`);
+
+    // 修复前:解析后仍遗留 once('error') 监听(对已 settle 的 promise 无害,
+    // 但属清理项);修复后 error 监听应被移除
+    expect(socket.listenerCount('error')).toBe(0);
+
+    socket.close();
+    await server.close();
+    rmSync(dir, { recursive: true, force: true });
+  });
+
   it('rejects when the peer closes the socket mid-handshake', async () => {
     const dir = mkdtempSync(join(tmpdir(), 'syncx-client-'));
     const identity = loadOrCreateIdentity(dir);

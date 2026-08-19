@@ -215,7 +215,7 @@ export function createControlServer(deps: ControlServerDeps): Server {
     }
 
     // Legacy JSON API: POST /api/folders
-    if (req.method === 'POST' && req.url === '/api/folders' && addFolder) {
+    if (req.method === 'POST' && req.url && pathname(req.url) === '/api/folders' && addFolder) {
       try {
         const raw = await readBody(req);
         const body = raw === '' ? {} : JSON.parse(raw);

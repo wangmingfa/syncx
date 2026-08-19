@@ -4,8 +4,9 @@ import { loadConfig, saveConfig, DEFAULT_CONFIG, type SharedFolderConfig } from 
 
 const FORBIDDEN_PATTERNS = [
   /^\/(etc|usr|bin|sbin|boot|dev|proc|sys|lib|lib64|var|opt|root)\b/i,
-  // 常见系统/隐私目录:SSH/GPG、配置与缓存、以及云/容器/K8s 凭证所在目录
-  /^\/home\/[^/]+\/(\.ssh|\.gnupg|\.config|\.local|\.cache|\.aws|\.kube|\.docker|\.docker\.cfg)\b/i,
+  // 常见系统/隐私目录:SSH/GPG、配置与缓存、以及云/容器/K8s 凭证所在目录。
+  // \b 边界让 .ssh2 这类变体名绕过,显式列入
+  /^\/home\/[^/]+\/(\.ssh|\.ssh2|\.gnupg|\.config|\.local|\.cache|\.aws|\.kube|\.docker|\.docker\.cfg)\b/i,
 ];
 
 /**

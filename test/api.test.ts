@@ -125,6 +125,32 @@ describe('control api folder config', () => {
     server.close();
   });
 
+  it('hits the folders route when the POST url carries a query string', async () => {
+    const added: Array<{ path: string; devices: string[] }> = [];
+    const server = createControlServer({
+      token: 'secret',
+      getStatus: () => ({ ok: true }),
+      addFolder: (path, devices) => {
+        added.push({ path, devices });
+      },
+    });
+    server.listen(0, '127.0.0.1');
+    await once(server, 'listening');
+    const port = (server.address() as AddressInfo).port;
+
+    // 修复前:req.url === '/api/folders' 精确匹配,带查询串的请求落到 404,
+    // 与其它路由的 pathname 宽容行为不一致
+    const res = await fetchJson(port, '/api/folders?source=web', 'secret', {
+      method: 'POST',
+      body: { path: '/data/docs', devices: ['DEV1234567'] },
+    });
+
+    expect(res.status).toBe(201);
+    expect(added).toEqual([{ path: '/data/docs', devices: ['DEV1234567'] }]);
+
+    server.close();
+  });
+
   it('rejects POST /api/folders without a token', async () => {
     const server = createControlServer({
       token: 'secret',

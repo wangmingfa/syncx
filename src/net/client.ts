@@ -28,6 +28,12 @@ export function connectPeer(identity: DeviceIdentity, url: string): Promise<Conn
     const settle = (): void => {
       settled = true;
       socket.off('close', onSocketClose);
+      socket.off('error', onSocketError);
+    };
+
+    const onSocketError = (err: Error): void => {
+      settle();
+      reject(err);
     };
 
     const onSocketClose = (): void => {
@@ -36,10 +42,7 @@ export function connectPeer(identity: DeviceIdentity, url: string): Promise<Conn
       }
     };
 
-    socket.once('error', (err) => {
-      settle();
-      reject(err);
-    });
+    socket.once('error', onSocketError);
     socket.on('close', onSocketClose);
     socket.once('open', () => {
       socket.send(identity.publicKey);

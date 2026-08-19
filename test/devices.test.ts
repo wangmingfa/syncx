@@ -73,6 +73,9 @@ describe('shared folder configuration', () => {
     expect(() => addSharedFolder(configPath, '/root/.ssh', ['DEV1234567'])).toThrow('not allowed');
     expect(() => addSharedFolder(configPath, '/home/user/.ssh', ['DEV1234567'])).toThrow('not allowed');
     expect(() => addSharedFolder(configPath, '/home/user/.gnupg', ['DEV1234567'])).toThrow('not allowed');
+    // 变体目录名(如 .ssh2)不得绕过黑名单
+    expect(() => addSharedFolder(configPath, '/home/user/.ssh2', ['DEV1234567'])).toThrow('not allowed');
+    expect(() => addSharedFolder(configPath, '/home/user/.ssh2/keys', ['DEV1234567'])).toThrow('not allowed');
     expect(() => addSharedFolder(configPath, '/home/user/.aws', ['DEV1234567'])).toThrow('not allowed');
     expect(() => addSharedFolder(configPath, '/home/user/.kube', ['DEV1234567'])).toThrow('not allowed');
     expect(() => addSharedFolder(configPath, '/home/user/.docker', ['DEV1234567'])).toThrow('not allowed');
