@@ -98,21 +98,6 @@ import { readFileSync, existsSync, writeFileSync, watch } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import type { ControlServerDeps } from './api.js';
 
-/** Vite SSR bundle location; resolved at runtime so tsx dev can import it. */
-const SSR_ENTRY = new URL('../dist/ui/server.js', import.meta.url);
-
-async function controlRenderSsr(
-  data: { status?: unknown; error?: string; message?: string },
-): Promise<string> {
-  try {
-    const { render } = await import(SSR_ENTRY.href);
-    return render(data.status ? 'status' : 'login', data);
-  } catch {
-    // SSR 包缺失(未执行 npm run build)时,回退到内置渲染器,保证控制页可用
-    return renderControlFallback(data);
-  }
-}
-
 import { startPeerServer } from './net/server.js';
 import { connectPeer } from './net/client.js';
 import { startDiscovery } from './net/discovery.js';
@@ -125,7 +110,6 @@ import { createInviteCode, parseInviteCode, revokeInviteCode } from './invite.js
 import { folderIdFor, folderIndexPath, type SharedFolderConfig } from './config.js';
 import { getLanAddresses, formatHost } from './net/addresses.js';
 import { renderSystemdUnit, renderLaunchdPlist, renderWindowsService } from './install.js';
-import { renderControlFallback } from './ui-fallback.js';
 import type { WebSocket } from 'ws';
 import { createLogger } from './logger.js';
 
@@ -513,7 +497,6 @@ export async function run(args: ParsedArgs): Promise<void> {
   // 控制 API:在 peer 状态和同步进度可用后创建
   const control = createControlServer({
     token,
-    renderSsr: controlRenderSsr,
     addFolder: (path, devices) => {
       addSharedFolder(configPath, path, devices);
       logger.info(`shared folder added: ${path}`);

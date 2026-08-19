@@ -12,17 +12,18 @@ export default defineConfig({
     // 并行测试文件会互相争抢 CPU 导致间歇性超时;串行化保证稳定
     fileParallelism: false,
   },
+  // 客户端 bundle:纯 CSR 模式,由浏览器加载 web/client.ts,
+  // 接管交互(fetch + 局部刷新 + toast)。产物目录 dist/web(与源码目录对齐)。
   build: {
-    target: 'node22',
-    outDir: resolve(root, 'dist/ui'),
-    ssr: true,
+    target: 'es2020',
+    outDir: resolve(root, 'dist/web'),
     lib: {
-      entry: resolve(root, 'src/web/server.ts'),
+      entry: resolve(root, 'web/client.ts'),
       formats: ['es'],
-      fileName: 'server',
+      fileName: 'client',
     },
     rollupOptions: {
-      external: ['vue', '@vue/server-renderer'],
+      external: ['vue'],
     },
   },
 });

@@ -7,13 +7,13 @@
     "node": ">=22.13.0"
   },
   "scripts": {
-    "dev": "npm run build:ssr && tsx watch src/main.ts start --host 0.0.0.0 --expose-control",
+    "dev": "npm run build:web && tsx watch src/main.ts start --host 0.0.0.0 --expose-control",
     "test": "vitest run",
     "test:watch": "vitest",
     "typecheck": "tsc --noEmit",
-    "build": "npm run build:app && npm run build:ssr",
+    "build": "npm run build:app && npm run build:web",
     "build:app": "tsc",
-    "build:ssr": "vite build --config vite.config.ts"
+    "build:web": "vite build --config vite.config.ts"
   },
   "license": "MIT",
   "devDependencies": {

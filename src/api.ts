@@ -1,6 +1,6 @@
 import { createServer, type Server, type IncomingMessage, type ServerResponse } from 'node:http';
 import { timingSafeEqual } from 'node:crypto';
-import { renderControlFallback } from './ui-fallback.js';
+import { readFileSync } from 'node:fs';
 
 export interface ControlServerDeps {
   token: string;
@@ -11,11 +11,19 @@ export interface ControlServerDeps {
   rescan?: () => void;
   /** 手动重连指定对端。 */
   reconnect?: (deviceId: string) => void;
-  /** Render the SSR app; may be undefined (e.g. in tests) and falls back to a 404. */
-  renderSsr?: (data: { status?: unknown; error?: string; message?: string }) => Promise<string>;
 }
 
 const COOKIE_NAME = 'syncx_session';
+
+/** 纯 CSR 页面壳:客户端 bundle 挂载后自行拉取状态与处理交互。 */
+const UI_SHELL = `<!DOCTYPE html><html lang="zh-CN"><head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width">
+<title>syncx</title>
+</head><body>
+<div id="app"></div>
+<script type="module" src="/client.js"></script>
+</body></html>`;
 
 /** 提取请求路径(去掉查询串),用于精确路由匹配。 */
 function pathname(rawUrl: string): string {
@@ -98,17 +106,8 @@ function readBody(req: IncomingMessage, maxBytes = 1_000_000): Promise<string> {
   });
 }
 
-async function ensureSsr(renderSsr?: ControlServerDeps['renderSsr']): Promise<ControlServerDeps['renderSsr'] | undefined> {
-  if (renderSsr) return renderSsr;
-  try {
-    const { render } = await import('./web/server.js');
-    const r = (data: { status?: unknown; error?: string; message?: string }) =>
-      render(data.status ? 'status' : 'login', data);
-    return r;
-  } catch {
-    // SSR 包缺失时回退到内置渲染器,保证控制页可用
-    return (data) => Promise.resolve(renderControlFallback(data));
-  }
+async function ensureSsr(): Promise<void> {
+  // 纯 CSR 化后不再需要 SSR 渲染;保留空实现以兼容调用点(如有)。
 }
 
 /**
@@ -117,7 +116,7 @@ async function ensureSsr(renderSsr?: ControlServerDeps['renderSsr']): Promise<Co
  * SSR page; unknown paths return 404.
  */
 export function createControlServer(deps: ControlServerDeps): Server {
-  const { token, getStatus, addFolder, removeFolder, rescan, reconnect, renderSsr } = deps;
+  const { token, getStatus, addFolder, removeFolder, rescan, reconnect } = deps;
 
   return createServer((req, res) => {
     void (async () => {
@@ -125,27 +124,21 @@ export function createControlServer(deps: ControlServerDeps): Server {
     const reqToken = readToken(req);
     const authenticated = tokenMatches(reqToken ?? '', token);
 
-    const r = await ensureSsr(renderSsr);
-
-    // GET / : SSR status page (auth required) or login form
-    if (req.method === 'GET' && req.url && pathname(req.url) === '/' && r) {
-      if (authenticated) {
-        sendHtml(res, await r({ status: getStatus() }));
-      } else {
-        sendHtml(res, await r({ error: undefined }));
-      }
+    // GET / : 纯 CSR 页面壳。客户端挂载后自行 fetch /api/status 拉取状态,
+    // 交互(手动扫描/重连/增删目录)走 JSON API + fetch,不再整页刷新。
+    if (req.method === 'GET' && req.url && pathname(req.url) === '/') {
+      sendHtml(res, UI_SHELL);
       return;
     }
 
-    // GET /login : always render the login form
-    if (req.method === 'GET' && req.url && pathname(req.url) === '/login' && r) {
-      const error = reqToken !== undefined && !tokenMatches(reqToken, token) ? 'token 无效,请重试' : undefined;
-      sendHtml(res, await r({ error }));
+    // GET /login : 登录表单(纯 CSR 下由客户端渲染)
+    if (req.method === 'GET' && req.url && pathname(req.url) === '/login') {
+      sendHtml(res, UI_SHELL);
       return;
     }
 
     // POST /login : set HttpOnly session cookie and redirect
-    if (req.method === 'POST' && req.url && pathname(req.url) === '/login' && r) {
+    if (req.method === 'POST' && req.url && pathname(req.url) === '/login') {
       const body = await readBody(req);
       const match = new URLSearchParams(body).get('token');
       if (match && tokenMatches(match, token)) {
@@ -155,7 +148,7 @@ export function createControlServer(deps: ControlServerDeps): Server {
         });
         res.end();
       } else {
-        sendHtml(res, await r({ error: 'token 无效,请重试' }));
+        sendHtml(res, UI_SHELL);
       }
       return;
     }
@@ -163,6 +156,18 @@ export function createControlServer(deps: ControlServerDeps): Server {
     if (!authenticated) {
       res.writeHead(401, { 'Content-Type': 'application/json' });
       res.end(JSON.stringify({ error: 'unauthorized' }));
+      return;
+    }
+
+    // GET /client.js : 纯 CSR 客户端 bundle(由 UI_SHELL 的 <script> 加载)
+    if (req.method === 'GET' && req.url && pathname(req.url) === '/client.js') {
+      try {
+        const js = readFileSync(new URL('../dist/web/client.js', import.meta.url));
+        res.writeHead(200, { 'Content-Type': 'application/javascript; charset=utf-8' });
+        res.end(js);
+      } catch {
+        sendJson(res, 500, { error: 'client bundle not built; run npm run build' });
+      }
       return;
     }
 
