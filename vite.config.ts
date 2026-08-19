@@ -10,15 +10,18 @@ export default defineConfig({
   root: 'web',
   plugins: [vue()],
   test: {
-    // 集成测试会拉起真实 daemon(tsx 转译 + 5s 扫描周期 + 子进程同步),
-    // 并行测试文件会互相争抢 CPU 导致间歇性超时;串行化保证稳定
+    // vitest 运行根目录回到仓库根(测试在 test/),与 vite dev/build 的 web/ 根分开
+    // fileParallelism 保证集成测试串行化
+    root: '..',
     fileParallelism: false,
   },
   // 开发模式:Vite dev server 提供 web/ 的热重载(HMR),
   // 把 /api/*、/login 代理到 control server(127.0.0.1:8384),
   // 登录 cookie 与认证逻辑经代理转发保持一致。
+  // allowedHosts:局域网/外网访问时 Vite 会拒绝请求;手动白名单放行。
   server: {
     host: '0.0.0.0',
+    allowedHosts: ['wmf3.com'],
     proxy: {
       '/api': 'http://127.0.0.1:8384',
       '/login': 'http://127.0.0.1:8384',
