@@ -22,38 +22,41 @@ export interface LocalExecutor {
   applySend(path: string, deviceId: string): Promise<IndexEntry>;
 }
 
-export function createLocalExecutor(root: string, index: IndexStore): LocalExecutor {
+/**
+ * 解析共享目录内的相对路径为绝对路径,并做符号链接越界校验:
+ * 沿路径各段自顶向下,对**已存在**的段做 realpath 检查,任何段解析后指向
+ * 共享目录之外则抛错。读写两侧共用(applyReceive/applyDelete/applyConflict
+ * 与 readLocalBlock),防止对端利用目录内符号链接读写共享目录之外的文件。
+ * 尚不存在的路径段(将由 mkdirSync recursive 安全创建)跳过。
+ */
+export function resolveSharePath(root: string, relPath: string): string {
   const rootReal = realpathSync(root);
+  const abs = join(root, relPath);
+  const rel = relative(root, abs);
+  if (rel.startsWith('..') || isAbsolute(rel)) {
+    throw new Error(`unsafe path: ${relPath}`);
+  }
 
-  /**
-   * 解析共享目录内的相对路径。除文本级 ../ 防护外,对路径上的每个父目录
-   * 组件运行 realpath,确保任何符号链接都不会指向共享目录之外 —— 防止
-   * 受信任对端利用目录内符号链接把文件写到任意位置(符号链接穿越)。
-   */
-  function resolvePath(relPath: string): string {
-    const abs = join(root, relPath);
-    const rel = relative(root, abs);
-    if (rel.startsWith('..') || isAbsolute(rel)) {
-      throw new Error(`unsafe path: ${relPath}`);
-    }
-
-    // 沿路径各段自顶向下检查:仅对**已存在**的中间目录做 realpath 越界校验 ——
-    // 若某段是符号链接指向 root 外,则视为越界;尚不存在的路径段(将由 mkdirSync
-    // 的 recursive 安全创建)直接跳过,避免新路径如 docs/plan.md 被误判。
-    const parts = relPath.split(sep).filter(Boolean);
-    let ancestor = root;
-    for (const part of parts) {
-      const candidate = join(ancestor, part);
-      if (existsSync(candidate)) {
-        const resolved = realpathSync(candidate);
-        if (resolved !== rootReal && !resolved.startsWith(rootReal + sep)) {
-          throw new Error(`unsafe path: ${relPath}`);
-        }
+  const parts = relPath.split(sep).filter(Boolean);
+  let ancestor = root;
+  for (const part of parts) {
+    const candidate = join(ancestor, part);
+    if (existsSync(candidate)) {
+      const resolved = realpathSync(candidate);
+      if (resolved !== rootReal && !resolved.startsWith(rootReal + sep)) {
+        throw new Error(`unsafe path: ${relPath}`);
       }
-      ancestor = candidate;
     }
+    ancestor = candidate;
+  }
 
-    return abs;
+  return abs;
+}
+
+export function createLocalExecutor(root: string, index: IndexStore): LocalExecutor {
+  /** 共享目录内相对路径解析:复用模块级守卫(含符号链接越界校验)。 */
+  function resolvePath(relPath: string): string {
+    return resolveSharePath(root, relPath);
   }
 
   /** 校验块完整性并原子落地一个条目:写临时文件 + rename,返回落盘后的 mtime。 */

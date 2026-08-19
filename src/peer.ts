@@ -2,6 +2,7 @@ import type { IndexEntry } from './index.js';
 import { buildPlan } from './plan.js';
 import type { BlockRequest, BlockResponse } from './messages.js';
 import type { LocalExecutor } from './executor.js';
+import { resolveSharePath } from './executor.js';
 import { verifyBlock, BLOCK_SIZE } from './blockstore.js';
 import type { ProgressCounts } from './status.js';
 
@@ -19,6 +20,8 @@ export interface SyncPeerDeps {
   deviceId: string;
   /** Peer device ID, used to name conflict copies. */
   remoteDeviceId?: string;
+  /** 共享目录根路径:块请求服务侧用它拒绝经符号链接逃逸目录的路径。 */
+  root?: string;
 }
 
 export interface SyncPeer {
@@ -46,6 +49,8 @@ interface PendingBlockRequest {
 
 const BLOCK_REQUEST_TIMEOUT_MS = 5000;
 const MAX_BLOCK_RETRIES = 3;
+/** 快速重试耗尽后的长间隔退避:继续重试而非丢弃条目。 */
+const BLOCK_RETRY_LONG_MS = 30_000;
 
 /**
  * Wire one sync round over an injected transport: on receiving the peer's
@@ -54,7 +59,7 @@ const MAX_BLOCK_RETRIES = 3;
  * complete, then apply it via the executor.
  */
 export function createSyncPeer(deps: SyncPeerDeps): SyncPeer {
-  const { transport, localIndex, executor, readLocalBlock, deviceId, remoteDeviceId } = deps;
+  const { transport, localIndex, executor, readLocalBlock, deviceId, remoteDeviceId, root } = deps;
   const pending = new Map<string, PendingEntry>();
   // 逐块跟踪超时重试:块响应丢失/丢弃时自动重发,避免文件永远收不齐
   const pendingBlocks = new Map<string, PendingBlockRequest>();
@@ -74,10 +79,15 @@ export function createSyncPeer(deps: SyncPeerDeps): SyncPeer {
     if (existing) {
       clearTimeout(existing.timeout);
       if (retries >= MAX_BLOCK_RETRIES) {
-        // 重试耗尽:该块无法收齐,清掉对应 pending 条目(下一轮 onPeerIndex 会自然重建),
-        // 避免条目无期限滞留
-        pendingBlocks.delete(key);
-        pending.delete(path);
+        // 快速重试(5s×3)耗尽后退避到 30s 长间隔继续重试,绝不丢弃条目:
+        // 丢弃依赖"下一轮对端索引重建",但 onPeerIndex 只在对端发索引时触发,
+        // 连接保持且对端无变化时条目会永久丢失、文件静默不同步。
+        transport.sendBlockRequest({ deviceId, path, blockIndex, hash });
+        const timeout = setTimeout(
+          () => requestBlock(path, blockIndex, hash),
+          BLOCK_RETRY_LONG_MS,
+        );
+        pendingBlocks.set(key, { retries, timeout });
         return;
       }
     }
@@ -189,6 +199,15 @@ export function createSyncPeer(deps: SyncPeerDeps): SyncPeer {
     onBlockRequest(request: BlockRequest): void {
       // 越界/非整数索引直接拒绝,避免对本地文件做无谓的整文件读取
       if (!Number.isInteger(request.blockIndex) || request.blockIndex < 0) return;
+      // 读取侧路径防护(与写入侧 resolveSharePath 同款):拒绝 ../ 与经符号链接
+      // 逃逸共享目录的路径,防止恶意对端经块请求读取目录外文件
+      if (root !== undefined) {
+        try {
+          resolveSharePath(root, request.path);
+        } catch {
+          return;
+        }
+      }
       let data: Buffer;
       try {
         data = readLocalBlock(request.path, request.blockIndex);

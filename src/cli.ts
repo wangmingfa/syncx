@@ -73,7 +73,7 @@ import { randomBytes } from 'node:crypto';
 import { loadOrCreateIdentity } from './identity.js';
 import { loadConfig } from './config.js';
 import { openIndexStore, type IndexStore } from './indexstore.js';
-import { createLocalExecutor, type LocalExecutor } from './executor.js';
+import { createLocalExecutor, resolveSharePath, type LocalExecutor } from './executor.js';
 import { filterIndexedEntries, parseIgnoreRules } from './ignore.js';
 import { createSyncPeer, type PeerTransport, type SyncPeer } from './peer.js';
 import { scanFolder } from './scanner.js';
@@ -447,12 +447,8 @@ export async function run(args: ParsedArgs): Promise<void> {
       localIndex: folder.localIndex,
       executor: folder.executor,
       readLocalBlock: (path, blockIndex) => {
-        // 防止对端用 ../ 等路径穿越读取共享目录外的文件
-        const abs = join(folder.path, path);
-        const rel = relative(folder.path, abs);
-        if (rel.startsWith('..') || isAbsolute(rel)) {
-          throw new Error(`unsafe path: ${path}`);
-        }
+        // 与写入侧同一守卫:拒绝经符号链接/../ 越过共享目录的读取
+        const abs = resolveSharePath(folder.path, path);
         const blocks = splitIntoBlocks(readFileSync(abs));
         const block = blocks[blockIndex];
         if (!block) {
@@ -462,6 +458,8 @@ export async function run(args: ParsedArgs): Promise<void> {
       },
       deviceId: identity.deviceId,
       remoteDeviceId: session.remoteDeviceId,
+      // 块请求服务侧路径校验(经符号链接逃逸的路径不响应)
+      root: folder.path,
     });
     session.peers.set(folder.id, peer);
     folder.peers.set(session.remoteDeviceId, peer);

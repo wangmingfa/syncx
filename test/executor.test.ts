@@ -11,7 +11,7 @@ import {
 } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { createLocalExecutor } from '../src/executor.js';
+import { createLocalExecutor, resolveSharePath } from '../src/executor.js';
 import { openIndexStore } from '../src/indexstore.js';
 import { hashBlock } from '../src/blockstore.js';
 
@@ -124,6 +124,24 @@ describe('local executor receive', () => {
     expect(readFileSync(join(escape, 'secret.txt'))).toEqual(Buffer.from('top secret'));
 
     index.close();
+    rmSync(dir, { recursive: true, force: true });
+  });
+
+  it('resolveSharePath rejects paths escaping through a symlink (read-side guard)', () => {
+    const dir = mkdtempSync(join(tmpdir(), 'syncx-exec-'));
+    const root = join(dir, 'share');
+    const escape = join(dir, 'escape');
+    mkdirSync(root, { recursive: true });
+    mkdirSync(escape, { recursive: true });
+    writeFileSync(join(escape, 'secret.txt'), 'top secret');
+    symlinkSync(escape, join(root, 'link'));
+
+    // 读取侧(块请求)与写入侧共用同一守卫:拒绝经符号链接越过共享目录
+    expect(() => resolveSharePath(root, 'link/secret.txt')).toThrow(/unsafe path/);
+    expect(() => resolveSharePath(root, 'ok.txt')).not.toThrow();
+    // 文本级 ../ 仍被拒
+    expect(() => resolveSharePath(root, '../escape/secret.txt')).toThrow(/unsafe path/);
+
     rmSync(dir, { recursive: true, force: true });
   });
 });

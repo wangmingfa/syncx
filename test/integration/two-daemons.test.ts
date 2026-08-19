@@ -189,9 +189,11 @@ describe('two real daemons sync over peers config', () => {
       startDaemon(a, [`ws://127.0.0.1:${b.peerPort}`], [b.deviceId]);
       startDaemon(b, [`ws://127.0.0.1:${a.peerPort}`], [a.deviceId]);
 
-      // 双向同步:B 应收到 a.txt,A 应收到 b.txt
-      await waitFor(() => existsSync(join(b.share, 'a.txt')));
-      await waitFor(() => existsSync(join(a.share, 'b.txt')));
+      // 双向同步:B 应收到 a.txt,A 应收到 b.txt。
+      // 两个 daemon 同时启动时互相 ECONNREFUSED 后走指数退避(1s→2s→4s→8s→16s),
+      // 负载高时连接建立可能被推到 30s 边缘,预算放宽到 45s
+      await waitFor(() => existsSync(join(b.share, 'a.txt')), 45000);
+      await waitFor(() => existsSync(join(a.share, 'b.txt')), 45000);
 
       expect(readFileSync(join(b.share, 'a.txt'))).toEqual(Buffer.from('content from A'));
       expect(readFileSync(join(a.share, 'b.txt'))).toEqual(Buffer.from('content from B'));
@@ -201,7 +203,7 @@ describe('two real daemons sync over peers config', () => {
       rmSync(a.dir, { recursive: true, force: true });
       rmSync(b.dir, { recursive: true, force: true });
     },
-    60000,
+    90000,
   );
 
   it(
@@ -314,7 +316,18 @@ describe('two real daemons sync over peers config', () => {
       startDaemon(a, [], []);
 
       // 用编辑器式的原子保存(vi/vim/nvim 行为):先写临时文件再 rename 替换
-      await new Promise((r) => setTimeout(r, 1000));
+      // 等待 daemon 就绪(日志出现 "syncx daemon started" 后 watcher 已同步注册),
+      // 避免 watcher 尚未建立时 rename 事件被错过导致热重载静默失效;
+      // 日志文件可能尚未创建,读取失败按未就绪处理
+      await waitFor(() => {
+        try {
+          return readFileSync(join(a.dir, 'daemon.out.log'), 'utf8').includes(
+            'syncx daemon started',
+          );
+        } catch {
+          return false;
+        }
+      });
       saveConfigAtomically(a, [
         { id: 'main', path: a.share, devices: [] },
         { id: 'secondary', path: shareB, devices: [] },

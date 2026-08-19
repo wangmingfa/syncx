@@ -1,5 +1,13 @@
 import { describe, expect, it, vi } from 'vitest';
-import { mkdtempSync, rmSync, readFileSync, mkdirSync, writeFileSync, existsSync } from 'node:fs';
+import {
+  mkdtempSync,
+  rmSync,
+  readFileSync,
+  mkdirSync,
+  writeFileSync,
+  existsSync,
+  symlinkSync,
+} from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { createSyncPeer, type PeerTransport } from '../src/peer.js';
@@ -278,7 +286,7 @@ describe('sync peer session', () => {
     expect(requests).toEqual([]);
   });
 
-  it('clears a stalled entry from pending when block retries are exhausted', async () => {
+  it('keeps a stalled entry in pending and retries at a long interval after fast retries exhaust', async () => {
     const { transport, requests } = fakeTransport();
     const peer = createSyncPeer({
       transport,
@@ -295,15 +303,59 @@ describe('sync peer session', () => {
 
     expect(peer.getSyncProgress().pending).toBe(1);
 
-    // 每次重试超时 5s,MAX_BLOCK_RETRIES=3 → 最多 4 次发送,3 次重试耗尽后
-    // 该条目应从 pending 中移除,避免无期限滞留
-    await vi.advanceTimersByTimeAsync(5000 * 4 + 100);
+    // 快速重试窗口:5s × (1 + MAX_BLOCK_RETRIES) = 20s
+    await vi.advanceTimersByTimeAsync(5000 * 4);
 
+    // 修复前:条目被静默丢弃(pending=0、请求停止),但 onPeerIndex 只在对端
+    // 发索引时触发,对端无变化时文件会永久不同步;修复后:条目保持 pending
+    expect(peer.getSyncProgress().pending).toBe(1);
+    const fastRequests = requests.length;
+    expect(fastRequests).toBeGreaterThanOrEqual(3);
+
+    // 退避到 30s 长间隔后仍持续重试
+    await vi.advanceTimersByTimeAsync(30000);
+    expect(requests.length).toBeGreaterThan(fastRequests);
+    expect(peer.getSyncProgress().pending).toBe(1);
+
+    // 块最终到达 → 条目落地,pending 清空(长间隔重试期间仍可完成)
+    await peer.onBlockResponse({
+      deviceId: 'DEV-B',
+      path: 'missing.txt',
+      blockIndex: 0,
+      hash: hashBlock(content),
+      data: content,
+    });
     expect(peer.getSyncProgress().pending).toBe(0);
-    // 原始 1 + 重试 2 = 3 次发送;第 3 次超时后,retries=3 ≥ MAX_BLOCK_RETRIES,
-    // 清除 pending 后不再发出第 4 次(修复前会无限重试)
-    expect(requests).toHaveLength(3);
 
     vi.useRealTimers();
+  });
+
+  it('does not serve blocks for paths escaping the root via a symlink', () => {
+    const dir = mkdtempSync(join(tmpdir(), 'syncx-peer-'));
+    const root = join(dir, 'share');
+    const outside = join(dir, 'outside');
+    mkdirSync(root, { recursive: true });
+    mkdirSync(outside, { recursive: true });
+    writeFileSync(join(outside, 'secret.txt'), 'top secret');
+    // 共享目录内指向外部的符号链接:块请求不得经它读取目录外文件
+    symlinkSync(outside, join(root, 'link'));
+
+    const { transport, responses } = fakeTransport();
+    const peer = createSyncPeer({
+      transport,
+      localIndex: new Map(),
+      // root 校验依赖:读取侧与写入侧同款 realpath 守卫
+      root,
+      readLocalBlock: (path: string): Buffer => {
+        // 若未被拦截,这里会真的读到外部文件 —— 断言不响应
+        return readFileSync(join(root, path));
+      },
+      deviceId: 'DEV-A',
+    });
+
+    peer.onBlockRequest({ deviceId: 'DEV-B', path: 'link/secret.txt', blockIndex: 0, hash: 'h' });
+    expect(responses).toHaveLength(0);
+
+    rmSync(dir, { recursive: true, force: true });
   });
 });
