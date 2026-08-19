@@ -1,4 +1,4 @@
-import { readdirSync, readFileSync, statSync } from 'node:fs';
+import { readdirSync, readFileSync, statSync, existsSync } from 'node:fs';
 import { join, relative } from 'node:path';
 import type { IndexEntry } from './index.js';
 import type { IndexStore } from './indexstore.js';
@@ -51,6 +51,12 @@ export function scanFolder(
   rules: IgnoreRule[],
   deviceId: string,
 ): ScanDiff {
+  // 共享目录根不存在(盘符卸载 / 权限丢失 / 未挂载):不做墓碑推断,避免
+  // 把整个目录误判为已删除而批量传播墓碑给对端
+  if (!existsSync(root) || !statSync(root).isDirectory()) {
+    return { changed: [], tombstones: [] };
+  }
+
   const changed: string[] = [];
   const seen = new Set<string>();
 

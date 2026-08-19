@@ -1,4 +1,4 @@
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
 import { generateKeyPairSync, createHash } from 'node:crypto';
 import {
   deriveDeviceIdFromPublicKey,
@@ -10,6 +10,12 @@ import {
   buildKxMessage,
   verifyKxMessage,
 } from '../src/handshake.js';
+import { connectPeer } from '../src/net/client.js';
+import { mkdtempSync, rmSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+import { loadOrCreateIdentity } from '../src/identity.js';
+import { WebSocketServer } from 'ws';
 
 function makeKeypair() {
   const { publicKey, privateKey } = generateKeyPairSync('ed25519', {
@@ -106,5 +112,33 @@ describe('session key exchange', () => {
     der[0] ^= 0xff;
     const tampered = { ...kx, x25519: der.toString('base64') };
     expect(() => verifyKxMessage(tampered, identity.publicKey)).toThrow();
+  });
+});
+
+describe('connectPeer handshake', () => {
+  it('rejects when the peer closes the socket mid-handshake', async () => {
+    const dir = mkdtempSync(join(tmpdir(), 'syncx-client-'));
+    const identity = loadOrCreateIdentity(dir);
+    const { publicKey } = makeKeypair();
+
+    const wss = new WebSocketServer({ port: 0, host: '127.0.0.1' });
+    await new Promise<void>((resolve) => wss.on('listening', () => resolve()));
+    const port = (wss.address() as { port: number }).port;
+
+    let gotConnection = false;
+    wss.on('connection', (socket) => {
+      gotConnection = true;
+      socket.on('message', (data) => {
+        // 对端在第一阶段发公钥后,服务器直接关闭连接(模拟握手超时/异常断连)
+        socket.terminate();
+      });
+      socket.send(publicKey);
+    });
+
+    await expect(connectPeer(identity, `ws://127.0.0.1:${port}`)).rejects.toBeDefined();
+    expect(gotConnection).toBe(true);
+
+    await new Promise<void>((resolve) => wss.close(() => resolve()));
+    rmSync(dir, { recursive: true, force: true });
   });
 });

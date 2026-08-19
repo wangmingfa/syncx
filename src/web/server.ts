@@ -53,6 +53,15 @@ const CSS = `
   }
   button:hover { opacity: 0.9; }
   .actions button { margin-top: 0; margin-left: 4px; }
+  .actions { display: flex; gap: 8px; margin-top: 12px; flex-wrap: wrap; }
+  .online { color: #7ee787; }
+  .offline { color: #ff6b6b; }
+  .dot { display: inline-block; width: 8px; height: 8px; border-radius: 50%; margin-right: 6px; }
+  .dot-online { background: #7ee787; }
+  .dot-offline { background: #ff6b6b; }
+  .btn-sm { padding: 4px 8px; font-size: 12px; margin-top: 0; }
+  .progress-bar { background: var(--bg); border-radius: 4px; height: 6px; margin-top: 4px; overflow: hidden; }
+  .progress-fill { background: var(--accent); height: 100%; border-radius: 4px; }
 `;
 
 const SHELL = (content: string): string =>

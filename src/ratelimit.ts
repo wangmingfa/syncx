@@ -47,4 +47,10 @@ export class RateLimiter {
   refill(): void {
     this._refill();
   }
+
+  /** 清空当前令牌:用于单条超过桶容量的消息发送后,仍按限速节流后续发送。 */
+  drain(): void {
+    this._refill();
+    this.tokens = 0;
+  }
 }

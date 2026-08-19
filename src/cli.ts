@@ -1,5 +1,5 @@
 export interface ParsedArgs {
-  command: 'start' | 'status' | 'install' | 'invite' | 'join';
+  command: 'start' | 'status' | 'install' | 'invite' | 'join' | 'revoke';
   /** 位置参数(如 invite/join 的参数)。 */
   positionals: string[];
   configPath?: string;
@@ -11,7 +11,7 @@ export interface ParsedArgs {
   logFile?: string;
 }
 
-const COMMANDS = new Set(['start', 'status', 'install', 'invite', 'join']);
+const COMMANDS = new Set(['start', 'status', 'install', 'invite', 'join', 'revoke']);
 
 export function parseArgs(argv: string[]): ParsedArgs {
   const [command, ...rest] = argv;
@@ -93,13 +93,35 @@ import { RateLimiter } from './ratelimit.js';
 import { createControlServer } from './api.js';
 import { buildStatus, type PeerStatus, type SyncProgress } from './status.js';
 import { addSharedFolder, removeSharedFolder, isPeerAllowed } from './devices.js';
-import { createInviteCode, parseInviteCode } from './invite.js';
-import { folderIdFor, folderIndexPath } from './config.js';
+import { createInviteCode, parseInviteCode, revokeInviteCode } from './invite.js';
+import { folderIdFor, folderIndexPath, type SharedFolderConfig } from './config.js';
 import { getLanAddresses, formatHost } from './net/addresses.js';
 import { renderSystemdUnit, renderLaunchdPlist, renderWindowsService } from './install.js';
 import { renderControlFallback } from './ui-fallback.js';
 import type { WebSocket } from 'ws';
 import { createLogger } from './logger.js';
+
+/** 一个共享目录的运行期状态:索引、执行器与本地索引,随配置热重载增删。 */
+interface FolderState {
+  id: string;
+  path: string;
+  index: IndexStore;
+  executor: LocalExecutor;
+  localIndex: Map<string, IndexEntry>;
+  ignoreLines: string[];
+  transports: PeerTransport[];
+  peers: Map<string, SyncPeer>;
+  config: SharedFolderConfig;
+}
+
+/** 一条存活的对端会话:配置热重载新增/移除目录时,对现有连接补建或摘除对应 peer。 */
+interface ActiveSession {
+  socket: WebSocket;
+  key: Buffer;
+  remoteDeviceId: string;
+  peers: Map<string, SyncPeer>;
+  transports: Array<{ folder: FolderState; transport: PeerTransport }>;
+}
 
 function loadOrCreateToken(configDir: string): string {
   const file = join(configDir, 'control.token');
@@ -189,6 +211,17 @@ export async function run(args: ParsedArgs): Promise<void> {
     return;
   }
 
+  if (args.command === 'revoke') {
+    // 吊销一个邀请码:加入吊销列表,已吊销的邀请码在 parseInviteCode 时会被拒绝
+    const code = args.positionals[0];
+    if (!code) {
+      throw new Error('usage: syncx revoke <invite-code>');
+    }
+    revokeInviteCode(configDir, code);
+    console.log(`invitation code revoked: ${code}`);
+    return;
+  }
+
   // 本地控制 API 先启动(无论是否有共享目录),让用户能在 Web UI 里添加第一个目录
   const token = loadOrCreateToken(configDir);
   const controlPort = args.controlPort ?? 8384;
@@ -203,8 +236,8 @@ export async function run(args: ParsedArgs): Promise<void> {
     }
   }
 
-  // 每个共享目录独立的索引/执行器/本地索引状态
-  const folderStates = config.sharedFolders.map((f) => {
+  /** 为一个共享目录创建运行期状态(索引/执行器/本地索引/忽略规则)。 */
+  function createFolderState(f: SharedFolderConfig): FolderState {
     const id = folderIdFor(f);
     const index = openIndexStore(folderIndexPath(configDir, id));
     const executor = createLocalExecutor(f.path, index);
@@ -218,20 +251,14 @@ export async function run(args: ParsedArgs): Promise<void> {
     const localIndex = new Map(
       filterIndexedEntries(parseIgnoreRules(ignoreLines), index.listEntries()).map((e) => [e.path, e]),
     );
-    return { id, path: f.path, index, executor, localIndex, ignoreLines, transports: [] as PeerTransport[], peers: new Map<string, SyncPeer>(), config: f };
-  });
+    return { id, path: f.path, index, executor, localIndex, ignoreLines, transports: [], peers: new Map(), config: f };
+  }
 
+  // 每个共享目录独立的索引/执行器/本地索引状态(可变:配置热重载可新增/移除目录)
+  let folderStates: FolderState[] = config.sharedFolders.map(createFolderState);
   if (folderStates.length === 0) {
-    logger.info('no shared folders configured yet; add one via the web UI, then restart the daemon');
-    await new Promise<void>((resolve) => {
-      const shutdown = (): void => {
-        control.close();
-        resolve();
-      };
-      process.on('SIGINT', shutdown);
-      process.on('SIGTERM', shutdown);
-    });
-    return;
+    // 无目录时 daemon 保持运行,通过 Web UI 添加目录后由热重载生效,无需重启
+    logger.info('no shared folders configured; the daemon stays up and picks up folders added via the web UI');
   }
 
   /** 校验对端设备是否被任一共享目录授权;未授权则关闭 socket 并打日志。 */
@@ -291,6 +318,38 @@ export async function run(args: ParsedArgs): Promise<void> {
     }
   }
 
+  /**
+   * 连接到指定对端并建立同步会话:对端已有连接时关闭重复 socket,
+   * 未授权则拒绝;失败时按调用方策略处理(默认记日志)。
+   */
+  function connectTo(
+    url: string,
+    opts: {
+      onConnected?: (remoteDeviceId: string) => void;
+      onRejected?: (error: unknown) => void;
+    } = {},
+  ): void {
+    void connectPeer(identity, url)
+      .then(({ socket, remoteDeviceId, key }) => {
+        if (isPeerConnected(remoteDeviceId)) {
+          // 对端已有连接(入站或出站),关闭重复的 socket
+          socket.close();
+          return;
+        }
+        opts.onConnected?.(remoteDeviceId);
+        if (acceptPeer(socket, remoteDeviceId)) {
+          startSyncSession(socket, remoteDeviceId, key, url);
+        }
+      })
+      .catch((error) => {
+        if (opts.onRejected) {
+          opts.onRejected(error);
+        } else {
+          logger.error(`connect to ${url} failed: ${error instanceof Error ? error.message : String(error)}`);
+        }
+      });
+  }
+
   function scheduleReconnect(deviceId: string): void {
     const url = outboundPeerUrls.get(deviceId);
     if (!url) return;
@@ -300,17 +359,7 @@ export async function run(args: ParsedArgs): Promise<void> {
     logger.info(`peer ${deviceId} disconnected, reconnecting in ${delay}ms`);
     const timer = setTimeout(() => {
       reconnectTimers.delete(deviceId);
-      void connectPeer(identity, url)
-        .then(({ socket, remoteDeviceId, key }) => {
-          if (isPeerConnected(remoteDeviceId)) {
-            socket.close();
-            return;
-          }
-          if (acceptPeer(socket, remoteDeviceId)) {
-            startSyncSession(socket, remoteDeviceId, key, url);
-          }
-        })
-        .catch(() => scheduleReconnect(deviceId));
+      connectTo(url, { onRejected: () => scheduleReconnect(deviceId) });
     }, delay);
     reconnectTimers.set(deviceId, timer);
   }
@@ -365,65 +414,69 @@ export async function run(args: ParsedArgs): Promise<void> {
     }
     reconnectAttempts.delete(deviceId);
     logger.info(`manually reconnecting to peer ${deviceId}`);
-    void connectPeer(identity, url)
-      .then(({ socket, remoteDeviceId, key }) => {
-        if (isPeerConnected(remoteDeviceId)) {
-          socket.close();
-          return;
+    connectTo(url, { onRejected: () => scheduleReconnect(deviceId) });
+  }
+
+  // 存活会话注册表:配置热重载新增/移除目录时,对现有连接补建或摘除对应目录的 peer
+  const activeSessions: ActiveSession[] = [];
+
+  /** 在一个存活会话上为指定目录补建 transport/peer,并发送该目录的索引。 */
+  function attachFolderToSession(session: ActiveSession, folder: FolderState): void {
+    const rateLimiter = folder.config?.maxBandwidthKbps
+      ? new RateLimiter(folder.config.maxBandwidthKbps)
+      : undefined;
+    const transport = makePeerTransport(session.socket, session.key, folder.id, rateLimiter);
+    folder.transports.push(transport);
+    session.transports.push({ folder, transport });
+    const peer = createSyncPeer({
+      transport,
+      localIndex: folder.localIndex,
+      executor: folder.executor,
+      readLocalBlock: (path, blockIndex) => {
+        // 防止对端用 ../ 等路径穿越读取共享目录外的文件
+        const abs = join(folder.path, path);
+        const rel = relative(folder.path, abs);
+        if (rel.startsWith('..') || isAbsolute(rel)) {
+          throw new Error(`unsafe path: ${path}`);
         }
-        if (acceptPeer(socket, remoteDeviceId)) {
-          startSyncSession(socket, remoteDeviceId, key, url);
+        const blocks = splitIntoBlocks(readFileSync(abs));
+        const block = blocks[blockIndex];
+        if (!block) {
+          throw new Error(`block ${blockIndex} out of range for ${path}`);
         }
-      })
-      .catch(() => scheduleReconnect(deviceId));
+        return block;
+      },
+      deviceId: identity.deviceId,
+      remoteDeviceId: session.remoteDeviceId,
+    });
+    session.peers.set(folder.id, peer);
+    folder.peers.set(session.remoteDeviceId, peer);
+    transport.sendEntries([...folder.localIndex.values()]);
   }
 
   /** 在一个 socket 上建立同步会话:为每个共享目录建 peer,按 folder 路由。 */
   function startSyncSession(socket: WebSocket, remoteDeviceId: string, key: Buffer, url?: string): void {
     registerPeer(remoteDeviceId, url);
     peerSockets.add(socket);
-    const peers = new Map<string, SyncPeer>();
-    // 记录本次会话为各目录创建的 transport,便于 socket 断开时从对应目录中清理
-    const sessionTransports: Array<{ folder: (typeof folderStates)[number]; transport: PeerTransport }> = [];
+    const session: ActiveSession = {
+      socket,
+      key,
+      remoteDeviceId,
+      peers: new Map<string, SyncPeer>(),
+      transports: [],
+    };
+    activeSessions.push(session);
     for (const folder of folderStates) {
-      const rateLimiter = folder.config?.maxBandwidthKbps
-        ? new RateLimiter(folder.config.maxBandwidthKbps)
-        : undefined;
-      const transport = makePeerTransport(socket, key, folder.id, rateLimiter);
-      folder.transports.push(transport);
-      sessionTransports.push({ folder, transport });
-      const peer = createSyncPeer({
-        transport,
-        localIndex: folder.localIndex,
-        executor: folder.executor,
-        readLocalBlock: (path, blockIndex) => {
-          // 防止对端用 ../ 等路径穿越读取共享目录外的文件
-          const abs = join(folder.path, path);
-          const rel = relative(folder.path, abs);
-          if (rel.startsWith('..') || isAbsolute(rel)) {
-            throw new Error(`unsafe path: ${path}`);
-          }
-          const blocks = splitIntoBlocks(readFileSync(abs));
-          const block = blocks[blockIndex];
-          if (!block) {
-            throw new Error(`block ${blockIndex} out of range for ${path}`);
-          }
-          return block;
-        },
-        deviceId: identity.deviceId,
-        remoteDeviceId,
-        conflictPolicy: folder.config?.conflictPolicy,
-      });
-      peers.set(folder.id, peer);
-      folder.peers.set(remoteDeviceId, peer);
-      transport.sendEntries([...folder.localIndex.values()]);
+      attachFolderToSession(session, folder);
     }
-    attachPeerMessages(peers, socket, key);
+    attachPeerMessages(session.peers, socket, key);
     socket.on('error', (error) => logger.debug(`socket error for peer ${remoteDeviceId}: ${error.message}`));
     socket.on('close', (code, reason) => {
       logger.debug(`socket closed for peer ${remoteDeviceId}, code=${code}, reason=${reason?.toString('utf8') ?? '(empty)'}`);
       peerSockets.delete(socket);
-      for (const { folder, transport } of sessionTransports) {
+      const sessionIdx = activeSessions.indexOf(session);
+      if (sessionIdx >= 0) activeSessions.splice(sessionIdx, 1);
+      for (const { folder, transport } of session.transports) {
         const idx = folder.transports.indexOf(transport);
         if (idx >= 0) folder.transports.splice(idx, 1);
         folder.peers.delete(remoteDeviceId);
@@ -519,27 +572,23 @@ export async function run(args: ParsedArgs): Promise<void> {
   const discovery = startDiscovery(identity, server.port, (peer) => {
     if (isPeerConnected(peer.deviceId)) return;
     const url = `ws://${peer.host}:${peer.port}`;
-    void connectPeer(identity, url)
-      .then(({ socket, remoteDeviceId, key }) => {
-        if (acceptPeer(socket, remoteDeviceId)) {
-          startSyncSession(socket, remoteDeviceId, key, url);
-        }
-      })
-      .catch((error) => logger.error(`connect to ${peer.deviceId} failed: ${error.message}`));
+    connectTo(url, {
+      onRejected: (error) =>
+        logger.error(`connect to ${peer.deviceId} failed: ${error instanceof Error ? error.message : String(error)}`),
+    });
   });
 
   // 手动配置的对端(mDNS 不可用时的回退):启动时主动连接,失败仅日志
   // 去重由服务端 onPeerConnected 负责:若对端已连,服务端会关闭重复 socket
   for (const peerUrl of config.peers) {
-    void connectPeer(identity, peerUrl)
-      .then(({ socket, remoteDeviceId, key }) => {
+    connectTo(peerUrl, {
+      onConnected: (remoteDeviceId) => {
         logger.debug(`outbound connected to ${remoteDeviceId} at ${peerUrl}`);
         logger.info(`connected to configured peer ${remoteDeviceId} (${peerUrl})`);
-        if (acceptPeer(socket, remoteDeviceId)) {
-          startSyncSession(socket, remoteDeviceId, key, peerUrl);
-        }
-      })
-      .catch((error) => logger.error(`connect to configured peer ${peerUrl} failed: ${error.message}`));
+      },
+      onRejected: (error) =>
+        logger.error(`connect to configured peer ${peerUrl} failed: ${error instanceof Error ? error.message : String(error)}`),
+    });
   }
 
   logger.info(`syncx daemon started (device ${identity.deviceId}, peer port ${server.port})`);
@@ -555,28 +604,66 @@ export async function run(args: ParsedArgs): Promise<void> {
     void runScan();
   }, SCAN_INTERVAL_MS);
 
-  // 配置热重载:监听 config.json 变更,重新加载对端列表
-  // 新增/移除对端无需重启 daemon
+  // 配置热重载:监听 config.json 变更,增量应用共享目录与对端列表变更,无需重启 daemon
   const configWatcher = watch(configPath, (_eventType, _filename) => {
     try {
       const newConfig = loadConfig(configPath);
+
+      // 共享目录变更:新增/移除/更新
+      const oldFolderIds = new Set(folderStates.map((f) => f.id));
+      const newFolderById = new Map(newConfig.sharedFolders.map((f) => [folderIdFor(f), f]));
+      // 移除已删除的目录:关闭索引库,并从所有存活会话的路由表中摘除该目录
+      for (const folder of folderStates) {
+        if (!newFolderById.has(folder.id)) {
+          logger.info(`config updated: removing shared folder ${folder.path}`);
+          for (const session of activeSessions) {
+            session.peers.delete(folder.id);
+            session.transports = session.transports.filter((t) => t.folder.id !== folder.id);
+          }
+          folder.peers.clear();
+          folder.index.close();
+        }
+      }
+      folderStates = folderStates.filter((f) => newFolderById.has(f.id));
+      // 新增目录:创建运行期状态,并补建到所有存活会话;已存在目录则应用最新配置
+      for (const f of newConfig.sharedFolders) {
+        const id = folderIdFor(f);
+        const existing = folderStates.find((s) => s.id === id);
+        if (!existing) {
+          logger.info(`config updated: adding shared folder ${f.path}`);
+          const folder = createFolderState(f);
+          folderStates.push(folder);
+          for (const session of activeSessions) {
+            attachFolderToSession(session, folder);
+          }
+        } else {
+          if (existing.path !== f.path) {
+            // 路径变更:以新路径重建执行器与本地索引(索引库按 id 复用)
+            existing.path = f.path;
+            existing.executor = createLocalExecutor(f.path, existing.index);
+            existing.localIndex = new Map(
+              filterIndexedEntries(parseIgnoreRules(existing.ignoreLines), existing.index.listEntries()).map((e) => [e.path, e]),
+            );
+          }
+          existing.config = f;
+        }
+      }
+
+      // 对端列表变更:新增对端主动连接
       const newPeers = new Set(newConfig.peers);
       const oldPeers = new Set(config.peers);
-      // 新增对端:主动连接
       for (const peerUrl of newConfig.peers) {
         if (!oldPeers.has(peerUrl)) {
           logger.info(`config updated: connecting to new peer ${peerUrl}`);
-          void connectPeer(identity, peerUrl)
-            .then(({ socket, remoteDeviceId, key }) => {
-              if (acceptPeer(socket, remoteDeviceId)) {
-                startSyncSession(socket, remoteDeviceId, key, peerUrl);
-              }
-            })
-            .catch((error) => logger.error(`connect to new peer ${peerUrl} failed: ${error.message}`));
+          connectTo(peerUrl, {
+            onRejected: (error) =>
+              logger.error(`connect to new peer ${peerUrl} failed: ${error instanceof Error ? error.message : String(error)}`),
+          });
         }
       }
-      // 更新内存中的 peers 列表
+      // 更新内存中的配置
       config.peers = newConfig.peers;
+      config.sharedFolders = newConfig.sharedFolders;
     } catch (error) {
       logger.error(`config reload failed: ${error instanceof Error ? error.message : String(error)}`);
     }

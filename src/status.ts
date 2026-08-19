@@ -12,11 +12,14 @@ export interface PeerStatus {
   url?: string;
 }
 
-export interface SyncProgress {
-  folder: string;
+export interface ProgressCounts {
   pending: number;
   sending: number;
   receiving: number;
+}
+
+export interface SyncProgress extends ProgressCounts {
+  folder: string;
 }
 
 export interface StatusPayload {

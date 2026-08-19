@@ -98,6 +98,17 @@ describe('cli parseArgs', () => {
     });
   });
 
+  it('parses the revoke command with an invite code positional', () => {
+    expect(parseArgs(['revoke', 'SOMECODE123'])).toEqual({
+      command: 'revoke',
+      configPath: undefined,
+      port: undefined,
+      controlPort: undefined,
+      host: undefined,
+      positionals: ['SOMECODE123'],
+    });
+  });
+
   it('collects positionals alongside flags for invite', () => {
     expect(parseArgs(['invite', '/data/docs', '--config', '/etc/syncx.json'])).toEqual({
       command: 'invite',

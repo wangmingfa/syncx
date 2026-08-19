@@ -148,4 +148,24 @@ describe('scanFolder', () => {
     expect(changed).toEqual(['a.txt']);
     rmSync(dir, { recursive: true, force: true });
   });
+
+  it('returns an empty diff when the shared folder root does not exist', () => {
+    const dir = mkdtempSync(join(tmpdir(), 'syncx-scanner-'));
+    const index = openIndexStore(join(dir, 'index.db'));
+    // 索引里已有条目,但共享目录根不存在(盘符卸载 / 权限丢失)
+    index.saveEntry({
+      path: 'kept.txt',
+      version: new Map([['DEV-A', 1]]),
+      size: 8,
+      deleted: false,
+      blocks: [hashBlock(Buffer.from('hello'))],
+    });
+
+    const { changed, tombstones } = scanFolder(join(dir, 'does-not-exist'), index, [], 'DEV-A');
+
+    expect(changed).toEqual([]);
+    expect(tombstones).toEqual([]);
+    index.close();
+    rmSync(dir, { recursive: true, force: true });
+  });
 });

@@ -63,18 +63,33 @@ function readBody(req: IncomingMessage, maxBytes = 1_000_000): Promise<string> {
   return new Promise((resolve, reject) => {
     const chunks: Buffer[] = [];
     let size = 0;
+
+    const cleanup = (): void => {
+      req.removeListener('data', onData);
+      req.removeListener('end', onEnd);
+      req.removeListener('error', onError);
+    };
+
     const onData = (chunk: Buffer): void => {
       chunks.push(chunk);
       size += chunk.length;
       if (size > maxBytes) {
-        req.removeListener('data', onData);
+        cleanup();
         reject(new Error('request body too large'));
-        return;
       }
     };
+    const onEnd = (): void => {
+      cleanup();
+      resolve(Buffer.concat(chunks).toString('utf8'));
+    };
+    const onError = (error: Error): void => {
+      cleanup();
+      reject(error);
+    };
+
     req.on('data', onData);
-    req.on('end', () => resolve(Buffer.concat(chunks).toString('utf8')));
-    req.on('error', reject);
+    req.on('end', onEnd);
+    req.on('error', onError);
   });
 }
 

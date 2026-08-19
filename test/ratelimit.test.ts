@@ -37,4 +37,11 @@ describe('RateLimiter', () => {
     expect(wait).toBeGreaterThan(0);
     expect(wait).toBeLessThan(100); // 100KB at 1024KB/s < 100ms
   });
+
+  it('drain clears remaining tokens so the next send must wait', () => {
+    const limiter = new RateLimiter(1024);
+    limiter.tryConsume(500 * 1024); // 消耗一半令牌
+    limiter.drain(); // 清空剩余令牌
+    expect(limiter.waitTime(1024)).toBeGreaterThan(0);
+  });
 });

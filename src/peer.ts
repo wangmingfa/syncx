@@ -3,55 +3,7 @@ import { buildPlan } from './plan.js';
 import type { BlockRequest, BlockResponse } from './messages.js';
 import type { LocalExecutor } from './executor.js';
 import { verifyBlock, BLOCK_SIZE } from './blockstore.js';
-import { mergeVersions } from './version.js';
-
-export interface RoundPlan {
-  send: IndexEntry[];
-  /** Blocks to request; the peer session fills in deviceId later. */
-  requestBlocks: Array<Omit<BlockRequest, 'deviceId'>>;
-}
-
-/**
- * Plan one sync round from the local perspective: which entries to send
- * to the remote, and which blocks to request from the remote.
- */
-export function planSyncRound(
-  local: Map<string, IndexEntry>,
-  remote: Map<string, IndexEntry>,
-): RoundPlan {
-  const actions = buildPlan(local, remote);
-  const send: IndexEntry[] = [];
-  const requestBlocks: Array<Omit<BlockRequest, 'deviceId'>> = [];
-
-  for (const action of actions) {
-    switch (action.kind) {
-      case 'send':
-        send.push(action.entry);
-        break;
-      case 'delete': {
-        const localEntry = local.get(action.path);
-        if (localEntry?.deleted) {
-          send.push(localEntry);
-        }
-        break;
-      }
-      case 'receive':
-        action.entry.blocks.forEach((hash, blockIndex) => {
-          requestBlocks.push({
-            path: action.path,
-            blockIndex,
-            hash,
-          });
-        });
-        break;
-      case 'conflict':
-        // conflict 由会话层处理:拉远端块,完成后生成冲突副本
-        break;
-    }
-  }
-
-  return { send, requestBlocks };
-}
+import type { ProgressCounts } from './status.js';
 
 export interface PeerTransport {
   sendEntries(entries: IndexEntry[]): void;
@@ -67,15 +19,13 @@ export interface SyncPeerDeps {
   deviceId: string;
   /** Peer device ID, used to name conflict copies. */
   remoteDeviceId?: string;
-  /** Conflict resolution policy for this folder. */
-  conflictPolicy?: 'keep-conflict-copy' | 'keep-newest' | 'keep-larger' | 'keep-local';
 }
 
 export interface SyncPeer {
   onPeerIndex(entries: IndexEntry[]): Promise<void>;
   onBlockRequest(request: BlockRequest): void;
   onBlockResponse(response: BlockResponse): Promise<void>;
-  getSyncProgress(): { pending: number; sending: number; receiving: number };
+  getSyncProgress(): ProgressCounts;
 }
 
 interface PendingEntry {
@@ -104,7 +54,7 @@ const MAX_BLOCK_RETRIES = 3;
  * complete, then apply it via the executor.
  */
 export function createSyncPeer(deps: SyncPeerDeps): SyncPeer {
-  const { transport, localIndex, executor, readLocalBlock, deviceId, remoteDeviceId, conflictPolicy } = deps;
+  const { transport, localIndex, executor, readLocalBlock, deviceId, remoteDeviceId } = deps;
   const pending = new Map<string, PendingEntry>();
   // 逐块跟踪超时重试:块响应丢失/丢弃时自动重发,避免文件永远收不齐
   const pendingBlocks = new Map<string, PendingBlockRequest>();
@@ -119,17 +69,23 @@ export function createSyncPeer(deps: SyncPeerDeps): SyncPeer {
   function requestBlock(path: string, blockIndex: number, hash: string): void {
     const key = blockKey(path, blockIndex);
     const existing = pendingBlocks.get(key);
+    const retries = existing?.retries ?? 0;
+
     if (existing) {
       clearTimeout(existing.timeout);
-      if (existing.retries >= MAX_BLOCK_RETRIES) {
+      if (retries >= MAX_BLOCK_RETRIES) {
+        // 重试耗尽:该块无法收齐,清掉对应 pending 条目(下一轮 onPeerIndex 会自然重建),
+        // 避免条目无期限滞留
         pendingBlocks.delete(key);
+        pending.delete(path);
         return;
       }
     }
+
     transport.sendBlockRequest({ deviceId, path, blockIndex, hash });
-    const retries = existing?.retries ?? 0;
+    const nextRetries = retries + 1;
     const timeout = setTimeout(() => requestBlock(path, blockIndex, hash), BLOCK_REQUEST_TIMEOUT_MS);
-    pendingBlocks.set(key, { retries, timeout });
+    pendingBlocks.set(key, { retries: nextRetries, timeout });
   }
 
   function requestAllBlocks(entry: IndexEntry): void {
@@ -147,16 +103,17 @@ export function createSyncPeer(deps: SyncPeerDeps): SyncPeer {
     };
 
     if (item.kind === 'conflict' && item.local) {
-      await executor?.applyConflict(
+      const landed = await executor?.applyConflict(
         path,
         item.local,
         item.entry,
         provider,
         remoteDeviceId ?? '',
-        conflictPolicy,
       );
-      // 同步内存索引,使后续规划基于最新本地状态
-      localIndex.set(path, { ...item.entry, version: mergeVersions(item.local.version, item.entry.version) });
+      // 同步内存索引,使后续规划基于最新本地状态:以实际落盘结果为准
+      if (landed) {
+        localIndex.set(path, landed);
+      }
     } else {
       await executor?.applyReceive(item.entry, provider);
       localIndex.set(path, item.entry);
@@ -282,7 +239,7 @@ export function createSyncPeer(deps: SyncPeerDeps): SyncPeer {
       await completeIfReady(response.path);
     },
 
-    getSyncProgress(): { pending: number; sending: number; receiving: number } {
+    getSyncProgress(): ProgressCounts {
       let receiving = 0;
       for (const item of pending.values()) {
         if (item.kind === 'receive') receiving += 1;

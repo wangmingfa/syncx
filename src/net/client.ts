@@ -24,7 +24,23 @@ export interface ConnectedPeer {
 export function connectPeer(identity: DeviceIdentity, url: string): Promise<ConnectedPeer> {
   return new Promise((resolve, reject) => {
     const socket = new WebSocket(url);
-    socket.once('error', reject);
+    let settled = false;
+    const settle = (): void => {
+      settled = true;
+      socket.off('close', onSocketClose);
+    };
+
+    const onSocketClose = (): void => {
+      if (!settled) {
+        reject(new Error('peer closed connection during handshake'));
+      }
+    };
+
+    socket.once('error', (err) => {
+      settle();
+      reject(err);
+    });
+    socket.on('close', onSocketClose);
     socket.once('open', () => {
       socket.send(identity.publicKey);
     });
@@ -41,6 +57,7 @@ export function connectPeer(identity: DeviceIdentity, url: string): Promise<Conn
         try {
           remoteDeviceId = deriveDeviceIdFromPublicKey(text);
         } catch (error) {
+          settle();
           reject(error);
           socket.close();
           return;
@@ -59,12 +76,13 @@ export function connectPeer(identity: DeviceIdentity, url: string): Promise<Conn
               remotePublicKeyPem!,
             );
           } catch (error) {
+            settle();
             reject(error);
             socket.close();
             return;
           }
-          const key = deriveSessionKey(sessionPair.privateKeyPem, peerX25519Pem);
-          resolve({ socket, remoteDeviceId, key });
+          settle();
+          resolve({ socket, remoteDeviceId, key: deriveSessionKey(sessionPair.privateKeyPem, peerX25519Pem) });
         };
         socket.once('message', (kxData: Buffer) => onKx(kxData));
         return;

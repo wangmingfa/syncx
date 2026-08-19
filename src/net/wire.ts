@@ -58,23 +58,34 @@ export function makePeerTransport(
   rateLimiter?: RateLimiter,
 ): PeerTransport {
   const limiter = rateLimiter ?? new RateLimiter(0);
+  // 串行化限速发送:队列中每条消息都等待前一条消耗完令牌后再计算等待,
+  // 避免多条消息基于同一令牌快照同时醒来,造成约 2 倍速率的突发发送。
+  let sendQueue: Promise<void> = Promise.resolve();
 
-  function trySend(data: string): void {
+  /** 按限速发送一条消息:令牌不足时排队等待,等待后重新评估并消耗令牌。 */
+  function sendRateLimited(data: string): void {
     const bytes = Buffer.byteLength(data);
-    if (limiter.tryConsume(bytes)) {
-      socket.send(data);
-      return;
-    }
-    const wait = limiter.waitTime(bytes);
-    setTimeout(() => {
-      limiter.refill();
-      socket.send(data);
-    }, wait);
+    sendQueue = sendQueue
+      .then(async () => {
+        const wait = limiter.waitTime(bytes);
+        if (wait > 0) {
+          await new Promise((resolve) => setTimeout(resolve, wait));
+        }
+        // 等待后重新评估并消耗令牌;超大消息(超过桶容量)无法一次消耗,
+        // 清空桶后照常发送,避免其完全绕过限速。
+        if (!limiter.tryConsume(bytes)) {
+          limiter.drain();
+        }
+        socket.send(data);
+      })
+      .catch(() => {
+        // socket 可能在排队期间已关闭;忽略发送失败,后续消息不受影响
+      });
   }
 
   return {
     sendEntries(entries: IndexEntry[]): void {
-      trySend(
+      sendRateLimited(
         encryptMessage(key, {
           type: 'index',
           folder: folderPath,
@@ -83,10 +94,10 @@ export function makePeerTransport(
       );
     },
     sendBlockRequest(request: BlockRequest): void {
-      trySend(encryptMessage(key, { type: 'block-request', folder: folderPath, payload: request }));
+      sendRateLimited(encryptMessage(key, { type: 'block-request', folder: folderPath, payload: request }));
     },
     sendBlockResponse(response: BlockResponse): void {
-      trySend(
+      sendRateLimited(
         encryptMessage(key, {
           type: 'block-response',
           folder: folderPath,

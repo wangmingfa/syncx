@@ -8,6 +8,7 @@ import {
   existsSync,
   readdirSync,
   createWriteStream,
+  renameSync,
 } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -15,7 +16,7 @@ import { spawn, type ChildProcess } from 'node:child_process';
 import { loadOrCreateIdentity } from '../../src/identity.js';
 import { openIndexStore } from '../../src/indexstore.js';
 import { hashBlock } from '../../src/blockstore.js';
-import { folderIndexPath } from '../../src/config.js';
+import { folderIdFor, folderIndexPath } from '../../src/config.js';
 
 const children: ChildProcess[] = [];
 
@@ -133,6 +134,26 @@ function startDaemon(setup: DaemonSetup, peers: string[], peerDeviceIds: string[
   child.stdout?.pipe(createWriteStream(join(setup.dir, 'daemon.out.log')));
   child.stderr?.pipe(createWriteStream(join(setup.dir, 'daemon.err.log')));
   children.push(child);
+}
+
+/**
+ * 编辑器式的原子保存:先写临时文件再 rename 替换目标。许多编辑器(
+ * vi/vim/nvim)都这样做,会替换 config.json 的 inode。配置热重载必须
+ * 在 rename 后仍能触发,否则 daemon 的热重载会静默失效。
+ */
+function saveConfigAtomically(
+  setup: DaemonSetup,
+  newSharedFolders: Array<{ id: string; path: string; devices: string[] }>,
+): void {
+  const tmpPath = `${setup.configPath}.tmp`;
+  writeFileSync(
+    tmpPath,
+    JSON.stringify({
+      sharedFolders: newSharedFolders,
+      peers: [],
+    }),
+  );
+  renameSync(tmpPath, setup.configPath);
 }
 
 /** 失败时打印 daemon 日志与目录内容,辅助定位。 */
@@ -271,5 +292,45 @@ describe('two real daemons sync over peers config', () => {
       rmSync(b.dir, { recursive: true, force: true });
     },
     30000,
+  );
+
+  it(
+    'picks up a new shared folder when config.json is replaced atomically (rename-save)',
+    async () => {
+      const a = setupDaemon('a', []);
+      const shareB = join(a.dir, 'share-b');
+      mkdirSync(shareB, { recursive: true });
+
+      // 启动时只配 main 一个共享目录
+      startDaemon(a, [], []);
+
+      // 用编辑器式的原子保存(vi/vim/nvim 行为):先写临时文件再 rename 替换
+      await new Promise((r) => setTimeout(r, 1000));
+      saveConfigAtomically(a, [
+        { id: 'main', path: a.share, devices: [] },
+        { id: 'secondary', path: shareB, devices: [] },
+      ]);
+
+      // 热重载应触发,日志出现 "config updated: adding shared folder",并打开新索引库
+      await waitFor(
+        () =>
+          readFileSync(join(a.dir, 'daemon.out.log'), 'utf8')
+            .includes('config updated: adding shared folder'),
+        25000,
+      );
+
+      // 新增目录的索引库文件被创建,说明目录已被 daemon 接管
+      const configContent = JSON.parse(readFileSync(a.configPath, 'utf8')) as {
+        sharedFolders: Array<{ id: string; path: string }>;
+      };
+      const secondaryId = configContent.sharedFolders.find((f) => f.id === 'secondary')!.path;
+      const idx = openIndexStore(folderIndexPath(a.dir, folderIdFor({ id: 'secondary', path: secondaryId, devices: [] })));
+      expect(idx.listEntries()).toEqual([]);
+      idx.close();
+
+      await stopChildren();
+      rmSync(a.dir, { recursive: true, force: true });
+    },
+    45000,
   );
 });

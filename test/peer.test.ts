@@ -1,8 +1,8 @@
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
 import { mkdtempSync, rmSync, readFileSync, mkdirSync, writeFileSync, existsSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { planSyncRound, createSyncPeer, type PeerTransport } from '../src/peer.js';
+import { createSyncPeer, type PeerTransport } from '../src/peer.js';
 import { createLocalExecutor } from '../src/executor.js';
 import { openIndexStore } from '../src/indexstore.js';
 import { hashBlock, BLOCK_SIZE } from '../src/blockstore.js';
@@ -22,37 +22,6 @@ function entry(
     blocks,
   };
 }
-
-describe('sync peer round planning', () => {
-  it('plans sends for newer local entries and block requests for remote receives', () => {
-    const local = new Map([
-      ['local.txt', entry('local.txt', [['dev-a', 2]], ['l1'])],
-      ['shared.txt', entry('shared.txt', [['dev-a', 1]], ['s1'])],
-    ]);
-    const remote = new Map([
-      ['remote.txt', entry('remote.txt', [['dev-b', 3]], ['r1', 'r2'], 200)],
-      ['shared.txt', entry('shared.txt', [['dev-a', 1]], ['s1'])],
-    ]);
-
-    const plan = planSyncRound(local, remote);
-
-    expect(plan.send).toEqual([entry('local.txt', [['dev-a', 2]], ['l1'])]);
-    expect(plan.requestBlocks).toEqual([
-      { path: 'remote.txt', blockIndex: 0, hash: 'r1' },
-      { path: 'remote.txt', blockIndex: 1, hash: 'r2' },
-    ]);
-  });
-
-  it('requests no blocks when the remote has nothing newer', () => {
-    const local = new Map([['a.txt', entry('a.txt', [['dev-a', 2]], ['a1'])]]);
-    const remote = new Map([['a.txt', entry('a.txt', [['dev-a', 1]], ['a0'])]]);
-
-    const plan = planSyncRound(local, remote);
-
-    expect(plan.send).toEqual([entry('a.txt', [['dev-a', 2]], ['a1'])]);
-    expect(plan.requestBlocks).toEqual([]);
-  });
-});
 
 describe('sync peer session', () => {
   function fakeTransport() {
@@ -307,5 +276,34 @@ describe('sync peer session', () => {
     peer.onBlockRequest({ deviceId: 'DEV-B', path: 'f.txt', blockIndex: 1.5, hash: 'h' });
 
     expect(requests).toEqual([]);
+  });
+
+  it('clears a stalled entry from pending when block retries are exhausted', async () => {
+    const { transport, requests } = fakeTransport();
+    const peer = createSyncPeer({
+      transport,
+      localIndex: new Map(),
+      executor: null as never,
+      readLocalBlock: () => Buffer.from(''),
+      deviceId: 'DEV-A',
+    });
+
+    vi.useFakeTimers();
+    // 单块文件 → 只发 1 次块请求,该请求永远无响应(对端离线)
+    const content = Buffer.from('stalled');
+    await peer.onPeerIndex([entry('missing.txt', [['dev-b', 1]], [hashBlock(content)], content.length)]);
+
+    expect(peer.getSyncProgress().pending).toBe(1);
+
+    // 每次重试超时 5s,MAX_BLOCK_RETRIES=3 → 最多 4 次发送,3 次重试耗尽后
+    // 该条目应从 pending 中移除,避免无期限滞留
+    await vi.advanceTimersByTimeAsync(5000 * 4 + 100);
+
+    expect(peer.getSyncProgress().pending).toBe(0);
+    // 原始 1 + 重试 2 = 3 次发送;第 3 次超时后,retries=3 ≥ MAX_BLOCK_RETRIES,
+    // 清除 pending 后不再发出第 4 次(修复前会无限重试)
+    expect(requests).toHaveLength(3);
+
+    vi.useRealTimers();
   });
 });
