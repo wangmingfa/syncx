@@ -174,6 +174,19 @@ function dumpLogs(...setups: DaemonSetup[]): void {
   }
 }
 
+/** 等待 daemon 就绪:日志出现 "syncx daemon started" 时 peer 服务已监听。 */
+async function waitForDaemonReady(setup: DaemonSetup): Promise<void> {
+  await waitFor(() => {
+    try {
+      return readFileSync(join(setup.dir, 'daemon.out.log'), 'utf8').includes(
+        'syncx daemon started',
+      );
+    } catch {
+      return false;
+    }
+  });
+}
+
 describe('two real daemons sync over peers config', () => {
   it(
     'propagates files in both directions between two processes',
@@ -187,6 +200,9 @@ describe('two real daemons sync over peers config', () => {
 
       // 两个 daemon 互相把对方配为手动对端,并互相加入 devices 白名单
       startDaemon(a, [`ws://127.0.0.1:${b.peerPort}`], [b.deviceId]);
+      // 错开启动:先等 A 就绪再起 B,避免双方同时启动互相 ECONNREFUSED
+      // 后走指数退避把连接建立推到 30s 边缘(daemon 侧另有首连立即重试兜底)
+      await waitForDaemonReady(a);
       startDaemon(b, [`ws://127.0.0.1:${a.peerPort}`], [a.deviceId]);
 
       // 双向同步:B 应收到 a.txt,A 应收到 b.txt。
@@ -213,6 +229,9 @@ describe('two real daemons sync over peers config', () => {
       const b = await setupDaemon('b', []);
 
       startDaemon(a, [`ws://127.0.0.1:${b.peerPort}`], [b.deviceId]);
+      // 错开启动:先等 A 就绪再起 B,避免双方同时启动互相 ECONNREFUSED
+      // 后走指数退避把连接建立推到 30s 边缘(daemon 侧另有首连立即重试兜底)
+      await waitForDaemonReady(a);
       startDaemon(b, [`ws://127.0.0.1:${a.peerPort}`], [a.deviceId]);
 
       // 等连接建立(握手 + 加密会话 + 初始索引交换)
@@ -276,6 +295,9 @@ describe('two real daemons sync over peers config', () => {
       const b = await setupDaemon('b', []);
 
       startDaemon(a, [`ws://127.0.0.1:${b.peerPort}`], [b.deviceId]);
+      // 错开启动:先等 A 就绪再起 B,避免双方同时启动互相 ECONNREFUSED
+      // 后走指数退避把连接建立推到 30s 边缘(daemon 侧另有首连立即重试兜底)
+      await waitForDaemonReady(a);
       startDaemon(b, [`ws://127.0.0.1:${a.peerPort}`], [a.deviceId]);
 
       // B 先收到 temp.txt

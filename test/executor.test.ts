@@ -325,6 +325,53 @@ describe('local executor conflict', () => {
     index.close();
     rmSync(dir, { recursive: true, force: true });
   });
+
+  it('keeps the local file intact when remote blocks cannot be fetched during a conflict', async () => {
+    const dir = mkdtempSync(join(tmpdir(), 'syncx-exec-'));
+    const root = join(dir, 'share');
+    mkdirSync(root, { recursive: true });
+    const index = openIndexStore(join(dir, 'index.db'));
+    const executor = createLocalExecutor(root, index);
+    const target = join(root, 'doc.txt');
+    const localContent = Buffer.from('local edit');
+    writeFileSync(target, localContent);
+    index.saveEntry(
+      entry('doc.txt', [['dev-a', 2]], [hashBlock(localContent)], localContent.length),
+    );
+
+    const remote = entry(
+      'doc.txt',
+      [
+        ['dev-a', 1],
+        ['dev-b', 3],
+      ],
+      [hashBlock(Buffer.from('remote'))],
+      6,
+    );
+
+    // 对端中途失联:块获取抛错。修复前本地文件已被 rename 成冲突副本,
+    // 原路径变空 → 下一轮扫描产生墓碑并传播删除;修复后本地文件保持不动。
+    await expect(
+      executor.applyConflict(
+        'doc.txt',
+        index.getEntry('doc.txt')!,
+        remote,
+        {
+          getBlocks: async (): Promise<Buffer[]> => {
+            throw new Error('peer disconnected');
+          },
+        },
+        'dev-b',
+      ),
+    ).rejects.toThrow('peer disconnected');
+
+    expect(readFileSync(target)).toEqual(localContent);
+    expect(readdirSync(root).filter((n) => n.includes('.sync-conflict-'))).toHaveLength(0);
+    expect(index.getEntry('doc.txt')?.deleted).toBe(false);
+
+    index.close();
+    rmSync(dir, { recursive: true, force: true });
+  });
 });
 
 describe('local executor send', () => {

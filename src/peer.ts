@@ -113,9 +113,12 @@ export function createSyncPeer(deps: SyncPeerDeps): SyncPeer {
     };
 
     if (item.kind === 'conflict' && item.local) {
+      // 落地时重新读取本地最新条目:冲突规划到块收齐之间,本地可能已被
+      // 新一轮扫描更新(A:1→A:2),用规划时捕获的旧版本合并会回退版本向量
+      const currentLocal = localIndex.get(path) ?? item.local;
       const landed = await executor?.applyConflict(
         path,
-        item.local,
+        currentLocal,
         item.entry,
         provider,
         remoteDeviceId ?? '',
@@ -139,6 +142,8 @@ export function createSyncPeer(deps: SyncPeerDeps): SyncPeer {
       const remote = new Map(entries.map((e) => [e.path, e]));
       const actions = buildPlan(localIndex, remote);
       const sends: IndexEntry[] = [];
+      // 本轮索引实际引用的 pending 路径:用于清理上一轮遗留的陈旧条目
+      const livePending = new Set<string>();
 
       for (const action of actions) {
         switch (action.kind) {
@@ -167,6 +172,7 @@ export function createSyncPeer(deps: SyncPeerDeps): SyncPeer {
                 blocks: new Array<Buffer | undefined>(remoteEntry.blocks.length),
                 received: 0,
               });
+              livePending.add(remoteEntry.path);
               requestAllBlocks(remoteEntry);
               // 空文件(0 块)不产生块请求,直接落地
               await completeIfReady(remoteEntry.path);
@@ -184,6 +190,7 @@ export function createSyncPeer(deps: SyncPeerDeps): SyncPeer {
                 blocks: new Array<Buffer | undefined>(remoteEntry.blocks.length),
                 received: 0,
               });
+              livePending.add(remoteEntry.path);
               requestAllBlocks(remoteEntry);
               await completeIfReady(remoteEntry.path);
             }
@@ -192,7 +199,18 @@ export function createSyncPeer(deps: SyncPeerDeps): SyncPeer {
         }
       }
 
-      transport.sendEntries(sends);
+      // 清理上一轮遗留、本轮索引已不再引用的陈旧 pending 条目:
+      // 对端删除/改名后这些条目会永久滞留(进度虚报),且迟到的块响应
+      // 可能把刚删除的文件临时复活
+      for (const path of pending.keys()) {
+        if (!livePending.has(path)) {
+          pending.delete(path);
+        }
+      }
+
+      if (sends.length > 0) {
+        transport.sendEntries(sends);
+      }
       pendingSendCount = sends.length;
     },
 

@@ -115,11 +115,23 @@ export function createLocalExecutor(root: string, index: IndexStore): LocalExecu
       }
 
       const target = resolvePath(path);
-
-      // 本地内容保留为冲突副本,绝不静默丢弃;远端版本落地
-      // 时间戳精度到毫秒 + 逐次递增序号,防止同一毫秒多次冲突时副本文件名碰撞被覆盖
       const ext = extname(path);
       const base = path.slice(0, path.length - ext.length);
+
+      // 先获取并校验远端块:失败(对端失联/块校验不符)时本地文件保持不动,
+      // 避免本地被 rename 成冲突副本后原路径变空,下一轮扫描产生墓碑并传播删除
+      const blocks = await provider.getBlocks(remote);
+      if (blocks.length !== remote.blocks.length) {
+        throw new Error(`block count mismatch for ${remote.path}`);
+      }
+      for (let i = 0; i < blocks.length; i++) {
+        if (!verifyBlock(blocks[i]!, remote.blocks[i]!)) {
+          throw new Error(`block ${i} hash mismatch for ${remote.path}`);
+        }
+      }
+
+      // 校验通过后才动本地文件:本地内容保留为冲突副本,绝不静默丢弃。
+      // 时间戳精度到毫秒 + 逐次递增序号,防止同一毫秒多次冲突时副本文件名碰撞被覆盖
       if (existsSync(target)) {
         const ts = Date.now().toString(36);
         let n = 0;
@@ -132,7 +144,6 @@ export function createLocalExecutor(root: string, index: IndexStore): LocalExecu
         renameSync(target, resolvePath(copyName));
       }
 
-      const blocks = await provider.getBlocks(remote);
       const mtime = await landRemote(remote, blocks);
 
       // 索引记录合并版本(双方修改都保留),并写入落地后的 mtime

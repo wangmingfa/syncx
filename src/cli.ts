@@ -16,6 +16,20 @@ const COMMANDS = new Set(['start', 'status', 'install', 'invite', 'join', 'revok
 /** 控制 API 可安全绑定的回环地址;非回环地址必须显式 --expose-control。 */
 const LOOPBACK_HOSTS = new Set(['127.0.0.1', '::1', 'localhost']);
 
+/** 断线重连退避基数与上限(指数退避 1s、2s、4s…,封顶 30s)。 */
+export const RECONNECT_BASE_MS = 1000;
+export const RECONNECT_MAX_MS = 30000;
+
+/**
+ * 断线重连退避延迟:attempts 为已连续失败次数。
+ * 第 0 次(首连失败)立即重试(0ms),之后按指数退避 —— 避免双 daemon
+ * 同时启动时互相 ECONNREFUSED,连接建立被推后到 30s 边缘。
+ */
+export function reconnectDelayMs(attempts: number): number {
+  if (attempts <= 0) return 0;
+  return Math.min(RECONNECT_BASE_MS * 2 ** (attempts - 1), RECONNECT_MAX_MS);
+}
+
 export function parseArgs(argv: string[]): ParsedArgs {
   const [command, ...rest] = argv;
 
@@ -298,8 +312,6 @@ export async function run(args: ParsedArgs): Promise<void> {
   // 跟踪所有 peer socket(入站 + 出站),关闭时统一断开,避免客户端 socket
   // 保持事件循环活跃导致进程无法退出。
   const peerSockets = new Set<WebSocket>();
-  const RECONNECT_BASE_MS = 1000;
-  const RECONNECT_MAX_MS = 30000;
   const MAX_CONNECTIONS_PER_PEER = 2;
 
   function isPeerConnected(deviceId: string): boolean {
@@ -367,9 +379,10 @@ export async function run(args: ParsedArgs): Promise<void> {
   function scheduleReconnect(deviceId: string): void {
     const url = outboundPeerUrls.get(deviceId);
     if (!url) return;
-    const attempts = (reconnectAttempts.get(deviceId) ?? 0) + 1;
-    reconnectAttempts.set(deviceId, attempts);
-    const delay = Math.min(RECONNECT_BASE_MS * 2 ** (attempts - 1), RECONNECT_MAX_MS);
+    // attempts = 已连续失败次数:首连失败(0)立即重试,之后指数退避
+    const attempts = reconnectAttempts.get(deviceId) ?? 0;
+    reconnectAttempts.set(deviceId, attempts + 1);
+    const delay = reconnectDelayMs(attempts);
     logger.info(`peer ${deviceId} disconnected, reconnecting in ${delay}ms`);
     const timer = setTimeout(() => {
       reconnectTimers.delete(deviceId);

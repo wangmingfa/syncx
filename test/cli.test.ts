@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { parseArgs } from '../src/cli.js';
+import { parseArgs, reconnectDelayMs } from '../src/cli.js';
 
 describe('cli parseArgs', () => {
   it('parses the start command with defaults', () => {
@@ -133,5 +133,24 @@ describe('cli parseArgs', () => {
       host: undefined,
       positionals: ['/data/docs'],
     });
+  });
+});
+
+describe('reconnectDelayMs', () => {
+  it('retries the first failed connection attempt immediately', () => {
+    // 首连失败(attempts=0)不等待,立即重试 —— 修复前第一个延迟就是 1s,
+    // 双 daemon 同时启动时互相 ECONNREFUSED 后连接建立会被推后,
+    // 负载高时退避到 30s 边缘导致同步类集成测试间歇超时
+    expect(reconnectDelayMs(0)).toBe(0);
+  });
+
+  it('backs off exponentially after the immediate retry, capped at 30s', () => {
+    expect(reconnectDelayMs(1)).toBe(1000);
+    expect(reconnectDelayMs(2)).toBe(2000);
+    expect(reconnectDelayMs(3)).toBe(4000);
+    expect(reconnectDelayMs(4)).toBe(8000);
+    expect(reconnectDelayMs(5)).toBe(16000);
+    expect(reconnectDelayMs(6)).toBe(30000);
+    expect(reconnectDelayMs(10)).toBe(30000);
   });
 });

@@ -11,9 +11,11 @@ import {
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { createSyncPeer, type PeerTransport } from '../src/peer.js';
-import { createLocalExecutor } from '../src/executor.js';
+import { createLocalExecutor, type LocalExecutor } from '../src/executor.js';
 import { openIndexStore } from '../src/indexstore.js';
 import { hashBlock, BLOCK_SIZE } from '../src/blockstore.js';
+import { mergeVersions } from '../src/version.js';
+import type { IndexEntry } from '../src/index.js';
 
 function entry(
   path: string,
@@ -357,5 +359,103 @@ describe('sync peer session', () => {
     expect(responses).toHaveLength(0);
 
     rmSync(dir, { recursive: true, force: true });
+  });
+
+  it('clears stale pending entries when the peer index no longer references them', async () => {
+    const { transport } = fakeTransport();
+    const peer = createSyncPeer({
+      transport,
+      localIndex: new Map(),
+      executor: null as never,
+      readLocalBlock: () => Buffer.from(''),
+      deviceId: 'DEV-A',
+    });
+
+    const content = Buffer.from('gone');
+    await peer.onPeerIndex([
+      entry('gone.txt', [['dev-b', 1]], [hashBlock(content)], content.length),
+    ]);
+    expect(peer.getSyncProgress().pending).toBe(1);
+
+    // 对端下一轮索引不再包含该路径(如对端删除后不再广播该条目):
+    // 上一轮遗留的 pending 条目应被清理,而非永久滞留(进度虚报 +
+    // 迟到块响应可能复活已被删除的文件)
+    await peer.onPeerIndex([]);
+    expect(peer.getSyncProgress().pending).toBe(0);
+
+    // 迟到块响应不应复活已清理的条目
+    await peer.onBlockResponse({
+      deviceId: 'DEV-B',
+      path: 'gone.txt',
+      blockIndex: 0,
+      hash: hashBlock(content),
+      data: content,
+    });
+    expect(peer.getSyncProgress().pending).toBe(0);
+
+    vi.useRealTimers();
+  });
+
+  it('uses the latest local entry when landing a conflict', async () => {
+    const { transport } = fakeTransport();
+    const localIndex = new Map<string, IndexEntry>();
+    const landed: Array<{ version: Map<string, number> }> = [];
+    const peer = createSyncPeer({
+      transport,
+      localIndex,
+      executor: {
+        applyConflict: async (path: string, local: IndexEntry, remote: IndexEntry) => {
+          const merged: IndexEntry = {
+            path,
+            version: mergeVersions(local.version, remote.version),
+            size: 0,
+            deleted: false,
+            blocks: [],
+          };
+          landed.push(merged);
+          return merged;
+        },
+      } as unknown as LocalExecutor,
+      readLocalBlock: () => Buffer.from(''),
+      deviceId: 'DEV-A',
+      remoteDeviceId: 'DEV-B',
+    });
+
+    const content = Buffer.from('remote edit');
+    localIndex.set(
+      'doc.txt',
+      entry('doc.txt', [['DEV-A', 2]], [hashBlock(Buffer.from('local'))], 5),
+    );
+    const remote = entry(
+      'doc.txt',
+      [
+        ['DEV-A', 1],
+        ['DEV-B', 2],
+      ],
+      [hashBlock(content)],
+      content.length,
+    );
+
+    await peer.onPeerIndex([remote]);
+    expect(peer.getSyncProgress().pending).toBe(1);
+
+    // 冲突规划后、块到达前,本地被新一轮扫描更新(DEV-A:2 → DEV-A:3):
+    // 合并必须用最新本地版本,否则版本向量回退(修复前用规划时捕获的 DEV-A:2)
+    localIndex.set(
+      'doc.txt',
+      entry('doc.txt', [['DEV-A', 3]], [hashBlock(Buffer.from('local v2'))], 7),
+    );
+
+    await peer.onBlockResponse({
+      deviceId: 'DEV-B',
+      path: 'doc.txt',
+      blockIndex: 0,
+      hash: hashBlock(content),
+      data: content,
+    });
+
+    expect(landed).toHaveLength(1);
+    expect(landed[0]!.version.get('DEV-A')).toBe(3);
+    expect(landed[0]!.version.get('DEV-B')).toBe(2);
   });
 });
