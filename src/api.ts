@@ -1,6 +1,6 @@
 import { createServer, type Server, type IncomingMessage, type ServerResponse } from 'node:http';
 import { timingSafeEqual } from 'node:crypto';
-import { readFileSync } from 'node:fs';
+import webClientJs from './web-client.js';
 
 export interface ControlServerDeps {
   token: string;
@@ -153,21 +153,17 @@ export function createControlServer(deps: ControlServerDeps): Server {
       return;
     }
 
-    if (!authenticated) {
-      res.writeHead(401, { 'Content-Type': 'application/json' });
-      res.end(JSON.stringify({ error: 'unauthorized' }));
+    // GET /client.js : 纯 CSR 客户端 bundle。UI 壳由浏览器在加载时即拉取,
+    // 此时尚未登录,故保持公开(与 /、/login 一致);写操作仍受 token 保护。
+    if (req.method === 'GET' && req.url && pathname(req.url) === '/client.js') {
+      res.writeHead(200, { 'Content-Type': 'application/javascript; charset=utf-8' });
+      res.end(webClientJs);
       return;
     }
 
-    // GET /client.js : 纯 CSR 客户端 bundle(由 UI_SHELL 的 <script> 加载)
-    if (req.method === 'GET' && req.url && pathname(req.url) === '/client.js') {
-      try {
-        const js = readFileSync(new URL('../dist/web/client.js', import.meta.url));
-        res.writeHead(200, { 'Content-Type': 'application/javascript; charset=utf-8' });
-        res.end(js);
-      } catch {
-        sendJson(res, 500, { error: 'client bundle not built; run npm run build' });
-      }
+    if (!authenticated) {
+      res.writeHead(401, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ error: 'unauthorized' }));
       return;
     }
 

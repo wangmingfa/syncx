@@ -27,18 +27,27 @@ export default defineConfig({
       '/login': 'http://127.0.0.1:8384',
     },
   },
+  // 顶层 define:Vite 不会替换 process.env.NODE_ENV,需手动注入。
+  // 放错位置(如 build.define)会导致 Vue 跑在 dev 模式(TS 也会报 overload 错误)。
+  define: {
+    'process.env.NODE_ENV': '"production"',
+  },
   // 生产构建:客户端 bundle,由浏览器加载 web/client.ts,
   // 接管交互(fetch + 局部刷新 + toast)。产物目录 dist/web(与源码目录对齐)。
   build: {
     target: 'es2020',
     outDir: resolve(root, 'dist/web'),
+    // lib 模式下 vite 默认不 minify。显式压缩避免内嵌到单文件后端后
+    // syncx.js 中段保留一整份未压缩的 Vue 运行时源码(体积虚高)。
+    minify: 'esbuild',
     lib: {
       entry: resolve(root, 'web/client.ts'),
       formats: ['es'],
       fileName: 'client',
     },
     rollupOptions: {
-      external: ['vue'],
+      // vue 一同打进 client.js,使内嵌到单文件后端后浏览器侧可独立运行,
+      // 无需额外的 import map 或全局 vue。
     },
   },
 });
