@@ -79,6 +79,24 @@ describe('mDNS discovery', () => {
     expect(found).toHaveLength(before);
   });
 
+  it('parses TXT data shaped as Buffer[] (real dns-packet decode output)', () => {
+    const fake = new FakeMdns();
+    const found: DiscoveredPeer[] = [];
+    startDiscovery(SELF, 22000, (p) => found.push(p), () => fake as unknown as MdnsInstance);
+    fake.emit('ready');
+
+    // dns-packet 解码 TXT 后 data 是 Buffer[] 而非单个 Buffer;
+    // 修复前 Buffer.isBuffer(txt.data) 恒为 false,导致 deviceId 永远匹配不到。
+    const txtData = [Buffer.from('deviceId=PEER234567')];
+    fake.emit('response', {
+      answers: [
+        { name: SERVICE, type: 'TXT', data: txtData },
+        { name: SERVICE, type: 'SRV', data: { target: 'host.', port: 22000 } },
+      ],
+    });
+    expect(found).toEqual([{ deviceId: 'PEER234567', host: 'host', port: 22000 }]);
+  });
+
   it('closes the underlying mDNS socket on close()', () => {
     const fake = new FakeMdns();
     const disc = startDiscovery(SELF, 22000, () => {}, () => fake as unknown as MdnsInstance);

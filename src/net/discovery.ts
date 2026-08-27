@@ -19,6 +19,22 @@ export interface Discovery {
 export type MdnsInstance = ReturnType<typeof multicastDNS>;
 
 /**
+ * 解析 mDNS TXT 记录的 data。
+ * dns-packet 的 TXT 解码结果在真实环境下是 `Buffer[]`(每段一段文本),
+ * 而旧版本 / 测试假对象可能是单个 Buffer 或字符串。统一归一化为字符串。
+ */
+function decodeTxtData(data: unknown): string {
+  if (Buffer.isBuffer(data)) return data.toString('utf8');
+  if (Array.isArray(data)) {
+    return data
+      .map((part) => (Buffer.isBuffer(part) ? part.toString('utf8') : String(part)))
+      .join('');
+  }
+  if (typeof data === 'string') return data;
+  return '';
+}
+
+/**
  * Thin mDNS discovery: advertises this device (deviceId derived from the
  * public key, service port in SRV), and reports peers that advertise the
  * same service. Advertisement is refreshed periodically and we also query
@@ -77,7 +93,7 @@ export function startDiscovery(
     const srv = response.answers.find((a) => a.type === 'SRV' && a.name === SERVICE);
     if (!txt || !srv || srv.type !== 'SRV' || txt.type !== 'TXT') return;
 
-    const text = Buffer.isBuffer(txt.data) ? txt.data.toString('utf8') : '';
+    const text = decodeTxtData(txt.data);
     const match = text.match(/deviceId=([A-Z2-7]{10})/);
     if (!match) return;
     const deviceId = match[1];

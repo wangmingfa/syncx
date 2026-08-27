@@ -561,7 +561,7 @@ export async function run(args: ParsedArgs): Promise<void> {
     {
       onPeerConnected(socket, remoteDeviceId, key) {
         logger.debug(`inbound peer connected: ${remoteDeviceId}, count=${peerConnectionCount.get(remoteDeviceId) ?? 0}`);
-        if (peerConnectionCount.get(remoteDeviceId) ?? 0 >= MAX_CONNECTIONS_PER_PEER) {
+        if ((peerConnectionCount.get(remoteDeviceId) ?? 0) >= MAX_CONNECTIONS_PER_PEER) {
           socket.close();
           return;
         }
