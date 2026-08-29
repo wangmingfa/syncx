@@ -12,7 +12,7 @@ interface StatusData {
   deviceId: string;
   entries: number;
   tombstones: number;
-  folders: Array<{ path: string; devices: string[] }>;
+  folders: Array<{ id?: string; path: string; devices: string[] }>;
   peers: Array<{ deviceId: string; online: boolean; url?: string }>;
   syncProgress: SyncProgressItem[];
 }
@@ -123,6 +123,22 @@ onMounted(() => {
   void refreshStatus();
 });
 
+// 目录稳定标识(与后端 folderIdFor 一致:id 优先,回退 path),用作列表 key 与进度匹配
+function folderKey(f: { id?: string; path: string }): string {
+  return f.id ?? f.path;
+}
+
+// 该目录的同步进度(按 folderId 匹配)
+function progressOf(f: { id?: string; path: string }): SyncProgressItem | undefined {
+  const key = folderKey(f);
+  return status.value.syncProgress.find((p) => p.folder === key);
+}
+
+// 某设备参与共享的目录数量(反向映射)
+function deviceFolderCount(deviceId: string): number {
+  return status.value.folders.filter((f) => f.devices.includes(deviceId)).length;
+}
+
 function progressPercent(p: SyncProgressItem): number {
   const total = p.pending + p.sending + p.receiving;
   return total > 0 ? Math.round((p.receiving / total) * 100) : 0;
@@ -131,94 +147,90 @@ function progressPercent(p: SyncProgressItem): number {
 
 <template>
   <div class="container">
-    <h1>syncx 状态</h1>
+    <h1>syncx</h1>
     <div v-if="toast" class="toast">{{ toast }}</div>
 
-    <div class="card">
+    <!-- 顶部:本机设备 + 概览 -->
+    <div class="card header-card">
       <div class="muted">本机设备</div>
       <div class="deviceId">{{ status.deviceId }}</div>
       <div class="stat-row">
         <div class="stat"><b>{{ status.entries }}</b>索引条目</div>
         <div class="stat"><b>{{ status.tombstones }}</b>墓碑</div>
         <div class="stat"><b>{{ status.folders.length }}</b>共享目录</div>
+        <div class="stat"><b>{{ status.peers.length }}</b>已配对设备</div>
       </div>
       <div class="actions">
         <button type="button" :disabled="busy" @click="rescan">手动扫描</button>
       </div>
     </div>
 
-    <div class="card">
-      <div class="muted">对端连接</div>
-      <table>
-        <thead>
-          <tr><th>设备</th><th>状态</th><th>操作</th></tr>
-        </thead>
-        <tbody>
-          <tr v-if="status.peers.length === 0">
-            <td colspan="3" class="muted">暂无对端</td>
-          </tr>
-          <tr v-for="p in status.peers" :key="p.deviceId">
-            <td><span class="dot" :class="p.online ? 'dot-online' : 'dot-offline'"></span>{{ p.deviceId }}</td>
-            <td :class="p.online ? 'online' : 'offline'">{{ p.online ? '在线' : '离线' }}</td>
-            <td>
-              <button v-if="!p.online" type="button" class="btn-sm" :disabled="busy" @click="reconnect(p.deviceId)">重连</button>
-            </td>
-          </tr>
-        </tbody>
-      </table>
-    </div>
+    <!-- 主体:左右两栏(左=共享目录,右=已配对设备) -->
+    <div class="layout">
+      <!-- 左栏:共享目录 -->
+      <section class="col">
+        <div class="col-head">
+          <span>共享目录</span>
+          <span class="badge">{{ status.folders.length }}</span>
+        </div>
 
-    <div class="card">
-      <div class="muted">同步进度</div>
-      <table>
-        <thead>
-          <tr><th>目录</th><th>待处理</th><th>发送中</th><th>接收中</th><th>进度</th></tr>
-        </thead>
-        <tbody>
-          <tr v-if="status.syncProgress.length === 0">
-            <td colspan="5" class="muted">同步中无待处理任务</td>
-          </tr>
-          <tr v-for="p in status.syncProgress" :key="p.folder">
-            <td>{{ p.folder }}</td>
-            <td>{{ p.pending }}</td>
-            <td>{{ p.sending }}</td>
-            <td>{{ p.receiving }}</td>
-            <td>
-              <div class="progress-bar"><div class="progress-fill" :style="{ width: progressPercent(p) + '%' }"></div></div>
-            </td>
-          </tr>
-        </tbody>
-      </table>
-    </div>
+        <div v-if="status.folders.length === 0" class="empty">暂无共享目录</div>
+        <div v-for="f in status.folders" :key="folderKey(f)" class="item-card">
+          <div class="item-top">
+            <span class="item-title">{{ f.path }}</span>
+            <button
+              type="button"
+              class="btn-sm btn-danger"
+              :disabled="busy"
+              @click="removeFolder(f.path)"
+            >移除</button>
+          </div>
+          <div class="item-sub">
+            已配对 {{ f.devices.length }} 台设备
+            <span v-if="f.devices.length"> · {{ f.devices.join(', ') }}</span>
+          </div>
+          <div v-if="progressOf(f)" class="item-progress">
+            <div class="progress-bar">
+              <div class="progress-fill" :style="{ width: progressPercent(progressOf(f)!) + '%' }"></div>
+            </div>
+            <div class="item-sub">
+              待处理 {{ progressOf(f)!.pending }} · 发送 {{ progressOf(f)!.sending }} · 接收 {{ progressOf(f)!.receiving }}
+            </div>
+          </div>
+        </div>
 
-    <div class="card">
-      <div class="muted">共享目录</div>
-      <table>
-        <thead>
-          <tr><th>路径</th><th>已配对设备</th><th></th></tr>
-        </thead>
-        <tbody>
-          <tr v-if="status.folders.length === 0">
-            <td colspan="3" class="muted">暂无共享目录</td>
-          </tr>
-          <tr v-for="f in status.folders" :key="f.path">
-            <td>{{ f.path }}</td>
-            <td>{{ f.devices.join(', ') }}</td>
-            <td class="actions">
-              <button type="button" class="btn-sm" :disabled="busy" @click="removeFolder(f.path)">移除</button>
-            </td>
-          </tr>
-        </tbody>
-      </table>
-    </div>
+        <form class="add-form" @submit.prevent="addFolder">
+          <input v-model="newPath" placeholder="本地目录绝对路径,如 /home/me/Documents">
+          <input v-model="newDevices" placeholder="允许的设备 ID,逗号分隔,如 DEV1234567">
+          <button type="submit" :disabled="busy">添加共享目录</button>
+        </form>
+      </section>
 
-    <div class="card">
-      <div class="muted">添加共享目录</div>
-      <form @submit.prevent="addFolder">
-        <input v-model="newPath" placeholder="本地目录绝对路径,如 /home/me/Documents">
-        <input v-model="newDevices" placeholder="允许的设备 ID,逗号分隔,如 DEV1234567">
-        <button type="submit" :disabled="busy">添加</button>
-      </form>
+      <!-- 右栏:已配对设备 -->
+      <section class="col">
+        <div class="col-head">
+          <span>已配对设备</span>
+          <span class="badge">{{ status.peers.length }}</span>
+        </div>
+
+        <div v-if="status.peers.length === 0" class="empty">暂无已配对设备</div>
+        <div v-for="p in status.peers" :key="p.deviceId" class="item-card">
+          <div class="item-top">
+            <span class="dot" :class="p.online ? 'dot-online' : 'dot-offline'"></span>
+            <span class="item-title mono">{{ p.deviceId }}</span>
+            <span class="status-pill" :class="p.online ? 'pill-online' : 'pill-offline'">
+              {{ p.online ? '在线' : '离线' }}
+            </span>
+          </div>
+          <div class="item-sub">
+            共享 {{ deviceFolderCount(p.deviceId) }} 个目录
+            <span v-if="p.url"> · {{ p.url }}</span>
+          </div>
+          <div v-if="!p.online" class="actions">
+            <button type="button" class="btn-sm" :disabled="busy" @click="reconnect(p.deviceId)">重连</button>
+          </div>
+        </div>
+      </section>
     </div>
   </div>
 </template>
