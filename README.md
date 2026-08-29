@@ -176,6 +176,13 @@ npm run typecheck      # TypeScript 类型检查(tsc --noEmit)
 npm run build          # 编译到 dist/(tsc)
 ```
 
+`npm run dev` 会同时起两个进程:vite dev server(固定 `5173`)和 syncx 后端(控制端口 `8384`)。
+**浏览器请打开 `http://localhost:8384`** —— 后端会把页面、前端模块和 HMR 请求反向代理到 vite,
+因此改 `.vue` 即时热更新,且不需要先跑 `vite build`。
+
+> 直接开 `5173` 也能看到页面,但 HMR 之外的一切(登录写 cookie、目录增删)仍以 `8384` 为准,
+> 所以 `8384` 是唯一推荐入口。
+
 ### npm run dev 的参数
 
 `npm run dev` 等价于 `tsx watch src/main.ts start`,任何 `start` 支持的参数都可以通过 `npm run dev -- <参数>` 传入(注意中间的 `--`):
@@ -186,6 +193,10 @@ npm run build          # 编译到 dist/(tsc)
 | `--port <端口>` | P2P 同步端口(其他设备连接用) | `22000` |
 | `--control-port <端口>` | Web UI / 控制 API 端口 | `8384` |
 | `--host <地址>` | 控制服务绑定地址 | `0.0.0.0`(dev 脚本已默认;`127.0.0.1` 仅本机) |
+| `--dev-vite <url>` | 把前端资源反向代理到 vite dev server(启用 HMR) | dev 脚本已传 `http://127.0.0.1:5173` |
+
+不传 `--dev-vite` 时,后端从 `dist/web/client.js` 提供前端 bundle,即生产行为 ——
+此时必须先 `npm run build:web`,否则 `/client.js` 返回空内容导致页面白屏。
 
 示例:
 

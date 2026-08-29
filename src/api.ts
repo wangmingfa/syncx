@@ -1,6 +1,7 @@
 import { createServer, type Server, type IncomingMessage, type ServerResponse } from 'node:http';
 import { timingSafeEqual } from 'node:crypto';
-import { readFileSync } from 'node:fs';
+import webClientJs from './web-client.js';
+import { FAVICON_SVG } from './favicon.js';
 
 export interface ControlServerDeps {
   token: string;
@@ -11,14 +12,44 @@ export interface ControlServerDeps {
   rescan?: () => void;
   /** 手动重连指定对端。 */
   reconnect?: (deviceId: string) => void;
+  /**
+   * 开发模式的 vite dev server 基址(如 `http://127.0.0.1:5173`)。
+   * 设置后,非控制端点的请求全部反向代理过去,前端因此获得 HMR,
+   * 且无需先跑 `vite build` 生成 `dist/web/client.js`。
+   * 生产/打包形态不传,走内嵌 bundle。
+   */
+  devViteUrl?: string;
 }
 
 const COOKIE_NAME = 'syncx_session';
+
+/** 逐跳首部:代理时既不转发给上游,也不回传给浏览器。 */
+const HOP_BY_HOP = new Set([
+  'connection',
+  'keep-alive',
+  'transfer-encoding',
+  'upgrade',
+  // content-length / content-encoding 由 fetch 解压后重新计算
+  'content-length',
+  'content-encoding',
+  // 不转发浏览器的 Host(形如 localhost:8384),由 fetch 按目标 URL 重新生成
+  'host',
+]);
+
+/**
+ * dev 代理标记头。
+ *
+ * 若上游(vite)又把请求代理回 control server,会出现
+ * 8384 → vite → 8384 → … 的无限回环。带上这个头,收到带头的请求时
+ * 不再二次代理,直接按控制端点逻辑处理(兜底是 404,而不是挂死)。
+ */
+const DEV_PROXY_HEADER = 'x-syncx-dev-proxy';
 
 /** 纯 CSR 页面壳:客户端 bundle 挂载后自行拉取状态与处理交互。 */
 const UI_SHELL = `<!DOCTYPE html><html lang="zh-CN"><head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width">
+<link rel="icon" type="image/svg+xml" href="/favicon.svg">
 <title>syncx</title>
 </head><body>
 <div id="app"></div>
@@ -28,6 +59,66 @@ const UI_SHELL = `<!DOCTYPE html><html lang="zh-CN"><head>
 /** 提取请求路径(去掉查询串),用于精确路由匹配。 */
 function pathname(rawUrl: string): string {
   return new URL(rawUrl, 'http://localhost').pathname;
+}
+
+/**
+ * 判断请求是否必须由 control server 本地处理。
+ *
+ * dev 代理下其余请求一律转交 vite,所以这里必须显式列出全部控制端点,
+ * 否则后续新增的 API 会被误当成前端资源代理出去(静默失效)。
+ */
+function isControlRoute(method: string, path: string): boolean {
+  if (path.startsWith('/api/')) return true;
+  // 表单提交走 control server:登录写 cookie,目录增删写配置。
+  return method === 'POST' && (path === '/login' || path === '/folders' || path === '/actions');
+}
+
+/**
+ * 把请求反向代理到 vite dev server。
+ *
+ * 上游不可达时返回 502 并说明原因 —— 不回退到空壳 HTML,
+ * 避免再次出现「页面白屏但控制台无报错」的静默失败。
+ */
+async function proxyToDevServer(
+  req: IncomingMessage,
+  res: ServerResponse,
+  baseUrl: string,
+): Promise<void> {
+  try {
+    const target = new URL(req.url ?? '/', baseUrl);
+
+    const headers: Record<string, string> = {};
+    for (const [key, value] of Object.entries(req.headers)) {
+      if (HOP_BY_HOP.has(key) || value === undefined) continue;
+      headers[key] = Array.isArray(value) ? value.join(', ') : value;
+    }
+
+    const upstream = await fetch(target, {
+      method: req.method ?? 'GET',
+      headers: { ...headers, [DEV_PROXY_HEADER]: '1' },
+      redirect: 'manual',
+    });
+    const body = Buffer.from(await upstream.arrayBuffer());
+
+    const out: Record<string, string> = {};
+    upstream.headers.forEach((value, key) => {
+      if (HOP_BY_HOP.has(key)) return;
+      out[key] = value;
+    });
+    out['content-length'] = String(body.length);
+    res.writeHead(upstream.status, out);
+    res.end(body);
+  } catch (error) {
+    if (!res.headersSent) {
+      res.writeHead(502, { 'Content-Type': 'application/json' });
+      res.end(
+        JSON.stringify({
+          error: 'dev server unavailable',
+          detail: `cannot reach vite dev server at ${baseUrl}: ${error instanceof Error ? error.message : String(error)}`,
+        }),
+      );
+    }
+  }
 }
 
 function readToken(req: IncomingMessage): string | undefined {
@@ -114,13 +205,48 @@ async function ensureSsr(): Promise<void> {
  * Local control API on localhost. Auth accepts Bearer token (legacy) or
  * the HttpOnly `syncx_session` cookie. Form POSTs redirect back to the
  * SSR page; unknown paths return 404.
+ *
+ * 若传入 `devViteUrl`,非控制端点的请求会先代理到 vite dev server
+ * (见 `isControlRoute`),生产形态下不传该参数。
  */
 export function createControlServer(deps: ControlServerDeps): Server {
-  const { token, getStatus, addFolder, removeFolder, rescan, reconnect } = deps;
+  const { token, getStatus, addFolder, removeFolder, rescan, reconnect, devViteUrl } = deps;
 
   return createServer((req, res) => {
     void (async () => {
       try {
+    const path = req.url ? pathname(req.url) : '/';
+
+    // 站点图标:公开资源,且打包形态下也须可用,
+    // 故排在认证兜底与 dev 代理之前,避免落到 401 分支。
+    if (req.method === 'GET' && path === '/favicon.svg') {
+      res.writeHead(200, {
+        'Content-Type': 'image/svg+xml',
+        'Cache-Control': 'public, max-age=86400',
+      });
+      res.end(FAVICON_SVG);
+      return;
+    }
+    // 浏览器在无 <link rel="icon"> 时会自动请求 .ico;这里显式给 204,
+    // 否则会落到下方未认证分支返回 401,在控制台里误导排查。
+    if (req.method === 'GET' && path === '/favicon.ico') {
+      res.writeHead(204, {});
+      res.end();
+      return;
+    }
+
+    // dev 模式:页面壳、前端模块、HMR 端点全部转交 vite dev server,
+    // 这样无需先跑 vite build,改 .vue 即时生效。控制端点仍本地处理。
+    if (devViteUrl && !isControlRoute(req.method ?? 'GET', path)) {
+      if (req.headers[DEV_PROXY_HEADER] !== undefined) {
+        // 已经被代理过一轮:不再转发,避免回环。
+        sendJson(res, 404, { error: 'not found' });
+        return;
+      }
+      await proxyToDevServer(req, res, devViteUrl);
+      return;
+    }
+
     const reqToken = readToken(req);
     const authenticated = tokenMatches(reqToken ?? '', token);
 
@@ -153,21 +279,17 @@ export function createControlServer(deps: ControlServerDeps): Server {
       return;
     }
 
-    if (!authenticated) {
-      res.writeHead(401, { 'Content-Type': 'application/json' });
-      res.end(JSON.stringify({ error: 'unauthorized' }));
+    // GET /client.js : 纯 CSR 客户端 bundle。UI 壳由浏览器在加载时即拉取,
+    // 此时尚未登录,故保持公开(与 /、/login 一致);写操作仍受 token 保护。
+    if (req.method === 'GET' && req.url && pathname(req.url) === '/client.js') {
+      res.writeHead(200, { 'Content-Type': 'application/javascript; charset=utf-8' });
+      res.end(webClientJs);
       return;
     }
 
-    // GET /client.js : 纯 CSR 客户端 bundle(由 UI_SHELL 的 <script> 加载)
-    if (req.method === 'GET' && req.url && pathname(req.url) === '/client.js') {
-      try {
-        const js = readFileSync(new URL('../dist/web/client.js', import.meta.url));
-        res.writeHead(200, { 'Content-Type': 'application/javascript; charset=utf-8' });
-        res.end(js);
-      } catch {
-        sendJson(res, 500, { error: 'client bundle not built; run npm run build' });
-      }
+    if (!authenticated) {
+      res.writeHead(401, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ error: 'unauthorized' }));
       return;
     }
 

@@ -9,6 +9,8 @@ export interface ParsedArgs {
   host?: string;
   /** 日志文件路径;不指定则仅输出到 stdout。 */
   logFile?: string;
+  /** dev 模式:前端资源代理到该 vite dev server 基址(如 http://127.0.0.1:5173)。 */
+  devViteUrl?: string;
 }
 
 const COMMANDS = new Set(['start', 'status', 'install', 'invite', 'join', 'revoke']);
@@ -61,6 +63,11 @@ export function parseArgs(argv: string[]): ParsedArgs {
     } else if (flag === '--log-file') {
       result.logFile = value;
       i++;
+    } else if (flag === '--dev-vite') {
+      // 用 URL 构造器校验:非法基址在此处就报错,而不是等某次请求代理时才炸。
+      new URL(String(value));
+      result.devViteUrl = value;
+      i++;
     } else if (flag === '--expose-control') {
       exposeControl = true;
     } else if (flag.startsWith('-')) {
@@ -85,7 +92,7 @@ import { dirname, join, relative, isAbsolute } from 'node:path';
 import { homedir } from 'node:os';
 import { randomBytes } from 'node:crypto';
 import { loadOrCreateIdentity } from './identity.js';
-import { loadConfig } from './config.js';
+import { loadConfig, saveConfig } from './config.js';
 import { openIndexStore, type IndexStore } from './indexstore.js';
 import { createLocalExecutor, resolveSharePath, type LocalExecutor } from './executor.js';
 import { filterIndexedEntries, parseIgnoreRules } from './ignore.js';
@@ -160,6 +167,12 @@ export async function run(args: ParsedArgs): Promise<void> {
 
   const identity = loadOrCreateIdentity(configDir);
   const config = loadConfig(configPath);
+  // 首次运行(如 dev 未指定 --config,默认 ~/.syncx/config.json):若配置文件不存在,
+  // 先写出默认配置,否则下方 fs.watch 在 Windows 上对不存在的路径会同步抛出 ENOENT,
+  // 未捕获将导致 daemon 进程崩溃(control server 无法监听,Web UI 代理 502/ECONNREFUSED)。
+  if (!existsSync(configPath)) {
+    saveConfig(configPath, config);
+  }
   if (args.command === 'status') {
     console.log(`device: ${identity.deviceId}`);
     console.log(`shared folders: ${config.sharedFolders.length}`);
@@ -246,6 +259,9 @@ export async function run(args: ParsedArgs): Promise<void> {
     for (const lan of lanAddresses) {
       logger.info(`  http://${formatHost(lan.address, lan.family)}:${controlPort}`);
     }
+  }
+  if (args.devViteUrl) {
+    logger.info(`dev mode: 前端资源代理到 vite dev server ${args.devViteUrl}(HMR 已启用)`);
   }
 
   /** 为一个共享目录创建运行期状态(索引/执行器/本地索引/忽略规则)。 */
@@ -497,6 +513,7 @@ export async function run(args: ParsedArgs): Promise<void> {
   // 控制 API:在 peer 状态和同步进度可用后创建
   const control = createControlServer({
     token,
+    devViteUrl: args.devViteUrl,
     addFolder: (path, devices) => {
       addSharedFolder(configPath, path, devices);
       logger.info(`shared folder added: ${path}`);
@@ -561,7 +578,7 @@ export async function run(args: ParsedArgs): Promise<void> {
     {
       onPeerConnected(socket, remoteDeviceId, key) {
         logger.debug(`inbound peer connected: ${remoteDeviceId}, count=${peerConnectionCount.get(remoteDeviceId) ?? 0}`);
-        if (peerConnectionCount.get(remoteDeviceId) ?? 0 >= MAX_CONNECTIONS_PER_PEER) {
+        if ((peerConnectionCount.get(remoteDeviceId) ?? 0) >= MAX_CONNECTIONS_PER_PEER) {
           socket.close();
           return;
         }
@@ -613,7 +630,9 @@ export async function run(args: ParsedArgs): Promise<void> {
   }, SCAN_INTERVAL_MS);
 
   // 配置热重载:监听 config.json 变更,增量应用共享目录与对端列表变更,无需重启 daemon
-  const configWatcher = watch(configPath, (_eventType, _filename) => {
+  let configWatcher: import('node:fs').FSWatcher | undefined;
+  try {
+    configWatcher = watch(configPath, (_eventType, _filename) => {
     try {
       const newConfig = loadConfig(configPath);
 
@@ -676,11 +695,16 @@ export async function run(args: ParsedArgs): Promise<void> {
       logger.error(`config reload failed: ${error instanceof Error ? error.message : String(error)}`);
     }
   });
+  } catch (err) {
+    // Windows 上对不存在/不可达路径 fs.watch 会同步抛错;上游已确保配置文件存在,
+    // 此处仅作兜底,避免热重载初始化失败拖垮整个 daemon(control server 仍可正常服务)。
+    logger.warn(`config hot-reload disabled (cannot watch ${configPath}): ${String(err)}`);
+  }
 
   await new Promise<void>((resolve) => {
 const shutdown = (): void => {
     clearInterval(scanTimer);
-    configWatcher.close();
+    configWatcher?.close();
     for (const timer of reconnectTimers.values()) clearTimeout(timer);
     reconnectTimers.clear();
     // 关闭所有 peer socket(入站 + 出站),否则客户端 socket 保持事件循环活跃
