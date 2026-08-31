@@ -408,6 +408,28 @@ button:disabled {
   background: rgb(74 127 192 / 0.14);
 }
 
+/* 顶栏「使用指南」帮助按钮(品牌旁,浅色描边胶囊,不抢身份区) */
+.help-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  background: var(--card);
+  color: var(--accent);
+  border: 1px solid rgb(74 127 192 / 0.3);
+  border-radius: 999px;
+  padding: 7px 14px;
+  margin: 0;
+  font-size: 13px;
+  font-weight: 500;
+  cursor: pointer;
+  transition: background 0.15s ease, border-color 0.15s ease;
+}
+
+.help-btn:hover {
+  background: rgb(74 127 192 / 0.08);
+  border-color: rgb(74 127 192 / 0.5);
+}
+
 /* 区块标题栏里的操作按钮统一推到最右 */
 .col-head .scan-btn {
   margin-left: auto;
@@ -451,6 +473,22 @@ button:disabled {
   grid-template-columns: 1fr 1fr;
   gap: 18px;
   align-items: start;
+  position: relative;
+}
+
+/* 宽屏下两栏之间加一道竖直分隔,强化左右区分 */
+@media (min-width: 821px) {
+  .layout::before {
+    content: '';
+    position: absolute;
+    top: 8px;
+    bottom: 8px;
+    left: 50%;
+    width: 1px;
+    transform: translateX(-50%);
+    background: linear-gradient(to bottom, transparent, var(--border-strong), transparent);
+    pointer-events: none;
+  }
 }
 
 @media (max-width: 820px) {
@@ -459,11 +497,26 @@ button:disabled {
   }
 }
 
+/* 左右两栏各自包一层淡色面板:左=共享目录(天青蓝)、右=设备(薄荷青),
+   卡片仍为纯白,叠在淡色面板上更分明,整体一眼区分两大功能区。 */
 .col {
   display: flex;
   flex-direction: column;
   gap: 12px;
   min-width: 0;
+  padding: 14px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+}
+
+.col--folders {
+  background: rgb(74 127 192 / 0.05);
+  border-color: rgb(74 127 192 / 0.2);
+}
+
+.col--devices {
+  background: rgb(43 182 172 / 0.05);
+  border-color: rgb(43 182 172 / 0.2);
 }
 
 .col-head {
@@ -475,6 +528,15 @@ button:disabled {
   letter-spacing: 0.02em;
   padding: 2px 2px;
   color: var(--text);
+}
+
+/* 区块标题按栏着色:左蓝、右青 */
+.col--folders .col-head {
+  color: var(--accent);
+}
+
+.col--devices .col-head {
+  color: var(--accent-2);
 }
 
 .badge {
@@ -489,6 +551,17 @@ button:disabled {
   color: var(--accent);
   font-size: 12px;
   font-family: var(--mono);
+}
+
+/* 徽标随栏着色,与标题呼应 */
+.col--folders .badge {
+  background: rgb(74 127 192 / 0.12);
+  color: var(--accent);
+}
+
+.col--devices .badge {
+  background: rgb(43 182 172 / 0.14);
+  color: var(--accent-2);
 }
 
 .item-card {
@@ -632,7 +705,7 @@ button:disabled {
 /* ---------- 邀请码配对卡 ---------- */
 
 .pair-card {
-  border-color: rgb(74 127 192 / 0.3);
+  border-color: rgb(43 182 172 / 0.3);
 }
 
 .pair-card .eyebrow {
@@ -753,5 +826,164 @@ button:disabled {
   td {
     padding: 6px 4px;
     font-size: 13px;
+  }
+}
+
+/* ---------- 使用指南弹窗 ---------- */
+
+.modal-overlay {
+  position: fixed;
+  inset: 0;
+  background: rgb(22 32 52 / 0.4);
+  backdrop-filter: blur(2px);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 20px;
+  z-index: 100;
+}
+
+.modal {
+  position: relative;
+  width: 100%;
+  max-width: 520px;
+  max-height: 88vh;
+  overflow-y: auto;
+  background: var(--card);
+  border: 1px solid var(--border);
+  border-radius: 16px;
+  padding: 26px 26px 22px;
+  box-shadow: 0 24px 60px -24px rgb(22 32 52 / 0.45);
+}
+
+.modal-close {
+  position: absolute;
+  top: 14px;
+  right: 14px;
+  width: 30px;
+  height: 30px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  background: transparent;
+  color: var(--muted);
+  border: none;
+  border-radius: 8px;
+  font-size: 22px;
+  line-height: 1;
+  margin: 0;
+  cursor: pointer;
+  transition: background 0.15s ease, color 0.15s ease;
+}
+
+.modal-close:hover {
+  background: var(--bg-soft);
+  color: var(--text);
+}
+
+.modal-title {
+  font-size: 19px;
+  font-weight: 600;
+  letter-spacing: -0.01em;
+  margin-bottom: 4px;
+}
+
+.modal-lead {
+  color: var(--muted);
+  font-size: 13px;
+  margin-bottom: 16px;
+}
+
+.guide-steps {
+  list-style: none;
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+  margin: 0;
+  padding: 0;
+}
+
+.guide-step-h {
+  font-size: 14px;
+  font-weight: 600;
+  color: var(--text);
+  margin-bottom: 3px;
+}
+
+.guide-step-b {
+  font-size: 13px;
+  color: var(--muted);
+  line-height: 1.7;
+}
+
+.guide-step-b strong {
+  color: var(--text);
+  font-weight: 600;
+}
+
+.guide-note {
+  margin-top: 18px;
+  padding: 12px 14px;
+  background: var(--accent-soft);
+  border: 1px solid rgb(74 127 192 / 0.2);
+  border-radius: 10px;
+  font-size: 12.5px;
+  color: var(--accent);
+  line-height: 1.6;
+}
+
+.modal-ok {
+  display: block;
+  width: 100%;
+  margin-top: 18px;
+  background: var(--accent);
+  color: #fff;
+  border: none;
+  border-radius: 10px;
+  padding: 11px;
+  font-size: 14px;
+  font-weight: 500;
+  cursor: pointer;
+  transition: filter 0.15s ease;
+}
+
+.modal-ok:hover {
+  filter: brightness(1.05);
+}
+
+/* ---------- 使用指南弹窗开合动画(由 <Transition name="guide"> 驱动) ---------- */
+/* 遮罩:淡入/淡出;卡片:上浮 + 轻微缩放,开与关对称。 */
+.guide-enter-active,
+.guide-leave-active {
+  transition: opacity 0.22s ease;
+}
+
+.guide-enter-from,
+.guide-leave-to {
+  opacity: 0;
+}
+
+.guide-enter-active .modal,
+.guide-leave-active .modal {
+  transition: transform 0.28s cubic-bezier(0.22, 1, 0.36, 1);
+}
+
+.guide-enter-from .modal,
+.guide-leave-to .modal {
+  transform: translateY(14px) scale(0.96);
+}
+
+/* 尊重系统「减少动态效果」偏好:直接显隐,不做位移动画 */
+@media (prefers-reduced-motion: reduce) {
+  .guide-enter-active,
+  .guide-leave-active,
+  .guide-enter-active .modal,
+  .guide-leave-active .modal {
+    transition: opacity 0.12s ease;
+  }
+
+  .guide-enter-from .modal,
+  .guide-leave-to .modal {
+    transform: none;
   }
 }

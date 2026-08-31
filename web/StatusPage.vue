@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { ref, onMounted } from 'vue';
+import { ref, onMounted, onUnmounted } from 'vue';
 
 interface SyncProgressItem {
   folder: string;
@@ -23,6 +23,23 @@ const props = defineProps<{ status: StatusData; message?: string }>();
 const status = ref<StatusData>(props.status);
 const toast = ref<string | undefined>(props.message);
 const busy = ref(false);
+
+// 使用指南弹窗
+const showGuide = ref(false);
+// 端口提示仅开发模式显示:「dev 请访问 5173(HMR)」对终端用户是噪音,
+// build 后由 vite 静态替换为 false 并 tree-shake 掉整段 DOM。
+const isDev = import.meta.env.DEV;
+// 控制端口取当前地址的真实端口,而非硬编码 8384(--port 可改)。
+const controlPort = globalThis.location?.port || '8384';
+function openGuide(): void {
+  showGuide.value = true;
+}
+function closeGuide(): void {
+  showGuide.value = false;
+}
+function onKeydown(e: KeyboardEvent): void {
+  if (e.key === 'Escape' && showGuide.value) closeGuide();
+}
 
 function showToast(msg: string): void {
   toast.value = msg;
@@ -198,6 +215,11 @@ async function doJoin(): Promise<void> {
 // 挂载后立即刷新一次,确保展示最新状态
 onMounted(() => {
   void refreshStatus();
+  window.addEventListener('keydown', onKeydown);
+});
+
+onUnmounted(() => {
+  window.removeEventListener('keydown', onKeydown);
 });
 
 // 目录稳定标识(与后端 folderIdFor 一致:id 优先,回退 path),用作列表 key 与进度匹配
@@ -267,6 +289,15 @@ function progressText(p: SyncProgressItem): string {
         </div>
       </div>
 
+      <button type="button" class="help-btn" @click="openGuide">
+        <svg viewBox="0 0 24 24" width="15" height="15" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+          <circle cx="12" cy="12" r="9" />
+          <path d="M9.2 9.2a2.8 2.8 0 0 1 5.4 1c0 1.9-2.8 2.8-2.8 2.8" />
+          <line x1="12" y1="16.5" x2="12" y2="16.6" />
+        </svg>
+        使用指南
+      </button>
+
       <div class="topbar__spacer"></div>
 
       <span class="device-chip">
@@ -286,7 +317,7 @@ function progressText(p: SyncProgressItem): string {
     <!-- 主体:左右两栏(左=共享目录,右=设备配对 + 已配对设备) -->
     <div class="layout">
       <!-- 左栏:共享目录 -->
-      <section class="col">
+      <section class="col col--folders">
         <div class="col-head">
           <span>共享目录</span>
           <span class="badge">{{ status.folders.length }}</span>
@@ -339,7 +370,7 @@ function progressText(p: SyncProgressItem): string {
       </section>
 
       <!-- 右栏:设备配对 + 已配对设备 -->
-      <section class="col">
+      <section class="col col--devices">
         <!-- 邀请码配对 -->
         <div class="card pair-card">
           <div class="eyebrow">设备配对</div>
@@ -415,5 +446,52 @@ function progressText(p: SyncProgressItem): string {
         </div>
       </section>
     </div>
+
+    <!-- 使用指南弹窗(开合带动画,由 <Transition> 驱动) -->
+    <Transition name="guide">
+      <div v-if="showGuide" class="modal-overlay" @click.self="closeGuide">
+      <div class="modal" role="dialog" aria-modal="true" aria-labelledby="guide-title">
+        <button type="button" class="modal-close" aria-label="关闭" @click="closeGuide">×</button>
+        <h2 id="guide-title" class="modal-title">首次使用指南</h2>
+        <p class="modal-lead">四步把一台设备连起来,开始局域网同步。</p>
+
+        <ol class="guide-steps">
+          <li>
+            <div class="guide-step-h">① 添加共享目录</div>
+            <div class="guide-step-b">
+              在左侧「共享目录」填写<strong>本地目录绝对路径</strong>(如
+              <code class="mono">/home/me/Documents</code>),可选填允许访问的设备 ID,点「添加共享目录」。
+            </div>
+          </li>
+          <li>
+            <div class="guide-step-h">② 设备配对</div>
+            <div class="guide-step-b">
+              在右侧「设备配对」里二选一:选目录点「生成」拿到<strong>邀请码</strong>发给对方;或粘贴对方邀请码 +
+              本机目录完成「加入并配对」。配对基于局域网自动发现(mDNS)互连。
+            </div>
+          </li>
+          <li>
+            <div class="guide-step-h">③ 等待同步</div>
+            <div class="guide-step-b">
+              配对成功后,该目录会出现在双方设备上。状态显示为「在线 / 传输中 / 已同步」;进度条流动代表正在传数据。
+            </div>
+          </li>
+          <li>
+            <div class="guide-step-h">④ 需要时重新索引</div>
+            <div class="guide-step-b">
+              改了目录里的文件却没立即同步,点左侧「扫描全部」让本机重新建立索引并推送变更。
+            </div>
+          </li>
+        </ol>
+
+        <div v-if="isDev" class="guide-note">
+          开发提示:本界面当前由控制端口 <code class="mono">{{ controlPort }}</code> 提供;dev 模式请访问
+          <code class="mono">5173</code>(HMR 实时热更新)。
+        </div>
+
+        <button type="button" class="modal-ok" @click="closeGuide">我知道了</button>
+      </div>
+    </div>
+    </Transition>
   </div>
 </template>

@@ -10,7 +10,7 @@
     "dev": "concurrently -n vite,syncx -c blue,green \"vite dev --config vite.config.ts\" \"tsx watch src/main.ts start --host 0.0.0.0 --expose-control --dev-vite http://127.0.0.1:5173\"",
     "test": "vitest run",
     "test:watch": "vitest",
-    "typecheck": "tsc --noEmit",
+    "typecheck": "tsc --noEmit && vue-tsc --noEmit -p tsconfig.web.json",
     "build": "npm run build:web && npm run build:single",
     "build:app": "tsc",
     "build:web": "vite build --config vite.config.ts",
@@ -26,8 +26,9 @@
     "concurrently": "^10.0.5",
     "esbuild": "^0.28.2",
     "tsx": "^4.23.12",
-    "typescript": "^7.0.2",
-    "vitest": "^4.1.10"
+    "typescript": "^5.9.3",
+    "vitest": "^4.1.10",
+    "vue-tsc": "^3.3.11"
   },
   "dependencies": {
     "@vitejs/plugin-vue": "^6.0.8",
