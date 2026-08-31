@@ -12,6 +12,10 @@ export interface ControlServerDeps {
   rescan?: () => void;
   /** 手动重连指定对端。 */
   reconnect?: (deviceId: string) => void;
+  /** 为已配置共享目录生成一次性配对邀请码(含本机 deviceId + 签名)。 */
+  createInvite?: (folder: string) => string;
+  /** 接受邀请码:把对端加入共享目录白名单,并返回回邀码供对方反向配对。 */
+  joinInvite?: (code: string, localPath: string) => { deviceId: string; reciprocalCode: string };
   /**
    * 开发模式的 vite dev server 基址(如 `http://127.0.0.1:5173`)。
    * 设置后,非控制端点的请求全部反向代理过去,前端因此获得 HMR,
@@ -210,7 +214,7 @@ async function ensureSsr(): Promise<void> {
  * (见 `isControlRoute`),生产形态下不传该参数。
  */
 export function createControlServer(deps: ControlServerDeps): Server {
-  const { token, getStatus, addFolder, removeFolder, rescan, reconnect, devViteUrl } = deps;
+  const { token, getStatus, addFolder, removeFolder, rescan, reconnect, createInvite, joinInvite, devViteUrl } = deps;
 
   return createServer((req, res) => {
     void (async () => {
@@ -388,6 +392,42 @@ export function createControlServer(deps: ControlServerDeps): Server {
       }
       reconnect(deviceId);
       sendJson(res, 200, { ok: true });
+      return;
+    }
+
+    // GET /api/invite?folder=xxx : 为已配置目录生成一次性配对邀请码
+    if (req.method === 'GET' && req.url && pathname(req.url) === '/api/invite' && createInvite) {
+      const url = new URL(req.url, 'http://localhost');
+      const folder = url.searchParams.get('folder');
+      if (!folder) {
+        sendJson(res, 400, { error: 'folder is required' });
+        return;
+      }
+      try {
+        const code = createInvite(folder);
+        sendJson(res, 200, { code });
+      } catch (e) {
+        sendJson(res, 400, { error: e instanceof Error ? e.message : 'failed to create invite' });
+      }
+      return;
+    }
+
+    // POST /api/join : 接受邀请码,把对端加入白名单,返回回邀码(双向配对)
+    if (req.method === 'POST' && req.url && pathname(req.url) === '/api/join' && joinInvite) {
+      try {
+        const raw = await readBody(req);
+        const body = raw === '' ? {} : JSON.parse(raw);
+        const code = (body as { code?: unknown }).code;
+        const localPath = (body as { localPath?: unknown }).localPath;
+        if (typeof code !== 'string' || typeof localPath !== 'string' || !code || !localPath) {
+          sendJson(res, 400, { error: 'code and localPath are required' });
+          return;
+        }
+        const result = joinInvite(code, localPath);
+        sendJson(res, 200, result);
+      } catch (e) {
+        sendJson(res, 400, { error: e instanceof Error ? e.message : 'failed to join' });
+      }
       return;
     }
 

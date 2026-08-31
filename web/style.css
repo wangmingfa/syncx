@@ -6,16 +6,18 @@
  */
 
 :root {
-  --bg: #0f1117;
-  --bg-deep: #0b0e14;
-  --card: #1a1d27;
-  --card-hi: #1f2331;
-  --text: #e6e8ee;
-  --muted: #8b90a0;
+  --bg: #0c0e14;
+  --bg-deep: #080a0f;
+  --card: #151823;
+  --card-hi: #1c2030;
+  --text: #eef1f7;
+  --muted: #9aa1b4;
   --accent: #4f8cff;
   --accent-2: #22d3ee;
-  --border: #2a2e3b;
-  --online: #7ee787;
+  --accent-3: #5ee0a8;
+  --flow: linear-gradient(90deg, var(--accent), var(--accent-2));
+  --border: #262b3a;
+  --online: #5ee08a;
   --offline: #ff6b6b;
   --radius: 10px;
   --mono: ui-monospace, SFMono-Regular, Menlo, Consolas, "Liberation Mono", monospace;
@@ -48,20 +50,47 @@ body {
 }
 
 h1 {
-  font-size: 22px;
+  font-size: 28px;
+  font-weight: 600;
+  letter-spacing: -0.01em;
+  margin-bottom: 18px;
+}
+
+/* 小标签:等宽大写 + 字距,用于区块眉题/字段名(eyebrow) */
+.eyebrow {
+  font-family: var(--mono);
+  font-size: 10px;
+  letter-spacing: 0.16em;
+  text-transform: uppercase;
+  color: var(--muted);
+}
+
+/* 数据数字:等宽,用于统计/设备 ID 等大字号数值 */
+.data {
+  font-family: var(--mono);
   font-weight: 500;
-  letter-spacing: 0.01em;
-  margin-bottom: 16px;
 }
 
 /* ---------- 卡片 ---------- */
 
 .card {
-  background: var(--card);
+  position: relative;
+  background: linear-gradient(180deg, var(--card-hi), var(--card));
   border: 1px solid var(--border);
   border-radius: var(--radius);
   padding: 18px;
   margin-bottom: 16px;
+  box-shadow: inset 0 1px 0 rgb(255 255 255 / 0.03);
+}
+
+/* 顶部一道极淡的高光,与登录页玻璃卡呼应,统一两页视觉 */
+.card::before {
+  content: '';
+  position: absolute;
+  inset: 0 0 auto 0;
+  height: 1px;
+  border-radius: var(--radius) var(--radius) 0 0;
+  background: linear-gradient(90deg, transparent, rgb(255 255 255 / 0.09), transparent);
 }
 
 .muted {
@@ -219,17 +248,40 @@ button:disabled {
 
 .progress-bar {
   background: var(--bg-deep);
-  border-radius: 4px;
+  border-radius: 999px;
   height: 6px;
   min-width: 90px;
   overflow: hidden;
+  box-shadow: inset 0 0 0 1px rgb(255 255 255 / 0.03);
 }
 
 .progress-fill {
-  background: linear-gradient(90deg, var(--accent), var(--accent-2));
+  background: var(--flow);
   height: 100%;
-  border-radius: 4px;
+  border-radius: 999px;
   transition: width 0.3s ease;
+}
+
+/* 「数据流」签名:正在传输时,实色填充 + 缓慢流光扫过,表达数据在流动 */
+.progress-fill.is-flowing {
+  background-image: linear-gradient(90deg, var(--accent) 0%, var(--accent-2) 50%, var(--accent) 100%);
+  background-size: 220% 100%;
+  animation: flow 1.8s linear infinite;
+}
+
+@keyframes flow {
+  0% {
+    background-position: 120% 0;
+  }
+  100% {
+    background-position: -120% 0;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .progress-fill.is-flowing {
+    animation: none;
+  }
 }
 
 .message {
@@ -316,10 +368,19 @@ button:disabled {
 }
 
 .item-card {
-  background: var(--card);
+  position: relative;
+  background: linear-gradient(180deg, var(--card-hi), var(--card));
   border: 1px solid var(--border);
   border-radius: var(--radius);
   padding: 14px 16px;
+  box-shadow: inset 0 1px 0 rgb(255 255 255 / 0.03);
+  transition: border-color 0.15s ease, box-shadow 0.15s ease;
+}
+
+/* hover 左栏目录卡时,右栏对应设备卡高亮(轻量拓扑联动) */
+.item-card.is-linked {
+  border-color: var(--accent);
+  box-shadow: 0 0 0 1px rgb(79 140 255 / 0.4), inset 0 1px 0 rgb(255 255 255 / 0.03);
 }
 
 .item-top {
@@ -354,10 +415,11 @@ button:disabled {
 }
 
 .add-form {
-  background: var(--card);
+  background: linear-gradient(180deg, var(--card-hi), var(--card));
   border: 1px solid var(--border);
   border-radius: var(--radius);
   padding: 14px 16px;
+  box-shadow: inset 0 1px 0 rgb(255 255 255 / 0.03);
 }
 
 .add-form input {
@@ -410,6 +472,108 @@ button:disabled {
 
 .mono {
   font-family: var(--mono);
+}
+
+/* ---------- 邀请码配对卡 ---------- */
+
+.pair-card .eyebrow {
+  margin-bottom: 10px;
+}
+
+.pair-id {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+.pair-id .mono {
+  font-size: 13px;
+  letter-spacing: 0.05em;
+  word-break: break-all;
+}
+
+.pair-id .btn-sm {
+  margin-left: auto;
+}
+
+.pair-hint {
+  color: var(--muted);
+  font-size: 13px;
+  margin-top: 10px;
+}
+
+.pair-block {
+  margin-top: 14px;
+  padding-top: 14px;
+  border-top: 1px solid var(--border);
+}
+
+.pair-label {
+  font-size: 13px;
+  font-weight: 500;
+  color: var(--text);
+  margin-bottom: 4px;
+}
+
+.pair-row {
+  display: flex;
+  gap: 8px;
+  align-items: center;
+}
+
+.pair-row.col {
+  flex-direction: column;
+  align-items: stretch;
+}
+
+.pair-row.col .btn-sm {
+  align-self: flex-start;
+}
+
+.pair-select,
+.pair-input {
+  background: var(--bg-deep);
+  color: var(--text);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 10px 12px;
+  font-family: inherit;
+  font-size: 14px;
+  width: 100%;
+  margin-top: 8px;
+  transition: border-color 0.15s ease, box-shadow 0.15s ease;
+}
+
+.pair-select:focus,
+.pair-input:focus {
+  outline: none;
+  border-color: var(--accent);
+  box-shadow: 0 0 0 3px rgb(79 140 255 / 0.15);
+}
+
+.pair-code {
+  margin-top: 10px;
+  padding: 10px 12px;
+  background: var(--bg-deep);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+}
+
+.pair-code .mono {
+  display: block;
+  font-size: 12px;
+  letter-spacing: 0.03em;
+  color: var(--accent-2);
+  word-break: break-all;
+}
+
+.pair-code .btn-sm {
+  margin-top: 8px;
+}
+
+.break {
+  word-break: break-all;
 }
 
 @media (max-width: 600px) {

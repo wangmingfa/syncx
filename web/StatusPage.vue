@@ -115,8 +115,85 @@ async function addFolder(): Promise<void> {
   }
 }
 
+// 轻量拓扑联动:鼠标悬停左栏目录卡时,记录其配对设备,用于高亮右栏对应设备卡
+const hoverDevices = ref<string[]>([]);
+
+function onFolderEnter(f: { devices: string[] }): void {
+  hoverDevices.value = f.devices;
+}
+
+function onFolderLeave(): void {
+  hoverDevices.value = [];
+}
+
 const newPath = ref('');
 const newDevices = ref('');
+
+// ---- 设备配对(邀请码) ----
+const inviteFolder = ref('');
+const inviteCode = ref('');
+const joinCode = ref('');
+const joinPath = ref('');
+const joinResult = ref<{ deviceId: string; reciprocalCode: string } | undefined>();
+
+/** 复制文本到剪贴板,并轻提示。 */
+async function copy(text: string): Promise<void> {
+  try {
+    await navigator.clipboard.writeText(text);
+    showToast('已复制到剪贴板');
+  } catch {
+    showToast('复制失败,请手动选择');
+  }
+}
+
+/** 为本机某共享目录生成一次性配对邀请码。 */
+async function generateInvite(): Promise<void> {
+  if (!inviteFolder.value || busy.value) return;
+  busy.value = true;
+  try {
+    const res = await fetch(`/api/invite?folder=${encodeURIComponent(inviteFolder.value)}`);
+    const data = (await res.json().catch(() => ({}))) as { code?: string; error?: string };
+    if (!res.ok || !data.code) throw new Error(data.error ?? '生成邀请码失败');
+    inviteCode.value = data.code;
+    showToast('邀请码已生成');
+  } catch (e) {
+    showToast(e instanceof Error ? e.message : '生成邀请码失败');
+  } finally {
+    busy.value = false;
+  }
+}
+
+/** 接受对方邀请码:把对方加入白名单,并取回回邀码用于双向配对。 */
+async function doJoin(): Promise<void> {
+  if (busy.value) return;
+  if (!joinCode.value.trim() || !joinPath.value.trim()) {
+    showToast('请填写邀请码与本地目录');
+    return;
+  }
+  busy.value = true;
+  try {
+    const res = await fetch('/api/join', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ code: joinCode.value.trim(), localPath: joinPath.value.trim() }),
+    });
+    const data = (await res.json().catch(() => ({}))) as {
+      deviceId?: string;
+      reciprocalCode?: string;
+      error?: string;
+    };
+    if (!res.ok || !data.deviceId || !data.reciprocalCode) {
+      throw new Error(data.error ?? '加入失败');
+    }
+    joinResult.value = { deviceId: data.deviceId, reciprocalCode: data.reciprocalCode };
+    showToast(`已与 ${data.deviceId} 配对`);
+    await refreshStatus();
+  } catch (e) {
+    showToast(e instanceof Error ? e.message : '加入失败');
+  } finally {
+    busy.value = false;
+  }
+}
 
 // 挂载后立即刷新一次,确保展示最新状态
 onMounted(() => {
@@ -143,6 +220,18 @@ function progressPercent(p: SyncProgressItem): number {
   const total = p.pending + p.sending + p.receiving;
   return total > 0 ? Math.round((p.receiving / total) * 100) : 0;
 }
+
+/** 是否正在传输(有发送或接收活动)。 */
+function isActive(p: SyncProgressItem): boolean {
+  return p.sending + p.receiving > 0;
+}
+
+/** 进度区文案:用用户能看懂的语言,而非 pending/sending/receiving 系统术语。 */
+function progressText(p: SyncProgressItem): string {
+  if (isActive(p)) return `传输中 · 发送 ${p.sending} · 接收 ${p.receiving}`;
+  if (p.pending > 0) return `已排队 ${p.pending} 项,等待同步`;
+  return '已同步';
+}
 </script>
 
 <template>
@@ -152,7 +241,7 @@ function progressPercent(p: SyncProgressItem): number {
 
     <!-- 顶部:本机设备 + 概览 -->
     <div class="card header-card">
-      <div class="muted">本机设备</div>
+      <div class="eyebrow">本机节点</div>
       <div class="deviceId">{{ status.deviceId }}</div>
       <div class="stat-row">
         <div class="stat"><b>{{ status.entries }}</b>索引条目</div>
@@ -174,8 +263,14 @@ function progressPercent(p: SyncProgressItem): number {
           <span class="badge">{{ status.folders.length }}</span>
         </div>
 
-        <div v-if="status.folders.length === 0" class="empty">暂无共享目录</div>
-        <div v-for="f in status.folders" :key="folderKey(f)" class="item-card">
+        <div v-if="status.folders.length === 0" class="empty">还没有共享目录 · 在下方添加第一个</div>
+        <div
+          v-for="f in status.folders"
+          :key="folderKey(f)"
+          class="item-card"
+          @mouseenter="onFolderEnter(f)"
+          @mouseleave="onFolderLeave"
+        >
           <div class="item-top">
             <span class="item-title">{{ f.path }}</span>
             <button
@@ -191,11 +286,13 @@ function progressPercent(p: SyncProgressItem): number {
           </div>
           <div v-if="progressOf(f)" class="item-progress">
             <div class="progress-bar">
-              <div class="progress-fill" :style="{ width: progressPercent(progressOf(f)!) + '%' }"></div>
+              <div
+                class="progress-fill"
+                :class="{ 'is-flowing': isActive(progressOf(f)!) }"
+                style="width: 100%"
+              ></div>
             </div>
-            <div class="item-sub">
-              待处理 {{ progressOf(f)!.pending }} · 发送 {{ progressOf(f)!.sending }} · 接收 {{ progressOf(f)!.receiving }}
-            </div>
+            <div class="item-sub">{{ progressText(progressOf(f)!) }}</div>
           </div>
         </div>
 
@@ -208,13 +305,64 @@ function progressPercent(p: SyncProgressItem): number {
 
       <!-- 右栏:已配对设备 -->
       <section class="col">
+        <!-- 邀请码配对 -->
+        <div class="card pair-card">
+          <div class="eyebrow">设备配对</div>
+          <div class="pair-id">
+            <span class="muted">本机 ID</span>
+            <code class="mono">{{ status.deviceId }}</code>
+            <button type="button" class="btn-sm" @click="copy(status.deviceId)">复制</button>
+          </div>
+
+          <div v-if="status.folders.length === 0" class="pair-hint">
+            先添加共享目录,才能生成邀请码
+          </div>
+
+          <template v-else>
+            <div class="pair-block">
+              <div class="pair-label">① 生成邀请码</div>
+              <div class="pair-row">
+                <select v-model="inviteFolder" class="pair-select">
+                  <option v-for="f in status.folders" :key="folderKey(f)" :value="f.path">{{ f.path }}</option>
+                </select>
+                <button type="button" class="btn-sm" :disabled="!inviteFolder || busy" @click="generateInvite">生成</button>
+              </div>
+              <div v-if="inviteCode" class="pair-code">
+                <code class="mono break">{{ inviteCode }}</code>
+                <button type="button" class="btn-sm" @click="copy(inviteCode)">复制邀请码</button>
+                <div class="item-sub">有效期 1 小时 · 发给对方,对方在「②」粘贴</div>
+              </div>
+            </div>
+
+            <div class="pair-block">
+              <div class="pair-label">② 加入对方设备</div>
+              <div class="pair-row col">
+                <input v-model="joinCode" class="pair-input" placeholder="粘贴对方邀请码">
+                <input v-model="joinPath" class="pair-input" placeholder="本机对应的本地目录绝对路径">
+                <button type="button" class="btn-sm" :disabled="!joinCode || !joinPath || busy" @click="doJoin">加入并配对</button>
+              </div>
+              <div v-if="joinResult" class="pair-code">
+                <div class="item-sub">已与 <b class="mono">{{ joinResult.deviceId }}</b> 配对</div>
+                <div class="item-sub">把下面回邀码发给对方,对方粘贴后即双向连通:</div>
+                <code class="mono break">{{ joinResult.reciprocalCode }}</code>
+                <button type="button" class="btn-sm" @click="copy(joinResult.reciprocalCode)">复制回邀码</button>
+              </div>
+            </div>
+          </template>
+        </div>
+
         <div class="col-head">
           <span>已配对设备</span>
           <span class="badge">{{ status.peers.length }}</span>
         </div>
 
-        <div v-if="status.peers.length === 0" class="empty">暂无已配对设备</div>
-        <div v-for="p in status.peers" :key="p.deviceId" class="item-card">
+        <div v-if="status.peers.length === 0" class="empty">还没有已配对设备 · 在「共享目录」中填写允许的设备 ID 即可配对</div>
+        <div
+          v-for="p in status.peers"
+          :key="p.deviceId"
+          class="item-card"
+          :class="{ 'is-linked': hoverDevices.includes(p.deviceId) }"
+        >
           <div class="item-top">
             <span class="dot" :class="p.online ? 'dot-online' : 'dot-offline'"></span>
             <span class="item-title mono">{{ p.deviceId }}</span>

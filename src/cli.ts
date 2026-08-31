@@ -189,7 +189,7 @@ export async function run(args: ParsedArgs): Promise<void> {
 
   if (args.command === 'install') {
     // 生成系统服务模板:systemd(linux)/launchd(macOS)/sc(Windows)
-    const mainPath = fileURLToPath(new URL('./main.js', import.meta.url));
+    const mainPath = fileURLToPath(new URL('./syncx.js', import.meta.url));
     const target = {
       executable: `${process.execPath} ${mainPath}`,
       configPath,
@@ -570,6 +570,19 @@ export async function run(args: ParsedArgs): Promise<void> {
       void runScan();
     },
     reconnect: (deviceId) => forceReconnect(deviceId),
+    createInvite: (folder) => {
+      if (!config.sharedFolders.some((f) => f.path === folder)) {
+        throw new Error(`folder not configured: ${folder}`);
+      }
+      return createInviteCode(identity, folder);
+    },
+    joinInvite: (code, localPath) => {
+      const invite = parseInviteCode(code, configDir);
+      addSharedFolder(configPath, localPath, [invite.deviceId]);
+      logger.info(`paired with device ${invite.deviceId} via invite (folder ${invite.folder})`);
+      const reciprocalCode = createInviteCode(identity, localPath);
+      return { deviceId: invite.deviceId, reciprocalCode };
+    },
   });
   control.listen(controlPort, controlHost);
 

@@ -14,7 +14,7 @@ function escapeHtml(value: string): string {
 }
 
 const STYLE = `
-  :root { --bg:#0f1117; --card:#1a1d27; --text:#e6e8ee; --muted:#8b90a0; --accent:#4f8cff; --border:#2a2e3b; --online:#7ee787; --offline:#ff6b6b; }
+  :root { --bg:#0c0e14; --bg-deep:#080a0f; --card:#151823; --card-hi:#1c2030; --text:#eef1f7; --muted:#9aa1b4; --accent:#4f8cff; --accent-2:#22d3ee; --accent-3:#5ee0a8; --flow:linear-gradient(90deg,var(--accent),var(--accent-2)); --border:#262b3a; --online:#5ee08a; --offline:#ff6b6b; }
   * { box-sizing: border-box; margin: 0; padding: 0; }
   body { background: var(--bg); color: var(--text); font-family: system-ui, sans-serif; padding: 24px; line-height: 1.5; }
   .container { max-width: 720px; margin: 0 auto; }
@@ -40,7 +40,7 @@ const STYLE = `
   .dot-online { background: var(--online); }
   .dot-offline { background: var(--offline); }
   .actions { display: flex; gap: 8px; margin-top: 12px; flex-wrap: wrap; }
-  .progress-bar { background: var(--bg); border-radius: 4px; height: 6px; margin-top: 4px; overflow: hidden; }
+  .progress-bar { background: var(--bg-deep); border-radius: 999px; height: 6px; margin-top: 4px; overflow: hidden; }
   .progress-fill { background: var(--accent); height: 100%; border-radius: 4px; }
 `;
 

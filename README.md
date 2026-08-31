@@ -13,7 +13,7 @@
 - **双模式发现** — mDNS 自动发现局域网设备,同时支持手动配置 `peers` 地址回退
 - **忽略规则** — 每个共享目录一个 `.syncxignore`(gitignore 语法),排除不需同步的内容
 - **端到端传输加密** — Ed25519 密钥对 + 双向握手,Device ID 由公钥派生
-- **Web UI** — 浏览器查看状态、添加/移除共享目录
+- **Web UI** — 浏览器查看状态、添加/移除共享目录、配对设备
 - **系统服务安装** — `syncx install` 生成 systemd / launchd / Windows 服务模板
 
 ## 快速上手(普通用户)
@@ -28,7 +28,7 @@
 git clone <repo-url> && cd syncx
 npm install
 npm run build
-node dist/main.js start
+node dist/syncx.js start
 ```
 
 首次启动会自动完成:
@@ -46,27 +46,28 @@ node dist/main.js start
 3. 状态页可完成日常操作:
    - **添加共享目录**:填本机目录绝对路径,并勾选允许同步的设备(Device ID)
    - **移除共享目录**:目录列表里删除
+   - **设备配对**:右栏「设备配对」卡可生成邀请码、或粘贴对方邀请码完成双向配对(无需知道对方 IP,局域网内自动互连);也可走下方命令行邀请码方式
    - 查看对端连接状态与同步进度、**手动触发扫描**、**手动重连**某台对端
 
 想让局域网内其它设备也能打开 Web UI?启动时加 `--host 0.0.0.0 --expose-control`(详见「端口」一节)。
 
 ### 3. 两台设备配对
 
-每台设备先各自启动 daemon,并用 `node dist/main.js status` 确认自己的 Device ID。
+每台设备先各自启动 daemon,并用 `node dist/syncx.js status` 确认自己的 Device ID。
 
 **方式一:邀请码(推荐)**
 
 在 A 上(该目录需已添加为共享目录):
 
 ```bash
-node dist/main.js invite /home/me/Documents
+node dist/syncx.js invite /home/me/Documents
 # 输出一串 base64url 邀请码(1 小时有效,可随时 revoke)
 ```
 
 在 B 上:
 
 ```bash
-node dist/main.js join <邀请码> /home/me/Documents
+node dist/syncx.js join <邀请码> /home/me/Documents
 ```
 
 B 会打印一串**反向邀请码**——把它发给 A,再在 A 上执行一次 `join`。配对是**双向信任**,双方都要把对方加入白名单,否则对端会拒绝连接。
@@ -104,8 +105,8 @@ B 会打印一串**反向邀请码**——把它发给 A,再在 A 上执行一�
 | Web UI 打不开? | 默认仅监听本机。局域网访问需 `--host 0.0.0.0 --expose-control` 启动 |
 | 两台设备互相找不到? | mDNS 依赖同一局域网;跨网段或路由器隔离时,双方在 `peers` 互填 `ws://IP:22000`,并放行 UDP 5353 与 TCP 22000 |
 | 启动提示端口被占用? | `--port 24001` 改同步端口;`--control-port 8385` 改 Web UI 端口 |
-| 忘了自己的 Device ID? | `node dist/main.js status` |
-| 想撤销已发出的邀请码? | `node dist/main.js revoke <邀请码>` |
+| 忘了自己的 Device ID? | `node dist/syncx.js status` |
+| 想撤销已发出的邀请码? | `node dist/syncx.js revoke <邀请码>` |
 | 换电脑了,原来配对的设备怎么办? | 新设备按「配对」一节重新配对即可;旧设备 ID 不再出现在任何 `devices` 白名单中即断开 |
 
 ## 架构
@@ -221,13 +222,13 @@ npm run dev -- --config ~/syncx-home.json --port 24001 --control-port 8385
 ```bash
 # 启动 daemon(前台;部署时配合 systemd/launchd 后台常驻)
 npm run build
-node dist/main.js start [--config <路径>] [--port <端口>] [--control-port <端口>] [--host <主机>]
+node dist/syncx.js start [--config <路径>] [--port <端口>] [--control-port <端口>] [--host <主机>]
 
 # 查看状态:设备 ID 与共享目录数
-node dist/main.js status [--config <路径>]
+node dist/syncx.js status [--config <路径>]
 
 # 生成系统服务模板
-node dist/main.js install
+node dist/syncx.js install
 ```
 
 常用选项:
