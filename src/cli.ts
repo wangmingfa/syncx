@@ -9,7 +9,7 @@ export interface ParsedArgs {
   host?: string;
   /** 日志文件路径;不指定则仅输出到 stdout。 */
   logFile?: string;
-  /** dev 模式:前端资源代理到该 vite dev server 基址(如 http://127.0.0.1:5173)。 */
+  /** dev 模式:vite dev server 基址(如 http://127.0.0.1:5173)。设置后 8384 的 web 页面请求会 302 重定向过去,由 vite 提供 HMR;不设置则 8384 直接提供页面(生产/打包形态)。 */
   devViteUrl?: string;
 }
 
@@ -261,7 +261,12 @@ export async function run(args: ParsedArgs): Promise<void> {
     }
   }
   if (args.devViteUrl) {
-    logger.info(`dev mode: 前端资源代理到 vite dev server ${args.devViteUrl}(HMR 已启用)`);
+    logger.info(
+      `dev mode: 访问 ${controlPort} 端口的页面会自动重定向到 vite dev server ${args.devViteUrl}(HMR 已启用)`,
+    );
+    logger.info(
+      `  请用 ${args.devViteUrl} 打开 Web UI;生产构建(不带 --dev-vite)才由 ${controlPort} 端口直接提供页面`,
+    );
   }
 
   /** 为一个共享目录创建运行期状态(索引/执行器/本地索引/忽略规则)。 */

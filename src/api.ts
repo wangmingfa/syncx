@@ -18,36 +18,18 @@ export interface ControlServerDeps {
   joinInvite?: (code: string, localPath: string) => { deviceId: string; reciprocalCode: string };
   /**
    * 开发模式的 vite dev server 基址(如 `http://127.0.0.1:5173`)。
-   * 设置后,非控制端点的请求全部反向代理过去,前端因此获得 HMR,
-   * 且无需先跑 `vite build` 生成 `dist/web/client.js`。
-   * 生产/打包形态不传,走内嵌 bundle。
+   * 设置后,非控制端点的 web 请求会 302 重定向到该地址,由 vite 原生提供 HMR;
+   * 浏览器访问 8384 的页面会自动跳到 5173,无需先跑 `vite build`。
+   * 控制端点(/api、登录、增删目录)仍由 8384 本地处理。
+   * 生产/打包形态不传,走内嵌 bundle 直接提供页面。
    */
   devViteUrl?: string;
 }
 
 const COOKIE_NAME = 'syncx_session';
 
-/** 逐跳首部:代理时既不转发给上游,也不回传给浏览器。 */
-const HOP_BY_HOP = new Set([
-  'connection',
-  'keep-alive',
-  'transfer-encoding',
-  'upgrade',
-  // content-length / content-encoding 由 fetch 解压后重新计算
-  'content-length',
-  'content-encoding',
-  // 不转发浏览器的 Host(形如 localhost:8384),由 fetch 按目标 URL 重新生成
-  'host',
-]);
-
-/**
- * dev 代理标记头。
- *
- * 若上游(vite)又把请求代理回 control server,会出现
- * 8384 → vite → 8384 → … 的无限回环。带上这个头,收到带头的请求时
- * 不再二次代理,直接按控制端点逻辑处理(兜底是 404,而不是挂死)。
- */
-const DEV_PROXY_HEADER = 'x-syncx-dev-proxy';
+// web 请求在 dev 模式下重定向到 vite dev server(见 createControlServer),
+// 不再反向代理,故无需逐跳首部与防回环标记头。
 
 /** 纯 CSR 页面壳:客户端 bundle 挂载后自行拉取状态与处理交互。 */
 const UI_SHELL = `<!DOCTYPE html><html lang="zh-CN"><head>
@@ -77,53 +59,7 @@ function isControlRoute(method: string, path: string): boolean {
   return method === 'POST' && (path === '/login' || path === '/folders' || path === '/actions');
 }
 
-/**
- * 把请求反向代理到 vite dev server。
- *
- * 上游不可达时返回 502 并说明原因 —— 不回退到空壳 HTML,
- * 避免再次出现「页面白屏但控制台无报错」的静默失败。
- */
-async function proxyToDevServer(
-  req: IncomingMessage,
-  res: ServerResponse,
-  baseUrl: string,
-): Promise<void> {
-  try {
-    const target = new URL(req.url ?? '/', baseUrl);
-
-    const headers: Record<string, string> = {};
-    for (const [key, value] of Object.entries(req.headers)) {
-      if (HOP_BY_HOP.has(key) || value === undefined) continue;
-      headers[key] = Array.isArray(value) ? value.join(', ') : value;
-    }
-
-    const upstream = await fetch(target, {
-      method: req.method ?? 'GET',
-      headers: { ...headers, [DEV_PROXY_HEADER]: '1' },
-      redirect: 'manual',
-    });
-    const body = Buffer.from(await upstream.arrayBuffer());
-
-    const out: Record<string, string> = {};
-    upstream.headers.forEach((value, key) => {
-      if (HOP_BY_HOP.has(key)) return;
-      out[key] = value;
-    });
-    out['content-length'] = String(body.length);
-    res.writeHead(upstream.status, out);
-    res.end(body);
-  } catch (error) {
-    if (!res.headersSent) {
-      res.writeHead(502, { 'Content-Type': 'application/json' });
-      res.end(
-        JSON.stringify({
-          error: 'dev server unavailable',
-          detail: `cannot reach vite dev server at ${baseUrl}: ${error instanceof Error ? error.message : String(error)}`,
-        }),
-      );
-    }
-  }
-}
+// web 请求改为重定向到 vite,proxyToDevServer 已移除。
 
 function readToken(req: IncomingMessage): string | undefined {
   const auth = req.headers.authorization;
@@ -156,6 +92,26 @@ function sendHtml(res: ServerResponse, html: string): void {
 function redirect(res: ServerResponse, location: string): void {
   res.writeHead(302, { Location: location });
   res.end();
+}
+
+/**
+ * 计算 dev 模式下 web 请求应跳转到的 vite 地址。
+ *
+ * 只替换端口、沿用浏览器原本使用的主机名 —— 若直接跳到 `devViteUrl` 里的
+ * `127.0.0.1`,从别的机器访问 `http://<host>:8384` 时会被跳到访问者自己的
+ * 本机地址而打不开。
+ */
+function devViteTarget(req: IncomingMessage, devViteUrl: string): string {
+  const vite = new URL(devViteUrl);
+  const hostHeader = Array.isArray(req.headers.host) ? req.headers.host[0] : req.headers.host;
+  const target = new URL(req.url ?? '/', devViteUrl);
+  if (hostHeader) {
+    // Host 形如 `wmf3.com:8384` 或 `[::1]:8384`,只取主机名部分。
+    const hostname = new URL(`http://${hostHeader}`).hostname;
+    if (hostname) target.hostname = hostname;
+  }
+  target.port = vite.port;
+  return target.toString();
 }
 
 /** 常量时间比较,避免 token 校验被时序侧信道利用。 */
@@ -239,15 +195,13 @@ export function createControlServer(deps: ControlServerDeps): Server {
       return;
     }
 
-    // dev 模式:页面壳、前端模块、HMR 端点全部转交 vite dev server,
-    // 这样无需先跑 vite build,改 .vue 即时生效。控制端点仍本地处理。
+    // dev 模式:非控制端点的 web 页面请求重定向到 vite dev server,
+    // 由 vite 原生提供 HMR。fetch 反向代理无法转发 HMR 的 WebSocket,
+    // 经 8384 打开的页面能加载却不热更新,因此改为重定向(浏览器自动跳到 5173)。
+    // 控制端点(/api、登录、增删目录)仍本地处理;生产形态不传 devViteUrl,
+    // 走下方内嵌 bundle 直接提供页面。
     if (devViteUrl && !isControlRoute(req.method ?? 'GET', path)) {
-      if (req.headers[DEV_PROXY_HEADER] !== undefined) {
-        // 已经被代理过一轮:不再转发,避免回环。
-        sendJson(res, 404, { error: 'not found' });
-        return;
-      }
-      await proxyToDevServer(req, res, devViteUrl);
+      redirect(res, devViteTarget(req, devViteUrl));
       return;
     }
 

@@ -205,6 +205,11 @@ function folderKey(f: { id?: string; path: string }): string {
   return f.id ?? f.path;
 }
 
+// 设备首字母徽标(浅色主题里替代纯文字,增强可读性)
+function monogram(id: string): string {
+  return id.replace(/[^A-Za-z0-9]/g, '').slice(0, 2).toUpperCase() || '··';
+}
+
 // 该目录的同步进度(按 folderId 匹配)
 function progressOf(f: { id?: string; path: string }): SyncProgressItem | undefined {
   const key = folderKey(f);
@@ -236,31 +241,56 @@ function progressText(p: SyncProgressItem): string {
 
 <template>
   <div class="container">
-    <h1>syncx</h1>
     <div v-if="toast" class="toast">{{ toast }}</div>
 
-    <!-- 顶部:本机设备 + 概览 -->
-    <div class="card header-card">
-      <div class="eyebrow">本机节点</div>
-      <div class="deviceId">{{ status.deviceId }}</div>
-      <div class="stat-row">
-        <div class="stat"><b>{{ status.entries }}</b>索引条目</div>
-        <div class="stat"><b>{{ status.tombstones }}</b>墓碑</div>
-        <div class="stat"><b>{{ status.folders.length }}</b>共享目录</div>
-        <div class="stat"><b>{{ status.peers.length }}</b>已配对设备</div>
+    <!-- 顶部:品牌条 -->
+    <div class="topbar">
+      <div class="brand">
+        <svg class="brand__mark" viewBox="0 0 32 32" aria-hidden="true">
+          <defs>
+            <linearGradient id="lg" x1="0" y1="0" x2="1" y2="1">
+              <stop offset="0" stop-color="#4a7fc0" />
+              <stop offset="1" stop-color="#2bb6ac" />
+            </linearGradient>
+          </defs>
+          <rect width="32" height="32" rx="9" fill="url(#lg)" />
+          <g fill="none" stroke="#fff" stroke-width="2.4" stroke-linecap="round">
+            <path d="M8.5 13H20" />
+            <path d="M24 19H12" />
+          </g>
+          <path d="M20 10.5 24.5 13 20 15.5Z" fill="#fff" />
+          <path d="M12 16.5 7.5 19 12 21.5Z" fill="#fff" />
+        </svg>
+        <div class="brand__text">
+          <div class="brand__name">SYNCX</div>
+          <div class="brand__sub">P2P LAN SYNC</div>
+        </div>
       </div>
-      <div class="actions">
-        <button type="button" :disabled="busy" @click="rescan">手动扫描</button>
-      </div>
+
+      <div class="topbar__spacer"></div>
+
+      <span class="device-chip">
+        <span class="dot" :class="status.peers.some((p) => p.online) ? 'dot-online' : 'dot-offline'"></span>
+        <span class="mono">{{ status.deviceId }}</span>
+      </span>
     </div>
 
-    <!-- 主体:左右两栏(左=共享目录,右=已配对设备) -->
+    <!-- 概览胶囊 -->
+    <div class="stat-pills">
+      <span class="stat-pill-item"><b>{{ status.entries }}</b><span>索引条目</span></span>
+      <span class="stat-pill-item"><b>{{ status.tombstones }}</b><span>墓碑</span></span>
+      <span class="stat-pill-item"><b>{{ status.folders.length }}</b><span>共享目录</span></span>
+      <span class="stat-pill-item"><b>{{ status.peers.length }}</b><span>已配对设备</span></span>
+    </div>
+
+    <!-- 主体:左右两栏(左=共享目录,右=设备配对 + 已配对设备) -->
     <div class="layout">
       <!-- 左栏:共享目录 -->
       <section class="col">
         <div class="col-head">
           <span>共享目录</span>
           <span class="badge">{{ status.folders.length }}</span>
+          <button type="button" class="scan-btn" :disabled="busy" @click="rescan">扫描全部</button>
         </div>
 
         <div v-if="status.folders.length === 0" class="empty">还没有共享目录 · 在下方添加第一个</div>
@@ -272,6 +302,11 @@ function progressText(p: SyncProgressItem): string {
           @mouseleave="onFolderLeave"
         >
           <div class="item-top">
+            <span class="avatar" aria-hidden="true">
+              <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
+                <path d="M3 7a2 2 0 0 1 2-2h4l2 2h8a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z" />
+              </svg>
+            </span>
             <span class="item-title">{{ f.path }}</span>
             <button
               type="button"
@@ -289,7 +324,7 @@ function progressText(p: SyncProgressItem): string {
               <div
                 class="progress-fill"
                 :class="{ 'is-flowing': isActive(progressOf(f)!) }"
-                style="width: 100%"
+                :style="isActive(progressOf(f)!) ? '' : 'width:100%'"
               ></div>
             </div>
             <div class="item-sub">{{ progressText(progressOf(f)!) }}</div>
@@ -303,7 +338,7 @@ function progressText(p: SyncProgressItem): string {
         </form>
       </section>
 
-      <!-- 右栏:已配对设备 -->
+      <!-- 右栏:设备配对 + 已配对设备 -->
       <section class="col">
         <!-- 邀请码配对 -->
         <div class="card pair-card">
@@ -364,7 +399,7 @@ function progressText(p: SyncProgressItem): string {
           :class="{ 'is-linked': hoverDevices.includes(p.deviceId) }"
         >
           <div class="item-top">
-            <span class="dot" :class="p.online ? 'dot-online' : 'dot-offline'"></span>
+            <span class="avatar" :class="p.online ? 'online' : 'offline'">{{ monogram(p.deviceId) }}</span>
             <span class="item-title mono">{{ p.deviceId }}</span>
             <span class="status-pill" :class="p.online ? 'pill-online' : 'pill-offline'">
               {{ p.online ? '在线' : '离线' }}

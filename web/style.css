@@ -1,25 +1,28 @@
 /*
- * 全局样式与设计变量。
+ * 全局样式与设计变量(清新典雅 · 浅色主题)。
  *
  * 配色沿用 src/ui-fallback.ts 的 SSR 回退页(--bg/--card/--accent 等),
  * 保证纯 CSR 的 Vue 应用与无 JS 回退页视觉一致。改动此处请同步该文件的 STYLE。
  */
 
 :root {
-  --bg: #0c0e14;
-  --bg-deep: #080a0f;
-  --card: #151823;
-  --card-hi: #1c2030;
-  --text: #eef1f7;
-  --muted: #9aa1b4;
-  --accent: #4f8cff;
-  --accent-2: #22d3ee;
-  --accent-3: #5ee0a8;
+  --bg: #f4f6f9;
+  --bg-soft: #eaeef3;
+  --card: #ffffff;
+  --card-hi: #ffffff;
+  --text: #1e2630;
+  --muted: #7e8aa0;
+  --accent: #4a7fc0;
+  --accent-soft: #eaf1fb;
+  --accent-2: #2bb6ac;
+  --accent-3: #2fa56f;
   --flow: linear-gradient(90deg, var(--accent), var(--accent-2));
-  --border: #262b3a;
-  --online: #5ee08a;
-  --offline: #ff6b6b;
-  --radius: 10px;
+  --border: #e5e9f0;
+  --border-strong: #d4dae4;
+  --online: #2fa56f;
+  --offline: #d96b6b;
+  --shadow: 0 1px 2px rgba(22, 32, 52, 0.04), 0 12px 30px -20px rgba(22, 32, 52, 0.28);
+  --radius: 12px;
   --mono: ui-monospace, SFMono-Regular, Menlo, Consolas, "Liberation Mono", monospace;
 }
 
@@ -46,14 +49,14 @@ body {
 .container {
   max-width: 1080px;
   margin: 0 auto;
-  padding: 24px 16px 48px;
+  padding: 28px 18px 56px;
 }
 
 h1 {
-  font-size: 28px;
+  font-size: 26px;
   font-weight: 600;
   letter-spacing: -0.01em;
-  margin-bottom: 18px;
+  margin-bottom: 16px;
 }
 
 /* 小标签:等宽大写 + 字距,用于区块眉题/字段名(eyebrow) */
@@ -75,22 +78,22 @@ h1 {
 
 .card {
   position: relative;
-  background: linear-gradient(180deg, var(--card-hi), var(--card));
+  background: var(--card);
   border: 1px solid var(--border);
   border-radius: var(--radius);
   padding: 18px;
   margin-bottom: 16px;
-  box-shadow: inset 0 1px 0 rgb(255 255 255 / 0.03);
+  box-shadow: var(--shadow);
 }
 
-/* 顶部一道极淡的高光,与登录页玻璃卡呼应,统一两页视觉 */
+/* 顶部一道极淡的高光,呼应品牌渐变,克制不喧宾夺主 */
 .card::before {
   content: '';
   position: absolute;
   inset: 0 0 auto 0;
-  height: 1px;
+  height: 2px;
   border-radius: var(--radius) var(--radius) 0 0;
-  background: linear-gradient(90deg, transparent, rgb(255 255 255 / 0.09), transparent);
+  background: linear-gradient(90deg, transparent, rgb(74 127 192 / 0.16), transparent);
 }
 
 .muted {
@@ -100,15 +103,16 @@ h1 {
 
 .deviceId {
   font-family: var(--mono);
-  font-size: 18px;
+  font-size: 17px;
   font-weight: 500;
-  letter-spacing: 0.08em;
+  letter-spacing: 0.06em;
   margin: 4px 0 8px;
+  color: var(--text);
 }
 
 .stat-row {
   display: flex;
-  gap: 24px;
+  gap: 22px;
   margin-top: 8px;
   flex-wrap: wrap;
 }
@@ -121,9 +125,10 @@ h1 {
 .stat b {
   display: block;
   font-size: 22px;
-  font-weight: 500;
+  font-weight: 600;
   color: var(--text);
   font-family: var(--mono);
+  line-height: 1.2;
 }
 
 /* ---------- 表格 ---------- */
@@ -156,10 +161,10 @@ tbody tr:last-child td {
 /* ---------- 表单控件 ---------- */
 
 input {
-  background: var(--bg-deep);
+  background: var(--bg-soft);
   color: var(--text);
   border: 1px solid var(--border);
-  border-radius: 8px;
+  border-radius: 9px;
   padding: 10px 12px;
   width: 100%;
   margin-top: 8px;
@@ -169,40 +174,40 @@ input {
 }
 
 input::placeholder {
-  color: #5b6070;
+  color: #aab2c2;
 }
 
 input:focus {
   outline: none;
   border-color: var(--accent);
-  box-shadow: 0 0 0 3px rgb(79 140 255 / 0.15);
+  box-shadow: 0 0 0 3px rgb(74 127 192 / 0.14);
 }
 
 button {
   background: var(--accent);
   color: #fff;
   border: none;
-  border-radius: 8px;
+  border-radius: 9px;
   padding: 10px 16px;
   margin-top: 10px;
   font-family: inherit;
   font-size: 13px;
   font-weight: 500;
   cursor: pointer;
-  transition: opacity 0.15s ease, filter 0.15s ease;
+  transition: background 0.15s ease, filter 0.15s ease;
 }
 
 button:hover:not(:disabled) {
-  filter: brightness(1.1);
+  filter: brightness(1.05);
 }
 
 button:disabled {
-  opacity: 0.55;
+  opacity: 0.5;
   cursor: not-allowed;
 }
 
 .btn-sm {
-  padding: 5px 10px;
+  padding: 5px 11px;
   font-size: 12px;
   margin-top: 0;
 }
@@ -239,48 +244,56 @@ button:disabled {
 
 .dot-online {
   background: var(--online);
-  box-shadow: 0 0 8px rgb(126 231 135 / 0.6);
+  box-shadow: 0 0 0 3px rgb(47 165 111 / 0.16);
 }
 
 .dot-offline {
   background: var(--offline);
+  box-shadow: 0 0 0 3px rgb(217 107 107 / 0.16);
 }
 
+/* ---------- 进度条(「数据流」签名的浅色版本) ---------- */
+
 .progress-bar {
-  background: var(--bg-deep);
+  position: relative;
+  background: var(--bg-soft);
   border-radius: 999px;
-  height: 6px;
+  height: 5px;
   min-width: 90px;
   overflow: hidden;
-  box-shadow: inset 0 0 0 1px rgb(255 255 255 / 0.03);
 }
 
 .progress-fill {
-  background: var(--flow);
+  background: var(--accent-3);
   height: 100%;
   border-radius: 999px;
   transition: width 0.3s ease;
 }
 
-/* 「数据流」签名:正在传输时,实色填充 + 缓慢流光扫过,表达数据在流动 */
+/* 传输中:一段流光在槽中往复掠过,表达数据在流动(不确定进度) */
 .progress-fill.is-flowing {
-  background-image: linear-gradient(90deg, var(--accent) 0%, var(--accent-2) 50%, var(--accent) 100%);
-  background-size: 220% 100%;
-  animation: flow 1.8s linear infinite;
+  position: absolute;
+  top: 0;
+  left: 0;
+  width: 38%;
+  background-image: linear-gradient(90deg, transparent, var(--accent-2), var(--accent));
+  animation: flow 1.5s ease-in-out infinite;
 }
 
 @keyframes flow {
   0% {
-    background-position: 120% 0;
+    transform: translateX(-110%);
   }
   100% {
-    background-position: -120% 0;
+    transform: translateX(265%);
   }
 }
 
 @media (prefers-reduced-motion: reduce) {
   .progress-fill.is-flowing {
     animation: none;
+    width: 100%;
+    background: var(--accent-2);
   }
 }
 
@@ -303,12 +316,13 @@ button:disabled {
   left: 50%;
   bottom: 28px;
   transform: translateX(-50%);
-  background: var(--card-hi);
+  background: var(--card);
   border: 1px solid var(--border);
-  border-radius: 8px;
-  padding: 10px 18px;
+  border-radius: 999px;
+  padding: 10px 20px;
   font-size: 13px;
-  box-shadow: 0 12px 32px -12px rgb(0 0 0 / 0.8);
+  color: var(--text);
+  box-shadow: var(--shadow);
   z-index: 50;
 }
 
@@ -320,12 +334,122 @@ button:disabled {
   letter-spacing: 0.04em;
 }
 
+/* ---------- 顶部品牌条 ---------- */
+
+.topbar {
+  display: flex;
+  align-items: center;
+  gap: 14px;
+  flex-wrap: wrap;
+  margin-bottom: 18px;
+}
+
+.brand {
+  display: flex;
+  align-items: center;
+  gap: 11px;
+}
+
+.brand__mark {
+  width: 36px;
+  height: 36px;
+  flex: none;
+}
+
+.brand__name {
+  font-size: 19px;
+  font-weight: 600;
+  letter-spacing: 0.2em;
+  line-height: 1;
+}
+
+.brand__sub {
+  font-family: var(--mono);
+  font-size: 9px;
+  letter-spacing: 0.18em;
+  color: var(--muted);
+  text-transform: uppercase;
+  margin-top: 3px;
+}
+
+.topbar__spacer {
+  flex: 1 1 auto;
+}
+
+.device-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 7px 12px;
+  background: var(--card);
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  font-family: var(--mono);
+  font-size: 12px;
+  color: var(--text);
+  box-shadow: var(--shadow);
+}
+
+.scan-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  background: var(--accent-soft);
+  color: var(--accent);
+  border: 1px solid rgb(74 127 192 / 0.25);
+  border-radius: 8px;
+  padding: 5px 12px;
+  margin-top: 0;
+  font-size: 12px;
+  font-weight: 500;
+}
+
+.scan-btn:hover:not(:disabled) {
+  background: rgb(74 127 192 / 0.14);
+}
+
+/* 区块标题栏里的操作按钮统一推到最右 */
+.col-head .scan-btn {
+  margin-left: auto;
+}
+
+/* 概览胶囊行 */
+.stat-pills {
+  display: flex;
+  gap: 10px;
+  flex-wrap: wrap;
+  margin-bottom: 20px;
+}
+
+.stat-pill-item {
+  display: inline-flex;
+  align-items: baseline;
+  gap: 6px;
+  padding: 9px 14px;
+  background: var(--card);
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  box-shadow: var(--shadow);
+}
+
+.stat-pill-item b {
+  font-size: 18px;
+  font-weight: 600;
+  font-family: var(--mono);
+  color: var(--text);
+}
+
+.stat-pill-item span {
+  font-size: 12px;
+  color: var(--muted);
+}
+
 /* ---------- 两栏布局(参考 Syncthing:左=共享目录 / 右=已配对设备) ---------- */
 
 .layout {
   display: grid;
   grid-template-columns: 1fr 1fr;
-  gap: 16px;
+  gap: 18px;
   align-items: start;
 }
 
@@ -347,9 +471,10 @@ button:disabled {
   align-items: center;
   gap: 8px;
   font-size: 15px;
-  font-weight: 500;
+  font-weight: 600;
   letter-spacing: 0.02em;
-  padding: 0 2px;
+  padding: 2px 2px;
+  color: var(--text);
 }
 
 .badge {
@@ -360,27 +485,29 @@ button:disabled {
   height: 22px;
   padding: 0 7px;
   border-radius: 999px;
-  background: var(--card-hi);
-  border: 1px solid var(--border);
-  color: var(--muted);
+  background: var(--accent-soft);
+  color: var(--accent);
   font-size: 12px;
   font-family: var(--mono);
 }
 
 .item-card {
   position: relative;
-  background: linear-gradient(180deg, var(--card-hi), var(--card));
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  background: var(--card);
   border: 1px solid var(--border);
   border-radius: var(--radius);
   padding: 14px 16px;
-  box-shadow: inset 0 1px 0 rgb(255 255 255 / 0.03);
+  box-shadow: var(--shadow);
   transition: border-color 0.15s ease, box-shadow 0.15s ease;
 }
 
 /* hover 左栏目录卡时,右栏对应设备卡高亮(轻量拓扑联动) */
 .item-card.is-linked {
   border-color: var(--accent);
-  box-shadow: 0 0 0 1px rgb(79 140 255 / 0.4), inset 0 1px 0 rgb(255 255 255 / 0.03);
+  box-shadow: 0 0 0 1px rgb(74 127 192 / 0.35), var(--shadow);
 }
 
 .item-top {
@@ -389,37 +516,64 @@ button:disabled {
   gap: 10px;
 }
 
+/* 首字母/图标徽标 */
+.avatar {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 30px;
+  height: 30px;
+  flex: none;
+  border-radius: 8px;
+  font-family: var(--mono);
+  font-size: 12px;
+  font-weight: 600;
+  letter-spacing: 0.02em;
+  background: var(--accent-soft);
+  color: var(--accent);
+}
+
+.avatar.online {
+  background: rgb(47 165 111 / 0.12);
+  color: var(--online);
+}
+
+.avatar.offline {
+  background: rgb(217 107 107 / 0.1);
+  color: var(--offline);
+}
+
 .item-title {
   font-size: 14px;
   font-weight: 500;
   word-break: break-all;
   flex: 1 1 auto;
   min-width: 0;
+  color: var(--text);
 }
 
 .item-title.mono {
   font-family: var(--mono);
   font-size: 13px;
-  letter-spacing: 0.04em;
+  letter-spacing: 0.03em;
 }
 
 .item-sub {
   color: var(--muted);
   font-size: 12px;
-  margin-top: 6px;
   word-break: break-all;
 }
 
 .item-progress {
-  margin-top: 10px;
+  margin-top: 2px;
 }
 
 .add-form {
-  background: linear-gradient(180deg, var(--card-hi), var(--card));
-  border: 1px solid var(--border);
+  background: var(--card);
+  border: 1px dashed var(--border-strong);
   border-radius: var(--radius);
   padding: 14px 16px;
-  box-shadow: inset 0 1px 0 rgb(255 255 255 / 0.03);
+  box-shadow: var(--shadow);
 }
 
 .add-form input {
@@ -437,12 +591,13 @@ button:disabled {
   text-align: center;
   border: 1px dashed var(--border);
   border-radius: var(--radius);
+  background: rgb(255 255 255 / 0.5);
 }
 
 .status-pill {
   margin-left: auto;
   font-size: 11px;
-  padding: 2px 9px;
+  padding: 3px 10px;
   border-radius: 999px;
   border: 1px solid transparent;
   white-space: nowrap;
@@ -450,24 +605,24 @@ button:disabled {
 
 .pill-online {
   color: var(--online);
-  background: rgb(126 231 135 / 0.12);
-  border-color: rgb(126 231 135 / 0.3);
+  background: rgb(47 165 111 / 0.1);
+  border-color: rgb(47 165 111 / 0.28);
 }
 
 .pill-offline {
   color: var(--offline);
-  background: rgb(255 107 107 / 0.12);
-  border-color: rgb(255 107 107 / 0.3);
+  background: rgb(217 107 107 / 0.1);
+  border-color: rgb(217 107 107 / 0.28);
 }
 
 .btn-danger {
   background: transparent;
   color: var(--offline);
-  border: 1px solid rgb(255 107 107 / 0.4);
+  border: 1px solid rgb(217 107 107 / 0.4);
 }
 
 .btn-danger:hover:not(:disabled) {
-  background: rgb(255 107 107 / 0.12);
+  background: rgb(217 107 107 / 0.1);
 }
 
 .mono {
@@ -475,6 +630,10 @@ button:disabled {
 }
 
 /* ---------- 邀请码配对卡 ---------- */
+
+.pair-card {
+  border-color: rgb(74 127 192 / 0.3);
+}
 
 .pair-card .eyebrow {
   margin-bottom: 10px;
@@ -489,8 +648,9 @@ button:disabled {
 
 .pair-id .mono {
   font-size: 13px;
-  letter-spacing: 0.05em;
+  letter-spacing: 0.04em;
   word-break: break-all;
+  color: var(--text);
 }
 
 .pair-id .btn-sm {
@@ -511,9 +671,9 @@ button:disabled {
 
 .pair-label {
   font-size: 13px;
-  font-weight: 500;
+  font-weight: 600;
   color: var(--text);
-  margin-bottom: 4px;
+  margin-bottom: 6px;
 }
 
 .pair-row {
@@ -533,10 +693,10 @@ button:disabled {
 
 .pair-select,
 .pair-input {
-  background: var(--bg-deep);
+  background: var(--bg-soft);
   color: var(--text);
   border: 1px solid var(--border);
-  border-radius: 8px;
+  border-radius: 9px;
   padding: 10px 12px;
   font-family: inherit;
   font-size: 14px;
@@ -549,22 +709,22 @@ button:disabled {
 .pair-input:focus {
   outline: none;
   border-color: var(--accent);
-  box-shadow: 0 0 0 3px rgb(79 140 255 / 0.15);
+  box-shadow: 0 0 0 3px rgb(74 127 192 / 0.14);
 }
 
 .pair-code {
   margin-top: 10px;
   padding: 10px 12px;
-  background: var(--bg-deep);
+  background: var(--bg-soft);
   border: 1px solid var(--border);
-  border-radius: 8px;
+  border-radius: 9px;
 }
 
 .pair-code .mono {
   display: block;
   font-size: 12px;
-  letter-spacing: 0.03em;
-  color: var(--accent-2);
+  letter-spacing: 0.02em;
+  color: var(--accent);
   word-break: break-all;
 }
 
@@ -578,7 +738,7 @@ button:disabled {
 
 @media (max-width: 600px) {
   .container {
-    padding: 16px 12px 40px;
+    padding: 18px 14px 44px;
   }
 
   .card {

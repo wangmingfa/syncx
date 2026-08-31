@@ -14,34 +14,34 @@ function escapeHtml(value: string): string {
 }
 
 const STYLE = `
-  :root { --bg:#0c0e14; --bg-deep:#080a0f; --card:#151823; --card-hi:#1c2030; --text:#eef1f7; --muted:#9aa1b4; --accent:#4f8cff; --accent-2:#22d3ee; --accent-3:#5ee0a8; --flow:linear-gradient(90deg,var(--accent),var(--accent-2)); --border:#262b3a; --online:#5ee08a; --offline:#ff6b6b; }
+  :root { --bg:#f4f6f9; --bg-soft:#eaeef3; --card:#ffffff; --card-hi:#ffffff; --text:#1e2630; --muted:#7e8aa0; --accent:#4a7fc0; --accent-2:#2bb6ac; --accent-3:#2fa56f; --flow:linear-gradient(90deg,var(--accent),var(--accent-2)); --border:#e5e9f0; --border-strong:#d4dae4; --online:#2fa56f; --offline:#d96b6b; }
   * { box-sizing: border-box; margin: 0; padding: 0; }
   body { background: var(--bg); color: var(--text); font-family: system-ui, sans-serif; padding: 24px; line-height: 1.5; }
   .container { max-width: 720px; margin: 0 auto; }
   h1 { font-size: 22px; margin-bottom: 16px; }
   h2 { font-size: 16px; margin-bottom: 10px; }
-  .card { background: var(--card); border: 1px solid var(--border); border-radius: 10px; padding: 18px; margin-bottom: 16px; }
+  .card { background: var(--card); border: 1px solid var(--border); border-radius: 12px; padding: 18px; margin-bottom: 16px; box-shadow: 0 1px 2px rgba(22,32,52,.04), 0 12px 30px -20px rgba(22,32,52,.28); }
   .muted { color: var(--muted); font-size: 13px; }
-  .message { color: #7ee787; margin-bottom: 12px; font-size: 14px; }
-  .error { color: #ff6b6b; margin-bottom: 12px; font-size: 14px; }
+  .message { color: var(--online); margin-bottom: 12px; font-size: 14px; }
+  .error { color: var(--offline); margin-bottom: 12px; font-size: 14px; }
   .deviceId { font-size: 18px; font-weight: 600; margin: 4px 0 8px; }
   .stat-row { display: flex; gap: 24px; margin-top: 8px; }
   .stat b { display: block; font-size: 22px; }
   table { width: 100%; border-collapse: collapse; margin-top: 8px; }
   th, td { text-align: left; padding: 6px 8px; border-bottom: 1px solid var(--border); }
   th { color: var(--muted); font-weight: 500; }
-  input { background: var(--bg); color: var(--text); border: 1px solid var(--border); border-radius: 6px; padding: 8px 10px; width: 100%; margin-top: 8px; }
-  button { background: var(--accent); color: #fff; border: none; border-radius: 6px; padding: 6px 12px; cursor: pointer; margin-top: 10px; font-size: 13px; }
-  button:hover { opacity: 0.85; }
+  input { background: var(--bg-soft); color: var(--text); border: 1px solid var(--border); border-radius: 9px; padding: 8px 10px; width: 100%; margin-top: 8px; }
+  button { background: var(--accent); color: #fff; border: none; border-radius: 9px; padding: 6px 12px; cursor: pointer; margin-top: 10px; font-size: 13px; }
+  button:hover { opacity: 0.9; }
   .btn-sm { padding: 4px 8px; font-size: 12px; margin-top: 0; }
   .online { color: var(--online); }
   .offline { color: var(--offline); }
   .dot { display: inline-block; width: 8px; height: 8px; border-radius: 50%; margin-right: 6px; }
-  .dot-online { background: var(--online); }
-  .dot-offline { background: var(--offline); }
+  .dot-online { background: var(--online); box-shadow: 0 0 0 3px rgb(47,165,111,.16); }
+  .dot-offline { background: var(--offline); box-shadow: 0 0 0 3px rgb(217,107,107,.16); }
   .actions { display: flex; gap: 8px; margin-top: 12px; flex-wrap: wrap; }
-  .progress-bar { background: var(--bg-deep); border-radius: 999px; height: 6px; margin-top: 4px; overflow: hidden; }
-  .progress-fill { background: var(--accent); height: 100%; border-radius: 4px; }
+  .progress-bar { background: var(--bg-soft); border-radius: 999px; height: 6px; margin-top: 4px; overflow: hidden; }
+  .progress-fill { background: var(--accent-3); height: 100%; border-radius: 4px; }
 `;
 
 function shell(content: string): string {

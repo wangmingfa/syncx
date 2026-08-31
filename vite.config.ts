@@ -2,6 +2,7 @@ import { defineConfig, type Plugin } from 'vitest/config';
 import vue from '@vitejs/plugin-vue';
 import { fileURLToPath } from 'node:url';
 import { resolve, dirname } from 'node:path';
+import { codeInspectorPlugin } from 'code-inspector-plugin';
 
 const root = dirname(fileURLToPath(import.meta.url));
 
@@ -41,7 +42,13 @@ function inlineCssIntoJs(): Plugin {
 export default defineConfig({
   // 开发 + 生产构建的根目录均为 web/(前端源码所在目录)
   root: 'web',
-  plugins: [vue(), inlineCssIntoJs()],
+  plugins:[
+    vue(),
+    inlineCssIntoJs(),
+    codeInspectorPlugin({
+      bundler: 'vite',
+    }),
+  ],
   test: {
     // vitest 运行根目录回到仓库根(测试在 test/),与 vite dev/build 的 web/ 根分开
     // fileParallelism 保证集成测试串行化
@@ -58,18 +65,27 @@ export default defineConfig({
     // 端口一旦漂移,代理目标就静默失效。strictPort 让冲突直接报错而非换端口。
     port: 5173,
     strictPort: true,
-    // 页面是从 8384 打开的,HMR 的 WebSocket 若按 location.port 连会打到 8384,
-    // 而那里没有 HMR 端点。显式指回 vite 自身端口。
-    // 注意:Vite 已废弃 server.hmr.clientPort,改用 server.ws.clientPort。
-    ws: {
-      clientPort: 5173,
-    },
+    // HMR 的 WebSocket 不再需要 ws.clientPort:dev 下页面由 vite 自身(5173)
+    // 直接提供,浏览器按 location.port 连过来正好命中 HMR 端点。
+    // (旧写法是为了兼容"页面从 8384 打开"的反向代理形态,该形态已废弃。)
     allowedHosts: ['wmf3.com'],
-    // 只代理 /api:登录与页面壳现在由 8384 侧统一处理。
-    // 注意不能把 /login 也代理出去 —— dev 下 8384 会把非控制端点反向代理回来,
-    // 形成 8384 → vite → 8384 的无限回环。
+    // dev 下浏览器经 8384 的页面会 302 跳到 5173(vite 原生 HMR 源),
+    // 因此 5173 才是前端实际运行域。这里把前端需要的控制端点代理回 8384:
+    // - /api:JSON 控制 API(状态/扫描/配对等)
+    // - /login:仅代理 POST(登录提交,8384 下发 HttpOnly cookie);
+    //   GET /login 是页面壳,交给 vite 自身 SPA fallback 返回 index.html,避免回环。
+    // - /favicon.svg:8384 侧提供的站点图标,避免 5173 页面 404。
     proxy: {
       '/api': 'http://127.0.0.1:8384',
+      '/favicon.svg': 'http://127.0.0.1:8384',
+      '/login': {
+        target: 'http://127.0.0.1:8384',
+        changeOrigin: true,
+        // GET /login 不代理(返回 index.html 让前端渲染登录表单);POST /login 才转发到 8384
+        bypass(req) {
+          return req.method === 'GET' ? '/login' : undefined;
+        },
+      },
     },
   },
   // 顶层 define:Vite 不会替换 process.env.NODE_ENV,需手动注入。

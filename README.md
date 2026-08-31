@@ -178,11 +178,21 @@ npm run build          # 编译到 dist/(tsc)
 ```
 
 `npm run dev` 会同时起两个进程:vite dev server(固定 `5173`)和 syncx 后端(控制端口 `8384`)。
-**浏览器请打开 `http://localhost:8384`** —— 后端会把页面、前端模块和 HMR 请求反向代理到 vite,
-因此改 `.vue` 即时热更新,且不需要先跑 `vite build`。
 
-> 直接开 `5173` 也能看到页面,但 HMR 之外的一切(登录写 cookie、目录增删)仍以 `8384` 为准,
-> 所以 `8384` 是唯一推荐入口。
+**dev 下浏览器请打开 `http://localhost:5173`** —— 页面由 vite 原生提供,改 `.vue` 即时热更新,
+也不需要先跑 `vite build`。vite 会把前端用到的控制端点(`/api/*`、`POST /login`、`/favicon.svg`)
+代理回 `8384`,登录与会话行为和生产一致。
+
+为避免走错入口,dev 下 `8384` **不再提供 web 页面**:访问它会 302 重定向到 `5173`(只换端口、
+沿用你输入的主机名,因此局域网访问 `http://<内网IP>:8384` 也会正确跳到 `http://<内网IP>:5173`)。
+`8384` 此时只保留控制 API。
+
+> 为什么不能从 `8384` 打开页面?HMR 走 WebSocket,而 `8384` 侧只能做 HTTP 反向代理、
+> 无法转发 WebSocket upgrade —— 以前从 `8384` 打开的页面能加载却**不会热更新**,
+> 是个静默失效的坑,所以现在直接重定向到 `5173`。
+
+**build 之后则相反**:不带 `--dev-vite` 启动时,`8384` 直接提供页面(前端来自内嵌 bundle),
+`5173` 不参与,这就是生产形态。
 
 ### npm run dev 的参数
 
@@ -194,7 +204,7 @@ npm run build          # 编译到 dist/(tsc)
 | `--port <端口>` | P2P 同步端口(其他设备连接用) | `22000` |
 | `--control-port <端口>` | Web UI / 控制 API 端口 | `8384` |
 | `--host <地址>` | 控制服务绑定地址 | `0.0.0.0`(dev 脚本已默认;`127.0.0.1` 仅本机) |
-| `--dev-vite <url>` | 把前端资源反向代理到 vite dev server(启用 HMR) | dev 脚本已传 `http://127.0.0.1:5173` |
+| `--dev-vite <url>` | dev 模式:web 页面请求 302 重定向到该 vite dev server(HMR 由 vite 原生提供),控制端口只保留 API | dev 脚本已传 `http://127.0.0.1:5173` |
 
 不传 `--dev-vite` 时,后端从 `dist/web/client.js` 提供前端 bundle,即生产行为 ——
 此时必须先 `npm run build:web`,否则 `/client.js` 返回空内容导致页面白屏。

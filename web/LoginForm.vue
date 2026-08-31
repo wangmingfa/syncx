@@ -54,17 +54,17 @@ async function submit(): Promise<void> {
         <svg class="brand__mark" viewBox="0 0 32 32" aria-hidden="true">
           <defs>
             <linearGradient id="lg" x1="0" y1="0" x2="1" y2="1">
-              <stop offset="0" stop-color="#4f8cff" />
-              <stop offset="1" stop-color="#22d3ee" />
+              <stop offset="0" stop-color="#4a7fc0" />
+              <stop offset="1" stop-color="#2bb6ac" />
             </linearGradient>
           </defs>
-          <rect width="32" height="32" rx="8" fill="url(#lg)" />
-          <g fill="none" stroke="#04121c" stroke-width="2.4" stroke-linecap="round">
+          <rect width="32" height="32" rx="9" fill="url(#lg)" />
+          <g fill="none" stroke="#fff" stroke-width="2.4" stroke-linecap="round">
             <path d="M8.5 13H20" />
             <path d="M24 19H12" />
           </g>
-          <path d="M20 10.5 24.5 13 20 15.5Z" fill="#04121c" />
-          <path d="M12 16.5 7.5 19 12 21.5Z" fill="#04121c" />
+          <path d="M20 10.5 24.5 13 20 15.5Z" fill="#fff" />
+          <path d="M12 16.5 7.5 19 12 21.5Z" fill="#fff" />
         </svg>
         <div class="brand__text">
           <div class="brand__name">SYNCX</div>
@@ -111,9 +111,13 @@ async function submit(): Promise<void> {
   min-height: 100vh;
   padding: 24px;
   overflow: hidden;
+  background:
+    radial-gradient(620px 420px at 16% 8%, rgb(74 127 192 / 0.1), transparent 70%),
+    radial-gradient(560px 400px at 86% 94%, rgb(43 182 172 / 0.08), transparent 70%),
+    var(--bg);
 }
 
-/* ---------- 背景:网格 + 双色光晕 ---------- */
+/* ---------- 背景:极淡网格 ---------- */
 
 .login__bg {
   position: absolute;
@@ -125,19 +129,11 @@ async function submit(): Promise<void> {
   position: absolute;
   inset: -1px;
   background-image:
-    linear-gradient(to right, rgb(79 140 255 / 0.08) 1px, transparent 1px),
-    linear-gradient(to bottom, rgb(79 140 255 / 0.08) 1px, transparent 1px);
+    linear-gradient(to right, rgb(74 127 192 / 0.05) 1px, transparent 1px),
+    linear-gradient(to bottom, rgb(74 127 192 / 0.05) 1px, transparent 1px);
   background-size: 34px 34px;
-  -webkit-mask-image: radial-gradient(ellipse 85% 65% at 50% 0%, #000 35%, transparent 100%);
-  mask-image: radial-gradient(ellipse 85% 65% at 50% 0%, #000 35%, transparent 100%);
-}
-
-.login__glow {
-  position: absolute;
-  inset: 0;
-  background:
-    radial-gradient(520px 320px at 18% 10%, rgb(79 140 255 / 0.22), transparent 70%),
-    radial-gradient(460px 300px at 84% 92%, rgb(34 211 238 / 0.15), transparent 70%);
+  -webkit-mask-image: radial-gradient(ellipse 80% 60% at 50% 40%, #000 30%, transparent 100%);
+  mask-image: radial-gradient(ellipse 80% 60% at 50% 40%, #000 30%, transparent 100%);
 }
 
 /* ---------- 卡片 ---------- */
@@ -149,21 +145,20 @@ async function submit(): Promise<void> {
   max-width: 400px;
   padding: 32px;
   border: 1px solid var(--border);
-  border-radius: 16px;
-  background: linear-gradient(180deg, rgb(31 35 49 / 0.92), rgb(20 23 31 / 0.92));
-  backdrop-filter: blur(10px);
+  border-radius: 18px;
+  background: var(--card);
   box-shadow:
-    0 30px 70px -24px rgb(0 0 0 / 0.85),
-    inset 0 1px 0 rgb(255 255 255 / 0.05);
+    0 1px 2px rgba(22, 32, 52, 0.05),
+    0 30px 70px -28px rgba(22, 32, 52, 0.28);
 }
 
-/* 顶部一条渐变高光,科技感的主要来源 */
+/* 顶部一道极淡渐变高光,呼应品牌 */
 .login__card::before {
   content: '';
   position: absolute;
   inset: -1px -1px auto -1px;
-  height: 1px;
-  border-radius: 16px 16px 0 0;
+  height: 2px;
+  border-radius: 18px 18px 0 0;
   background: linear-gradient(90deg, transparent, var(--accent), var(--accent-2), transparent);
 }
 
@@ -183,8 +178,9 @@ async function submit(): Promise<void> {
 
 .brand__name {
   font-size: 17px;
-  font-weight: 500;
-  letter-spacing: 0.22em;
+  font-weight: 600;
+  letter-spacing: 0.2em;
+  color: var(--text);
 }
 
 .brand__sub {
@@ -232,10 +228,10 @@ async function submit(): Promise<void> {
   margin-top: 12px;
   padding: 9px 12px;
   font-size: 12.5px;
-  color: #ffb4b4;
-  background: rgb(255 107 107 / 0.08);
-  border: 1px solid rgb(255 107 107 / 0.28);
-  border-radius: 8px;
+  color: var(--offline);
+  background: rgb(217 107 107 / 0.08);
+  border: 1px solid rgb(217 107 107 / 0.28);
+  border-radius: 9px;
 }
 
 .login__error::before {
@@ -244,30 +240,30 @@ async function submit(): Promise<void> {
   width: 15px;
   height: 15px;
   border-radius: 50%;
-  background: rgb(255 107 107 / 0.22);
+  background: rgb(217 107 107 / 0.18);
   font-family: var(--mono);
   font-size: 10px;
   line-height: 15px;
   text-align: center;
-  color: #ff8f8f;
+  color: var(--offline);
 }
 
 .submit {
   width: 100%;
   height: 46px;
   margin-top: 18px;
-  border-radius: 10px;
+  border-radius: 11px;
   background: linear-gradient(100deg, var(--accent), var(--accent-2));
-  color: #04121c;
+  color: #fff;
   font-size: 14px;
   font-weight: 500;
   letter-spacing: 0.06em;
-  box-shadow: 0 10px 26px -12px rgb(79 140 255 / 0.9);
+  box-shadow: 0 12px 26px -14px rgb(74 127 192 / 0.8);
 }
 
 .submit:hover:not(:disabled) {
-  filter: brightness(1.08);
-  box-shadow: 0 14px 32px -12px rgb(79 140 255 / 1);
+  filter: brightness(1.05);
+  box-shadow: 0 16px 32px -14px rgb(74 127 192 / 0.9);
 }
 
 /* ---------- 页脚 ---------- */
@@ -287,14 +283,14 @@ async function submit(): Promise<void> {
   height: 6px;
   border-radius: 50%;
   background: var(--accent-2);
-  box-shadow: 0 0 8px rgb(34 211 238 / 0.8);
+  box-shadow: 0 0 0 3px rgb(43 182 172 / 0.16);
   animation: pulse 1.8s ease-in-out infinite;
 }
 
 @keyframes pulse {
   0%,
   100% {
-    opacity: 0.35;
+    opacity: 0.4;
     transform: scale(0.85);
   }
   50% {
