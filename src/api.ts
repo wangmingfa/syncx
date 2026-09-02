@@ -6,16 +6,25 @@ import { FAVICON_SVG } from './favicon.js';
 export interface ControlServerDeps {
   token: string;
   getStatus: () => unknown;
-  addFolder?: (path: string, devices: string[]) => void;
+  addFolder?: (path: string, devices: string[], id?: string) => void;
   removeFolder?: (path: string) => void;
+  /** 添加一个已知对端设备 ID(按 ID 配对,不依赖邀请码)。可选 address 直接写入
+   *  config.peers 并立即直连,用于跨网段/无 mDNS 时手动指定对方 ws:// 地址。 */
+  addDevice?: (deviceId: string, address?: string) => void;
+  /** 移除一个已知对端设备(同时从各目录 devices 中摘除)。 */
+  removeDevice?: (deviceId: string) => void;
+  /** 精确设置某目录的设备列表(按目录多选设备的提交)。 */
+  setFolderDevices?: (path: string, devices: string[]) => void;
+  /** 列出待确认项(对方推送的配对 / 目录共享邀请)。 */
+  getOffers?: () => unknown;
+  /** 确认一个待确认项;目录共享邀请需附带 localPath(本机落地路径)。 */
+  acceptOffer?: (offerId: string, localPath?: string) => void;
+  /** 忽略一个待确认项。 */
+  declineOffer?: (offerId: string) => void;
   /** 手动触发一轮扫描。 */
   rescan?: () => void;
   /** 手动重连指定对端。 */
   reconnect?: (deviceId: string) => void;
-  /** 为已配置共享目录生成一次性配对邀请码(含本机 deviceId + 签名)。 */
-  createInvite?: (folder: string) => string;
-  /** 接受邀请码:把对端加入共享目录白名单,并返回回邀码供对方反向配对。 */
-  joinInvite?: (code: string, localPath: string) => { deviceId: string; reciprocalCode: string };
   /**
    * 开发模式的 vite dev server 基址(如 `http://127.0.0.1:5173`)。
    * 设置后,非控制端点的 web 请求会 302 重定向到该地址,由 vite 原生提供 HMR;
@@ -170,7 +179,7 @@ async function ensureSsr(): Promise<void> {
  * (见 `isControlRoute`),生产形态下不传该参数。
  */
 export function createControlServer(deps: ControlServerDeps): Server {
-  const { token, getStatus, addFolder, removeFolder, rescan, reconnect, createInvite, joinInvite, devViteUrl } = deps;
+  const { token, getStatus, addFolder, removeFolder, addDevice, removeDevice, setFolderDevices, rescan, reconnect, getOffers, acceptOffer, declineOffer, devViteUrl } = deps;
 
   return createServer((req, res) => {
     void (async () => {
@@ -308,11 +317,104 @@ export function createControlServer(deps: ControlServerDeps): Server {
           sendJson(res, 400, { error: 'path is required' });
           return;
         }
-        addFolder((body as any).path, ((body as any).devices ?? []).filter((d: unknown): d is string => typeof d === 'string'));
+        const devices = ((body as any).devices ?? []).filter((d: unknown): d is string => typeof d === 'string');
+        const id = typeof (body as any).id === 'string' && (body as any).id !== '' ? (body as any).id : undefined;
+        addFolder((body as any).path, devices, id);
         sendJson(res, 201, { ok: true });
       } catch {
         sendJson(res, 400, { error: 'invalid json body' });
       }
+      return;
+    }
+
+    // POST /api/folders/devices : 精确设置某目录的设备列表(按目录多选设备)
+    if (req.method === 'POST' && req.url && pathname(req.url) === '/api/folders/devices' && setFolderDevices) {
+      try {
+        const raw = await readBody(req);
+        const body = raw === '' ? {} : JSON.parse(raw);
+        if (typeof (body as any).path !== 'string' || (body as any).path === '') {
+          sendJson(res, 400, { error: 'path is required' });
+          return;
+        }
+        const devices = ((body as any).devices ?? []).filter((d: unknown): d is string => typeof d === 'string');
+        setFolderDevices((body as any).path, devices);
+        sendJson(res, 200, { ok: true });
+      } catch (e) {
+        sendJson(res, 400, { error: e instanceof Error ? e.message : 'invalid json body' });
+      }
+      return;
+    }
+
+    // POST /api/devices : 添加一个已知对端设备 ID
+    if (req.method === 'POST' && req.url && pathname(req.url) === '/api/devices' && addDevice) {
+      try {
+        const raw = await readBody(req);
+        const body = raw === '' ? {} : JSON.parse(raw);
+        if (typeof (body as any).deviceId !== 'string' || (body as any).deviceId === '') {
+          sendJson(res, 400, { error: 'deviceId is required' });
+          return;
+        }
+        const address =
+          typeof (body as any).address === 'string' && (body as any).address !== ''
+            ? (body as any).address
+            : undefined;
+        addDevice((body as any).deviceId, address);
+        sendJson(res, 201, { ok: true });
+      } catch (e) {
+        sendJson(res, 400, { error: e instanceof Error ? e.message : 'failed to add device' });
+      }
+      return;
+    }
+
+    // DELETE /api/devices?deviceId=xxx : 移除一个已知对端设备
+    if (req.method === 'DELETE' && req.url && pathname(req.url) === '/api/devices' && removeDevice) {
+      const url = new URL(req.url, 'http://localhost');
+      const deviceId = url.searchParams.get('deviceId');
+      if (!deviceId) {
+        sendJson(res, 400, { error: 'deviceId is required' });
+        return;
+      }
+      removeDevice(deviceId);
+      sendJson(res, 200, { ok: true });
+      return;
+    }
+
+    // GET /api/offers : 列出待确认项(对方推送的配对 / 目录共享邀请)
+    if (req.method === 'GET' && req.url && pathname(req.url) === '/api/offers' && getOffers) {
+      sendJson(res, 200, getOffers());
+      return;
+    }
+
+    // POST /api/offers/:id/accept : 确认一个待确认项
+    // 目录共享邀请需 body 带 localPath(本机落地路径);配对邀请无需路径
+    if (req.method === 'POST' && req.url && pathname(req.url).startsWith('/api/offers/') && acceptOffer) {
+      const id = pathname(req.url).slice('/api/offers/'.length).replace(/\/accept$/, '');
+      if (!id) {
+        sendJson(res, 400, { error: 'offer id is required' });
+        return;
+      }
+      try {
+        const raw = await readBody(req);
+        const body = raw === '' ? {} : JSON.parse(raw);
+        const localPath = typeof (body as any).localPath === 'string' ? (body as any).localPath : undefined;
+        acceptOffer(id, localPath);
+        sendJson(res, 200, { ok: true });
+      } catch (e) {
+        // 待确认项不存在 / 目录邀请缺少本地路径 / 配置写入失败:透传错误
+        sendJson(res, 400, { error: e instanceof Error ? e.message : 'failed to accept offer' });
+      }
+      return;
+    }
+
+    // POST /api/offers/:id/decline : 忽略一个待确认项
+    if (req.method === 'POST' && req.url && pathname(req.url).startsWith('/api/offers/') && declineOffer) {
+      const id = pathname(req.url).slice('/api/offers/'.length).replace(/\/decline$/, '');
+      if (!id) {
+        sendJson(res, 400, { error: 'offer id is required' });
+        return;
+      }
+      declineOffer(id);
+      sendJson(res, 200, { ok: true });
       return;
     }
 
@@ -346,42 +448,6 @@ export function createControlServer(deps: ControlServerDeps): Server {
       }
       reconnect(deviceId);
       sendJson(res, 200, { ok: true });
-      return;
-    }
-
-    // GET /api/invite?folder=xxx : 为已配置目录生成一次性配对邀请码
-    if (req.method === 'GET' && req.url && pathname(req.url) === '/api/invite' && createInvite) {
-      const url = new URL(req.url, 'http://localhost');
-      const folder = url.searchParams.get('folder');
-      if (!folder) {
-        sendJson(res, 400, { error: 'folder is required' });
-        return;
-      }
-      try {
-        const code = createInvite(folder);
-        sendJson(res, 200, { code });
-      } catch (e) {
-        sendJson(res, 400, { error: e instanceof Error ? e.message : 'failed to create invite' });
-      }
-      return;
-    }
-
-    // POST /api/join : 接受邀请码,把对端加入白名单,返回回邀码(双向配对)
-    if (req.method === 'POST' && req.url && pathname(req.url) === '/api/join' && joinInvite) {
-      try {
-        const raw = await readBody(req);
-        const body = raw === '' ? {} : JSON.parse(raw);
-        const code = (body as { code?: unknown }).code;
-        const localPath = (body as { localPath?: unknown }).localPath;
-        if (typeof code !== 'string' || typeof localPath !== 'string' || !code || !localPath) {
-          sendJson(res, 400, { error: 'code and localPath are required' });
-          return;
-        }
-        const result = joinInvite(code, localPath);
-        sendJson(res, 200, result);
-      } catch (e) {
-        sendJson(res, 400, { error: e instanceof Error ? e.message : 'failed to join' });
-      }
       return;
     }
 

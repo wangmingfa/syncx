@@ -60,7 +60,7 @@ describe('ui-fallback', () => {
       status: {
         deviceId: 'ABCDEFGH23',
         folders: [],
-        peers: [
+        devices: [
           { deviceId: 'PEER234567', online: true },
           { deviceId: 'OFFLINE123', online: false },
         ],
@@ -80,7 +80,7 @@ describe('ui-fallback', () => {
       status: {
         deviceId: 'ABCDEFGH23',
         folders: [],
-        peers: [
+        devices: [
           { deviceId: 'PEER234567', online: true },
           { deviceId: 'OFFLINE123', online: false },
         ],
@@ -130,12 +130,12 @@ describe('ui-fallback', () => {
     expect(html).toContain('手动扫描');
   });
 
-  it('shows empty state when no peers are configured', () => {
+  it('shows empty state when no devices are configured', () => {
     const html = renderControlFallback({
       status: {
         deviceId: 'ABCDEFGH23',
         folders: [],
-        peers: [],
+        devices: [],
       },
     });
 

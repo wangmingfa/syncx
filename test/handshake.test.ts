@@ -9,8 +9,10 @@ import {
   deriveSessionKey,
   buildKxMessage,
   verifyKxMessage,
+  decodeKxMessage,
 } from '../src/handshake.js';
 import { connectPeer } from '../src/net/client.js';
+import { startPeerServer } from '../src/net/server.js';
 import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -113,6 +115,30 @@ describe('session key exchange', () => {
     const tampered = { ...kx, x25519: der.toString('base64') };
     expect(() => verifyKxMessage(tampered, identity.publicKey)).toThrow();
   });
+
+  it('round-trips the listenPort field for reverse peer discovery', () => {
+    const identity = makeKeypair();
+    const session = generateX25519KeyPair();
+
+    const kx = buildKxMessage(session, identity.privateKey, 22000);
+    expect(kx.listenPort).toBe(22000);
+
+    // 序列化后仍能被解码并校验,且 listenPort 保持
+    const decoded = decodeKxMessage(JSON.stringify(kx));
+    expect(decoded.listenPort).toBe(22000);
+    expect(verifyKxMessage(decoded, identity.publicKey)).toBe(session.publicKeyPem);
+  });
+
+  it('omits listenPort when not provided (backward compatible)', () => {
+    const identity = makeKeypair();
+    const session = generateX25519KeyPair();
+
+    const kx = buildKxMessage(session, identity.privateKey);
+    expect(kx.listenPort).toBeUndefined();
+
+    const decoded = decodeKxMessage(JSON.stringify(kx));
+    expect(decoded.listenPort).toBeUndefined();
+  });
 });
 
 describe('connectPeer handshake', () => {
@@ -199,5 +225,67 @@ describe('connectPeer handshake', () => {
 
     await new Promise<void>((resolve) => wss.close(() => resolve()));
     rmSync(dir, { recursive: true, force: true });
+  });
+});
+
+describe('peer server reverse discovery (listenPort)', () => {
+  it('passes the connecting peer listenPort to onPeerConnected', async () => {
+    const serverDir = mkdtempSync(join(tmpdir(), 'syncx-srv-'));
+    const clientDir = mkdtempSync(join(tmpdir(), 'syncx-cli-'));
+    const serverIdentity = loadOrCreateIdentity(serverDir);
+    const clientIdentity = loadOrCreateIdentity(clientDir);
+
+    let receivedPort: number | undefined;
+    const server = startPeerServer(
+      serverIdentity,
+      {
+        onPeerConnected: (_socket, _deviceId, _key, listenPort) => {
+          receivedPort = listenPort;
+        },
+        onError: () => {},
+      },
+      0,
+    );
+
+    const peer = await connectPeer(clientIdentity, `ws://127.0.0.1:${server.port}`, 22000);
+    // 等待 server 侧握手完成的回调触发
+    await new Promise((r) => setTimeout(r, 50));
+
+    expect(receivedPort).toBe(22000);
+
+    peer.socket.close();
+    server.close();
+    rmSync(serverDir, { recursive: true, force: true });
+    rmSync(clientDir, { recursive: true, force: true });
+  });
+
+  it('passes undefined listenPort when the client omits it (old peer)', async () => {
+    const serverDir = mkdtempSync(join(tmpdir(), 'syncx-srv-'));
+    const clientDir = mkdtempSync(join(tmpdir(), 'syncx-cli-'));
+    const serverIdentity = loadOrCreateIdentity(serverDir);
+    const clientIdentity = loadOrCreateIdentity(clientDir);
+
+    let receivedPort: number | undefined;
+    const server = startPeerServer(
+      serverIdentity,
+      {
+        onPeerConnected: (_socket, _deviceId, _key, listenPort) => {
+          receivedPort = listenPort;
+        },
+        onError: () => {},
+      },
+      0,
+    );
+
+    // 旧版客户端不广播 listenPort
+    const peer = await connectPeer(clientIdentity, `ws://127.0.0.1:${server.port}`);
+    await new Promise((r) => setTimeout(r, 50));
+
+    expect(receivedPort).toBeUndefined();
+
+    peer.socket.close();
+    server.close();
+    rmSync(serverDir, { recursive: true, force: true });
+    rmSync(clientDir, { recursive: true, force: true });
   });
 });

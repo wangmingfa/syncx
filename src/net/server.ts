@@ -9,6 +9,7 @@ import {
   generateX25519KeyPair,
   verifyKxMessage,
 } from '../handshake.js';
+import type { KxMessage } from '../handshake.js';
 
 /** 单条 WebSocket 消息的最大字节数:索引/块传输的上限,防单条巨消息耗尽内存。 */
 export const MAX_MESSAGE_BYTES = 64 * 1024 * 1024;
@@ -18,7 +19,8 @@ const HANDSHAKE_TIMEOUT_MS = 10_000;
 const MAX_PEER_CONNECTIONS = 64;
 
 export interface PeerHandlers {
-  onPeerConnected(socket: WebSocket, deviceId: string, key: Buffer): void;
+  /** 入站对端连上并完成握手。listenPort 为对端在 kx 中广播的监听端口(旧版可能为 undefined)。 */
+  onPeerConnected(socket: WebSocket, deviceId: string, key: Buffer, listenPort?: number): void;
   onError(error: Error): void;
 }
 
@@ -109,12 +111,13 @@ export function startPeerServer(
       }
 
       const sessionPair = generateX25519KeyPair();
-      socket.send(encodeKx(buildKxMessage(sessionPair, identity.privateKey)));
+      // 回发 kx 时带上本机监听端口,让连接方(成为接收方时)也能反向发现并主动重连本机
+      socket.send(encodeKx(buildKxMessage(sessionPair, identity.privateKey, port)));
       const key = deriveSessionKey(sessionPair.privateKeyPem, peerX25519Pem);
 
       socket.off('message', onMessage);
       clearTimeout(handshakeTimeout);
-      handlers.onPeerConnected(socket, peerDeviceId!, key);
+      handlers.onPeerConnected(socket, peerDeviceId!, key, kx.listenPort);
     };
     socket.on('message', onMessage);
   });
@@ -143,6 +146,6 @@ export function startPeerServer(
   };
 }
 
-function encodeKx(kx: { type: 'kx'; x25519: string; sig: string }): string {
+function encodeKx(kx: KxMessage): string {
   return JSON.stringify(kx);
 }

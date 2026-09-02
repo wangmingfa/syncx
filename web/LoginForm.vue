@@ -1,5 +1,6 @@
 <script setup lang="ts">
 import { ref } from 'vue';
+import { NInput, NButton } from 'naive-ui';
 
 // 登录失败原因:优先取外部传入,否则用本地校验结果。
 const props = defineProps<{ error?: string }>();
@@ -77,22 +78,24 @@ async function submit(): Promise<void> {
       <form method="POST" action="/login" @submit.prevent="submit">
         <label class="field">
           <span class="field__label">控制令牌</span>
-          <input
-            id="token"
-            v-model="token"
-            name="token"
+          <n-input
+            v-model:value="token"
             type="password"
+            show-password-on="click"
             autocomplete="current-password"
-            spellcheck="false"
             placeholder="粘贴 ~/.syncx/control.token 的内容"
-          >
+          />
         </label>
 
         <div v-if="errorMsg" class="login__error">{{ errorMsg }}</div>
 
-        <button class="submit" type="submit" :disabled="busy">
-          {{ busy ? '验证中…' : '验证并进入' }}
-        </button>
+        <n-button
+          class="submit"
+          type="primary"
+          attr-type="submit"
+          :loading="busy"
+          block
+        >验证并进入</n-button>
       </form>
 
       <div class="login__foot">
@@ -216,11 +219,6 @@ async function submit(): Promise<void> {
   color: var(--muted);
 }
 
-.field input {
-  font-family: var(--mono);
-  letter-spacing: 0.05em;
-}
-
 .login__error {
   display: flex;
   align-items: center;
@@ -249,21 +247,7 @@ async function submit(): Promise<void> {
 }
 
 .submit {
-  width: 100%;
-  height: 46px;
   margin-top: 18px;
-  border-radius: 11px;
-  background: linear-gradient(100deg, var(--accent), var(--accent-2));
-  color: #fff;
-  font-size: 14px;
-  font-weight: 500;
-  letter-spacing: 0.06em;
-  box-shadow: 0 12px 26px -14px rgb(74 127 192 / 0.8);
-}
-
-.submit:hover:not(:disabled) {
-  filter: brightness(1.05);
-  box-shadow: 0 16px 32px -14px rgb(74 127 192 / 0.9);
 }
 
 /* ---------- 页脚 ---------- */

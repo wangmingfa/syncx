@@ -108,11 +108,12 @@ import type { ControlServerDeps } from './api.js';
 import { startPeerServer } from './net/server.js';
 import { connectPeer } from './net/client.js';
 import { startDiscovery } from './net/discovery.js';
-import { makePeerTransport, attachPeerMessages } from './net/wire.js';
+import { makePeerTransport, attachPeerMessages, sendControlMessage, type ControlMessage } from './net/wire.js';
 import { RateLimiter } from './ratelimit.js';
 import { createControlServer } from './api.js';
-import { buildStatus, type PeerStatus, type SyncProgress } from './status.js';
-import { addSharedFolder, removeSharedFolder, isPeerAllowed } from './devices.js';
+import { buildStatus, type DeviceStatus, type SyncProgress } from './status.js';
+import { addSharedFolder, removeSharedFolder, isPeerAllowed, addKnownDevice, removeKnownDevice, addPeer, setFolderDevices } from './devices.js';
+import { receiveOffer, markOfferAccepted, markOfferDeclined, listPendingOffers, makeOfferId } from './offers.js';
 import { createInviteCode, parseInviteCode, revokeInviteCode } from './invite.js';
 import { folderIdFor, folderIndexPath, type SharedFolderConfig } from './config.js';
 import { getLanAddresses, formatHost } from './net/addresses.js';
@@ -294,14 +295,14 @@ export async function run(args: ParsedArgs): Promise<void> {
     logger.info('no shared folders configured; the daemon stays up and picks up folders added via the web UI');
   }
 
-  /** 校验对端设备是否被任一共享目录授权;未授权则关闭 socket 并打日志。 */
-  function acceptPeer(socket: WebSocket, remoteDeviceId: string): boolean {
-    const allowed = isPeerAllowed(remoteDeviceId, loadConfig(configPath).sharedFolders);
-    if (!allowed) {
-      logger.warn(`rejected unauthorized peer ${remoteDeviceId}`);
-      socket.close();
-    }
-    return allowed;
+  /**
+   * 入站连接授权:握手阶段已用 Ed25519 签名校验对端身份(verifyKxMessage),
+   * 此处不再因「未互相信任」而拒连。否则一方添加另一方时,对方收不到配对请求
+   * (连接被拒 → 控制面消息到不了 → 不弹「待确认」)。未确认前的会话仅开放控制面,
+   * 不交换文件索引(见 startSyncSession 对 allowed 的判断),信任在「待确认」弹窗确认后建立。
+   */
+  function acceptPeer(): boolean {
+    return true;
   }
 
   // --- 对端连接去重与断线重连 ---
@@ -350,6 +351,24 @@ export async function run(args: ParsedArgs): Promise<void> {
   }
 
   /**
+   * 由入站 socket 的对端源 IP + 握手 kx 中广播的监听端口,拼出可反向连接的
+   * ws:// 地址。@types/ws 未暴露 remoteAddress,故对 ws 实例做防御性读取
+   * (优先 socket.remoteAddress,回退底层 _socket.remoteAddress)。IPv6 自动加方括号。
+   * 端口非法或缺失时返回 undefined(旧版对端不广播端口,则无法反向发现)。
+   */
+  function learnPeerUrl(socket: WebSocket, listenPort?: number): string | undefined {
+    if (typeof listenPort !== 'number' || listenPort <= 0 || listenPort > 65535) return undefined;
+    const anySock = socket as unknown as {
+      remoteAddress?: string;
+      _socket?: { remoteAddress?: string };
+    };
+    const addr = anySock.remoteAddress ?? anySock._socket?.remoteAddress;
+    if (!addr) return undefined;
+    const host = addr.includes(':') && !addr.startsWith('[') ? `[${addr}]` : addr;
+    return `ws://${host}:${listenPort}`;
+  }
+
+  /**
    * 连接到指定对端并建立同步会话:对端已有连接时关闭重复 socket,
    * 未授权则拒绝;失败时按调用方策略处理(默认记日志)。
    */
@@ -360,7 +379,7 @@ export async function run(args: ParsedArgs): Promise<void> {
       onRejected?: (error: unknown) => void;
     } = {},
   ): void {
-    void connectPeer(identity, url)
+    void connectPeer(identity, url, args.port ?? 22000)
       .then(({ socket, remoteDeviceId, key }) => {
         if (isPeerConnected(remoteDeviceId)) {
           // 对端已有连接(入站或出站),关闭重复的 socket
@@ -368,7 +387,7 @@ export async function run(args: ParsedArgs): Promise<void> {
           return;
         }
         opts.onConnected?.(remoteDeviceId);
-        if (acceptPeer(socket, remoteDeviceId)) {
+        if (acceptPeer()) {
           startSyncSession(socket, remoteDeviceId, key, url);
         }
       })
@@ -451,6 +470,9 @@ export async function run(args: ParsedArgs): Promise<void> {
 
   // 存活会话注册表:配置热重载新增/移除目录时,对现有连接补建或摘除对应目录的 peer
   const activeSessions: ActiveSession[] = [];
+  // 按对端 deviceId 索引的存活会话:用于向已连接对端推送 control 控制面消息
+  // (配对请求 / 目录共享邀请 / 确认回执)。离线对端查不到即跳过(连接建立时会自动补发)。
+  const peerSessions = new Map<string, ActiveSession>();
 
   /** 在一个存活会话上为指定目录补建 transport/peer,并发送该目录的索引。 */
   function attachFolderToSession(session: ActiveSession, folder: FolderState): void {
@@ -484,7 +506,95 @@ export async function run(args: ParsedArgs): Promise<void> {
     transport.sendEntries([...folder.localIndex.values()]);
   }
 
-  /** 在一个 socket 上建立同步会话:为每个共享目录建 peer,按 folder 路由。 */
+  /** 向已连接对端推送一条 control 控制面消息;对端离线(无存活会话)则忽略。 */
+  function sendControlTo(deviceId: string, message: ControlMessage): boolean {
+    const session = peerSessions.get(deviceId);
+    if (!session) return false;
+    try {
+      sendControlMessage(session.socket, session.key, message);
+      return true;
+    } catch (error) {
+      logger.warn(`failed to send control to ${deviceId}: ${error instanceof Error ? error.message : String(error)}`);
+      return false;
+    }
+  }
+
+  /** 收到对端 control 消息:把配对 / 目录共享邀请落成待确认项;确认回执仅记录。 */
+  function onControl(message: ControlMessage): void {
+    switch (message.kind) {
+      case 'pairing-request':
+        receiveOffer(configPath, {
+          id: message.offerId,
+          kind: 'pairing',
+          fromDeviceId: message.fromDeviceId,
+        });
+        logger.info(`pairing request received from ${message.fromDeviceId}`);
+        break;
+      case 'folder-invitation':
+        receiveOffer(configPath, {
+          id: message.offerId,
+          kind: 'folder',
+          fromDeviceId: message.fromDeviceId,
+          folderId: message.folderId,
+          folderName: message.folderName,
+        });
+        logger.info(`folder invitation received from ${message.fromDeviceId}: ${message.folderId}`);
+        break;
+      case 'pairing-ack':
+        logger.info(`pairing ${message.accepted ? 'accepted' : 'declined'} by ${message.fromDeviceId}`);
+        break;
+      case 'folder-invitation-ack':
+        logger.info(`folder invitation ${message.accepted ? 'accepted' : 'declined'} by ${message.fromDeviceId}`);
+        break;
+    }
+  }
+
+  /**
+   * 连接建立后,把本机「共享意图」推送给对端:
+   * - 每个把对端列入 devices 的共享目录 → 发目录共享邀请(对端去重,已 mutual 则跳过)
+   * - 对端在 knownDevices → 发配对请求
+   * 这样无论谁先上线,对方上线并互连后都会收到待确认项;离线期间累积的意图在重连时自动补发。
+   */
+  function pushSharesTo(session: ActiveSession): void {
+    const current = loadConfig(configPath);
+    for (const f of current.sharedFolders) {
+      if ((f.devices ?? []).includes(session.remoteDeviceId)) {
+        sendControlTo(session.remoteDeviceId, {
+          kind: 'folder-invitation',
+          offerId: makeOfferId('folder', session.remoteDeviceId, folderIdFor(f)),
+          fromDeviceId: identity.deviceId,
+          folderId: folderIdFor(f),
+          folderName: folderIdFor(f),
+        });
+      }
+    }
+    if (current.knownDevices.some((d) => d.id === session.remoteDeviceId)) {
+      sendControlTo(session.remoteDeviceId, {
+        kind: 'pairing-request',
+        offerId: makeOfferId('pair', session.remoteDeviceId),
+        fromDeviceId: identity.deviceId,
+      });
+    }
+  }
+
+  /**
+   * 确认配对 / 目录共享后,本机已信任该对端:在其已有会话上补建目录 peer 并推送本机共享意图,
+   * 使离线期间建立的「仅控制面」会话升级为可同步。无存活会话(对端尚未连)时静默跳过,
+   * 连接建立时 startSyncSession 会按 allowed 自动附加目录。
+   */
+  function promoteSession(remoteDeviceId: string): void {
+    const session = peerSessions.get(remoteDeviceId);
+    if (!session) return;
+    const config = loadConfig(configPath);
+    for (const folder of folderStates) {
+      if ((folder.config.devices ?? []).includes(remoteDeviceId) && !session.peers.has(folder.id)) {
+        attachFolderToSession(session, folder);
+      }
+    }
+    pushSharesTo(session);
+  }
+
+  /** 在一个 socket 上建立同步会话:为每个共享目录建 peer,按 folder 路由;并推送本机共享意图。 */
   function startSyncSession(socket: WebSocket, remoteDeviceId: string, key: Buffer, url?: string): void {
     registerPeer(remoteDeviceId, url);
     peerSockets.add(socket);
@@ -496,16 +606,27 @@ export async function run(args: ParsedArgs): Promise<void> {
       transports: [],
     };
     activeSessions.push(session);
-    for (const folder of folderStates) {
-      attachFolderToSession(session, folder);
+    peerSessions.set(remoteDeviceId, session);
+    // 仅对「已互相信任」(在 knownDevices 或某共享目录 devices 中)的对端附加目录 peer 并交换索引;
+    // 未确认的对端此时仅建立控制面会话,用于接收配对 / 目录共享邀请并弹「待确认」,不泄漏文件索引。
+    const allowed = isPeerAllowed(remoteDeviceId, loadConfig(configPath).sharedFolders, loadConfig(configPath).knownDevices);
+    if (allowed) {
+      for (const folder of folderStates) {
+        if ((folder.config.devices ?? []).includes(remoteDeviceId)) {
+          attachFolderToSession(session, folder);
+        }
+      }
+      // 连接就绪后把本机当前的配对 / 目录共享意图推送给对端(对方会弹「待确认」)
+      pushSharesTo(session);
     }
-    attachPeerMessages(session.peers, socket, key);
+    attachPeerMessages(session.peers, socket, key, onControl);
     socket.on('error', (error) => logger.debug(`socket error for peer ${remoteDeviceId}: ${error.message}`));
     socket.on('close', (code, reason) => {
       logger.debug(`socket closed for peer ${remoteDeviceId}, code=${code}, reason=${reason?.toString('utf8') ?? '(empty)'}`);
       peerSockets.delete(socket);
       const sessionIdx = activeSessions.indexOf(session);
       if (sessionIdx >= 0) activeSessions.splice(sessionIdx, 1);
+      if (peerSessions.get(remoteDeviceId) === session) peerSessions.delete(remoteDeviceId);
       for (const { folder, transport } of session.transports) {
         const idx = folder.transports.indexOf(transport);
         if (idx >= 0) folder.transports.splice(idx, 1);
@@ -519,8 +640,8 @@ export async function run(args: ParsedArgs): Promise<void> {
   const control = createControlServer({
     token,
     devViteUrl: args.devViteUrl,
-    addFolder: (path, devices) => {
-      addSharedFolder(configPath, path, devices);
+    addFolder: (path, devices, id) => {
+      addSharedFolder(configPath, path, devices, id);
       logger.info(`shared folder added: ${path}`);
     },
     removeFolder: (path) => {
@@ -528,19 +649,28 @@ export async function run(args: ParsedArgs): Promise<void> {
       logger.info(`shared folder removed: ${path}`);
     },
     getStatus: () => {
-      // 收集所有已配置对端的在线状态
-      const allDeviceIds = new Set<string>();
-      for (const f of loadConfig(configPath).sharedFolders) {
+      // 收集已知设备 + 各目录指派,构建设备状态(含在线与所属目录)
+      const config = loadConfig(configPath);
+      const folderDevices = new Map<string, string[]>();
+      for (const f of config.sharedFolders) {
+        const fid = folderIdFor(f);
         for (const d of f.devices ?? []) {
-          allDeviceIds.add(d);
+          const list = folderDevices.get(d) ?? [];
+          list.push(fid);
+          folderDevices.set(d, list);
         }
       }
-      const peers: PeerStatus[] = [];
-      for (const deviceId of allDeviceIds) {
-        peers.push({
+      const deviceIds = new Set<string>([
+        ...config.knownDevices.map((d) => d.id),
+        ...folderDevices.keys(),
+      ]);
+      const devices: DeviceStatus[] = [];
+      for (const deviceId of deviceIds) {
+        devices.push({
           deviceId,
           online: isPeerConnected(deviceId),
           url: outboundPeerUrls.get(deviceId),
+          folders: folderDevices.get(deviceId) ?? [],
         });
       }
       // 收集各目录同步进度
@@ -565,28 +695,106 @@ export async function run(args: ParsedArgs): Promise<void> {
       }
       return buildStatus(
         identity,
-        loadConfig(configPath),
+        config,
         { entries, tombstones },
-        peers,
+        devices,
         syncProgress,
+        listPendingOffers(configPath),
       );
     },
     rescan: () => {
       void runScan();
     },
     reconnect: (deviceId) => forceReconnect(deviceId),
-    createInvite: (folder) => {
-      if (!config.sharedFolders.some((f) => f.path === folder)) {
-        throw new Error(`folder not configured: ${folder}`);
+    addDevice: (deviceId, address) => {
+      addKnownDevice(configPath, deviceId);
+      logger.info(`known device added: ${deviceId}`);
+      // 跨网段/无 mDNS 时手动指定对方 ws:// 地址:写入 config.peers 并立即直连
+      if (address) {
+        try {
+          addPeer(configPath, address);
+        } catch (e) {
+          logger.warn(`invalid peer address ignored: ${e instanceof Error ? e.message : String(e)}`);
+        }
+        connectTo(address, {
+          onRejected: (error) =>
+            logger.error(`connect to ${address} failed: ${error instanceof Error ? error.message : String(error)}`),
+        });
       }
-      return createInviteCode(identity, folder);
+      // 若对端当前已连,立即推送配对请求(无需等下次重连)
+      if (isPeerConnected(deviceId)) {
+        sendControlTo(deviceId, {
+          kind: 'pairing-request',
+          offerId: makeOfferId('pair', deviceId),
+          fromDeviceId: identity.deviceId,
+        });
+      }
     },
-    joinInvite: (code, localPath) => {
-      const invite = parseInviteCode(code, configDir);
-      addSharedFolder(configPath, localPath, [invite.deviceId]);
-      logger.info(`paired with device ${invite.deviceId} via invite (folder ${invite.folder})`);
-      const reciprocalCode = createInviteCode(identity, localPath);
-      return { deviceId: invite.deviceId, reciprocalCode };
+    removeDevice: (deviceId) => {
+      removeKnownDevice(configPath, deviceId);
+      outboundPeerUrls.delete(deviceId);
+      logger.info(`known device removed: ${deviceId}`);
+    },
+    setFolderDevices: (path, devices) => {
+      const before = loadConfig(configPath).sharedFolders.find((f) => f.path === path);
+      const beforeDevices = new Set(before?.devices ?? []);
+      setFolderDevices(configPath, path, devices);
+      logger.info(`folder devices updated: ${path}`);
+      // 对本次新加入且当前在线的对端,立即推送目录共享邀请(无需等下次重连)
+      for (const d of devices) {
+        if (!beforeDevices.has(d) && isPeerConnected(d)) {
+          const folder = folderStates.find((f) => f.path === path);
+          const fid = folder ? folder.id : before?.id;
+          sendControlTo(d, {
+            kind: 'folder-invitation',
+            offerId: makeOfferId('folder', d, fid),
+            fromDeviceId: identity.deviceId,
+            folderId: fid ?? '',
+            folderName: fid ?? path,
+          });
+        }
+      }
+    },
+    getOffers: () => listPendingOffers(configPath),
+    acceptOffer: (offerId, localPath) => {
+      const offer = markOfferAccepted(configPath, offerId);
+      if (!offer) throw new Error('offer not found');
+      if (offer.kind === 'folder') {
+        if (!localPath || localPath.trim() === '') {
+          throw new Error('local path is required to accept a folder invitation');
+        }
+        addSharedFolder(configPath, localPath, [offer.fromDeviceId], offer.folderId);
+        sendControlTo(offer.fromDeviceId, {
+          kind: 'folder-invitation-ack',
+          offerId: offer.id,
+          fromDeviceId: identity.deviceId,
+          accepted: true,
+        });
+        logger.info(`accepted folder invitation ${offer.folderId} from ${offer.fromDeviceId}`);
+      } else {
+        addKnownDevice(configPath, offer.fromDeviceId);
+        sendControlTo(offer.fromDeviceId, {
+          kind: 'pairing-ack',
+          offerId: offer.id,
+          fromDeviceId: identity.deviceId,
+          accepted: true,
+        });
+        logger.info(`accepted pairing request from ${offer.fromDeviceId}`);
+      }
+      // 确认后本机已信任该对端:升级已有会话(补建目录 peer 并反推本机共享意图),无需等重连
+      promoteSession(offer.fromDeviceId);
+    },
+    declineOffer: (offerId) => {
+      const offer = markOfferDeclined(configPath, offerId);
+      if (!offer) throw new Error('offer not found');
+      // 通知对方本端已忽略;不影响其后续重推(本端按去重键不再弹)
+      sendControlTo(offer.fromDeviceId, {
+        kind: offer.kind === 'folder' ? 'folder-invitation-ack' : 'pairing-ack',
+        offerId: offer.id,
+        fromDeviceId: identity.deviceId,
+        accepted: false,
+      });
+      logger.info(`declined offer from ${offer.fromDeviceId}`);
     },
   });
   control.listen(controlPort, controlHost);
@@ -594,14 +802,20 @@ export async function run(args: ParsedArgs): Promise<void> {
   const server = startPeerServer(
     identity,
     {
-      onPeerConnected(socket, remoteDeviceId, key) {
+      onPeerConnected(socket, remoteDeviceId, key, listenPort) {
         logger.debug(`inbound peer connected: ${remoteDeviceId}, count=${peerConnectionCount.get(remoteDeviceId) ?? 0}`);
         if ((peerConnectionCount.get(remoteDeviceId) ?? 0) >= MAX_CONNECTIONS_PER_PEER) {
           socket.close();
           return;
         }
-        if (acceptPeer(socket, remoteDeviceId)) {
-          startSyncSession(socket, remoteDeviceId, key);
+        if (acceptPeer()) {
+          // 连接方在握手 kx 中广播了监听端口:结合源 IP 拼出反向地址并交给 startSyncSession
+          // 记录到 outboundPeerUrls,使本机也能主动重连对端(只填一方地址即可双向重连)
+          const learnedUrl = learnPeerUrl(socket, listenPort);
+          if (learnedUrl) {
+            logger.info(`learned peer ${remoteDeviceId} reachable at ${learnedUrl} (reverse discovery)`);
+          }
+          startSyncSession(socket, remoteDeviceId, key, learnedUrl);
         }
       },
       onError(error) {

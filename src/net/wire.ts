@@ -9,7 +9,19 @@ import { RateLimiter } from '../ratelimit.js';
 export type WireMessage =
   | { type: 'index'; folder: string; payload: string }
   | { type: 'block-request'; folder: string; payload: BlockRequest }
-  | { type: 'block-response'; folder: string; payload: Omit<BlockResponse, 'data'> & { data: string } };
+  | { type: 'block-response'; folder: string; payload: Omit<BlockResponse, 'data'> & { data: string } }
+  | { type: 'control'; payload: ControlMessage };
+
+/**
+ * 与同步数据无关的「控制面」消息:设备配对请求 与 目录共享邀请,
+ * 以及对方的确认回执。它们不绑定某个共享目录,故走独立的 control 通道,
+ * 由接收方路由到一个全局处理器(而非按 folder 找 SyncPeer)。
+ */
+export type ControlMessage =
+  | { kind: 'folder-invitation'; offerId: string; fromDeviceId: string; folderId: string; folderName: string }
+  | { kind: 'folder-invitation-ack'; offerId: string; fromDeviceId: string; accepted: boolean }
+  | { kind: 'pairing-request'; offerId: string; fromDeviceId: string }
+  | { kind: 'pairing-ack'; offerId: string; fromDeviceId: string; accepted: boolean };
 
 export function encodeWireMessage(message: WireMessage): string {
   return JSON.stringify(message);
@@ -108,11 +120,22 @@ export function makePeerTransport(
   };
 }
 
+/** 经已建立的会话密钥,发送一条 control 控制面消息(不绑定任何目录)。 */
+export function sendControlMessage(socket: WebSocket, key: Buffer, message: ControlMessage): void {
+  socket.send(encryptMessage(key, { type: 'control', payload: message }));
+}
+
 /**
  * Receive-side dispatcher: decrypts incoming wire messages and routes each
- * message to the SyncPeer registered for its folder.
+ * message to the SyncPeer registered for its folder. `control` 类型的消息
+ * (配对请求 / 目录共享邀请 / 确认回执)路由到 onControl,不经过 folder 路由。
  */
-export function attachPeerMessages(peers: Map<string, SyncPeer>, socket: WebSocket, key: Buffer): void {
+export function attachPeerMessages(
+  peers: Map<string, SyncPeer>,
+  socket: WebSocket,
+  key: Buffer,
+  onControl?: (message: ControlMessage) => void,
+): void {
   socket.on('message', (data) => {
     const raw = data instanceof ArrayBuffer ? Buffer.from(data) : Buffer.from(data as Buffer);
     let message: WireMessage;
@@ -120,6 +143,10 @@ export function attachPeerMessages(peers: Map<string, SyncPeer>, socket: WebSock
       message = decryptMessage(key, raw.toString('utf8'));
     } catch {
       return; // 解密/认证失败(篡改或噪声),忽略
+    }
+    if (message.type === 'control') {
+      onControl?.(message.payload);
+      return;
     }
     const peer = peers.get(message.folder);
     if (!peer) return;

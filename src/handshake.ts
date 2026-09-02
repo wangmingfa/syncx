@@ -55,6 +55,12 @@ export interface KxMessage {
   x25519: string;
   /** base64 编码的 Ed25519 签名(对 x25519 DER 字节签名) */
   sig: string;
+  /**
+   * 可选:本机 peer 监听端口。连接方在 kx 中带上自己的监听端口,接收方结合
+   * socket 源 IP 即可拼出 `ws://源IP:listenPort`,从而在只填一方地址的情况下也能
+   * 反向主动重连对端(无需手动配置对端地址)。旧版对端不发送此字段时为 undefined。
+   */
+  listenPort?: number;
 }
 
 export function encodeKxMessage(kx: KxMessage): string {
@@ -67,17 +73,19 @@ export function decodeKxMessage(raw: string): KxMessage {
 
 /**
  * 构造并签名一个 kx 消息:用设备 Ed25519 私钥绑定本次会话的 X25519 公钥,
- * 防止中间人替换密钥。
+ * 防止中间人替换密钥。listenPort 可选,携带本机 peer 监听端口用于反向发现。
  */
 export function buildKxMessage(
   x25519Pair: X25519KeyPair,
   ed25519PrivateKeyPem: string,
+  listenPort?: number,
 ): KxMessage {
   const der = x25519PublicDer(x25519Pair.publicKeyPem);
   return {
     type: 'kx',
     x25519: der.toString('base64'),
     sig: signChallenge(ed25519PrivateKeyPem, der).toString('base64'),
+    ...(typeof listenPort === 'number' ? { listenPort } : {}),
   };
 }
 

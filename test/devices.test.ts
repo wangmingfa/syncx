@@ -2,7 +2,7 @@ import { describe, expect, it } from 'vitest';
 import { mkdtempSync, rmSync, readFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { addSharedFolder, removeSharedFolder, isPeerAllowed } from '../src/devices.js';
+import { addSharedFolder, removeSharedFolder, isPeerAllowed, addPeer } from '../src/devices.js';
 import type { SharedFolderConfig } from '../src/config.js';
 
 function tempDir(): string {
@@ -17,7 +17,9 @@ describe('shared folder configuration', () => {
     addSharedFolder(configPath, '/data/docs', ['DEV1234567']);
 
     const raw = JSON.parse(readFileSync(configPath, 'utf8'));
-    expect(raw.sharedFolders).toEqual([{ path: '/data/docs', devices: ['DEV1234567'] }]);
+    expect(raw.sharedFolders).toHaveLength(1);
+    expect(raw.sharedFolders[0]).toMatchObject({ path: '/data/docs', devices: ['DEV1234567'] });
+    expect(raw.sharedFolders[0].id).toMatch(/^[0-9a-f]{12}$/);
 
     rmSync(dir, { recursive: true, force: true });
   });
@@ -31,10 +33,11 @@ describe('shared folder configuration', () => {
 
     const raw = JSON.parse(readFileSync(configPath, 'utf8'));
     expect(raw.sharedFolders).toHaveLength(2);
-    expect(raw.sharedFolders[1]).toEqual({
+    expect(raw.sharedFolders[1]).toMatchObject({
       path: '/data/photos',
       devices: ['DEV1234567', 'DEVABCDEFG'],
     });
+    expect(raw.sharedFolders[1].id).toMatch(/^[0-9a-f]{12}$/);
 
     rmSync(dir, { recursive: true, force: true });
   });
@@ -48,7 +51,9 @@ describe('shared folder configuration', () => {
     removeSharedFolder(configPath, '/data/docs');
 
     const raw = JSON.parse(readFileSync(configPath, 'utf8'));
-    expect(raw.sharedFolders).toEqual([{ path: '/data/photos', devices: ['DEV1234567'] }]);
+    expect(raw.sharedFolders).toHaveLength(1);
+    expect(raw.sharedFolders[0]).toMatchObject({ path: '/data/photos', devices: ['DEV1234567'] });
+    expect(raw.sharedFolders[0].id).toMatch(/^[0-9a-f]{12}$/);
 
     rmSync(dir, { recursive: true, force: true });
   });
@@ -106,7 +111,52 @@ describe('isPeerAllowed', () => {
     expect(isPeerAllowed('AA', [])).toBe(false);
   });
 
+  it('allows a pasted known device even with no shared folders (Syncthing-style device introduction)', () => {
+    expect(isPeerAllowed('KK', [], [{ id: 'KK' }])).toBe(true);
+    // 未知设备仍拒绝
+    expect(isPeerAllowed('ZZ', [], [{ id: 'KK' }])).toBe(false);
+    // 未传 knownDevices 时退回仅目录授权(空 knownDevices 默认拒绝)
+    expect(isPeerAllowed('KK', [])).toBe(false);
+  });
+
   it('rejects empty peer id', () => {
     expect(isPeerAllowed('', folders)).toBe(false);
+  });
+});
+
+describe('manual peer address (addPeer)', () => {
+  it('appends a ws:// peer address to config.peers', () => {
+    const dir = tempDir();
+    const configPath = join(dir, 'config.json');
+
+    addPeer(configPath, 'ws://10.13.18.36:22000');
+
+    const raw = JSON.parse(readFileSync(configPath, 'utf8'));
+    expect(raw.peers).toEqual(['ws://10.13.18.36:22000']);
+
+    rmSync(dir, { recursive: true, force: true });
+  });
+
+  it('is idempotent for the same address', () => {
+    const dir = tempDir();
+    const configPath = join(dir, 'config.json');
+
+    addPeer(configPath, 'ws://172.25.48.139:22000');
+    addPeer(configPath, 'ws://172.25.48.139:22000');
+
+    const raw = JSON.parse(readFileSync(configPath, 'utf8'));
+    expect(raw.peers).toEqual(['ws://172.25.48.139:22000']);
+
+    rmSync(dir, { recursive: true, force: true });
+  });
+
+  it('rejects a non-ws:// address', () => {
+    const dir = tempDir();
+    const configPath = join(dir, 'config.json');
+
+    expect(() => addPeer(configPath, 'http://10.13.18.36:22000')).toThrow('ws://');
+    expect(() => addPeer(configPath, '10.13.18.36:22000')).toThrow('ws://');
+
+    rmSync(dir, { recursive: true, force: true });
   });
 });

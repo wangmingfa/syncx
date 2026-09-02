@@ -14,7 +14,7 @@ describe('config store', () => {
 
     const config = loadConfig(join(dir, 'config.json'));
 
-    expect(config).toEqual({ sharedFolders: [], peers: [] });
+    expect(config).toEqual({ sharedFolders: [], peers: [], knownDevices: [], pendingOffers: [] });
 
     rmSync(dir, { recursive: true, force: true });
   });
@@ -36,6 +36,8 @@ describe('config store', () => {
     expect(loadConfig(path)).toEqual({
       sharedFolders: [{ path: '/data/docs', devices: ['DEV1234567'] }],
       peers: ['ws://192.168.1.10:22000'],
+      knownDevices: [],
+      pendingOffers: [],
     });
     expect(JSON.parse(readFileSync(path, 'utf8'))).toEqual({
       sharedFolders: [{ path: '/data/docs', devices: ['DEV1234567'] }],
@@ -50,7 +52,7 @@ describe('config store', () => {
     const path = join(dir, 'config.json');
     saveConfig(path, { sharedFolders: [] });
 
-    expect(loadConfig(path)).toEqual({ sharedFolders: [], peers: [] });
+    expect(loadConfig(path)).toEqual({ sharedFolders: [], peers: [], knownDevices: [], pendingOffers: [] });
 
     rmSync(dir, { recursive: true, force: true });
   });

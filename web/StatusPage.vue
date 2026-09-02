@@ -1,5 +1,6 @@
 <script setup lang="ts">
-import { ref, onMounted, onUnmounted } from 'vue';
+import { ref, onMounted, onUnmounted, reactive, computed } from 'vue';
+import { NButton, NInput, NSelect } from 'naive-ui';
 
 interface SyncProgressItem {
   folder: string;
@@ -8,13 +9,38 @@ interface SyncProgressItem {
   receiving: number;
 }
 
+interface FolderInfo {
+  id?: string;
+  path: string;
+  devices: string[];
+}
+
+interface DeviceInfo {
+  deviceId: string;
+  online: boolean;
+  url?: string;
+  /** 该设备被指派到的目录 id 列表(用于展示「共享 N 个目录」)。 */
+  folders: string[];
+}
+
+interface OfferInfo {
+  id: string;
+  kind: 'pairing' | 'folder';
+  fromDeviceId: string;
+  folderId?: string;
+  folderName?: string;
+  status: 'pending' | 'accepted' | 'declined';
+  createdAt: number;
+}
+
 interface StatusData {
   deviceId: string;
   entries: number;
   tombstones: number;
-  folders: Array<{ id?: string; path: string; devices: string[] }>;
-  peers: Array<{ deviceId: string; online: boolean; url?: string }>;
+  folders: FolderInfo[];
+  devices: DeviceInfo[];
   syncProgress: SyncProgressItem[];
+  offers: OfferInfo[];
 }
 
 const props = defineProps<{ status: StatusData; message?: string }>();
@@ -23,6 +49,12 @@ const props = defineProps<{ status: StatusData; message?: string }>();
 const status = ref<StatusData>(props.status);
 const toast = ref<string | undefined>(props.message);
 const busy = ref(false);
+
+// 每个目录的设备多选本地镜像(提交时写回服务端)
+const folderSel = reactive<Record<string, string[]>>({});
+function syncFolderSel(): void {
+  for (const f of status.value.folders) folderSel[f.path] = [...f.devices];
+}
 
 // 使用指南弹窗
 const showGuide = ref(false);
@@ -55,6 +87,7 @@ async function refreshStatus(): Promise<void> {
     const res = await fetch('/api/status');
     if (!res.ok) throw new Error(`status ${res.status}`);
     status.value = (await res.json()) as StatusData;
+    syncFolderSel();
   } catch {
     // 静默失败,保留当前状态
   }
@@ -105,33 +138,6 @@ async function removeFolder(path: string): Promise<void> {
   }
 }
 
-async function addFolder(): Promise<void> {
-  if (busy.value) return;
-  const path = newPath.value.trim();
-  const devices = newDevices.value.split(',').map((s) => s.trim()).filter(Boolean);
-  if (!path) {
-    showToast('请填写目录路径');
-    return;
-  }
-  busy.value = true;
-  try {
-    const res = await fetch('/api/folders', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ path, devices }),
-    });
-    if (!res.ok) throw new Error(`add ${res.status}`);
-    showToast('已添加共享目录');
-    newPath.value = '';
-    newDevices.value = '';
-    await refreshStatus();
-  } catch {
-    showToast('添加失败,请重试');
-  } finally {
-    busy.value = false;
-  }
-}
-
 // 轻量拓扑联动:鼠标悬停左栏目录卡时,记录其配对设备,用于高亮右栏对应设备卡
 const hoverDevices = ref<string[]>([]);
 
@@ -143,15 +149,122 @@ function onFolderLeave(): void {
   hoverDevices.value = [];
 }
 
-const newPath = ref('');
-const newDevices = ref('');
+// 设备下拉选项(来自已知设备 + 已被指派的设备)
+const deviceOptions = computed(() =>
+  status.value.devices.map((d) => ({ label: d.deviceId, value: d.deviceId })),
+);
 
-// ---- 设备配对(邀请码) ----
-const inviteFolder = ref('');
-const inviteCode = ref('');
-const joinCode = ref('');
-const joinPath = ref('');
-const joinResult = ref<{ deviceId: string; reciprocalCode: string } | undefined>();
+// ---- 设备配对(按 ID) ----
+const newDeviceId = ref('');
+const newDeviceHost = ref('');
+const newDevicePort = ref('22000');
+
+async function addDevice(): Promise<void> {
+  const id = newDeviceId.value.trim();
+  if (!id) {
+    showToast('请填写设备 ID');
+    return;
+  }
+  if (busy.value) return;
+  // 地址为可选项:仅跨网段/无 mDNS 时需要。由 ws://(前缀) + 主机 + :端口(默认 22000) 拼成
+  const host = newDeviceHost.value.trim();
+  let address: string | undefined;
+  if (host) {
+    const port = newDevicePort.value.trim() || '22000';
+    address = `ws://${host}:${port}`;
+  }
+  busy.value = true;
+  try {
+    const res = await fetch('/api/devices', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ deviceId: id, address }),
+    });
+    if (!res.ok) throw new Error(`add device ${res.status}`);
+    showToast(address ? '已添加设备并发起直连' : '已添加设备');
+    newDeviceId.value = '';
+    newDeviceHost.value = '';
+    newDevicePort.value = '22000';
+    await refreshStatus();
+  } catch {
+    showToast('添加失败,请重试');
+  } finally {
+    busy.value = false;
+  }
+}
+
+async function removeDevice(deviceId: string): Promise<void> {
+  if (busy.value) return;
+  busy.value = true;
+  try {
+    const res = await fetch(`/api/devices?deviceId=${encodeURIComponent(deviceId)}`, {
+      method: 'DELETE',
+    });
+    if (!res.ok) throw new Error(`remove device ${res.status}`);
+    showToast('已移除设备');
+    await refreshStatus();
+  } catch {
+    showToast('移除失败,请重试');
+  } finally {
+    busy.value = false;
+  }
+}
+
+// ---- 按目录指派设备 ----
+async function commitFolderDevices(path: string, devices: string[]): Promise<void> {
+  if (busy.value) return;
+  busy.value = true;
+  try {
+    const res = await fetch('/api/folders/devices', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ path, devices }),
+    });
+    if (!res.ok) throw new Error(`update folder devices ${res.status}`);
+    showToast('已更新目录设备');
+    await refreshStatus();
+  } catch {
+    showToast('更新失败,请重试');
+  } finally {
+    busy.value = false;
+  }
+}
+
+// ---- 添加共享目录 ----
+const newPath = ref('');
+const newFolderId = ref('');
+const newFolderDevices = ref<string[]>([]);
+
+async function addFolder(): Promise<void> {
+  const path = newPath.value.trim();
+  if (!path) {
+    showToast('请填写目录路径');
+    return;
+  }
+  if (busy.value) return;
+  busy.value = true;
+  try {
+    const res = await fetch('/api/folders', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        path,
+        devices: newFolderDevices.value,
+        id: newFolderId.value.trim() || undefined,
+      }),
+    });
+    if (!res.ok) throw new Error(`add folder ${res.status}`);
+    showToast('已添加共享目录');
+    newPath.value = '';
+    newFolderId.value = '';
+    newFolderDevices.value = [];
+    await refreshStatus();
+  } catch {
+    showToast('添加失败,请重试');
+  } finally {
+    busy.value = false;
+  }
+}
 
 /** 复制文本到剪贴板,并轻提示。 */
 async function copy(text: string): Promise<void> {
@@ -163,63 +276,64 @@ async function copy(text: string): Promise<void> {
   }
 }
 
-/** 为本机某共享目录生成一次性配对邀请码。 */
-async function generateInvite(): Promise<void> {
-  if (!inviteFolder.value || busy.value) return;
-  busy.value = true;
-  try {
-    const res = await fetch(`/api/invite?folder=${encodeURIComponent(inviteFolder.value)}`);
-    const data = (await res.json().catch(() => ({}))) as { code?: string; error?: string };
-    if (!res.ok || !data.code) throw new Error(data.error ?? '生成邀请码失败');
-    inviteCode.value = data.code;
-    showToast('邀请码已生成');
-  } catch (e) {
-    showToast(e instanceof Error ? e.message : '生成邀请码失败');
-  } finally {
-    busy.value = false;
-  }
-}
+// ---- 待确认项(对方推送的配对 / 目录共享邀请) ----
+// 目录共享邀请需要本机落地路径,按 offer id 暂存输入框内容
+const offerPaths = reactive<Record<string, string>>({});
 
-/** 接受对方邀请码:把对方加入白名单,并取回回邀码用于双向配对。 */
-async function doJoin(): Promise<void> {
+async function acceptOffer(offer: OfferInfo): Promise<void> {
   if (busy.value) return;
-  if (!joinCode.value.trim() || !joinPath.value.trim()) {
-    showToast('请填写邀请码与本地目录');
-    return;
-  }
   busy.value = true;
   try {
-    const res = await fetch('/api/join', {
+    const localPath = offer.kind === 'folder' ? offerPaths[offer.id]?.trim() : undefined;
+    if (offer.kind === 'folder' && !localPath) {
+      showToast('请填写本机目录路径');
+      busy.value = false;
+      return;
+    }
+    const res = await fetch(`/api/offers/${encodeURIComponent(offer.id)}/accept`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ code: joinCode.value.trim(), localPath: joinPath.value.trim() }),
+      body: JSON.stringify({ localPath }),
     });
-    const data = (await res.json().catch(() => ({}))) as {
-      deviceId?: string;
-      reciprocalCode?: string;
-      error?: string;
-    };
-    if (!res.ok || !data.deviceId || !data.reciprocalCode) {
-      throw new Error(data.error ?? '加入失败');
-    }
-    joinResult.value = { deviceId: data.deviceId, reciprocalCode: data.reciprocalCode };
-    showToast(`已与 ${data.deviceId} 配对`);
+    if (!res.ok) throw new Error(`accept ${res.status}`);
+    showToast(offer.kind === 'folder' ? '已接受目录共享,开始同步' : '已接受配对');
     await refreshStatus();
-  } catch (e) {
-    showToast(e instanceof Error ? e.message : '加入失败');
+  } catch {
+    showToast('确认失败,请重试');
   } finally {
     busy.value = false;
   }
 }
 
-// 挂载后立即刷新一次,确保展示最新状态
+async function declineOffer(offer: OfferInfo): Promise<void> {
+  if (busy.value) return;
+  busy.value = false;
+  try {
+    const res = await fetch(`/api/offers/${encodeURIComponent(offer.id)}/decline`, {
+      method: 'POST',
+    });
+    if (!res.ok) throw new Error(`decline ${res.status}`);
+    showToast('已忽略该请求');
+    await refreshStatus();
+  } catch {
+    showToast('操作失败,请重试');
+  } finally {
+    busy.value = false;
+  }
+}
+
+// 挂载后立即刷新一次,并确保展示最新状态;之后周期轮询,
+// 让对方推送过来的配对 / 共享邀请(待确认项)能及时在页面上弹出。
+let pollTimer: ReturnType<typeof setInterval> | undefined;
 onMounted(() => {
   void refreshStatus();
   window.addEventListener('keydown', onKeydown);
+  pollTimer = setInterval(() => void refreshStatus(), 4000);
 });
 
 onUnmounted(() => {
   window.removeEventListener('keydown', onKeydown);
+  if (pollTimer) clearInterval(pollTimer);
 });
 
 // 目录稳定标识(与后端 folderIdFor 一致:id 优先,回退 path),用作列表 key 与进度匹配
@@ -238,9 +352,14 @@ function progressOf(f: { id?: string; path: string }): SyncProgressItem | undefi
   return status.value.syncProgress.find((p) => p.folder === key);
 }
 
-// 某设备参与共享的目录数量(反向映射)
+// 某设备被指派到的目录数量
 function deviceFolderCount(deviceId: string): number {
   return status.value.folders.filter((f) => f.devices.includes(deviceId)).length;
+}
+
+// 设备卡里展示对端地址时去掉 ws:// 前缀,只留 host:port
+function stripWs(url: string): string {
+  return url.startsWith('ws://') ? url.slice(5) : url;
 }
 
 function progressPercent(p: SyncProgressItem): number {
@@ -289,19 +408,21 @@ function progressText(p: SyncProgressItem): string {
         </div>
       </div>
 
-      <button type="button" class="help-btn" @click="openGuide">
-        <svg viewBox="0 0 24 24" width="15" height="15" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
-          <circle cx="12" cy="12" r="9" />
-          <path d="M9.2 9.2a2.8 2.8 0 0 1 5.4 1c0 1.9-2.8 2.8-2.8 2.8" />
-          <line x1="12" y1="16.5" x2="12" y2="16.6" />
-        </svg>
+      <n-button tertiary @click="openGuide">
+        <template #icon>
+          <svg viewBox="0 0 24 24" width="15" height="15" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+            <circle cx="12" cy="12" r="9" />
+            <path d="M9.2 9.2a2.8 2.8 0 0 1 5.4 1c0 1.9-2.8 2.8-2.8 2.8" />
+            <line x1="12" y1="16.5" x2="12" y2="16.6" />
+          </svg>
+        </template>
         使用指南
-      </button>
+      </n-button>
 
       <div class="topbar__spacer"></div>
 
       <span class="device-chip">
-        <span class="dot" :class="status.peers.some((p) => p.online) ? 'dot-online' : 'dot-offline'"></span>
+        <span class="dot" :class="status.devices.some((p) => p.online) ? 'dot-online' : 'dot-offline'"></span>
         <span class="mono">{{ status.deviceId }}</span>
       </span>
     </div>
@@ -311,17 +432,50 @@ function progressText(p: SyncProgressItem): string {
       <span class="stat-pill-item"><b>{{ status.entries }}</b><span>索引条目</span></span>
       <span class="stat-pill-item"><b>{{ status.tombstones }}</b><span>墓碑</span></span>
       <span class="stat-pill-item"><b>{{ status.folders.length }}</b><span>共享目录</span></span>
-      <span class="stat-pill-item"><b>{{ status.peers.length }}</b><span>已配对设备</span></span>
+      <span class="stat-pill-item"><b>{{ status.devices.length }}</b><span>已配对设备</span></span>
     </div>
 
-    <!-- 主体:左右两栏(左=共享目录,右=设备配对 + 已配对设备) -->
+    <!-- 待确认:对方推送的配对 / 目录共享邀请 -->
+    <div v-if="status.offers && status.offers.length" class="offers">
+      <div class="col-head">
+        <span>待确认</span>
+        <span class="badge">{{ status.offers.length }}</span>
+      </div>
+      <div
+        v-for="o in status.offers"
+        :key="o.id"
+        class="item-card offer-card"
+      >
+        <div class="item-top">
+          <span class="avatar" aria-hidden="true">
+            <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
+              <path d="M12 3v18M3 12h18" />
+            </svg>
+          </span>
+          <span class="item-title">
+            <template v-if="o.kind === 'folder'">目录共享邀请 · {{ o.folderName }}</template>
+            <template v-else>配对请求</template>
+          </span>
+        </div>
+        <div class="item-sub">来自 <span class="mono">{{ o.fromDeviceId }}</span></div>
+        <div v-if="o.kind === 'folder'" class="offer-path">
+          <n-input v-model:value="offerPaths[o.id]" placeholder="本机目录绝对路径,如 /home/me/Documents" />
+        </div>
+        <div class="actions">
+          <n-button size="small" type="primary" :disabled="busy" @click="acceptOffer(o)">确认</n-button>
+          <n-button size="small" tertiary :disabled="busy" @click="declineOffer(o)">忽略</n-button>
+        </div>
+      </div>
+    </div>
+
+    <!-- 主体:左右两栏(左=共享目录,右=设备) -->
     <div class="layout">
       <!-- 左栏:共享目录 -->
       <section class="col col--folders">
         <div class="col-head">
           <span>共享目录</span>
           <span class="badge">{{ status.folders.length }}</span>
-          <button type="button" class="scan-btn" :disabled="busy" @click="rescan">扫描全部</button>
+          <n-button :disabled="busy" @click="rescan">扫描全部</n-button>
         </div>
 
         <div v-if="status.folders.length === 0" class="empty">还没有共享目录 · 在下方添加第一个</div>
@@ -339,17 +493,33 @@ function progressText(p: SyncProgressItem): string {
               </svg>
             </span>
             <span class="item-title">{{ f.path }}</span>
-            <button
-              type="button"
-              class="btn-sm btn-danger"
+            <n-button
+              size="small"
+              type="error"
+              tertiary
               :disabled="busy"
               @click="removeFolder(f.path)"
-            >移除</button>
+            >移除</n-button>
           </div>
-          <div class="item-sub">
-            已配对 {{ f.devices.length }} 台设备
-            <span v-if="f.devices.length"> · {{ f.devices.join(', ') }}</span>
+
+          <!-- 目录 ID:跨机同步需两边配置同一 ID 才能对上 -->
+          <div class="fid-row">
+            <span class="fid-label">目录 ID</span>
+            <code class="fid-code break">{{ f.id ?? f.path }}</code>
+            <n-button size="small" tertiary @click="copy(f.id ?? f.path)">复制</n-button>
           </div>
+
+          <!-- 按目录指派可同步的设备 -->
+          <div class="fid-devices">
+            <n-select
+              multiple
+              :options="deviceOptions"
+              placeholder="选择可同步此目录的设备"
+              v-model:value="folderSel[f.path]"
+              @update:value="(v) => commitFolderDevices(f.path, v)"
+            />
+          </div>
+
           <div v-if="progressOf(f)" class="item-progress">
             <div class="progress-bar">
               <div
@@ -363,68 +533,41 @@ function progressText(p: SyncProgressItem): string {
         </div>
 
         <form class="add-form" @submit.prevent="addFolder">
-          <input v-model="newPath" placeholder="本地目录绝对路径,如 /home/me/Documents">
-          <input v-model="newDevices" placeholder="允许的设备 ID,逗号分隔,如 DEV1234567">
-          <button type="submit" :disabled="busy">添加共享目录</button>
+          <n-input v-model:value="newPath" placeholder="本地目录绝对路径,如 /home/me/Documents" />
+          <n-input v-model:value="newFolderId" placeholder="目录 ID(留空自动生成;跨机同步需与对方一致)" />
+          <n-select
+            multiple
+            :options="deviceOptions"
+            placeholder="允许同步此目录的设备(可留空,稍后在目录卡上指派)"
+            v-model:value="newFolderDevices"
+          />
+          <n-button type="primary" attr-type="submit" :disabled="busy" block>添加共享目录</n-button>
         </form>
       </section>
 
-      <!-- 右栏:设备配对 + 已配对设备 -->
+      <!-- 右栏:设备 -->
       <section class="col col--devices">
-        <!-- 邀请码配对 -->
-        <div class="card pair-card">
-          <div class="eyebrow">设备配对</div>
-          <div class="pair-id">
-            <span class="muted">本机 ID</span>
-            <code class="mono">{{ status.deviceId }}</code>
-            <button type="button" class="btn-sm" @click="copy(status.deviceId)">复制</button>
-          </div>
-
-          <div v-if="status.folders.length === 0" class="pair-hint">
-            先添加共享目录,才能生成邀请码
-          </div>
-
-          <template v-else>
-            <div class="pair-block">
-              <div class="pair-label">① 生成邀请码</div>
-              <div class="pair-row">
-                <select v-model="inviteFolder" class="pair-select">
-                  <option v-for="f in status.folders" :key="folderKey(f)" :value="f.path">{{ f.path }}</option>
-                </select>
-                <button type="button" class="btn-sm" :disabled="!inviteFolder || busy" @click="generateInvite">生成</button>
-              </div>
-              <div v-if="inviteCode" class="pair-code">
-                <code class="mono break">{{ inviteCode }}</code>
-                <button type="button" class="btn-sm" @click="copy(inviteCode)">复制邀请码</button>
-                <div class="item-sub">有效期 1 小时 · 发给对方,对方在「②」粘贴</div>
-              </div>
-            </div>
-
-            <div class="pair-block">
-              <div class="pair-label">② 加入对方设备</div>
-              <div class="pair-row col">
-                <input v-model="joinCode" class="pair-input" placeholder="粘贴对方邀请码">
-                <input v-model="joinPath" class="pair-input" placeholder="本机对应的本地目录绝对路径">
-                <button type="button" class="btn-sm" :disabled="!joinCode || !joinPath || busy" @click="doJoin">加入并配对</button>
-              </div>
-              <div v-if="joinResult" class="pair-code">
-                <div class="item-sub">已与 <b class="mono">{{ joinResult.deviceId }}</b> 配对</div>
-                <div class="item-sub">把下面回邀码发给对方,对方粘贴后即双向连通:</div>
-                <code class="mono break">{{ joinResult.reciprocalCode }}</code>
-                <button type="button" class="btn-sm" @click="copy(joinResult.reciprocalCode)">复制回邀码</button>
-              </div>
-            </div>
-          </template>
-        </div>
-
         <div class="col-head">
-          <span>已配对设备</span>
-          <span class="badge">{{ status.peers.length }}</span>
+          <span>设备</span>
+          <span class="badge">{{ status.devices.length }}</span>
         </div>
 
-        <div v-if="status.peers.length === 0" class="empty">还没有已配对设备 · 在「共享目录」中填写允许的设备 ID 即可配对</div>
+        <!-- 粘贴对方设备 ID 即可配对(双方各加一次,mutual)。跨网段/无 mDNS 时填对方地址:ws://(前缀) + IP + :端口(默认 22000) -->
+        <form class="add-device" @submit.prevent="addDevice">
+          <n-input v-model:value="newDeviceId" placeholder="粘贴对方设备 ID" />
+          <div class="addr-group">
+            <n-input v-model:value="newDeviceHost" placeholder="对方 IP" class="device-host">
+              <template #prefix>ws://</template>
+            </n-input>
+            <span class="addr-colon">:</span>
+            <n-input v-model:value="newDevicePort" placeholder="22000" class="device-port" />
+          </div>
+          <n-button type="primary" attr-type="submit" :disabled="busy">添加设备</n-button>
+        </form>
+
+        <div v-if="status.devices.length === 0" class="empty">还没有设备 · 在上方粘贴对方设备 ID 添加</div>
         <div
-          v-for="p in status.peers"
+          v-for="p in status.devices"
           :key="p.deviceId"
           class="item-card"
           :class="{ 'is-linked': hoverDevices.includes(p.deviceId) }"
@@ -435,13 +578,16 @@ function progressText(p: SyncProgressItem): string {
             <span class="status-pill" :class="p.online ? 'pill-online' : 'pill-offline'">
               {{ p.online ? '在线' : '离线' }}
             </span>
+            <n-button size="small" type="error" tertiary :disabled="busy" @click="removeDevice(p.deviceId)">移除</n-button>
           </div>
           <div class="item-sub">
             共享 {{ deviceFolderCount(p.deviceId) }} 个目录
-            <span v-if="p.url"> · {{ p.url }}</span>
+          </div>
+          <div v-if="p.url" class="item-addr">
+            <span class="addr-label">地址</span><span class="addr-value mono">{{ stripWs(p.url) }}</span>
           </div>
           <div v-if="!p.online" class="actions">
-            <button type="button" class="btn-sm" :disabled="busy" @click="reconnect(p.deviceId)">重连</button>
+            <n-button size="small" tertiary :disabled="busy" @click="reconnect(p.deviceId)">重连</n-button>
           </div>
         </div>
       </section>
@@ -451,35 +597,37 @@ function progressText(p: SyncProgressItem): string {
     <Transition name="guide">
       <div v-if="showGuide" class="modal-overlay" @click.self="closeGuide">
       <div class="modal" role="dialog" aria-modal="true" aria-labelledby="guide-title">
-        <button type="button" class="modal-close" aria-label="关闭" @click="closeGuide">×</button>
+        <n-button quaternary circle class="modal-close" aria-label="关闭" @click="closeGuide">×</n-button>
         <h2 id="guide-title" class="modal-title">首次使用指南</h2>
-        <p class="modal-lead">四步把一台设备连起来,开始局域网同步。</p>
+        <p class="modal-lead">四步把两台设备连起来,开始局域网同步。</p>
 
         <ol class="guide-steps">
           <li>
             <div class="guide-step-h">① 添加共享目录</div>
             <div class="guide-step-b">
               在左侧「共享目录」填写<strong>本地目录绝对路径</strong>(如
-              <code class="mono">/home/me/Documents</code>),可选填允许访问的设备 ID,点「添加共享目录」。
+              <code class="mono">/home/me/Documents</code>)。目录 ID 留空会自动生成,
+              但<strong>跨机同步时对方须用同一个目录 ID</strong>(可点目录卡上的「复制」发给对方)。
             </div>
           </li>
           <li>
-            <div class="guide-step-h">② 设备配对</div>
+            <div class="guide-step-h">② 添加对方设备</div>
             <div class="guide-step-b">
-              在右侧「设备配对」里二选一:选目录点「生成」拿到<strong>邀请码</strong>发给对方;或粘贴对方邀请码 +
-              本机目录完成「加入并配对」。配对基于局域网自动发现(mDNS)互连。
+              在右侧「设备」粘贴对方的<strong>设备 ID</strong>(对方网页顶部那串字符),点「添加设备」。
+              对方网页会立刻弹出<strong>配对请求</strong>,点「确认」即完成双向配对。
             </div>
           </li>
           <li>
-            <div class="guide-step-h">③ 等待同步</div>
+            <div class="guide-step-h">③ 指派目录给设备</div>
+            <div class="guide-step-b">
+              在左侧目录卡上的「选择可同步此目录的设备」里勾选刚添加的设备。
+              对方网页会弹出<strong>目录共享邀请</strong>,点「确认」并选好本机路径,目录即开始双向同步。
+            </div>
+          </li>
+          <li>
+            <div class="guide-step-h">④ 等待同步</div>
             <div class="guide-step-b">
               配对成功后,该目录会出现在双方设备上。状态显示为「在线 / 传输中 / 已同步」;进度条流动代表正在传数据。
-            </div>
-          </li>
-          <li>
-            <div class="guide-step-h">④ 需要时重新索引</div>
-            <div class="guide-step-b">
-              改了目录里的文件却没立即同步,点左侧「扫描全部」让本机重新建立索引并推送变更。
             </div>
           </li>
         </ol>
@@ -489,7 +637,7 @@ function progressText(p: SyncProgressItem): string {
           <code class="mono">5173</code>(HMR 实时热更新)。
         </div>
 
-        <button type="button" class="modal-ok" @click="closeGuide">我知道了</button>
+        <n-button type="primary" block class="modal-ok" @click="closeGuide">我知道了</n-button>
       </div>
     </div>
     </Transition>

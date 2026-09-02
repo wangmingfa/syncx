@@ -39,15 +39,23 @@ function inlineCssIntoJs(): Plugin {
   };
 }
 
-export default defineConfig({
+// code-inspector 是 dev 态「点击元素跳 IDE」的便利插件;测试(vitest)与生产
+// 构建都不需要它。受限环境(沙箱)下其临时目录创建会被拦截,导致 vitest 在
+// 配置加载/转换阶段直接失败,故仅在非测试模式下启用(VITEST 由 vitest 注入)。
+export default defineConfig(({ mode }: { mode: string }) => {
+  // code-inspector 是 dev 态「点击元素跳 IDE」的便利插件;测试(vitest, mode=test)
+  // 与生产构建都不需要它。受限环境(沙箱)下其临时目录创建会被拦截,导致 vitest
+  // 在配置加载/转换阶段直接失败,故仅在非测试模式下启用。
+  const isTest = mode === 'test';
+  return {
   // 开发 + 生产构建的根目录均为 web/(前端源码所在目录)
   root: 'web',
   plugins:[
     vue(),
     inlineCssIntoJs(),
-    codeInspectorPlugin({
+    ...(isTest ? [] : [codeInspectorPlugin({
       bundler: 'vite',
-    }),
+    })]),
   ],
   test: {
     // vitest 运行根目录回到仓库根(测试在 test/),与 vite dev/build 的 web/ 根分开
@@ -111,4 +119,5 @@ export default defineConfig({
       // 无需额外的 import map 或全局 vue。
     },
   },
+  };
 });

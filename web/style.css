@@ -158,69 +158,15 @@ tbody tr:last-child td {
   border-bottom: none;
 }
 
-/* ---------- 表单控件 ---------- */
-
-input {
-  background: var(--bg-soft);
-  color: var(--text);
-  border: 1px solid var(--border);
-  border-radius: 9px;
-  padding: 10px 12px;
-  width: 100%;
-  margin-top: 8px;
-  font-family: inherit;
-  font-size: 14px;
-  transition: border-color 0.15s ease, box-shadow 0.15s ease;
-}
-
-input::placeholder {
-  color: #aab2c2;
-}
-
-input:focus {
-  outline: none;
-  border-color: var(--accent);
-  box-shadow: 0 0 0 3px rgb(74 127 192 / 0.14);
-}
-
-button {
-  background: var(--accent);
-  color: #fff;
-  border: none;
-  border-radius: 9px;
-  padding: 10px 16px;
-  margin-top: 10px;
-  font-family: inherit;
-  font-size: 13px;
-  font-weight: 500;
-  cursor: pointer;
-  transition: background 0.15s ease, filter 0.15s ease;
-}
-
-button:hover:not(:disabled) {
-  filter: brightness(1.05);
-}
-
-button:disabled {
-  opacity: 0.5;
-  cursor: not-allowed;
-}
-
-.btn-sm {
-  padding: 5px 11px;
-  font-size: 12px;
-  margin-top: 0;
-}
+/* ---------- 表单控件 ----------
+   输入框/按钮现已全部由 naive-ui 组件(NInput/NSelect/NButton)接管,
+   其外观由 NConfigProvider 主题统一控制,不再写自定义 input/button 全局样式。 */
 
 .actions {
   display: flex;
   gap: 8px;
   margin-top: 12px;
   flex-wrap: wrap;
-}
-
-.actions button {
-  margin-top: 0;
 }
 
 /* ---------- 状态指示 ---------- */
@@ -390,48 +336,8 @@ button:disabled {
   box-shadow: var(--shadow);
 }
 
-.scan-btn {
-  display: inline-flex;
-  align-items: center;
-  gap: 6px;
-  background: var(--accent-soft);
-  color: var(--accent);
-  border: 1px solid rgb(74 127 192 / 0.25);
-  border-radius: 8px;
-  padding: 5px 12px;
-  margin-top: 0;
-  font-size: 12px;
-  font-weight: 500;
-}
-
-.scan-btn:hover:not(:disabled) {
-  background: rgb(74 127 192 / 0.14);
-}
-
-/* 顶栏「使用指南」帮助按钮(品牌旁,浅色描边胶囊,不抢身份区) */
-.help-btn {
-  display: inline-flex;
-  align-items: center;
-  gap: 6px;
-  background: var(--card);
-  color: var(--accent);
-  border: 1px solid rgb(74 127 192 / 0.3);
-  border-radius: 999px;
-  padding: 7px 14px;
-  margin: 0;
-  font-size: 13px;
-  font-weight: 500;
-  cursor: pointer;
-  transition: background 0.15s ease, border-color 0.15s ease;
-}
-
-.help-btn:hover {
-  background: rgb(74 127 192 / 0.08);
-  border-color: rgb(74 127 192 / 0.5);
-}
-
 /* 区块标题栏里的操作按钮统一推到最右 */
-.col-head .scan-btn {
+.col-head .n-button {
   margin-left: auto;
 }
 
@@ -637,24 +543,38 @@ button:disabled {
   word-break: break-all;
 }
 
+/* 设备卡对端地址行 */
+.item-addr {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 12px;
+}
+.item-addr .addr-label {
+  color: var(--muted);
+  flex: 0 0 auto;
+}
+.item-addr .addr-value {
+  color: var(--text);
+  background: var(--bg);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  padding: 1px 6px;
+}
+
 .item-progress {
   margin-top: 2px;
 }
 
 .add-form {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
   background: var(--card);
   border: 1px dashed var(--border-strong);
   border-radius: var(--radius);
   padding: 14px 16px;
   box-shadow: var(--shadow);
-}
-
-.add-form input {
-  margin-top: 8px;
-}
-
-.add-form button {
-  margin-top: 10px;
 }
 
 .empty {
@@ -688,121 +608,102 @@ button:disabled {
   border-color: rgb(217 107 107 / 0.28);
 }
 
-.btn-danger {
-  background: transparent;
-  color: var(--offline);
-  border: 1px solid rgb(217 107 107 / 0.4);
-}
-
-.btn-danger:hover:not(:disabled) {
-  background: rgb(217 107 107 / 0.1);
-}
-
 .mono {
   font-family: var(--mono);
 }
 
-/* ---------- 邀请码配对卡 ---------- */
+/* ---------- 目录 ID 行(跨机同步需两边一致) ---------- */
 
-.pair-card {
-  border-color: rgb(43 182 172 / 0.3);
-}
-
-.pair-card .eyebrow {
-  margin-bottom: 10px;
-}
-
-.pair-id {
+.fid-row {
   display: flex;
   align-items: center;
   gap: 8px;
   flex-wrap: wrap;
 }
 
-.pair-id .mono {
-  font-size: 13px;
-  letter-spacing: 0.04em;
-  word-break: break-all;
-  color: var(--text);
-}
-
-.pair-id .btn-sm {
-  margin-left: auto;
-}
-
-.pair-hint {
+.fid-label {
+  font-size: 10px;
+  letter-spacing: 0.16em;
+  text-transform: uppercase;
   color: var(--muted);
-  font-size: 13px;
-  margin-top: 10px;
+  font-family: var(--mono);
 }
 
-.pair-block {
-  margin-top: 14px;
-  padding-top: 14px;
-  border-top: 1px solid var(--border);
-}
-
-.pair-label {
-  font-size: 13px;
-  font-weight: 600;
-  color: var(--text);
-  margin-bottom: 6px;
-}
-
-.pair-row {
-  display: flex;
-  gap: 8px;
-  align-items: center;
-}
-
-.pair-row.col {
-  flex-direction: column;
-  align-items: stretch;
-}
-
-.pair-row.col .btn-sm {
-  align-self: flex-start;
-}
-
-.pair-select,
-.pair-input {
-  background: var(--bg-soft);
-  color: var(--text);
-  border: 1px solid var(--border);
-  border-radius: 9px;
-  padding: 10px 12px;
-  font-family: inherit;
-  font-size: 14px;
-  width: 100%;
-  margin-top: 8px;
-  transition: border-color 0.15s ease, box-shadow 0.15s ease;
-}
-
-.pair-select:focus,
-.pair-input:focus {
-  outline: none;
-  border-color: var(--accent);
-  box-shadow: 0 0 0 3px rgb(74 127 192 / 0.14);
-}
-
-.pair-code {
-  margin-top: 10px;
-  padding: 10px 12px;
-  background: var(--bg-soft);
-  border: 1px solid var(--border);
-  border-radius: 9px;
-}
-
-.pair-code .mono {
-  display: block;
+.fid-code {
+  font-family: var(--mono);
   font-size: 12px;
   letter-spacing: 0.02em;
   color: var(--accent);
   word-break: break-all;
 }
 
-.pair-code .btn-sm {
-  margin-top: 8px;
+/* 目录卡内的设备多选(按目录指派可同步的设备) */
+.fid-devices {
+  margin-top: 2px;
+}
+
+/* ---------- 设备添加行 ---------- */
+
+.add-device {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  align-items: center;
+  background: var(--card);
+  border: 1px dashed var(--border-strong);
+  border-radius: var(--radius);
+  padding: 12px 14px;
+  box-shadow: var(--shadow);
+  margin-bottom: 12px;
+}
+
+.add-device > .n-input {
+  flex: 1 1 200px;
+  min-width: 0;
+}
+/* 地址组:ws:// 前缀(在主机框内) + 主机框 + 冒号 + 端口框 */
+.add-device .addr-group {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  flex: 2 1 280px;
+  min-width: 0;
+}
+.add-device .device-host {
+  flex: 1 1 auto;
+  min-width: 0;
+}
+.add-device .device-port {
+  flex: 0 0 88px;
+  width: 88px;
+}
+.add-device .addr-colon {
+  color: var(--text-muted);
+  font-weight: 600;
+  flex: 0 0 auto;
+}
+
+/* ---------- 待确认面板(对方推送的配对 / 目录共享邀请) ---------- */
+
+.offers {
+  margin-bottom: 14px;
+}
+
+.offers .col-head {
+  color: var(--accent);
+}
+
+.offer-card {
+  /* 用左缘强调色突出「需要你操作」,与只读状态卡区分 */
+  border-left: 3px solid var(--accent-2);
+}
+
+.offer-path {
+  margin-top: 10px;
+}
+
+.offer-card .item-sub {
+  margin-top: 2px;
 }
 
 .break {
@@ -860,25 +761,6 @@ button:disabled {
   position: absolute;
   top: 14px;
   right: 14px;
-  width: 30px;
-  height: 30px;
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  background: transparent;
-  color: var(--muted);
-  border: none;
-  border-radius: 8px;
-  font-size: 22px;
-  line-height: 1;
-  margin: 0;
-  cursor: pointer;
-  transition: background 0.15s ease, color 0.15s ease;
-}
-
-.modal-close:hover {
-  background: var(--bg-soft);
-  color: var(--text);
 }
 
 .modal-title {
@@ -936,19 +818,6 @@ button:disabled {
   display: block;
   width: 100%;
   margin-top: 18px;
-  background: var(--accent);
-  color: #fff;
-  border: none;
-  border-radius: 10px;
-  padding: 11px;
-  font-size: 14px;
-  font-weight: 500;
-  cursor: pointer;
-  transition: filter 0.15s ease;
-}
-
-.modal-ok:hover {
-  filter: brightness(1.05);
 }
 
 /* ---------- 使用指南弹窗开合动画(由 <Transition name="guide"> 驱动) ---------- */

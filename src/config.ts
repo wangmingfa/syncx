@@ -28,15 +28,43 @@ export function folderIndexPath(configDir: string, folderId: string): string {
   return join(configDir, `index-${hash}.db`);
 }
 
+/** 已知对端设备:通过「粘贴设备 ID」引入,未必已指派到任何目录。 */
+export interface DeviceConfig {
+  id: string;
+  /** 可选备注名,仅本机展示用。 */
+  name?: string;
+}
+
+/** 对方 daemon 推送过来的待确认项:配对请求 或 目录共享邀请。 */
+export interface PendingOffer {
+  /** 去重 / 确认用的唯一 id(由发起方确定性生成,便于重推幂等)。 */
+  id: string;
+  kind: 'pairing' | 'folder';
+  /** 发起方设备 ID。 */
+  fromDeviceId: string;
+  /** 目录共享邀请:目录的稳定标识(与 wire/folderIdFor 一致)。 */
+  folderId?: string;
+  /** 目录共享邀请:展示用名称(同 folderId)。 */
+  folderName?: string;
+  status: 'pending' | 'accepted' | 'declined';
+  createdAt: number;
+}
+
 export interface Config {
   sharedFolders: SharedFolderConfig[];
   /** 手动配置的对端 ws:// 地址列表(mDNS 不可用时的回退)。 */
   peers: string[];
+  /** 已知对端设备(按 ID 配对,不依赖邀请码)。 */
+  knownDevices: DeviceConfig[];
+  /** 对方推送过来的待确认项(配对 / 目录共享),确认或忽略后移出 pending。 */
+  pendingOffers: PendingOffer[];
 }
 
 export const DEFAULT_CONFIG: Config = {
   sharedFolders: [],
   peers: [],
+  knownDevices: [],
+  pendingOffers: [],
 };
 
 export function loadConfig(configPath: string): Config {
@@ -48,6 +76,8 @@ export function loadConfig(configPath: string): Config {
   return {
     sharedFolders: parsed.sharedFolders ?? [],
     peers: parsed.peers ?? [],
+    knownDevices: parsed.knownDevices ?? [],
+    pendingOffers: parsed.pendingOffers ?? [],
   };
 }
 

@@ -53,7 +53,7 @@ interface FallbackStatus {
   folders?: Array<{ path: string; devices?: string[]; id?: string }>;
   entries?: number;
   tombstones?: number;
-  peers?: Array<{ deviceId: string; online: boolean; url?: string }>;
+  devices?: Array<{ deviceId: string; online: boolean; url?: string; folders?: string[] }>;
   syncProgress?: Array<{ folder: string; pending: number; sending: number; receiving: number }>;
 }
 
@@ -86,10 +86,10 @@ export function renderControlFallback(data: {
   const message = data.message ? `<p class="message">${escapeHtml(data.message)}</p>` : '';
   const error = data.error ? `<p class="error">${escapeHtml(data.error)}</p>` : '';
 
-  // 对端连接状态列表
-  const peers = (status.peers ?? []);
-  const peerRows = peers.length > 0
-    ? peers.map((p) => {
+  // 设备连接状态列表
+  const devices = (status.devices ?? []);
+  const peerRows = devices.length > 0
+    ? devices.map((p) => {
         const onlineClass = p.online ? 'dot-online' : 'dot-offline';
         const statusText = p.online ? '在线' : '离线';
         const statusClass = p.online ? 'online' : 'offline';

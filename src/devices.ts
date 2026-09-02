@@ -1,6 +1,7 @@
 import { existsSync } from 'node:fs';
 import { resolve, isAbsolute } from 'node:path';
-import { loadConfig, saveConfig, DEFAULT_CONFIG, type SharedFolderConfig } from './config.js';
+import { randomBytes } from 'node:crypto';
+import { loadConfig, saveConfig, DEFAULT_CONFIG, type SharedFolderConfig, type DeviceConfig } from './config.js';
 
 const FORBIDDEN_PATTERNS = [
   /^\/(etc|usr|bin|sbin|boot|dev|proc|sys|lib|lib64|var|opt|root)\b/i,
@@ -33,16 +34,33 @@ export function listDevices(configPath: string): SharedFolderConfig[] {
   return loadConfig(configPath).sharedFolders;
 }
 
-/** 添加一个共享目录;目录已存在则更新其设备列表。 */
-export function addSharedFolder(configPath: string, path: string, devices: string[]): void {
+/** 生成一个稳定的短目录标识(跨设备同步时两边须配置同一 id 才能对上)。 */
+export function generateFolderId(): string {
+  return randomBytes(6).toString('hex');
+}
+
+/**
+ * 添加一个共享目录;目录已存在则合并其设备列表。
+ * id 缺省时自动生成;跨设备同步场景下可显式传入对方机器的同一目录 id。
+ */
+export function addSharedFolder(configPath: string, path: string, devices: string[], id?: string): void {
   validateFolderPath(path);
   const config = loadConfig(configPath);
   const existing = config.sharedFolders.find((f) => f.path === path);
   if (existing) {
     existing.devices = [...new Set([...existing.devices, ...devices])];
   } else {
-    config.sharedFolders.push({ path, devices });
+    config.sharedFolders.push({ path, devices, id: id ?? generateFolderId() });
   }
+  saveConfig(configPath, config);
+}
+
+/** 精确设置某目录的设备列表(用于按目录多选设备的提交)。 */
+export function setFolderDevices(configPath: string, path: string, devices: string[]): void {
+  const config = loadConfig(configPath);
+  const existing = config.sharedFolders.find((f) => f.path === path);
+  if (!existing) throw new Error(`folder not configured: ${path}`);
+  existing.devices = [...new Set(devices)];
   saveConfig(configPath, config);
 }
 
@@ -53,14 +71,62 @@ export function removeSharedFolder(configPath: string, path: string): void {
   saveConfig(configPath, config);
 }
 
+/** 列出已知设备(按 ID 引入,未必已指派到目录)。 */
+export function listKnownDevices(configPath: string): DeviceConfig[] {
+  return loadConfig(configPath).knownDevices;
+}
+
+/** 添加一个已知设备 ID(已存在则幂等)。 */
+export function addKnownDevice(configPath: string, deviceId: string): void {
+  if (!deviceId) throw new Error('device id is required');
+  const config = loadConfig(configPath);
+  if (!config.knownDevices.some((d) => d.id === deviceId)) {
+    config.knownDevices.push({ id: deviceId });
+    saveConfig(configPath, config);
+  }
+}
+
+/** 添加一个手动配置的对端地址(已存在则幂等)。仅接受 ws:// 开头的地址。 */
+export function addPeer(configPath: string, address: string): void {
+  if (!/^ws:\/\//i.test(address)) {
+    throw new Error('peer address must start with ws://');
+  }
+  const config = loadConfig(configPath);
+  if (!config.peers.includes(address)) {
+    config.peers.push(address);
+    saveConfig(configPath, config);
+  }
+}
+
+/** 移除已知设备:同时从各目录的 devices 列表里摘除该设备。 */
+export function removeKnownDevice(configPath: string, deviceId: string): void {
+  const config = loadConfig(configPath);
+  config.knownDevices = config.knownDevices.filter((d) => d.id !== deviceId);
+  for (const f of config.sharedFolders) {
+    f.devices = f.devices.filter((d) => d !== deviceId);
+  }
+  saveConfig(configPath, config);
+}
+
 export function ensureConfigFile(configPath: string): void {
   if (!existsSync(configPath)) {
     saveConfig(configPath, structuredClone(DEFAULT_CONFIG));
   }
 }
 
-/** 对端设备 ID 是否被任一共享目录授权。空 ID 或空列表一律拒绝。 */
-export function isPeerAllowed(peerId: string, sharedFolders: SharedFolderConfig[]): boolean {
-  if (!peerId || sharedFolders.length === 0) return false;
-  return sharedFolders.some((f) => f.devices.includes(peerId));
+/**
+ * 对端设备 ID 是否被授权建立连接。
+ * - 在任一共享目录的 devices 列表中 → 授权(目录既决定能否连,也决定同步什么)
+ * - 已在 knownDevices(粘贴对方 ID 配对)→ 也授权(对齐 Syncthing 设备引入:
+ *   引入即建立可信连接,目录指派只决定同步哪些目录,不决定能否连接)
+ * 空 ID 一律拒绝。
+ */
+export function isPeerAllowed(
+  peerId: string,
+  sharedFolders: SharedFolderConfig[],
+  knownDevices: DeviceConfig[] = [],
+): boolean {
+  if (!peerId) return false;
+  if (sharedFolders.some((f) => f.devices.includes(peerId))) return true;
+  return knownDevices.some((d) => d.id === peerId);
 }

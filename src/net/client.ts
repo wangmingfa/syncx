@@ -20,8 +20,15 @@ export interface ConnectedPeer {
  * WebSocket client handshake: presents the local Ed25519 public key, waits
  * for the server's key, then performs a signed X25519 key exchange so both
  * sides share an AES-256-GCM session key.
+ *
+ * @param listenPort 本机 peer 监听端口(可选)。写在 kx 消息里让接收方结合源 IP
+ *   拼出反向连接地址,实现「只填一方地址,另一方也能主动重连」。
  */
-export function connectPeer(identity: DeviceIdentity, url: string): Promise<ConnectedPeer> {
+export function connectPeer(
+  identity: DeviceIdentity,
+  url: string,
+  listenPort?: number,
+): Promise<ConnectedPeer> {
   return new Promise((resolve, reject) => {
     const socket = new WebSocket(url);
     let settled = false;
@@ -69,7 +76,7 @@ export function connectPeer(identity: DeviceIdentity, url: string): Promise<Conn
         remotePublicKeyPem = text;
 
         const sessionPair = generateX25519KeyPair();
-        socket.send(encodeKx(buildKxMessage(sessionPair, identity.privateKey)));
+        socket.send(encodeKx(buildKxMessage(sessionPair, identity.privateKey, listenPort)));
 
         // 等待服务端的 kx 消息
         const onKx = (kxData: Buffer): void => {
