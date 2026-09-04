@@ -185,15 +185,19 @@ async function doRemoveFolder(path: string): Promise<void> {
   await refreshStatus();
 }
 
-// 轻量拓扑联动:鼠标悬停左栏目录卡时,记录其配对设备,用于高亮右栏对应设备卡
+// 轻量拓扑联动:鼠标悬停目录卡时,目录卡自身与其配对的设备卡同时高亮,
+// 形成「源 ↔ 目标」的视觉映射(只有远端高亮会显得像误触发)
 const hoverDevices = ref<string[]>([]);
+const hoverFolderKey = ref('');
 
-function onFolderEnter(f: { devices: string[] }): void {
+function onFolderEnter(f: { id?: string; path: string; devices: string[] }): void {
   hoverDevices.value = f.devices;
+  hoverFolderKey.value = folderKey(f);
 }
 
 function onFolderLeave(): void {
   hoverDevices.value = [];
+  hoverFolderKey.value = '';
 }
 
 // 设备下拉选项(来自已知设备 + 已被指派的设备)
@@ -591,6 +595,7 @@ function fmtTime(ts: number): string {
           v-for="f in status.folders"
           :key="folderKey(f)"
           class="item-card"
+          :class="{ 'is-linked': hoverFolderKey === folderKey(f) }"
           @mouseenter="onFolderEnter(f)"
           @mouseleave="onFolderLeave"
         >

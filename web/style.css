@@ -483,7 +483,7 @@ tbody tr:last-child td {
   transition: border-color 0.15s ease, box-shadow 0.15s ease;
 }
 
-/* hover 左栏目录卡时,右栏对应设备卡高亮(轻量拓扑联动) */
+/* 拓扑联动:hover 目录卡时,源目录卡与右栏对应设备卡同时高亮,形成视觉映射 */
 .item-card.is-linked {
   border-color: var(--accent);
   box-shadow: 0 0 0 1px rgb(74 127 192 / 0.35), var(--shadow);
