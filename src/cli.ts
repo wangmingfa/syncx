@@ -429,8 +429,26 @@ export async function run(args: ParsedArgs): Promise<void> {
   /** 首轮扫描只建基线,不写同步记录(避免把存量文件当成"新增"刷屏)。 */
   let hasScannedOnce = false;
 
+  /**
+   * 扫描重入保护:慢设备上大目录的单轮扫描可能超过 5s 定时间隔,
+   * 若允许并发重入,两轮 scanFolder 会在对方 applySend 写回索引**之前**
+   * 各自对同一文件检出变更 → 同一次编辑产生两条记录 + 两次版本递增 + 两次广播
+   * (对端也会重复接收)。因此同一时刻只允许一轮扫描在跑。
+   */
+  let scanning = false;
+
   /** 手动触发一轮扫描:与定时扫描逻辑一致。 */
   async function runScan(): Promise<void> {
+    if (scanning) return;
+    scanning = true;
+    try {
+      await scanOnce();
+    } finally {
+      scanning = false;
+    }
+  }
+
+  async function scanOnce(): Promise<void> {
     for (const folder of folderStates) {
       try {
         folder.ignoreLines = readFileSync(join(folder.path, '.syncxignore'), 'utf8').split('\n');
