@@ -121,21 +121,68 @@ function reconnect(deviceId: string): void {
   void post(`/api/reconnect?deviceId=${encodeURIComponent(deviceId)}`);
 }
 
-async function removeFolder(path: string): Promise<void> {
-  if (busy.value) return;
+// ---- 二次确认弹窗(移除目录 / 移除设备共用) ----
+interface ConfirmState {
+  title: string;
+  message: string;
+  /** 被操作对象(目录路径 / 设备 ID),等宽展示便于核对。 */
+  detail?: string;
+  /** 受影响的共享目录(移除设备时列出);others = 移除后该目录还剩几个设备。 */
+  folders?: Array<{ path: string; others: number }>;
+  /** 补充提醒(如「对方仍需自行移除一次」)。 */
+  note?: string;
+  confirmText: string;
+  action: () => Promise<void>;
+}
+
+const confirmState = ref<ConfirmState | null>(null);
+const confirmBusy = ref(false);
+
+function askConfirm(state: ConfirmState): void {
+  if (busy.value || confirmBusy.value) return;
+  confirmState.value = state;
+}
+
+function closeConfirm(): void {
+  if (confirmBusy.value) return;
+  confirmState.value = null;
+}
+
+async function runConfirm(): Promise<void> {
+  const state = confirmState.value;
+  if (!state || confirmBusy.value) return;
+  confirmBusy.value = true;
   busy.value = true;
   try {
-    const res = await fetch(`/api/folders?path=${encodeURIComponent(path)}`, {
-      method: 'DELETE',
-    });
-    if (!res.ok) throw new Error(`delete ${res.status}`);
-    showToast('已移除共享目录');
-    await refreshStatus();
+    await state.action();
+    confirmState.value = null;
   } catch {
-    showToast('移除失败,请重试');
+    // 失败时保留弹窗,便于取消或重试,不做任何数据假设
+    showToast('操作失败,请重试');
   } finally {
+    confirmBusy.value = false;
     busy.value = false;
   }
+}
+
+/** 点目录卡「移除」:先二次确认,再真正删除(确认前不动任何数据)。 */
+function askRemoveFolder(path: string): void {
+  askConfirm({
+    title: '移除共享目录?',
+    message: '移除后本机不再同步该目录,对端也会停止同步它。磁盘上的文件不会被删除。',
+    detail: path,
+    confirmText: '确认移除',
+    action: () => doRemoveFolder(path),
+  });
+}
+
+async function doRemoveFolder(path: string): Promise<void> {
+  const res = await fetch(`/api/folders?path=${encodeURIComponent(path)}`, {
+    method: 'DELETE',
+  });
+  if (!res.ok) throw new Error(`delete ${res.status}`);
+  showToast('已移除共享目录');
+  await refreshStatus();
 }
 
 // 轻量拓扑联动:鼠标悬停左栏目录卡时,记录其配对设备,用于高亮右栏对应设备卡
@@ -193,21 +240,32 @@ async function addDevice(): Promise<void> {
   }
 }
 
-async function removeDevice(deviceId: string): Promise<void> {
-  if (busy.value) return;
-  busy.value = true;
-  try {
-    const res = await fetch(`/api/devices?deviceId=${encodeURIComponent(deviceId)}`, {
-      method: 'DELETE',
-    });
-    if (!res.ok) throw new Error(`remove device ${res.status}`);
-    showToast('已移除设备');
-    await refreshStatus();
-  } catch {
-    showToast('移除失败,请重试');
-  } finally {
-    busy.value = false;
-  }
+/** 点设备卡「移除」:列出会从哪些共享目录里摘掉它(目录本身保留),确认后才执行。 */
+function askRemoveDevice(deviceId: string): void {
+  // 受影响的目录 = devices 里含该设备的目录;others 用于区分「仅共享给它」的目录
+  // (旧配置的 devices 字段可能缺失,统一兜底为空数组)
+  const affected = status.value.folders
+    .filter((f) => (f.devices ?? []).includes(deviceId))
+    .map((f) => ({ path: f.path, others: (f.devices ?? []).filter((d) => d !== deviceId).length }));
+
+  askConfirm({
+    title: '移除设备?',
+    message: '将与该设备取消配对并断开连接。共享目录与磁盘文件都会保留,只是不再向它同步。',
+    detail: deviceId,
+    folders: affected,
+    note: '对方仍保留自己的配置,需要对方也移除一次才会彻底断开。',
+    confirmText: '确认移除',
+    action: () => doRemoveDevice(deviceId),
+  });
+}
+
+async function doRemoveDevice(deviceId: string): Promise<void> {
+  const res = await fetch(`/api/devices?deviceId=${encodeURIComponent(deviceId)}`, {
+    method: 'DELETE',
+  });
+  if (!res.ok) throw new Error(`remove device ${res.status}`);
+  showToast('已移除设备');
+  await refreshStatus();
 }
 
 // ---- 按目录指派设备 ----
@@ -378,6 +436,56 @@ function progressText(p: SyncProgressItem): string {
   if (p.pending > 0) return `已排队 ${p.pending} 项,等待同步`;
   return '已同步';
 }
+
+// 同步记录弹窗:展示某目录的变更历史(新增/修改/删除/冲突,含方向与对端)
+const historyOpen = ref(false);
+const historyFolderId = ref('');
+const historyFolderPath = ref('');
+const historyEvents = ref<SyncEventItem[]>([]);
+const historyLoading = ref(false);
+
+interface SyncEventItem {
+  ts: number;
+  folderId: string;
+  path: string;
+  action: 'add' | 'update' | 'delete' | 'conflict';
+  direction: 'local' | 'remote';
+  deviceId?: string;
+}
+
+async function openHistory(f: FolderInfo): Promise<void> {
+  historyFolderId.value = f.id ?? f.path;
+  historyFolderPath.value = f.path;
+  historyOpen.value = true;
+  historyLoading.value = true;
+  historyEvents.value = [];
+  try {
+    const res = await fetch(`/api/folders/history?folderId=${encodeURIComponent(historyFolderId.value)}`);
+    if (!res.ok) throw new Error(`history ${res.status}`);
+    const data = (await res.json()) as { events: SyncEventItem[] };
+    historyEvents.value = data.events ?? [];
+  } catch {
+    showToast('读取同步记录失败');
+  } finally {
+    historyLoading.value = false;
+  }
+}
+
+function closeHistory(): void {
+  historyOpen.value = false;
+}
+
+function actionLabel(a: string): string {
+  return ({ add: '新增', update: '修改', delete: '删除', conflict: '冲突' } as Record<string, string>)[a] ?? a;
+}
+
+function directionLabel(d: string): string {
+  return d === 'local' ? '本地' : '对端';
+}
+
+function fmtTime(ts: number): string {
+  return new Date(ts).toLocaleString();
+}
 </script>
 
 <template>
@@ -493,12 +601,13 @@ function progressText(p: SyncProgressItem): string {
               </svg>
             </span>
             <span class="item-title">{{ f.path }}</span>
+            <n-button size="small" tertiary :disabled="busy" @click="openHistory(f)">记录</n-button>
             <n-button
               size="small"
               type="error"
               tertiary
               :disabled="busy"
-              @click="removeFolder(f.path)"
+              @click="askRemoveFolder(f.path)"
             >移除</n-button>
           </div>
 
@@ -578,7 +687,7 @@ function progressText(p: SyncProgressItem): string {
             <span class="status-pill" :class="p.online ? 'pill-online' : 'pill-offline'">
               {{ p.online ? '在线' : '离线' }}
             </span>
-            <n-button size="small" type="error" tertiary :disabled="busy" @click="removeDevice(p.deviceId)">移除</n-button>
+            <n-button size="small" type="error" tertiary :disabled="busy" @click="askRemoveDevice(p.deviceId)">移除</n-button>
           </div>
           <div class="item-sub">
             共享 {{ deviceFolderCount(p.deviceId) }} 个目录
@@ -640,6 +749,64 @@ function progressText(p: SyncProgressItem): string {
         <n-button type="primary" block class="modal-ok" @click="closeGuide">我知道了</n-button>
       </div>
     </div>
+    </Transition>
+
+    <!-- 同步记录弹窗 -->
+    <Transition name="guide">
+      <div v-if="historyOpen" class="modal-overlay" @click.self="closeHistory">
+        <div class="modal modal-wide" role="dialog" aria-modal="true" aria-labelledby="history-title">
+          <n-button quaternary circle class="modal-close" aria-label="关闭" @click="closeHistory">×</n-button>
+          <h2 id="history-title" class="modal-title">同步记录</h2>
+          <p class="modal-lead mono break">{{ historyFolderPath }}</p>
+
+          <div v-if="historyLoading" class="history-loading">读取中…</div>
+          <div v-else-if="historyEvents.length === 0" class="empty">还没有同步记录</div>
+          <ul v-else class="history-list">
+            <li v-for="ev in historyEvents" :key="ev.ts + ev.path + ev.action" class="history-row">
+              <span class="history-time">{{ fmtTime(ev.ts) }}</span>
+              <span class="history-action" :class="'act-' + ev.action">{{ actionLabel(ev.action) }}</span>
+              <span class="history-dir" :class="ev.direction === 'local' ? 'dir-local' : 'dir-remote'">{{ directionLabel(ev.direction) }}</span>
+              <span class="history-path mono break">{{ ev.path }}</span>
+              <span v-if="ev.deviceId" class="history-dev mono">{{ ev.deviceId }}</span>
+            </li>
+          </ul>
+        </div>
+      </div>
+    </Transition>
+
+    <!-- 通用二次确认弹窗:移除共享目录 / 移除设备共用,确认前不触碰任何数据 -->
+    <Transition name="guide">
+      <div v-if="confirmState" class="modal-overlay" @click.self="closeConfirm">
+        <div class="modal" role="dialog" aria-modal="true" aria-labelledby="confirm-title">
+          <n-button quaternary circle class="modal-close" aria-label="关闭" @click="closeConfirm">×</n-button>
+          <h2 id="confirm-title" class="modal-title">{{ confirmState.title }}</h2>
+          <p class="modal-lead">{{ confirmState.message }}</p>
+          <div v-if="confirmState.detail" class="confirm-detail mono break">{{ confirmState.detail }}</div>
+
+          <template v-if="confirmState.folders && confirmState.folders.length > 0">
+            <p class="confirm-sub">将从以下 {{ confirmState.folders.length }} 个共享目录中移除它</p>
+            <div class="confirm-list">
+              <div v-for="fd in confirmState.folders" :key="fd.path" class="confirm-row">
+                <div class="confirm-row-main">
+                  <span class="confirm-path mono break">{{ fd.path }}</span>
+                  <span class="confirm-note">
+                    {{ fd.others > 0 ? `还有 ${fd.others} 个设备 · 其他设备不受影响` : '仅共享给它 · 之后不再同步给任何设备' }}
+                  </span>
+                </div>
+                <span v-if="fd.others === 0" class="confirm-tag">变空闲</span>
+              </div>
+            </div>
+          </template>
+
+          <p v-if="confirmState.note" class="confirm-note-extra">{{ confirmState.note }}</p>
+          <div class="modal-actions">
+            <n-button class="modal-cancel" :disabled="confirmBusy" @click="closeConfirm">取消</n-button>
+            <n-button type="error" class="modal-danger" :loading="confirmBusy" @click="runConfirm">
+              {{ confirmState.confirmText }}
+            </n-button>
+          </div>
+        </div>
+      </div>
     </Transition>
   </div>
 </template>

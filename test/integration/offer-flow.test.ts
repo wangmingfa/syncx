@@ -50,14 +50,18 @@ async function setupDaemon(name: string): Promise<DaemonSetup> {
 
 function startDaemon(
   setup: DaemonSetup,
-  opts: { peers?: string[]; sharedFolders?: Array<{ id: string; path: string; devices: string[] }> },
+  opts: {
+    peers?: string[];
+    knownDevices?: string[];
+    sharedFolders?: Array<{ id: string; path: string; devices: string[] }>;
+  },
 ): void {
   writeFileSync(
     setup.configPath,
     JSON.stringify({
       sharedFolders: opts.sharedFolders ?? [],
       peers: opts.peers ?? [],
-      knownDevices: [],
+      knownDevices: opts.knownDevices ?? [],
     }),
   );
   const child = spawn(
@@ -209,6 +213,67 @@ describe('Phase 2 remote confirmation (offer channel)', () => {
       }, 20000);
       } catch (err) {
         console.log('[offer-flow] FAILED, dumping daemon logs:');
+        dumpLogs(a, b);
+        throw err;
+      }
+
+      await stopChildren();
+      rmSync(a.dir, { recursive: true, force: true });
+      rmSync(b.dir, { recursive: true, force: true });
+    },
+    150000,
+  );
+
+  it(
+    'addFolder immediately pushes a folder-invitation to an assigned online peer (no second setup needed)',
+    async () => {
+      const a = await setupDaemon('a');
+      const b = await setupDaemon('b');
+      try {
+        // A 预先授权 B(knownDevices),但首启动不配任何共享目录——这样连接建立时
+        // 不会走 pushSharesTo 重连补推,纯粹考验 addFolder 的即时推送。
+        startDaemon(a, { knownDevices: [b.deviceId], peers: [`ws://127.0.0.1:${b.peerPort}`] });
+        await waitForDaemonReady(a);
+        // B 主动拨 A(A 已授权 B,接受连接);A 不在 B 的 knownDevices,故仅 B 单向拨入
+        startDaemon(b, { peers: [`ws://127.0.0.1:${a.peerPort}`] });
+        await waitForDaemonReady(b);
+
+        // 等双向连接建立(A 侧看到 B 在线)
+        await waitFor(async () => {
+          const st = (await apiCall(a, 'GET', '/api/status')) as {
+            devices: Array<{ deviceId: string; online: boolean }>;
+          };
+          return st.devices.some((d) => d.deviceId === b.deviceId && d.online);
+        }, 30000);
+
+        // A 新建共享目录并直接指派 B——应当即时推送邀请,而非等 B 再建一次目录
+        await apiCall(a, 'POST', '/api/folders', {
+          path: a.share,
+          devices: [b.deviceId],
+          id: 'main',
+        });
+
+        // B 立即收到 folder-invitation(旧逻辑:不会触发,需 B 手动建目录)
+        const folderOffer = (await waitFor(async () => {
+          const st = (await apiCall(b, 'GET', '/api/status')) as {
+            offers: Array<{ kind: string; fromDeviceId: string; folderId?: string }>;
+          };
+          return st.offers.find((o) => o.kind === 'folder' && o.fromDeviceId === a.deviceId) ?? null;
+        }, 20000)) as { id: string; folderId?: string };
+        expect(folderOffer).toBeTruthy();
+        expect(folderOffer.folderId).toBe('main');
+
+        // B 接受邀请并落地到本地路径,闭环成立
+        await apiCall(b, 'POST', `/api/offers/${folderOffer.id}/accept`, { localPath: b.share });
+        await waitFor(async () => {
+          const st = (await apiCall(b, 'GET', '/api/status')) as {
+            folders: Array<{ id: string; devices: string[] }>;
+          };
+          const f = st.folders.find((x) => x.id === 'main');
+          return f && f.devices.includes(a.deviceId);
+        }, 20000);
+      } catch (err) {
+        console.log('[offer-flow:addFolder] FAILED, dumping daemon logs:');
         dumpLogs(a, b);
         throw err;
       }

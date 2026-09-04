@@ -30,6 +30,9 @@ ehthumbs.db
 .tmp/
 *.tmp
 
+# syncx 同步指纹缓存（由 scripts/sync.sh 生成，内容未变化时跳过同步）
+.syncx-fingerprint
+
 # 环境变量 / 密钥（切勿提交）
 .env
 .env.local

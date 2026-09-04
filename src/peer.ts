@@ -12,6 +12,15 @@ export interface PeerTransport {
   sendBlockResponse(response: BlockResponse): void;
 }
 
+/** 一条待记录的同步变更(不含 folderId,由调用方补全)。 */
+export interface SyncEventInput {
+  ts: number;
+  path: string;
+  action: 'add' | 'update' | 'delete' | 'conflict';
+  direction: 'local' | 'remote';
+  deviceId?: string;
+}
+
 export interface SyncPeerDeps {
   transport: PeerTransport;
   localIndex: Map<string, IndexEntry>;
@@ -22,6 +31,10 @@ export interface SyncPeerDeps {
   remoteDeviceId?: string;
   /** 共享目录根路径:块请求服务侧用它拒绝经符号链接逃逸目录的路径。 */
   root?: string;
+  /** 所属共享目录 ID(用于落盘同步记录)。 */
+  folderId: string;
+  /** 记录一次同步变更(新增/修改/删除/冲突),由上层写入历史存储。 */
+  onEvent?: (ev: SyncEventInput) => void;
 }
 
 export interface SyncPeer {
@@ -59,7 +72,7 @@ const BLOCK_RETRY_LONG_MS = 30_000;
  * complete, then apply it via the executor.
  */
 export function createSyncPeer(deps: SyncPeerDeps): SyncPeer {
-  const { transport, localIndex, executor, readLocalBlock, deviceId, remoteDeviceId, root } = deps;
+  const { transport, localIndex, executor, readLocalBlock, deviceId, remoteDeviceId, root, onEvent } = deps;
   const pending = new Map<string, PendingEntry>();
   // 逐块跟踪超时重试:块响应丢失/丢弃时自动重发,避免文件永远收不齐
   const pendingBlocks = new Map<string, PendingBlockRequest>();
@@ -127,9 +140,12 @@ export function createSyncPeer(deps: SyncPeerDeps): SyncPeer {
       if (landed) {
         localIndex.set(path, landed);
       }
+      onEvent?.({ ts: Date.now(), path, action: 'conflict', direction: 'remote', deviceId: remoteDeviceId });
     } else {
+      const isNew = !localIndex.has(path);
       await executor?.applyReceive(item.entry, provider);
       localIndex.set(path, item.entry);
+      onEvent?.({ ts: Date.now(), path, action: isNew ? 'add' : 'update', direction: 'remote', deviceId: remoteDeviceId });
     }
   }
 
@@ -160,6 +176,7 @@ export function createSyncPeer(deps: SyncPeerDeps): SyncPeer {
               // 对端墓碑:本地删除
               await executor?.applyDelete(action.path, remoteEntry);
               localIndex.set(action.path, remoteEntry);
+              onEvent?.({ ts: Date.now(), path: action.path, action: 'delete', direction: 'remote', deviceId: remoteDeviceId });
             }
             break;
           }

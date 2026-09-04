@@ -17,6 +17,8 @@ export interface ControlServerDeps {
   setFolderDevices?: (path: string, devices: string[]) => void;
   /** 列出待确认项(对方推送的配对 / 目录共享邀请)。 */
   getOffers?: () => unknown;
+  /** 读取某共享目录的同步记录(最近变更,倒序)。参数为目录 ID。 */
+  getFolderHistory?: (folderId: string) => unknown;
   /** 确认一个待确认项;目录共享邀请需附带 localPath(本机落地路径)。 */
   acceptOffer?: (offerId: string, localPath?: string) => void;
   /** 忽略一个待确认项。 */
@@ -53,7 +55,15 @@ const UI_SHELL = `<!DOCTYPE html><html lang="zh-CN"><head>
 
 /** 提取请求路径(去掉查询串),用于精确路由匹配。 */
 function pathname(rawUrl: string): string {
-  return new URL(rawUrl, 'http://localhost').pathname;
+  const p = new URL(rawUrl, 'http://localhost').pathname;
+  // 解码百分号编码(如 offer id 中的冒号 %3A → :),否则含冒号的 offer id
+  // 经路由提取后与盘上存储的不一致,导致 accept/decline 报 offer not found。
+  // 畸形编码(非法的 %)回退到原始 pathname,避免任意请求触发异常。
+  try {
+    return decodeURIComponent(p);
+  } catch {
+    return p;
+  }
 }
 
 /**
@@ -179,7 +189,7 @@ async function ensureSsr(): Promise<void> {
  * (见 `isControlRoute`),生产形态下不传该参数。
  */
 export function createControlServer(deps: ControlServerDeps): Server {
-  const { token, getStatus, addFolder, removeFolder, addDevice, removeDevice, setFolderDevices, rescan, reconnect, getOffers, acceptOffer, declineOffer, devViteUrl } = deps;
+  const { token, getStatus, addFolder, removeFolder, addDevice, removeDevice, setFolderDevices, rescan, reconnect, getOffers, getFolderHistory, acceptOffer, declineOffer, devViteUrl } = deps;
 
   return createServer((req, res) => {
     void (async () => {
@@ -382,6 +392,18 @@ export function createControlServer(deps: ControlServerDeps): Server {
     // GET /api/offers : 列出待确认项(对方推送的配对 / 目录共享邀请)
     if (req.method === 'GET' && req.url && pathname(req.url) === '/api/offers' && getOffers) {
       sendJson(res, 200, getOffers());
+      return;
+    }
+
+    // GET /api/folders/history?folderId=xxx : 读取某目录的同步记录(倒序)
+    if (req.method === 'GET' && req.url && pathname(req.url) === '/api/folders/history' && getFolderHistory) {
+      const url = new URL(req.url, 'http://localhost');
+      const folderId = url.searchParams.get('folderId');
+      if (!folderId) {
+        sendJson(res, 400, { error: 'folderId is required' });
+        return;
+      }
+      sendJson(res, 200, { events: getFolderHistory(folderId) });
       return;
     }
 

@@ -2,7 +2,7 @@ import { describe, expect, it } from 'vitest';
 import { mkdtempSync, rmSync, readFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { addSharedFolder, removeSharedFolder, isPeerAllowed, addPeer } from '../src/devices.js';
+import { addSharedFolder, removeSharedFolder, isPeerAllowed, addPeer, removePeer } from '../src/devices.js';
 import type { SharedFolderConfig } from '../src/config.js';
 
 function tempDir(): string {
@@ -156,6 +156,25 @@ describe('manual peer address (addPeer)', () => {
 
     expect(() => addPeer(configPath, 'http://10.13.18.36:22000')).toThrow('ws://');
     expect(() => addPeer(configPath, '10.13.18.36:22000')).toThrow('ws://');
+
+    rmSync(dir, { recursive: true, force: true });
+  });
+
+  it('removePeer deletes the exact address and is idempotent', () => {
+    const dir = tempDir();
+    const configPath = join(dir, 'config.json');
+
+    addPeer(configPath, 'ws://10.13.18.36:22000');
+    addPeer(configPath, 'ws://172.25.48.139:22000');
+
+    removePeer(configPath, 'ws://10.13.18.36:22000');
+    let raw = JSON.parse(readFileSync(configPath, 'utf8'));
+    expect(raw.peers).toEqual(['ws://172.25.48.139:22000']);
+
+    // 幂等:删除不存在的地址不应报错,也不改变配置
+    removePeer(configPath, 'ws://10.13.18.36:22000');
+    raw = JSON.parse(readFileSync(configPath, 'utf8'));
+    expect(raw.peers).toEqual(['ws://172.25.48.139:22000']);
 
     rmSync(dir, { recursive: true, force: true });
   });

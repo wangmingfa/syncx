@@ -776,6 +776,85 @@ tbody tr:last-child td {
   margin-bottom: 16px;
 }
 
+/* 同步记录弹窗:更宽,容纳列表 */
+.modal-wide {
+  max-width: 640px;
+}
+
+.history-loading {
+  color: var(--muted);
+  font-size: 13px;
+  padding: 18px 0;
+}
+
+.history-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  max-height: 60vh;
+  overflow-y: auto;
+}
+
+.history-row {
+  display: grid;
+  grid-template-columns: auto auto auto 1fr;
+  align-items: center;
+  gap: 10px;
+  padding: 8px 10px;
+  border-radius: 10px;
+  font-size: 13px;
+}
+
+.history-row:nth-child(odd) {
+  background: rgb(127 140 170 / 0.06);
+}
+
+.history-time {
+  color: var(--muted);
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+
+.history-action {
+  font-weight: 600;
+  padding: 1px 8px;
+  border-radius: 999px;
+  font-size: 12px;
+  white-space: nowrap;
+}
+
+.act-add { color: #1f9d55; background: rgb(31 157 85 / 0.12); }
+.act-update { color: #2563eb; background: rgb(37 99 235 / 0.12); }
+.act-delete { color: #e0413b; background: rgb(224 65 59 / 0.12); }
+.act-conflict { color: #c47f00; background: rgb(196 127 0 / 0.14); }
+
+.history-dir {
+  font-size: 12px;
+  padding: 1px 8px;
+  border-radius: 999px;
+  white-space: nowrap;
+}
+
+.dir-local { color: var(--muted); background: rgb(127 140 170 / 0.12); }
+.dir-remote { color: #7c3aed; background: rgb(124 58 237 / 0.12); }
+
+.history-path {
+  color: var(--text);
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.history-dev {
+  grid-column: 4;
+  color: var(--muted);
+  font-size: 11px;
+  margin-top: -2px;
+}
+
 .guide-steps {
   list-style: none;
   display: flex;
@@ -818,6 +897,89 @@ tbody tr:last-child td {
   display: block;
   width: 100%;
   margin-top: 18px;
+}
+
+/* ---------- 二次确认弹窗 ---------- */
+/* 被操作对象(目录路径 / 设备 ID):等宽展示,长路径自动换行,便于确认前核对 */
+.confirm-detail {
+  padding: 10px 12px;
+  background: var(--bg-soft);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  font-size: 12.5px;
+  line-height: 1.6;
+  color: var(--text);
+}
+
+.modal-actions {
+  display: flex;
+  gap: 10px;
+  margin-top: 18px;
+}
+
+.modal-actions > * {
+  flex: 1;
+}
+
+/* 受影响目录清单:目录多时可滚动,长路径省略号截断 */
+.confirm-sub {
+  margin: 18px 0 8px;
+  font-size: 13px;
+  font-weight: 500;
+  color: var(--text);
+}
+
+.confirm-list {
+  max-height: 172px;
+  overflow-y: auto;
+}
+
+.confirm-row {
+  display: flex;
+  align-items: flex-start;
+  gap: 10px;
+  padding: 9px 0;
+  border-top: 1px solid var(--border);
+}
+
+.confirm-row:last-child {
+  border-bottom: 1px solid var(--border);
+}
+
+.confirm-row-main {
+  flex: 1;
+  min-width: 0;
+}
+
+.confirm-path {
+  display: block;
+  font-size: 12.5px;
+  line-height: 1.5;
+  color: var(--text);
+}
+
+.confirm-note {
+  display: block;
+  margin-top: 3px;
+  font-size: 12px;
+  line-height: 1.5;
+  color: var(--muted);
+}
+
+.confirm-tag {
+  flex: none;
+  padding: 1px 8px;
+  border-radius: 10px;
+  font-size: 12px;
+  color: var(--offline);
+  background: rgb(217 107 107 / 0.12);
+}
+
+.confirm-note-extra {
+  margin-top: 12px;
+  font-size: 12px;
+  line-height: 1.6;
+  color: var(--muted);
 }
 
 /* ---------- 使用指南弹窗开合动画(由 <Transition name="guide"> 驱动) ---------- */

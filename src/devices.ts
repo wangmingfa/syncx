@@ -98,6 +98,16 @@ export function addPeer(configPath: string, address: string): void {
   }
 }
 
+/** 移除一个手动或反向发现学到的对端地址(按完整 URL 精确匹配,幂等)。 */
+export function removePeer(configPath: string, address: string): void {
+  const config = loadConfig(configPath);
+  const before = config.peers.length;
+  config.peers = config.peers.filter((p) => p !== address);
+  if (config.peers.length !== before) {
+    saveConfig(configPath, config);
+  }
+}
+
 /** 移除已知设备:同时从各目录的 devices 列表里摘除该设备。 */
 export function removeKnownDevice(configPath: string, deviceId: string): void {
   const config = loadConfig(configPath);

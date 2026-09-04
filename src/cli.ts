@@ -100,6 +100,7 @@ import { createSyncPeer, type PeerTransport, type SyncPeer } from './peer.js';
 import { scanFolder } from './scanner.js';
 import type { IndexEntry } from './index.js';
 import { splitIntoBlocks } from './blockstore.js';
+import { recordSyncEvent, listSyncHistory } from './history.js';
 import { broadcastFolderUpdates } from './broadcast.js';
 import { readFileSync, existsSync, writeFileSync, watch } from 'node:fs';
 import { fileURLToPath } from 'node:url';
@@ -112,7 +113,7 @@ import { makePeerTransport, attachPeerMessages, sendControlMessage, type Control
 import { RateLimiter } from './ratelimit.js';
 import { createControlServer } from './api.js';
 import { buildStatus, type DeviceStatus, type SyncProgress } from './status.js';
-import { addSharedFolder, removeSharedFolder, isPeerAllowed, addKnownDevice, removeKnownDevice, addPeer, setFolderDevices } from './devices.js';
+import { addSharedFolder, removeSharedFolder, isPeerAllowed, addKnownDevice, removeKnownDevice, addPeer, removePeer, setFolderDevices } from './devices.js';
 import { receiveOffer, markOfferAccepted, markOfferDeclined, listPendingOffers, makeOfferId } from './offers.js';
 import { createInviteCode, parseInviteCode, revokeInviteCode } from './invite.js';
 import { folderIdFor, folderIndexPath, type SharedFolderConfig } from './config.js';
@@ -151,6 +152,34 @@ function loadOrCreateToken(configDir: string): string {
   const token = randomBytes(24).toString('hex');
   writeFileSync(file, token, { mode: 0o600 });
   return token;
+}
+
+/**
+ * 由入站 socket 的对端源 IP + 握手 kx 中广播的监听端口,拼出可反向连接的
+ * ws:// 地址。@types/ws 未暴露 remoteAddress,故对 ws 实例做防御性读取
+ * (优先 socket.remoteAddress,回退底层 _socket.remoteAddress)。IPv6 自动加方括号。
+ * 端口非法或缺失时返回 undefined(旧版对端不广播端口,则无法反向发现)。
+ *
+ * 地址规范化:剥离 IPv4-mapped IPv6 前缀(::ffff:a.b.c.d → a.b.c.d)。
+ * peer server 默认双栈监听(::),IPv4 对端连入时 OS 会套这层壳,
+ * 否则会存成 ws://[::ffff:a.b.c.d]:port —— 既丑又无法与手动填的纯 IPv4
+ * (ws://a.b.c.d:port) 去重,污染 config.peers。
+ */
+export function learnPeerUrl(socket: WebSocket, listenPort?: number): string | undefined {
+  if (typeof listenPort !== 'number' || listenPort <= 0 || listenPort > 65535) return undefined;
+  const anySock = socket as unknown as {
+    remoteAddress?: string;
+    _socket?: { remoteAddress?: string };
+  };
+  let addr = anySock.remoteAddress ?? anySock._socket?.remoteAddress;
+  if (!addr) return undefined;
+  // 去方括号
+  if (addr.startsWith('[') && addr.endsWith(']')) addr = addr.slice(1, -1);
+  // 还原 IPv4-mapped IPv6 地址(::ffff:a.b.c.d → a.b.c.d)
+  if (addr.startsWith('::ffff:')) addr = addr.slice('::ffff:'.length);
+  // 仅真正的 IPv6(仍含冒号)才加方括号
+  const host = addr.includes(':') && !addr.startsWith('[') ? `[${addr}]` : addr;
+  return `ws://${host}:${listenPort}`;
 }
 
 /**
@@ -351,24 +380,6 @@ export async function run(args: ParsedArgs): Promise<void> {
   }
 
   /**
-   * 由入站 socket 的对端源 IP + 握手 kx 中广播的监听端口,拼出可反向连接的
-   * ws:// 地址。@types/ws 未暴露 remoteAddress,故对 ws 实例做防御性读取
-   * (优先 socket.remoteAddress,回退底层 _socket.remoteAddress)。IPv6 自动加方括号。
-   * 端口非法或缺失时返回 undefined(旧版对端不广播端口,则无法反向发现)。
-   */
-  function learnPeerUrl(socket: WebSocket, listenPort?: number): string | undefined {
-    if (typeof listenPort !== 'number' || listenPort <= 0 || listenPort > 65535) return undefined;
-    const anySock = socket as unknown as {
-      remoteAddress?: string;
-      _socket?: { remoteAddress?: string };
-    };
-    const addr = anySock.remoteAddress ?? anySock._socket?.remoteAddress;
-    if (!addr) return undefined;
-    const host = addr.includes(':') && !addr.startsWith('[') ? `[${addr}]` : addr;
-    return `ws://${host}:${listenPort}`;
-  }
-
-  /**
    * 连接到指定对端并建立同步会话:对端已有连接时关闭重复 socket,
    * 未授权则拒绝;失败时按调用方策略处理(默认记日志)。
    */
@@ -415,6 +426,9 @@ export async function run(args: ParsedArgs): Promise<void> {
     reconnectTimers.set(deviceId, timer);
   }
 
+  /** 首轮扫描只建基线,不写同步记录(避免把存量文件当成"新增"刷屏)。 */
+  let hasScannedOnce = false;
+
   /** 手动触发一轮扫描:与定时扫描逻辑一致。 */
   async function runScan(): Promise<void> {
     for (const folder of folderStates) {
@@ -433,16 +447,35 @@ export async function run(args: ParsedArgs): Promise<void> {
         try {
           await folder.executor.applyDelete(tomb.path, tomb);
           folder.localIndex.set(tomb.path, tomb);
+          if (hasScannedOnce) {
+            recordSyncEvent(configPath, {
+              ts: Date.now(),
+              folderId: folder.id,
+              path: tomb.path,
+              action: 'delete',
+              direction: 'local',
+            });
+          }
         } catch {
           // 索引写入失败,下一轮扫描重试
         }
       }
       const sends: IndexEntry[] = [...diff.tombstones];
       for (const path of diff.changed) {
+        const isNew = !folder.localIndex.has(path);
         try {
           const updated = await folder.executor.applySend(path, identity.deviceId);
           folder.localIndex.set(path, updated);
           sends.push(updated);
+          if (hasScannedOnce) {
+            recordSyncEvent(configPath, {
+              ts: Date.now(),
+              folderId: folder.id,
+              path,
+              action: isNew ? 'add' : 'update',
+              direction: 'local',
+            });
+          }
         } catch {
           // 文件在扫描后被删除/重命名,下一轮扫描处理
         }
@@ -451,6 +484,7 @@ export async function run(args: ParsedArgs): Promise<void> {
         broadcastFolderUpdates(folder, sends);
       }
     }
+    hasScannedOnce = true;
   }
 
   /** 手动强制重连:立即尝试连接,不走指数退避;失败后回退到正常重连调度。 */
@@ -500,6 +534,9 @@ export async function run(args: ParsedArgs): Promise<void> {
       remoteDeviceId: session.remoteDeviceId,
       // 块请求服务侧路径校验(经符号链接逃逸的路径不响应)
       root: folder.path,
+      folderId: folder.id,
+      // 远端推送的变更(新增/修改/删除/冲突)落盘为同步记录
+      onEvent: (ev) => recordSyncEvent(configPath, { ...ev, folderId: folder.id }),
     });
     session.peers.set(folder.id, peer);
     folder.peers.set(session.remoteDeviceId, peer);
@@ -636,6 +673,22 @@ export async function run(args: ParsedArgs): Promise<void> {
     });
   }
 
+  /**
+   * 向指定对端推送目录共享邀请(控制面 folder-invitation)。
+   * 仅对当前在线的对端推送;离线对端由 pushSharesTo 在重连时补推,
+   * 接收侧按 (from, kind, folderId) 去重,幂等安全。
+   */
+  function pushFolderInvitation(deviceId: string, folderId: string, folderName: string): void {
+    if (!isPeerConnected(deviceId)) return;
+    sendControlTo(deviceId, {
+      kind: 'folder-invitation',
+      offerId: makeOfferId('folder', deviceId, folderId),
+      fromDeviceId: identity.deviceId,
+      folderId,
+      folderName,
+    });
+  }
+
   // 控制 API:在 peer 状态和同步进度可用后创建
   const control = createControlServer({
     token,
@@ -643,6 +696,12 @@ export async function run(args: ParsedArgs): Promise<void> {
     addFolder: (path, devices, id) => {
       addSharedFolder(configPath, path, devices, id);
       logger.info(`shared folder added: ${path}`);
+      // 新建目录时即指派的对端,若当前在线立即推送共享邀请,免去对方再建一次目录
+      const folder = loadConfig(configPath).sharedFolders.find((f) => f.path === path);
+      const fid = folder?.id ?? '';
+      for (const d of devices ?? []) {
+        pushFolderInvitation(d, fid, fid || path);
+      }
     },
     removeFolder: (path) => {
       removeSharedFolder(configPath, path);
@@ -721,41 +780,52 @@ export async function run(args: ParsedArgs): Promise<void> {
             logger.error(`connect to ${address} failed: ${error instanceof Error ? error.message : String(error)}`),
         });
       }
-      // 若对端当前已连,立即推送配对请求(无需等下次重连)
+      // 若对端当前已连,立即推送配对请求与既有目录共享邀请(无需等下次重连);
+      // pushSharesTo 覆盖本机所有已把该对端列入 devices 的目录,使"先加目录后加设备"
+      // 或"修复前遗留目录"也能在添加设备这一步即刻送达,不必等掉线重连。
       if (isPeerConnected(deviceId)) {
         sendControlTo(deviceId, {
           kind: 'pairing-request',
           offerId: makeOfferId('pair', deviceId),
           fromDeviceId: identity.deviceId,
         });
+        const session = peerSessions.get(deviceId);
+        if (session) pushSharesTo(session);
       }
     },
     removeDevice: (deviceId) => {
       removeKnownDevice(configPath, deviceId);
+      // 连同清理持久化的对端地址(手动填的或反向发现学来的),否则移除后盘上残留、重启仍会去连
+      const learnedUrl = outboundPeerUrls.get(deviceId);
+      if (learnedUrl) {
+        removePeer(configPath, learnedUrl);
+      }
       outboundPeerUrls.delete(deviceId);
-      logger.info(`known device removed: ${deviceId}`);
+      // 断开与该设备的所有连接(入站 + 出站各可能有一条,故遍历 activeSessions 而非只取
+      // peerSessions 里的最后一条)。close 回调会拆掉目录 peer、清 peerSessions 与连接计数;
+      // 此时 outboundPeerUrls 已清空,unregisterPeer 不会排定重连。
+      const sessions = activeSessions.filter((s) => s.remoteDeviceId === deviceId);
+      for (const s of sessions) s.socket.close();
+      logger.info(
+        `known device removed: ${deviceId}${sessions.length > 0 ? ` (${sessions.length} connection(s) closed)` : ''}`,
+      );
     },
     setFolderDevices: (path, devices) => {
       const before = loadConfig(configPath).sharedFolders.find((f) => f.path === path);
       const beforeDevices = new Set(before?.devices ?? []);
       setFolderDevices(configPath, path, devices);
       logger.info(`folder devices updated: ${path}`);
-      // 对本次新加入且当前在线的对端,立即推送目录共享邀请(无需等下次重连)
+      // 对本次新加入的对端,若当前在线立即推送目录共享邀请(无需等下次重连;离线由重连补推)
+      const folder = folderStates.find((f) => f.path === path);
+      const fid = folder ? folder.id : before?.id ?? '';
       for (const d of devices) {
-        if (!beforeDevices.has(d) && isPeerConnected(d)) {
-          const folder = folderStates.find((f) => f.path === path);
-          const fid = folder ? folder.id : before?.id;
-          sendControlTo(d, {
-            kind: 'folder-invitation',
-            offerId: makeOfferId('folder', d, fid),
-            fromDeviceId: identity.deviceId,
-            folderId: fid ?? '',
-            folderName: fid ?? path,
-          });
+        if (!beforeDevices.has(d)) {
+          pushFolderInvitation(d, fid, fid || path);
         }
       }
     },
     getOffers: () => listPendingOffers(configPath),
+    getFolderHistory: (folderId) => listSyncHistory(configPath, folderId),
     acceptOffer: (offerId, localPath) => {
       const offer = markOfferAccepted(configPath, offerId);
       if (!offer) throw new Error('offer not found');
@@ -814,6 +884,13 @@ export async function run(args: ParsedArgs): Promise<void> {
           const learnedUrl = learnPeerUrl(socket, listenPort);
           if (learnedUrl) {
             logger.info(`learned peer ${remoteDeviceId} reachable at ${learnedUrl} (reverse discovery)`);
+            // 持久化反向发现的地址:重启 daemon 后本机也能主动重连对方,不依赖对方先连过来
+            // (原仅存内存 outboundPeerUrls,重启即丢)。addPeer 幂等去重,且 learnedUrl 已保证 ws:// 格式
+            try {
+              addPeer(configPath, learnedUrl);
+            } catch {
+              // learnedUrl 必为 ws://,正常情况下不会抛
+            }
           }
           startSyncSession(socket, remoteDeviceId, key, learnedUrl);
         }
@@ -828,6 +905,11 @@ export async function run(args: ParsedArgs): Promise<void> {
   // mDNS 自动发现:发现对端后自动发起连接并建立会话
   const discovery = startDiscovery(identity, server.port, (peer) => {
     if (isPeerConnected(peer.deviceId)) return;
+    // 未授权的对端(已移除,或从未添加)不主动连接。否则移除设备后 mDNS 会把它重新连回来,
+    // 握手能过但 startSyncSession 判定未授权,只建控制面会话:界面显示「在线」却不同步数据,
+    // 比显示离线更误导。顺带的效果:本机不再主动连接任何未添加的设备。
+    const cfg = loadConfig(configPath);
+    if (!isPeerAllowed(peer.deviceId, cfg.sharedFolders, cfg.knownDevices)) return;
     const url = `ws://${peer.host}:${peer.port}`;
     connectTo(url, {
       onRejected: (error) =>

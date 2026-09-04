@@ -18,6 +18,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { loadOrCreateIdentity } from '../src/identity.js';
 import { WebSocketServer } from 'ws';
+import { learnPeerUrl } from '../src/cli.js';
 
 function makeKeypair() {
   const { publicKey, privateKey } = generateKeyPairSync('ed25519', {
@@ -287,5 +288,44 @@ describe('peer server reverse discovery (listenPort)', () => {
     server.close();
     rmSync(serverDir, { recursive: true, force: true });
     rmSync(clientDir, { recursive: true, force: true });
+  });
+});
+
+describe('learnPeerUrl address normalization', () => {
+  it('strips the ::ffff: IPv4-mapped IPv6 prefix (dual-stack peer server)', () => {
+    const sock = { remoteAddress: '::ffff:172.25.48.139' } as unknown as WebSocket;
+    expect(learnPeerUrl(sock, 22000)).toBe('ws://172.25.48.139:22000');
+  });
+
+  it('normalizes a bracketed ::ffff: address to bare IPv4', () => {
+    const sock = { remoteAddress: '[::ffff:172.25.48.139]' } as unknown as WebSocket;
+    expect(learnPeerUrl(sock, 22000)).toBe('ws://172.25.48.139:22000');
+  });
+
+  it('keeps a bare IPv4 address unchanged', () => {
+    const sock = { remoteAddress: '10.13.18.36' } as unknown as WebSocket;
+    expect(learnPeerUrl(sock, 22000)).toBe('ws://10.13.18.36:22000');
+  });
+
+  it('brackets a true IPv6 address', () => {
+    const sock = { remoteAddress: '2001:db8::1' } as unknown as WebSocket;
+    expect(learnPeerUrl(sock, 22000)).toBe('ws://[2001:db8::1]:22000');
+  });
+
+  it('falls back to the underlying _socket.remoteAddress', () => {
+    const sock = { _socket: { remoteAddress: '::ffff:192.168.1.5' } } as unknown as WebSocket;
+    expect(learnPeerUrl(sock, 22000)).toBe('ws://192.168.1.5:22000');
+  });
+
+  it('returns undefined for an invalid listen port', () => {
+    const sock = { remoteAddress: '::ffff:172.25.48.139' } as unknown as WebSocket;
+    expect(learnPeerUrl(sock, 0)).toBeUndefined();
+    expect(learnPeerUrl(sock, 70000)).toBeUndefined();
+    expect(learnPeerUrl(sock, undefined)).toBeUndefined();
+  });
+
+  it('returns undefined when no remote address is available', () => {
+    const sock = {} as unknown as WebSocket;
+    expect(learnPeerUrl(sock, 22000)).toBeUndefined();
   });
 });
