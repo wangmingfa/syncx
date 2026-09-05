@@ -2,6 +2,17 @@ import { describe, expect, it } from 'vitest';
 import { parseArgs, reconnectDelayMs } from '../src/cli.js';
 
 describe('cli parseArgs', () => {
+  it('defaults to the start command when invoked with no arguments', () => {
+    expect(parseArgs([])).toEqual({
+      command: 'start',
+      configPath: undefined,
+      port: undefined,
+      controlPort: undefined,
+      host: undefined,
+      positionals: [],
+    });
+  });
+
   it('parses the start command with defaults', () => {
     expect(parseArgs(['start'])).toEqual({
       command: 'start',

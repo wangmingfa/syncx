@@ -33,14 +33,14 @@ export function reconnectDelayMs(attempts: number): number {
 }
 
 export function parseArgs(argv: string[]): ParsedArgs {
-  const [command, ...rest] = argv;
+  const [rawCommand, ...rest] = argv;
 
   const result: ParsedArgs = {
-    command: command as ParsedArgs['command'],
+    command: (rawCommand ?? 'start') as ParsedArgs['command'],
     positionals: [],
   };
   if (!COMMANDS.has(result.command)) {
-    throw new Error(`unknown command: ${String(command)}`);
+    throw new Error(`unknown command: ${String(rawCommand)}`);
   }
 
   let exposeControl = false;
