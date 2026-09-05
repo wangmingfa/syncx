@@ -148,6 +148,9 @@ interface ActiveSession {
   remoteDeviceId: string;
   peers: Map<string, SyncPeer>;
   transports: Array<{ folder: FolderState; transport: PeerTransport }>;
+  /** 对端宣告的「它与本机在同步的目录 id 集合」(folder-sync-list 消息)。
+   *  undefined = 对端是旧版本(未发送该消息),UI 无法区分「已停止共享」。 */
+  remoteFolders?: Set<string>;
 }
 
 function loadOrCreateToken(configDir: string): string {
@@ -656,6 +659,8 @@ export async function run(args: ParsedArgs): Promise<void> {
       }
     }
     pushSharesTo(session);
+    // 共享意图变化(如刚接受邀请新建目录)后,同步重推目录清单
+    pushFolderSyncList(session.remoteDeviceId);
   }
 
   /** 在一个 socket 上建立同步会话:为每个共享目录建 peer,按 folder 路由;并推送本机共享意图。 */
@@ -682,8 +687,17 @@ export async function run(args: ParsedArgs): Promise<void> {
       }
       // 连接就绪后把本机当前的配对 / 目录共享意图推送给对端(对方会弹「待确认」)
       pushSharesTo(session);
+      // 同时宣告本机当前与其同步的目录清单,供对端 UI 区分 同步中 / 已停止共享
+      pushFolderSyncList(remoteDeviceId);
     }
-    attachPeerMessages(session.peers, socket, key, onControl);
+    attachPeerMessages(session.peers, socket, key, (message) => {
+      if (message.kind === 'folder-sync-list') {
+        session.remoteFolders = new Set(message.folderIds);
+        logger.info(`folder sync list from ${remoteDeviceId}: ${message.folderIds.length} folder(s)`);
+        return;
+      }
+      onControl(message);
+    });
     socket.on('error', (error) => logger.debug(`socket error for peer ${remoteDeviceId}: ${error.message}`));
     socket.on('close', (code, reason) => {
       logger.debug(`socket closed for peer ${remoteDeviceId}, code=${code}, reason=${reason?.toString('utf8') ?? '(empty)'}`);
@@ -697,6 +711,25 @@ export async function run(args: ParsedArgs): Promise<void> {
         folder.peers.delete(remoteDeviceId);
       }
       unregisterPeer(remoteDeviceId);
+    });
+  }
+
+  /**
+   * 本机当前与某对端同步的目录 id 列表(folderIdFor 口径,与 invitations 一致)。
+   * 会话建立与共享关系变更时经 folder-sync-list 宣告给对端。
+   */
+  function syncFolderIdsFor(deviceId: string): string[] {
+    return loadConfig(configPath)
+      .sharedFolders.filter((f) => (f.devices ?? []).includes(deviceId))
+      .map((f) => folderIdFor(f));
+  }
+
+  /** 向对端宣告本机当前与其同步的目录清单;对端离线则忽略(重连时会话建立时重发)。 */
+  function pushFolderSyncList(deviceId: string): void {
+    sendControlTo(deviceId, {
+      kind: 'folder-sync-list',
+      fromDeviceId: identity.deviceId,
+      folderIds: syncFolderIdsFor(deviceId),
     });
   }
 
@@ -728,11 +761,15 @@ export async function run(args: ParsedArgs): Promise<void> {
       const fid = folder?.id ?? '';
       for (const d of devices ?? []) {
         pushFolderInvitation(d, fid, fid || path);
+        pushFolderSyncList(d);
       }
     },
     removeFolder: (path) => {
+      // 移除前先记下原指派设备:移除后要向它们重推目录清单(它们 UI 上应显示「已停止共享」)
+      const affected = new Set(loadConfig(configPath).sharedFolders.find((f) => f.path === path)?.devices ?? []);
       removeSharedFolder(configPath, path);
       logger.info(`shared folder removed: ${path}`);
+      for (const d of affected) pushFolderSyncList(d);
     },
     getStatus: () => {
       // 收集已知设备 + 各目录指派,构建设备状态(含在线与所属目录)
@@ -752,11 +789,14 @@ export async function run(args: ParsedArgs): Promise<void> {
       ]);
       const devices: DeviceStatus[] = [];
       for (const deviceId of deviceIds) {
+        const session = peerSessions.get(deviceId);
         devices.push({
           deviceId,
           online: isPeerConnected(deviceId),
           url: outboundPeerUrls.get(deviceId),
           folders: folderDevices.get(deviceId) ?? [],
+          // 对端宣告的目录清单:undefined=旧版本对端(无法判断「已停止共享」)
+          remoteFolders: session?.remoteFolders ? [...session.remoteFolders] : undefined,
         });
       }
       // 收集各目录同步进度
@@ -849,6 +889,10 @@ export async function run(args: ParsedArgs): Promise<void> {
         if (!beforeDevices.has(d)) {
           pushFolderInvitation(d, fid, fid || path);
         }
+      }
+      // 指派变化(新增或摘除)都会改变本机的目录清单,向前后两批设备重推
+      for (const d of new Set([...beforeDevices, ...devices])) {
+        pushFolderSyncList(d);
       }
     },
     getOffers: () => listPendingOffers(configPath),
@@ -1032,6 +1076,10 @@ export async function run(args: ParsedArgs): Promise<void> {
       // 更新内存中的配置
       config.peers = newConfig.peers;
       config.sharedFolders = newConfig.sharedFolders;
+      // 共享关系可能变化(手动改配置文件):向所有存活会话重推目录清单
+      for (const session of activeSessions) {
+        pushFolderSyncList(session.remoteDeviceId);
+      }
     } catch (error) {
       logger.error(`config reload failed: ${error instanceof Error ? error.message : String(error)}`);
     }

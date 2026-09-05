@@ -10,8 +10,11 @@ export interface DeviceStatus {
   deviceId: string;
   online: boolean;
   url?: string;
-  /** 该设备被指派到的目录 id 列表(用于界面展示「共享 N 个目录」)。 */
+  /** 本机配置里该设备被指派到的目录 id 列表(用于界面展示「共享 N 个目录」)。 */
   folders: string[];
+  /** 对端经 folder-sync-list 宣告的「它与本机在同步的目录 id 集合」。
+   *  undefined = 对端为旧版本,UI 无法区分「已停止共享」。 */
+  remoteFolders?: string[];
 }
 
 export interface ProgressCounts {

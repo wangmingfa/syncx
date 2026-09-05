@@ -21,7 +21,10 @@ export type ControlMessage =
   | { kind: 'folder-invitation'; offerId: string; fromDeviceId: string; folderId: string; folderName: string }
   | { kind: 'folder-invitation-ack'; offerId: string; fromDeviceId: string; accepted: boolean }
   | { kind: 'pairing-request'; offerId: string; fromDeviceId: string }
-  | { kind: 'pairing-ack'; offerId: string; fromDeviceId: string; accepted: boolean };
+  | { kind: 'pairing-ack'; offerId: string; fromDeviceId: string; accepted: boolean }
+  /** 会话建立与共享关系变更时互发的「本机当前与你在同步的目录清单」,
+   *  接收方据此在 UI 上区分设备标签的 同步中 / 已停止共享 状态。 */
+  | { kind: 'folder-sync-list'; fromDeviceId: string; folderIds: string[] };
 
 export function encodeWireMessage(message: WireMessage): string {
   return JSON.stringify(message);

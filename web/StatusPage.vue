@@ -1,6 +1,6 @@
 <script setup lang="ts">
-import { ref, onMounted, onUnmounted, reactive, computed } from 'vue';
-import { NButton, NInput, NSelect } from 'naive-ui';
+import { ref, onMounted, onUnmounted, reactive } from 'vue';
+import { NButton, NInput, NCheckbox, NCheckboxGroup } from 'naive-ui';
 
 interface SyncProgressItem {
   folder: string;
@@ -21,6 +21,8 @@ interface DeviceInfo {
   url?: string;
   /** 该设备被指派到的目录 id 列表(用于展示「共享 N 个目录」)。 */
   folders: string[];
+  /** 对端宣告的「它与本机在同步的目录 id 集合」;undefined=旧版本对端,无法判断已停止共享。 */
+  remoteFolders?: string[];
 }
 
 interface OfferInfo {
@@ -49,12 +51,6 @@ const props = defineProps<{ status: StatusData; message?: string }>();
 const status = ref<StatusData>(props.status);
 const toast = ref<string | undefined>(props.message);
 const busy = ref(false);
-
-// 每个目录的设备多选本地镜像(提交时写回服务端)
-const folderSel = reactive<Record<string, string[]>>({});
-function syncFolderSel(): void {
-  for (const f of status.value.folders) folderSel[f.path] = [...f.devices];
-}
 
 // 使用指南弹窗
 const showGuide = ref(false);
@@ -87,7 +83,6 @@ async function refreshStatus(): Promise<void> {
     const res = await fetch('/api/status');
     if (!res.ok) throw new Error(`status ${res.status}`);
     status.value = (await res.json()) as StatusData;
-    syncFolderSel();
   } catch {
     // 静默失败,保留当前状态
   }
@@ -200,15 +195,15 @@ function onFolderLeave(): void {
   hoverFolderKey.value = '';
 }
 
-// 设备下拉选项(来自已知设备 + 已被指派的设备)
-const deviceOptions = computed(() =>
-  status.value.devices.map((d) => ({ label: d.deviceId, value: d.deviceId })),
-);
-
-// ---- 设备配对(按 ID) ----
+// ---- 设备配对(按 ID,默认收起,点按钮展开表单) ----
+const addDeviceOpen = ref(false);
 const newDeviceId = ref('');
 const newDeviceHost = ref('');
 const newDevicePort = ref('22000');
+
+function toggleAddDevice(): void {
+  addDeviceOpen.value = !addDeviceOpen.value;
+}
 
 async function addDevice(): Promise<void> {
   const id = newDeviceId.value.trim();
@@ -236,6 +231,7 @@ async function addDevice(): Promise<void> {
     newDeviceId.value = '';
     newDeviceHost.value = '';
     newDevicePort.value = '22000';
+    addDeviceOpen.value = false;
     await refreshStatus();
   } catch {
     showToast('添加失败,请重试');
@@ -272,7 +268,49 @@ async function doRemoveDevice(deviceId: string): Promise<void> {
   await refreshStatus();
 }
 
-// ---- 按目录指派设备 ----
+// ---- 按目录指派设备(编辑弹窗:改动需显式保存,避免误触下拉直接生效) ----
+const editDevicesOpen = ref(false);
+
+/** 目录卡设备标签的三态:同步中 / 对方已停止共享 / 设备离线。 */
+type DeviceTagStatus = 'syncing' | 'stopped' | 'offline';
+
+/**
+ * 依据设备在线状态与其宣告的目录清单(folder-sync-list)判定标签状态:
+ * - 离线:设备连接断开;
+ * - 已停止:设备在线,但其宣告的清单里没有本目录(旧版本对端无清单,退化为「同步中」);
+ * - 同步中:设备在线且清单包含本目录。
+ */
+function deviceTagStatus(f: FolderInfo, deviceId: string): { key: DeviceTagStatus; label: string } {
+  const dev = status.value.devices.find((x) => x.deviceId === deviceId);
+  if (!dev?.online) return { key: 'offline', label: '离线' };
+  const fid = f.id ?? f.path;
+  if (dev.remoteFolders === undefined) return { key: 'syncing', label: '同步中' };
+  return dev.remoteFolders.includes(fid)
+    ? { key: 'syncing', label: '同步中' }
+    : { key: 'stopped', label: '对方已停止共享' };
+}
+
+/** 正在编辑的目录路径,空串表示弹窗未关联目录。 */
+const editDevicesPath = ref('');
+const editDevicesValue = ref<string[]>([]);
+
+/** 点目录卡「编辑」:打开弹窗并预填当前指派,不直接改任何数据。 */
+function openEditDevices(path: string, devices: string[]): void {
+  editDevicesPath.value = path;
+  editDevicesValue.value = [...devices];
+  editDevicesOpen.value = true;
+}
+
+function closeEditDevices(): void {
+  editDevicesOpen.value = false;
+}
+
+/** 弹窗「保存」:真正的写操作只有这里。 */
+async function saveEditDevices(): Promise<void> {
+  await commitFolderDevices(editDevicesPath.value, [...editDevicesValue.value]);
+  editDevicesOpen.value = false;
+}
+
 async function commitFolderDevices(path: string, devices: string[]): Promise<void> {
   if (busy.value) return;
   busy.value = true;
@@ -292,10 +330,15 @@ async function commitFolderDevices(path: string, devices: string[]): Promise<voi
   }
 }
 
-// ---- 添加共享目录 ----
+// ---- 添加共享目录(默认收起,点按钮展开表单) ----
+const addFolderOpen = ref(false);
 const newPath = ref('');
 const newFolderId = ref('');
 const newFolderDevices = ref<string[]>([]);
+
+function toggleAddFolder(): void {
+  addFolderOpen.value = !addFolderOpen.value;
+}
 
 async function addFolder(): Promise<void> {
   const path = newPath.value.trim();
@@ -320,6 +363,7 @@ async function addFolder(): Promise<void> {
     newPath.value = '';
     newFolderId.value = '';
     newFolderDevices.value = [];
+    addFolderOpen.value = false;
     await refreshStatus();
   } catch {
     showToast('添加失败,请重试');
@@ -588,9 +632,26 @@ function fmtTime(ts: number): string {
           <span>共享目录</span>
           <span class="badge">{{ status.folders.length }}</span>
           <n-button :disabled="busy" @click="rescan">扫描全部</n-button>
+          <n-button v-if="status.folders.length > 0" class="add-toggle" :class="{ 'is-invisible': addFolderOpen }" :disabled="busy" :tabindex="addFolderOpen ? -1 : 0" @click="toggleAddFolder">＋ 添加</n-button>
         </div>
 
-        <div v-if="status.folders.length === 0" class="empty">还没有共享目录 · 在下方添加第一个</div>
+        <!-- 添加共享目录:头部按钮触发展开;列表为空时表单常显 -->
+        <form v-if="addFolderOpen || status.folders.length === 0" class="add-form" @submit.prevent="addFolder">
+          <n-input v-model:value="newPath" placeholder="本地目录绝对路径,如 /home/me/Documents" />
+          <n-input v-model:value="newFolderId" placeholder="目录 ID(留空自动生成;跨机同步需与对方一致)" />
+          <n-checkbox-group v-model:value="newFolderDevices">
+            <div class="device-checks">
+              <n-checkbox v-for="d in status.devices" :key="d.deviceId" :value="d.deviceId" :label="d.deviceId" class="mono" />
+            </div>
+            <p v-if="status.devices.length === 0" class="confirm-note-extra">还没有已配对的设备,可先添加目录,稍后在卡片上指派。</p>
+          </n-checkbox-group>
+          <div class="add-form-actions">
+            <n-button quaternary :disabled="busy" @click="toggleAddFolder">取消</n-button>
+            <n-button type="primary" attr-type="submit" :disabled="busy">添加</n-button>
+          </div>
+        </form>
+
+        <div v-if="status.folders.length === 0" class="empty">还没有共享目录 · 在上方添加第一个</div>
         <div
           v-for="f in status.folders"
           :key="folderKey(f)"
@@ -623,15 +684,19 @@ function fmtTime(ts: number): string {
             <n-button size="small" tertiary @click="copy(f.id ?? f.path)">复制</n-button>
           </div>
 
-          <!-- 按目录指派可同步的设备 -->
+          <!-- 按目录指派可同步的设备:卡片上只读展示,点「编辑」弹窗修改后显式保存 -->
           <div class="fid-devices">
-            <n-select
-              multiple
-              :options="deviceOptions"
-              placeholder="选择可同步此目录的设备"
-              v-model:value="folderSel[f.path]"
-              @update:value="(v) => commitFolderDevices(f.path, v)"
-            />
+            <div class="device-tags">
+              <span
+                v-for="d in f.devices"
+                :key="d"
+                class="device-tag mono"
+                :class="`is-${deviceTagStatus(f, d).key}`"
+                :title="deviceTagStatus(f, d).label"
+              >{{ d }}</span>
+              <span v-if="f.devices.length === 0" class="device-tag device-tag-empty">未指派设备</span>
+            </div>
+            <n-button size="small" tertiary :disabled="busy" @click="openEditDevices(f.path, f.devices)">编辑</n-button>
           </div>
 
           <div v-if="progressOf(f)" class="item-progress">
@@ -645,18 +710,6 @@ function fmtTime(ts: number): string {
             <div class="item-sub">{{ progressText(progressOf(f)!) }}</div>
           </div>
         </div>
-
-        <form class="add-form" @submit.prevent="addFolder">
-          <n-input v-model:value="newPath" placeholder="本地目录绝对路径,如 /home/me/Documents" />
-          <n-input v-model:value="newFolderId" placeholder="目录 ID(留空自动生成;跨机同步需与对方一致)" />
-          <n-select
-            multiple
-            :options="deviceOptions"
-            placeholder="允许同步此目录的设备(可留空,稍后在目录卡上指派)"
-            v-model:value="newFolderDevices"
-          />
-          <n-button type="primary" attr-type="submit" :disabled="busy" block>添加共享目录</n-button>
-        </form>
       </section>
 
       <!-- 右栏:设备 -->
@@ -664,10 +717,11 @@ function fmtTime(ts: number): string {
         <div class="col-head">
           <span>设备</span>
           <span class="badge">{{ status.devices.length }}</span>
+          <n-button v-if="status.devices.length > 0" class="add-toggle" :class="{ 'is-invisible': addDeviceOpen }" :disabled="busy" :tabindex="addDeviceOpen ? -1 : 0" @click="toggleAddDevice">＋ 添加</n-button>
         </div>
 
         <!-- 粘贴对方设备 ID 即可配对(双方各加一次,mutual)。跨网段/无 mDNS 时填对方地址:ws://(前缀) + IP + :端口(默认 22000) -->
-        <form class="add-device" @submit.prevent="addDevice">
+        <form v-if="addDeviceOpen || status.devices.length === 0" class="add-device" @submit.prevent="addDevice">
           <n-input v-model:value="newDeviceId" placeholder="粘贴对方设备 ID" />
           <div class="addr-group">
             <n-input v-model:value="newDeviceHost" placeholder="对方 IP" class="device-host">
@@ -676,7 +730,10 @@ function fmtTime(ts: number): string {
             <span class="addr-colon">:</span>
             <n-input v-model:value="newDevicePort" placeholder="22000" class="device-port" />
           </div>
-          <n-button type="primary" attr-type="submit" :disabled="busy">添加设备</n-button>
+          <div class="add-form-actions">
+            <n-button quaternary :disabled="busy" @click="toggleAddDevice">取消</n-button>
+            <n-button type="primary" attr-type="submit" :disabled="busy">添加</n-button>
+          </div>
         </form>
 
         <div v-if="status.devices.length === 0" class="empty">还没有设备 · 在上方粘贴对方设备 ID 添加</div>
@@ -808,6 +865,28 @@ function fmtTime(ts: number): string {
             <n-button type="error" class="modal-danger" :loading="confirmBusy" @click="runConfirm">
               {{ confirmState.confirmText }}
             </n-button>
+          </div>
+        </div>
+      </div>
+    </Transition>
+
+    <!-- 目录设备编辑弹窗:卡片上的指派只读,改动在此确认后保存 -->
+    <Transition name="guide">
+      <div v-if="editDevicesOpen" class="modal-overlay" @click.self="closeEditDevices">
+        <div class="modal" role="dialog" aria-modal="true" aria-labelledby="edit-devices-title">
+          <n-button quaternary circle class="modal-close" aria-label="关闭" @click="closeEditDevices">×</n-button>
+          <h2 id="edit-devices-title" class="modal-title">编辑可同步设备</h2>
+          <p class="modal-lead mono break">{{ editDevicesPath }}</p>
+          <n-checkbox-group v-model:value="editDevicesValue">
+            <div class="device-checks">
+              <n-checkbox v-for="d in status.devices" :key="d.deviceId" :value="d.deviceId" :label="d.deviceId" class="mono" />
+            </div>
+            <p v-if="status.devices.length === 0" class="confirm-note-extra">还没有已配对的设备,先在「设备」栏添加。</p>
+          </n-checkbox-group>
+          <p class="confirm-note-extra">保存后,新加入的设备会立即收到共享邀请(在线时),被移除的设备不再同步此目录。</p>
+          <div class="modal-actions">
+            <n-button class="modal-cancel" :disabled="busy" @click="closeEditDevices">取消</n-button>
+            <n-button type="primary" :loading="busy" @click="saveEditDevices">保存</n-button>
           </div>
         </div>
       </div>
