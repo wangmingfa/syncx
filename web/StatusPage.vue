@@ -770,9 +770,8 @@ function fmtTime(ts: number): string {
             <li v-for="ev in historyEvents" :key="ev.ts + ev.path + ev.action" class="history-row">
               <span class="history-time">{{ fmtTime(ev.ts) }}</span>
               <span class="history-action" :class="'act-' + ev.action">{{ actionLabel(ev.action) }}</span>
-              <span class="history-dir" :class="ev.direction === 'local' ? 'dir-local' : 'dir-remote'">{{ directionLabel(ev.direction) }}</span>
+              <span class="history-dir" :class="ev.direction === 'local' ? 'dir-local' : 'dir-remote'">{{ directionLabel(ev.direction) }}{{ ev.direction !== 'local' && ev.deviceId ? `：${ev.deviceId}` : '' }}</span>
               <span class="history-path mono break">{{ ev.path }}</span>
-              <span v-if="ev.deviceId" class="history-dev mono">{{ ev.deviceId }}</span>
             </li>
           </ul>
         </div>

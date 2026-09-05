@@ -133,6 +133,12 @@ interface FolderState {
   transports: PeerTransport[];
   peers: Map<string, SyncPeer>;
   config: SharedFolderConfig;
+  /**
+   * 首轮扫描是否只建基线(不写同步记录):索引为空(新目录)时为 true,
+   * 存量文件视为基线避免刷屏;索引从盘上恢复(有存量条目)时为 false,
+   * 首扫的 diff 是 daemon 离线期间的真实改动,必须记录。首扫完成后清除。
+   */
+  baselinePending: boolean;
 }
 
 /** 一条存活的对端会话:配置热重载新增/移除目录时,对现有连接补建或摘除对应 peer。 */
@@ -314,7 +320,10 @@ export async function run(args: ParsedArgs): Promise<void> {
     const localIndex = new Map(
       filterIndexedEntries(parseIgnoreRules(ignoreLines), index.listEntries()).map((e) => [e.path, e]),
     );
-    return { id, path: f.path, index, executor, localIndex, ignoreLines, transports: [], peers: new Map(), config: f };
+    // 索引为空 → 首扫是建基线(存量文件不算新增);索引有存量 → 首扫 diff 是
+    // daemon 离线期间的真实改动,要写同步记录
+    const baselinePending = index.listEntries().length === 0;
+    return { id, path: f.path, index, executor, localIndex, ignoreLines, transports: [], peers: new Map(), config: f, baselinePending };
   }
 
   // 每个共享目录独立的索引/执行器/本地索引状态(可变:配置热重载可新增/移除目录)
@@ -426,9 +435,6 @@ export async function run(args: ParsedArgs): Promise<void> {
     reconnectTimers.set(deviceId, timer);
   }
 
-  /** 首轮扫描只建基线,不写同步记录(避免把存量文件当成"新增"刷屏)。 */
-  let hasScannedOnce = false;
-
   /**
    * 扫描重入保护:慢设备上大目录的单轮扫描可能超过 5s 定时间隔,
    * 若允许并发重入,两轮 scanFolder 会在对方 applySend 写回索引**之前**
@@ -461,11 +467,14 @@ export async function run(args: ParsedArgs): Promise<void> {
         parseIgnoreRules(folder.ignoreLines),
         identity.deviceId,
       );
+      // 建基线的目录(空索引首扫)不写记录,避免把存量文件当成"新增"刷屏;
+      // 索引从盘上恢复的目录,首扫 diff 是离线期间的真实改动,要记录
+      const recordEvents = !folder.baselinePending;
       for (const tomb of diff.tombstones) {
         try {
           await folder.executor.applyDelete(tomb.path, tomb);
           folder.localIndex.set(tomb.path, tomb);
-          if (hasScannedOnce) {
+          if (recordEvents) {
             recordSyncEvent(configPath, {
               ts: Date.now(),
               folderId: folder.id,
@@ -485,7 +494,7 @@ export async function run(args: ParsedArgs): Promise<void> {
           const updated = await folder.executor.applySend(path, identity.deviceId);
           folder.localIndex.set(path, updated);
           sends.push(updated);
-          if (hasScannedOnce) {
+          if (recordEvents) {
             recordSyncEvent(configPath, {
               ts: Date.now(),
               folderId: folder.id,
@@ -501,8 +510,8 @@ export async function run(args: ParsedArgs): Promise<void> {
       if (sends.length > 0) {
         broadcastFolderUpdates(folder, sends);
       }
+      folder.baselinePending = false;
     }
-    hasScannedOnce = true;
   }
 
   /** 手动强制重连:立即尝试连接,不走指数退避;失败后回退到正常重连调度。 */

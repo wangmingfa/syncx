@@ -848,13 +848,6 @@ tbody tr:last-child td {
   text-overflow: ellipsis;
 }
 
-.history-dev {
-  grid-column: 4;
-  color: var(--muted);
-  font-size: 11px;
-  margin-top: -2px;
-}
-
 .guide-steps {
   list-style: none;
   display: flex;
