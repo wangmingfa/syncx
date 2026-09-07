@@ -106,6 +106,10 @@ export default defineConfig(({ mode }: { mode: string }) => {
   build: {
     target: 'es2020',
     outDir: resolve(root, 'dist/web'),
+    // vite root 是 web/,outDir(dist/web)在 root 之外,vite 默认不清理并警告。
+    // 这里是纯构建产物目录(单文件后端只内嵌 client.js),清空是安全且必要的:
+    // 不清空会残留旧产物,被 build:single 一并内嵌。
+    emptyOutDir: true,
     // lib 模式下 vite 默认不 minify。显式压缩避免内嵌到单文件后端后
     // syncx.js 中段保留一整份未压缩的 Vue 运行时源码(体积虚高)。
     minify: 'esbuild',
