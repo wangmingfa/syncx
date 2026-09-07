@@ -699,6 +699,11 @@ export async function run(args: ParsedArgs): Promise<void> {
       pushSharesTo(session);
       // 同时宣告本机当前与其同步的目录清单,供对端 UI 区分 同步中 / 已停止共享
       pushFolderSyncList(remoteDeviceId);
+    } else {
+      // 设计:未授权对端不断连(否则对方收不到配对请求、弹不出「待确认」),
+      // 但文件同步被上面 allowed 闸门挡住,不会泄漏任何目录内容。这里仅记录一条
+      // 日志,便于排查「对方在线却不同步」而非「被拒」。
+      logger.info(`peer ${remoteDeviceId} connected but not authorized for any shared folder; control-only session until trusted`);
     }
     attachPeerMessages(session.peers, socket, key, (message) => {
       if (message.kind === 'folder-sync-list') {

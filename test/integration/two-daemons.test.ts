@@ -262,22 +262,25 @@ describe('two real daemons sync over peers config', () => {
   );
 
   it(
-    'rejects a peer that is not in the devices whitelist',
+    'does not sync files with a peer that is not in the devices whitelist',
     async () => {
       const a = await setupDaemon('a', [{ path: 'secret.txt', content: Buffer.from('top secret') }]);
       const b = await setupDaemon('b', []);
 
-      // B 的白名单不含 A → A 连接 B 时(加密握手后)应被拒绝,文件不应到达 B
+      // B 的白名单(devices)不含 A,且 A 不在 B 的 knownDevices → 信任模型下 A 连上 B 后
+      // 不断连(否则 B 收不到 A 的配对请求、弹不出「待确认」),但文件同步被 allowed 闸门
+      // 挡住,secret.txt 不应到达 B。日志应标明「已连上但未授权任何共享目录」。
       startDaemon(a, [`ws://127.0.0.1:${b.peerPort}`], [b.deviceId]);
       startDaemon(b, [`ws://127.0.0.1:${a.peerPort}`], []);
 
-      // 留足时间:握手 + A 侧扫描(5s) + B 侧拒绝
+      // 留足时间:握手 + A 侧扫描(5s) + B 侧处理连接
       await new Promise((r) => setTimeout(r, 6000));
 
+      // 核心不变量:未授权对端拿不到任何文件内容
       expect(existsSync(join(b.share, 'secret.txt'))).toBe(false);
 
       const bLog = readFileSync(join(b.dir, 'daemon.out.log'), 'utf8');
-      expect(bLog).toContain('rejected unauthorized peer');
+      expect(bLog).toContain('not authorized for any shared folder');
 
       await stopChildren();
       rmSync(a.dir, { recursive: true, force: true });

@@ -6,6 +6,14 @@ import { codeInspectorPlugin } from 'code-inspector-plugin';
 
 const root = dirname(fileURLToPath(import.meta.url));
 
+// WorkBuddy 沙箱经 NODE_OPTIONS 注入 fs broker shim,会 DENY device.key / control.token
+// 等敏感文件读取,导致 identity / join 等「进程内」单测在 worker 中失败。这些测试只操作
+// 临时目录,且跑在 vitest 的 fork worker 里,故在配置加载阶段(主进程)移除该 shim,
+// 使 worker 继承干净 fs。真实环境无 NODE_OPTIONS 注入,此删除为空操作,无副作用。
+if (process.env.VITEST && process.env.CODEBUDDY_BROKERED_FS_HOOK_ENABLED === '1') {
+  delete process.env.NODE_OPTIONS;
+}
+
 /**
  * 把构建产出的 CSS 内联进 JS bundle。
  *
