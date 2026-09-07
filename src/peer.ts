@@ -2,8 +2,9 @@ import type { IndexEntry } from './index.js';
 import { buildPlan } from './plan.js';
 import type { BlockRequest, BlockResponse } from './messages.js';
 import type { LocalExecutor } from './executor.js';
-import { resolveSharePath } from './executor.js';
+import { resolveSharePath, preserveLocalAsConflict } from './executor.js';
 import { verifyBlock, BLOCK_SIZE } from './blockstore.js';
+import { parseIgnoreRules, isIgnored } from './ignore.js';
 import type { ProgressCounts } from './status.js';
 
 export interface PeerTransport {
@@ -31,6 +32,8 @@ export interface SyncPeerDeps {
   remoteDeviceId?: string;
   /** 共享目录根路径:块请求服务侧用它拒绝经符号链接逃逸目录的路径。 */
   root?: string;
+  /** 共享目录的 .syncxignore 行:接收保护据此跳过被忽略的文件。 */
+  ignoreLines?: string[];
   /** 所属共享目录 ID(用于落盘同步记录)。 */
   folderId: string;
   /** 记录一次同步变更(新增/修改/删除/冲突),由上层写入历史存储。 */
@@ -72,7 +75,7 @@ const BLOCK_RETRY_LONG_MS = 30_000;
  * complete, then apply it via the executor.
  */
 export function createSyncPeer(deps: SyncPeerDeps): SyncPeer {
-  const { transport, localIndex, executor, readLocalBlock, deviceId, remoteDeviceId, root, onEvent } = deps;
+  const { transport, localIndex, executor, readLocalBlock, deviceId, remoteDeviceId, root, onEvent, ignoreLines } = deps;
   const pending = new Map<string, PendingEntry>();
   // 逐块跟踪超时重试:块响应丢失/丢弃时自动重发,避免文件永远收不齐
   const pendingBlocks = new Map<string, PendingBlockRequest>();
@@ -143,9 +146,30 @@ export function createSyncPeer(deps: SyncPeerDeps): SyncPeer {
       onEvent?.({ ts: Date.now(), path, action: 'conflict', direction: 'remote', deviceId: remoteDeviceId });
     } else {
       const isNew = !localIndex.has(path);
+      // 冷启动保护:本机磁盘已有同名文件、但本机索引尚未记录(对端“热”且先于本机
+      // 首扫推送)时,先保留为 .sync-conflict 副本,避免被对端版本静默覆盖。
+      // 忽略规则命中的文件不保护(旧行为即会接收覆盖,避免把被忽略文件反向同步出去)。
+      let preserved = false;
+      if (isNew && root !== undefined && remoteDeviceId) {
+        try {
+          const rules = ignoreLines ? parseIgnoreRules(ignoreLines) : [];
+          if (!isIgnored(rules, path, false)) {
+            preserved = preserveLocalAsConflict(root, path, remoteDeviceId);
+          }
+        } catch {
+          // 路径校验 / 重命名失败不阻断接收,退回旧行为(覆盖);保护仅为防丢数据增强
+          preserved = false;
+        }
+      }
       await executor?.applyReceive(item.entry, provider);
       localIndex.set(path, item.entry);
-      onEvent?.({ ts: Date.now(), path, action: isNew ? 'add' : 'update', direction: 'remote', deviceId: remoteDeviceId });
+      onEvent?.({
+        ts: Date.now(),
+        path,
+        action: preserved ? 'conflict' : isNew ? 'add' : 'update',
+        direction: 'remote',
+        deviceId: remoteDeviceId,
+      });
     }
   }
 

@@ -7,6 +7,7 @@ import {
   writeFileSync,
   existsSync,
   symlinkSync,
+  readdirSync,
 } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -457,5 +458,95 @@ describe('sync peer session', () => {
     expect(landed).toHaveLength(1);
     expect(landed[0]!.version.get('DEV-A')).toBe(3);
     expect(landed[0]!.version.get('DEV-B')).toBe(2);
+  });
+
+  it('preserves a pre-existing un-indexed local file as a conflict copy on receive (cold-start guard)', async () => {
+    const dir = mkdtempSync(join(tmpdir(), 'syncx-peer-'));
+    const root = join(dir, 'share');
+    mkdirSync(root, { recursive: true });
+    const index = openIndexStore(join(dir, 'index.db'));
+    const executor = createLocalExecutor(root, index);
+    const { transport } = fakeTransport();
+
+    // 冷设备:磁盘已有 doc.txt,但 localIndex 为空(尚未首扫);对端是“热”的
+    const localContent = Buffer.from('my local work');
+    writeFileSync(join(root, 'doc.txt'), localContent);
+    const localIndex = new Map();
+    const events: string[] = [];
+
+    const peer = createSyncPeer({
+      transport,
+      localIndex,
+      executor,
+      readLocalBlock: () => Buffer.from(''),
+      deviceId: 'DEV-A',
+      remoteDeviceId: 'DEV-B',
+      root,
+      ignoreLines: [],
+      onEvent: (ev) => events.push(ev.action),
+    });
+
+    const remoteContent = Buffer.from('peer version');
+    await peer.onPeerIndex([entry('doc.txt', [['dev-b', 1]], [hashBlock(remoteContent)], remoteContent.length)]);
+    peer.onBlockResponse({
+      deviceId: 'DEV-B',
+      path: 'doc.txt',
+      blockIndex: 0,
+      hash: hashBlock(remoteContent),
+      data: remoteContent,
+    });
+    await new Promise((r) => setTimeout(r, 10));
+
+    // 关键:本机原文件未被覆盖,保留为 .sync-conflict 副本;对端版本正常落地
+    const copies = readdirSync(root).filter((n) => n.startsWith('doc.sync-conflict-'));
+    expect(copies).toHaveLength(1);
+    expect(readFileSync(join(root, copies[0]!))).toEqual(localContent);
+    expect(readFileSync(join(root, 'doc.txt'))).toEqual(remoteContent);
+    expect(events).toContain('conflict');
+
+    index.close();
+    rmSync(dir, { recursive: true, force: true });
+  });
+
+  it('does not preserve ignored files on receive (lets them be overwritten, avoids re-syncing them out)', async () => {
+    const dir = mkdtempSync(join(tmpdir(), 'syncx-peer-'));
+    const root = join(dir, 'share');
+    mkdirSync(root, { recursive: true });
+    writeFileSync(join(root, '.syncxignore'), 'secret.txt\n');
+    const index = openIndexStore(join(dir, 'index.db'));
+    const executor = createLocalExecutor(root, index);
+    const { transport } = fakeTransport();
+
+    writeFileSync(join(root, 'secret.txt'), 'local ignored');
+    const localIndex = new Map();
+
+    const peer = createSyncPeer({
+      transport,
+      localIndex,
+      executor,
+      readLocalBlock: () => Buffer.from(''),
+      deviceId: 'DEV-A',
+      remoteDeviceId: 'DEV-B',
+      root,
+      ignoreLines: ['secret.txt'],
+    });
+
+    const remoteContent = Buffer.from('peer version');
+    await peer.onPeerIndex([entry('secret.txt', [['dev-b', 1]], [hashBlock(remoteContent)], remoteContent.length)]);
+    peer.onBlockResponse({
+      deviceId: 'DEV-B',
+      path: 'secret.txt',
+      blockIndex: 0,
+      hash: hashBlock(remoteContent),
+      data: remoteContent,
+    });
+    await new Promise((r) => setTimeout(r, 10));
+
+    // 被忽略文件:不保留冲突副本,直接接收覆盖(与旧行为一致,避免反向同步出去)
+    expect(readdirSync(root).filter((n) => n.includes('.sync-conflict-'))).toHaveLength(0);
+    expect(readFileSync(join(root, 'secret.txt'))).toEqual(remoteContent);
+
+    index.close();
+    rmSync(dir, { recursive: true, force: true });
   });
 });

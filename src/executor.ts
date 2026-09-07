@@ -53,6 +53,31 @@ export function resolveSharePath(root: string, relPath: string): string {
   return abs;
 }
 
+/**
+ * 接收对端文件前的冷启动保护:本机磁盘已存在同名文件、但本机索引尚未记录该路径
+ * (目录刚加入 / daemon 刚启动、首扫未跑即遭“热”对端推送)时,把本机原文件保留为
+ * `.sync-conflict-<ts>-<remoteDeviceId>` 副本,让出原路径给对端版本落地,避免被静默覆盖。
+ * 返回 true 表示已保留副本(原路径已让出),false 表示无需保留(磁盘无该文件)。
+ * 经 resolveSharePath 做符号链接越界校验;路径不安全时抛错,由调用方兜底。
+ */
+export function preserveLocalAsConflict(root: string, path: string, remoteDeviceId: string): boolean {
+  const target = resolveSharePath(root, path);
+  if (!existsSync(target) || !statSync(target).isFile()) return false;
+
+  const ext = extname(path);
+  const base = path.slice(0, path.length - ext.length);
+  const ts = Date.now().toString(36);
+  let n = 0;
+  let copyName: string;
+  do {
+    const seq = n > 0 ? `-${n.toString(36)}` : '';
+    copyName = `${base}.sync-conflict-${ts}${seq}-${remoteDeviceId}${ext}`;
+    n++;
+  } while (existsSync(resolveSharePath(root, copyName)) && n < 1000);
+  renameSync(target, resolveSharePath(root, copyName));
+  return true;
+}
+
 export function createLocalExecutor(root: string, index: IndexStore): LocalExecutor {
   /** 共享目录内相对路径解析:复用模块级守卫(含符号链接越界校验)。 */
   function resolvePath(relPath: string): string {

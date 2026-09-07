@@ -11,7 +11,7 @@ import {
 } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { createLocalExecutor, resolveSharePath } from '../src/executor.js';
+import { createLocalExecutor, resolveSharePath, preserveLocalAsConflict } from '../src/executor.js';
 import { openIndexStore } from '../src/indexstore.js';
 import { hashBlock } from '../src/blockstore.js';
 
@@ -368,6 +368,44 @@ describe('local executor conflict', () => {
     expect(readFileSync(target)).toEqual(localContent);
     expect(readdirSync(root).filter((n) => n.includes('.sync-conflict-'))).toHaveLength(0);
     expect(index.getEntry('doc.txt')?.deleted).toBe(false);
+
+    index.close();
+    rmSync(dir, { recursive: true, force: true });
+  });
+});
+
+describe('preserveLocalAsConflict', () => {
+  it('renames an existing un-indexed local file to a .sync-conflict copy and frees the original path', () => {
+    const dir = mkdtempSync(join(tmpdir(), 'syncx-exec-'));
+    const root = join(dir, 'share');
+    mkdirSync(root, { recursive: true });
+    const index = openIndexStore(join(dir, 'index.db'));
+
+    const target = join(root, 'doc.txt');
+    const localContent = Buffer.from('my local work');
+    writeFileSync(target, localContent);
+
+    // 冷启动场景:磁盘有文件、但本机索引里还没有该路径
+    expect(preserveLocalAsConflict(root, 'doc.txt', 'DEV-B')).toBe(true);
+
+    // 原路径让出、内容保留为冲突副本
+    expect(existsSync(target)).toBe(false);
+    const copies = readdirSync(root).filter((n) => n.startsWith('doc.sync-conflict-'));
+    expect(copies).toHaveLength(1);
+    expect(readFileSync(join(root, copies[0]!))).toEqual(localContent);
+
+    index.close();
+    rmSync(dir, { recursive: true, force: true });
+  });
+
+  it('returns false when no local file exists (nothing to preserve)', () => {
+    const dir = mkdtempSync(join(tmpdir(), 'syncx-exec-'));
+    const root = join(dir, 'share');
+    mkdirSync(root, { recursive: true });
+    const index = openIndexStore(join(dir, 'index.db'));
+
+    expect(preserveLocalAsConflict(root, 'ghost.txt', 'DEV-B')).toBe(false);
+    expect(readdirSync(root).filter((n) => n.includes('.sync-conflict-'))).toHaveLength(0);
 
     index.close();
     rmSync(dir, { recursive: true, force: true });

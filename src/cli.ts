@@ -562,6 +562,8 @@ export async function run(args: ParsedArgs): Promise<void> {
       remoteDeviceId: session.remoteDeviceId,
       // 块请求服务侧路径校验(经符号链接逃逸的路径不响应)
       root: folder.path,
+      // .syncxignore 行:接收保护据此跳过被忽略文件,避免反向同步出去
+      ignoreLines: folder.ignoreLines,
       folderId: folder.id,
       // 远端推送的变更(新增/修改/删除/冲突)落盘为同步记录
       onEvent: (ev) => recordSyncEvent(configPath, { ...ev, folderId: folder.id }),
