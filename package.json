@@ -1,11 +1,17 @@
 {
-  "name": "syncx",
+  "name": "@wangmingfa/syncx",
   "version": "0.1.0",
   "description": "Peer-to-peer LAN file synchronization tool (Syncthing-like) in Node.js",
   "type": "module",
   "engines": {
     "node": ">=22.13.0"
   },
+  "bin": {
+    "syncx": "./dist/syncx.js"
+  },
+  "files": [
+    "dist/syncx.js"
+  ],
   "scripts": {
     "dev": "concurrently -n vite,syncx -c blue,green \"vite dev --config vite.config.ts\" \"tsx watch src/main.ts start --host 0.0.0.0 --expose-control --dev-vite http://127.0.0.1:5173\"",
     "test": "vitest run",
@@ -14,9 +20,22 @@
     "build": "npm run build:web && npm run build:single",
     "build:app": "tsc",
     "build:web": "vite build --config vite.config.ts",
-    "build:single": "node scripts/build-single.mjs"
+    "build:single": "node scripts/build-single.mjs",
+    "release": "node scripts/release.mjs"
   },
   "license": "MIT",
+  "author": "wangmingfa",
+  "keywords": [
+    "sync",
+    "file-sync",
+    "p2p",
+    "lan",
+    "syncthing",
+    "cli"
+  ],
+  "publishConfig": {
+    "access": "public"
+  },
   "devDependencies": {
     "@types/multicast-dns": "^7.2.4",
     "@types/node": "^26.2.0",
