@@ -13,16 +13,31 @@
  *   - 发布成功后自动 commit 版本变更(package.json + package-lock.json)
  *
  * 用法:
- *   npm run release [patch|minor|major|<semver>] [options]
+ *   npm run release [major|minor|patch|iteration|<semver>] [options]
  *
- * 版本号:
- *   缺省或 patch/minor/major 时基于 package.json 当前版本自动递增;
- *   也可直接给完整版本号(如 1.2.3)。--dry-run 下不修改版本号。
+ * 发布通道(--tag):
+ *   --tag=latest(默认)  正式版,版本号形如 x.y.z
+ *   --tag=beta           预发布,版本号形如 x.y.z-beta.N,并以 --tag beta 发布到 beta dist-tag
+ *   其它标签(alpha / next 等)同理,预发布后缀与标签同名。
+ *
+ * 基准版本来源(与 model-gate 一致):
+ *   从 npm registry 查询「当前通道」已发布的最新版本作为递增基准
+ *   (npm view <pkg> versions --json → 按通道过滤 → semver 排序取最大),
+ *   而不是读本地 package.json —— 避免本地与远端不一致导致版本回退或撞车。
+ *   只有当该通道远端无任何版本(首发)时,才回退到 package.json 当前版本。
+ *   注意:不能用 `npm view <pkg> version`,它只看 latest dist-tag,会漏掉 beta 版本。
+ *
+ * 升级方式:
+ *   major / minor / patch  递增基础版本号(预发布通道会附 -<tag>.1)
+ *   iteration              预发布迭代号 +1(x.y.z-beta.3 → beta.4);正式通道等价于 patch
+ *   缺省:beta 通道为 iteration,latest 通道为 patch
+ *   也可直接给完整版本号(如 1.2.3 或 1.2.3-beta.1),此时通道由预发布后缀自动推断。
+ *   预发布 + iteration 时若目标已被占用,会自动顺延迭代号直到找到可用版本。
  *
  * Options:
  *   --otp <code>       npm 一次性密码(2FA)。不传则优先读环境变量 SYNCX_NPM_OTP,
  *                      再退化为交互式隐藏输入。
- *   --tag <tag>        发布到指定 dist-tag(默认 latest)。例如 --tag beta。
+ *   --tag <tag>        发布通道 / dist-tag(默认 latest)。例如 --tag beta。
  *   --registry <url>   发布到指定 registry(默认沿用当前 npm 配置;若当前不是
  *                      registry.npmjs.org 且未指定本项,会拒绝执行以避免误发镜像源)。
  *   --no-check         跳过 typecheck + vitest。
@@ -199,6 +214,133 @@ async function versionExists(name, version) {
   );
 }
 
+/** 执行 `npm view <name> versions --json`,返回 { found, versions }。
+ *  found=false 表示包在 registry 上不存在(404,视为首发);其它错误抛错以便重试。 */
+async function npmViewVersions(name) {
+  return await withRetry(
+    async () => {
+      const r = await npmRaw(['view', name, 'versions', '--json']);
+      if (r.code === 0) {
+        try {
+          const parsed = JSON.parse(r.stdout);
+          return { found: true, versions: Array.isArray(parsed) ? parsed : [] };
+        } catch {
+          throw new Error(`npm 返回了无法解析的响应: ${r.stdout.trim().slice(0, 200)}`);
+        }
+      }
+      if (/E?404|Not Found/i.test(r.stderr)) return { found: false, versions: [] };
+      throw new Error(`npm view 查询失败 (exit ${r.code}): ${(r.stderr.trim() || r.stdout.trim()).slice(0, 300)}`);
+    },
+    {
+      retries: 3,
+      delayMs: 1000,
+      onRetry: (attempt, e) => warn(`第 ${attempt} 次查询 npm 失败,1s 后重试:${e.message}`),
+    },
+  );
+}
+
+/** semver 比较:a<b 返回负数,a===b 返回 0,a>b 返回正数。
+ *  必须正确处理预发布:无后缀 > 有后缀;同为后缀时按「标签名 + 迭代号数值」比较,
+ *  不可用字符串比较,否则会掉进 beta.10 < beta.9 的字典序陷阱,把旧版本排成最大。 */
+function cmpSemver(a, b) {
+  const na = a.split('-')[0].split('.').map(Number);
+  const nb = b.split('-')[0].split('.').map(Number);
+  for (let i = 0; i < 3; i++) {
+    if ((na[i] ?? 0) !== (nb[i] ?? 0)) return (na[i] ?? 0) - (nb[i] ?? 0);
+  }
+  const parsePre = (v) => {
+    const pre = v.includes('-') ? v.slice(v.indexOf('-') + 1) : null;
+    if (!pre) return null;
+    const dot = pre.indexOf('.');
+    const tag = dot === -1 ? pre : pre.slice(0, dot);
+    const num = dot === -1 ? NaN : Number(pre.slice(dot + 1));
+    return { tag, num };
+  };
+  const pa = parsePre(a);
+  const pb = parsePre(b);
+  if (pa === null && pb === null) return 0;
+  if (pa === null) return 1;
+  if (pb === null) return -1;
+  if (pa.tag !== pb.tag) return pa.tag < pb.tag ? -1 : 1;
+  return (Number.isNaN(pa.num) ? 0 : pa.num) - (Number.isNaN(pb.num) ? 0 : pb.num);
+}
+
+/** 拆版本号为 { base, pre, nums },pre 形如 "beta.3" 或 null。 */
+function parseVersion(v) {
+  const m = /^(\d+)\.(\d+)\.(\d+)(?:-(.+))?$/.exec(v);
+  if (!m) throw new Error(`无法解析版本号: ${v}`);
+  return { base: `${m[1]}.${m[2]}.${m[3]}`, pre: m[4] ?? null, nums: [Number(m[1]), Number(m[2]), Number(m[3])] };
+}
+
+/**
+ * 从 npm registry 拉取该包「当前通道」已发布的最新版本(按 semver 取最大)。
+ *   - 通道 latest:只看 stable 版本(无预发布后缀)
+ *   - 通道 beta / 其它:只看预发布标签与该通道同名的版本(如 x.y.z-beta.N)
+ * 该通道没有任何已发布版本(含从未发布)返回 null。
+ * 注意:不能用 `npm view <pkg> version`(它只看 latest dist-tag,会漏掉 beta 版本)。
+ */
+async function fetchLatestVersion(name, channel) {
+  const result = await npmViewVersions(name);
+  if (!result.found) return null;
+  const preTagOf = (v) => {
+    const pre = v.includes('-') ? v.slice(v.indexOf('-') + 1) : null;
+    if (!pre) return null;
+    const dot = pre.indexOf('.');
+    return dot === -1 ? pre : pre.slice(0, dot);
+  };
+  const inChannel = channel === 'latest' ? (v) => preTagOf(v) === null : (v) => preTagOf(v) === channel;
+  const candidates = result.versions.filter(inChannel).sort(cmpSemver);
+  return candidates.length ? candidates[candidates.length - 1] : null;
+}
+
+/** 递增基础版本号(major/minor/patch)。 */
+function bumpBase([maj, min, pat], bump) {
+  if (bump === 'major') return [maj + 1, 0, 0];
+  if (bump === 'minor') return [maj, min + 1, 0];
+  return [maj, min, pat + 1]; // patch
+}
+
+/**
+ * 计算新版本号。
+ * @param current        基准版本(远端该通道最新版,或本地 package.json 兜底)
+ * @param channel        latest 或 beta 等预发布标签名
+ * @param bump           major / minor / patch / iteration
+ * @param isFirstRelease 远端该通道查不到任何版本(首发)
+ */
+function nextVersion(current, channel, bump, isFirstRelease = false) {
+  const { nums, pre } = parseVersion(current);
+
+  if (channel !== 'latest') {
+    if (bump === 'iteration') {
+      // 当前已在同标签的预发布线上:迭代号 +1(beta.9 → beta.10,按数值比较)
+      if (pre && pre.startsWith(`${channel}.`)) {
+        const n = Number(pre.slice(channel.length + 1)) || 0;
+        return `${nums[0]}.${nums[1]}.${nums[2]}-${channel}.${n + 1}`;
+      }
+      // 当前是 stable 或别的预发布标签:切到下一个 patch 的 -<channel>.1
+      //   首发例外:直接用当前 base 挂 -beta.1(如 0.1.0 → 0.1.0-beta.1)
+      if (isFirstRelease) return `${nums[0]}.${nums[1]}.${nums[2]}-${channel}.1`;
+      const [maj, min, pat] = bumpBase(nums, 'patch');
+      return `${maj}.${min}.${pat}-${channel}.1`;
+    }
+    // 预发布 + major/minor/patch:升基础版本并附 -<channel>.1
+    const [maj, min, pat] = bumpBase(nums, bump);
+    return `${maj}.${min}.${pat}-${channel}.1`;
+  }
+
+  // latest 通道:iteration 无预发布概念,等价于 patch
+  const [maj, min, pat] = bumpBase(nums, bump === 'iteration' ? 'patch' : bump);
+  return `${maj}.${min}.${pat}`;
+}
+
+/** 从版本号推断通道:带 -beta 等预发布后缀 → 该后缀标签,否则 latest。 */
+function channelOfVersion(v) {
+  const pre = v.includes('-') ? v.slice(v.indexOf('-') + 1) : null;
+  if (!pre) return 'latest';
+  const dot = pre.indexOf('.');
+  return dot === -1 ? pre : pre.slice(0, dot);
+}
+
 /** 发布前确保已登录 npm:未登录/登录态失效时,交互终端引导 npm login,非交互环境明确提示。
  *  登录成功后再次校验,确保后续 publish 不会因 ENEEDAUTH 而中途失败。 */
 async function ensureNpmLogin() {
@@ -235,7 +377,8 @@ function confirmPrompt(question) {
 /* ---------- 参数解析 ---------- */
 const argv = process.argv.slice(2);
 const opts = {
-  versionArg: 'patch',
+  // 未显式指定升级方式时,解析完 --tag 后按通道取默认:beta → iteration,latest → patch
+  bumpArg: undefined,
   otp: process.env.SYNCX_NPM_OTP,
   registry: undefined,
   tag: 'latest',
@@ -255,42 +398,89 @@ for (const a of argv) {
   else if (a.startsWith('--registry=')) opts.registry = a.slice('--registry='.length);
   else if (a.startsWith('--tag=')) opts.tag = a.slice('--tag='.length);
   else if (a.startsWith('--otp') || a.startsWith('--registry') || a.startsWith('--tag')) fail(`用法错误:${a} 需以 --x=value 形式传参`);
-  else if (a === 'patch' || a === 'minor' || a === 'major') opts.versionArg = a;
-  else if (/^\d+\.\d+\.\d+$/.test(a)) opts.versionArg = a;
-  else fail(`无法识别的参数:${a}(版本号应为 patch/minor/major 或如 1.2.3)`);
+  else if (a === 'patch' || a === 'minor' || a === 'major' || a === 'iteration') opts.bumpArg = a;
+  // 允许显式版本号,含预发布(如 0.1.1-beta.1)—— 此时通道由后缀自动推断
+  else if (/^\d+\.\d+\.\d+(?:-[\w.]+)?$/.test(a)) opts.bumpArg = a;
+  else fail(`无法识别的参数:${a}(应为 patch/minor/major/iteration,或如 1.2.3 / 1.2.3-beta.1)`);
 }
 
-/* ---------- 解析/递增版本号 ---------- */
+/* ---------- 解析通道与基准版本(基准取自 npm 远端该通道的最新版本) ---------- */
 const pkg = JSON.parse(readFileSync(PKG_PATH, 'utf8'));
 const pkgName = pkg.name;
-const cur = pkg.version;
-const parse = (v) => v.split('.').map(Number);
+const cur = pkg.version; // 本地版本仅作「远端该通道无版本」时的首发兜底基准
 
-function nextVersion(arg, current) {
-  if (/^\d+\.\d+\.\d+$/.test(arg)) return arg;
-  const [M, m, p] = parse(current);
-  if (arg === 'major') return `${M + 1}.0.0`;
-  if (arg === 'minor') return `${M}.${m + 1}.0`;
-  return `${M}.${m}.${p + 1}`; // patch(默认)
+// 显式版本号(如 0.1.1-beta.1):通道由预发布后缀推断,跳过升级计算
+const explicitVersion =
+  opts.bumpArg && /^\d+\.\d+\.\d+(?:-[\w.]+)?$/.test(opts.bumpArg) ? opts.bumpArg : undefined;
+const channel = explicitVersion ? channelOfVersion(explicitVersion) : opts.tag;
+const bump = explicitVersion
+  ? 'iteration' // 显式版本下不参与计算,仅作展示
+  : (opts.bumpArg ?? (channel === 'latest' ? 'patch' : 'iteration'));
+
+let base;
+let isFirstRelease = false;
+if (explicitVersion) {
+  base = explicitVersion;
+  log(`使用显式版本号 ${explicitVersion}(通道由后缀推断为 ${channel})`);
+} else {
+  const remote = await withSpinner(
+    `查询 npm 上 ${pkgName} 在 ${channel} 通道的最新版本`,
+    () => fetchLatestVersion(pkgName, channel),
+  );
+  isFirstRelease = remote === null;
+  base = remote ?? cur;
+  if (isFirstRelease) {
+    log(`npm 上未找到 ${pkgName} 的 ${channel} 通道版本,按首发处理(基准取本地 ${cur})`);
+  } else {
+    log(`npm ${channel} 通道最新版本 ${remote}(本地 package.json 为 ${cur})`);
+  }
 }
 
-const target = nextVersion(opts.versionArg, cur);
-const cmp = (a, b) => { const [x, y, z] = parse(a); const [u, v, w] = parse(b); return x - u || y - v || z - w; };
-if (!opts.dryRun && target === cur) fail(`版本已是 ${cur},无需发布。请给更高版本号。`);
-if (opts.dryRun) {
-  log(`dry-run:版本保持 ${cur}(本次不递增)`);
-} else if (cmp(target, cur) < 0) {
-  fail(`目标版本 ${target} 低于当前 ${cur},已中止(如需强行覆盖请先手动改 package.json)。`);
+let target = explicitVersion ?? nextVersion(base, channel, bump, isFirstRelease);
+log(`通道 ${channel} | 升级方式 ${bump} | 基准 ${base} → 目标 ${target}`);
+
+// 目标的基础版本不得低于本地 package.json(防止误发回退版本)。
+// 只比 x.y.z 基础部分:预发布按 semver 本就低于同 base 的正式版(0.1.1-beta.1 < 0.1.1),
+// 首个 beta 属合法场景,不能因后缀而被拦;真正要拦的是基础版本倒退(如本地 0.5.0 却发 0.2.0-beta.1)。
+if (!explicitVersion) {
+  const targetBase = target.split('-')[0];
+  const localBase = cur.split('-')[0];
+  if (cmpSemver(targetBase, localBase) < 0) {
+    fail(
+      `目标版本 ${target} 的基础版本低于本地 package.json 的 ${cur},已中止。` +
+      '远端该通道版本落后于本地时请检查是否选错通道,或先手动改 package.json。',
+    );
+  }
 }
 
 /* ---------- 网络预检 1:目标版本号是否已被 npm 占用 ---------- */
-await withSpinner(`校验 ${pkgName}@${target} 是否已被 npm 占用`, async () => {
-  const occupied = await versionExists(pkgName, target);
-  if (occupied) {
-    fail(`版本 ${pkgName}@${target} 已被发布过,不能重复发布。请换一个未占用的版本号(如 bump 更高版本)。`);
+// 预发布 + iteration 时若已占用则自动顺延迭代号(beta.1 被占 → beta.2),与 model-gate 一致;
+// 其它升级方式被占用则直接失败,不静默跳版本。
+let occupied = await withSpinner(
+  `校验 ${pkgName}@${target} 是否已被 npm 占用`,
+  () => versionExists(pkgName, target),
+);
+if (occupied) {
+  if (channel !== 'latest' && bump === 'iteration') {
+    let guard = 0;
+    while (occupied) {
+      const next = nextVersion(target, channel, 'iteration', false);
+      if (++guard > 50) fail('iteration 顺延超过 50 次仍被占用,请检查 npm 版本历史');
+      target = next;
+      occupied = await withSpinner(
+        `校验 ${pkgName}@${target} 是否已被 npm 占用`,
+        () => versionExists(pkgName, target),
+      );
+    }
+    warn(`基准 ${base} 的下一版已被占用,已自动顺延到 ${target}`);
+  } else {
+    fail(
+      `版本 ${pkgName}@${target} 已被发布过,不能重复发布。` +
+      '请换更高版本号,或在预发布通道用 iteration 自动顺延。',
+    );
   }
-  log(`版本 ${target} 未被占用,可发布`);
-});
+}
+log(`版本 ${target} 未被占用,可发布`);
 
 /* ---------- registry 预检(仅真正发布时) ---------- */
 if (!opts.dryRun) {
