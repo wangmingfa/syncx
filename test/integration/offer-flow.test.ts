@@ -1,10 +1,9 @@
 import { describe, expect, it, afterEach } from 'vitest';
 import { mkdtempSync, rmSync, readFileSync, writeFileSync, mkdirSync, createWriteStream } from 'node:fs';
-import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { spawn, type ChildProcess } from 'node:child_process';
 import { loadOrCreateIdentity } from '../../src/identity.js';
-import { allocatePort } from './ports.js';
+import { allocatePort, cleanDaemonEnv } from './ports.js';
 
 const children: ChildProcess[] = [];
 
@@ -40,7 +39,10 @@ interface DaemonSetup {
 }
 
 async function setupDaemon(name: string): Promise<DaemonSetup> {
-  const dir = mkdtempSync(join(tmpdir(), `syncx-offer-${name}-`));
+  // 不要用 os.tmpdir():macOS 上它是 /var/folders/...,会被 validateFolderPath 的
+  // 系统目录保护(/^\/var\b/)拒绝,导致 accept 邀请与 POST /api/folders 全部 400。
+  // /tmp 直连(macOS 上 resolve 后为 /private/tmp,不在禁止清单)。
+  const dir = mkdtempSync(`/tmp/syncx-offer-${name}-`);
   const share = join(dir, 'share');
   mkdirSync(share, { recursive: true });
   const identity = loadOrCreateIdentity(dir);
@@ -52,7 +54,7 @@ function startDaemon(
   setup: DaemonSetup,
   opts: {
     peers?: string[];
-    knownDevices?: string[];
+    knownDevices?: Array<{ id: string }>;
     sharedFolders?: Array<{ id: string; path: string; devices: string[] }>;
   },
 ): void {
@@ -67,7 +69,7 @@ function startDaemon(
   const child = spawn(
     process.execPath,
     ['--import', 'tsx', 'src/main.ts', 'start', '--config', setup.configPath, '--port', String(setup.peerPort), '--control-port', String(setup.controlPort)],
-    { cwd: process.cwd(), stdio: ['ignore', 'pipe', 'pipe'] },
+    { cwd: process.cwd(), stdio: ['ignore', 'pipe', 'pipe'], env: cleanDaemonEnv() },
   );
   child.stdout?.pipe(createWriteStream(join(setup.dir, 'daemon.out.log')));
   child.stderr?.pipe(createWriteStream(join(setup.dir, 'daemon.err.log')));
@@ -232,7 +234,7 @@ describe('Phase 2 remote confirmation (offer channel)', () => {
       try {
         // A 预先授权 B(knownDevices),但首启动不配任何共享目录——这样连接建立时
         // 不会走 pushSharesTo 重连补推,纯粹考验 addFolder 的即时推送。
-        startDaemon(a, { knownDevices: [b.deviceId], peers: [`ws://127.0.0.1:${b.peerPort}`] });
+        startDaemon(a, { knownDevices: [{ id: b.deviceId }], peers: [`ws://127.0.0.1:${b.peerPort}`] });
         await waitForDaemonReady(a);
         // B 主动拨 A(A 已授权 B,接受连接);A 不在 B 的 knownDevices,故仅 B 单向拨入
         startDaemon(b, { peers: [`ws://127.0.0.1:${a.peerPort}`] });

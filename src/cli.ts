@@ -119,7 +119,7 @@ import { createInviteCode, parseInviteCode, revokeInviteCode } from './invite.js
 import { folderIdFor, folderIndexPath, type SharedFolderConfig } from './config.js';
 import { getLanAddresses, formatHost } from './net/addresses.js';
 import { renderSystemdUnit, renderLaunchdPlist, renderWindowsService } from './install.js';
-import type { WebSocket } from 'ws';
+import { WebSocket } from 'ws';
 import { createLogger } from './logger.js';
 
 /** 一个共享目录的运行期状态:索引、执行器与本地索引,随配置热重载增删。 */
@@ -347,10 +347,14 @@ export async function run(args: ParsedArgs): Promise<void> {
   }
 
   // --- 对端连接去重与断线重连 ---
-  // mDNS 重播 + config.peers 主动连接可能在同一对端上建立多条连接;
-  // 按 deviceId 计数,保证每个对端最多保留两条连接(入站 + 出站各一)。
-  // 双方同时主动连接时两条都保留,任一断开后另一条仍可用。
-  const peerConnectionCount = new Map<string, number>();
+  // mDNS 重播 + config.peers 主动连接 + 双向同时拨号会在同一对端上产生重复连接。
+  // 模型:peerSessions 是「与某对端的当前会话」书签,只指向 socket 存活的会话;
+  // 重复连接照常注册(消息 handlers 可收数据)作为备份,但不抢书签;本机多余的
+  // 出站拨号在拨号侧直接关闭。书签会话断开时先把书签移交给其余存活会话,
+  // 没有才清书签并排定重连。
+  // 旧实现按连接计数放行并无条件覆盖书签:书签被覆盖到一条随即被对端关闭的
+  // 连接上 → 书签孤儿化,sendControlTo 永远失败,设备却显示在线,
+  // 邀请/回执全部静默丢失(曾导致「添加共享目录对端收不到确认」)。
   // 记录由本机主动发起(outbound)的连接的 URL,断线后可按 URL 重连;
   // 入站连接(url 未知)依赖对端重连。
   const outboundPeerUrls = new Map<string, string>();
@@ -359,41 +363,37 @@ export async function run(args: ParsedArgs): Promise<void> {
   // 跟踪所有 peer socket(入站 + 出站),关闭时统一断开,避免客户端 socket
   // 保持事件循环活跃导致进程无法退出。
   const peerSockets = new Set<WebSocket>();
-  const MAX_CONNECTIONS_PER_PEER = 2;
 
+  /** 与某对端的当前会话是否存在且 socket 仍处于 OPEN 状态。 */
   function isPeerConnected(deviceId: string): boolean {
-    return (peerConnectionCount.get(deviceId) ?? 0) > 0;
+    const session = peerSessions.get(deviceId);
+    return !!session && session.socket.readyState === WebSocket.OPEN;
+  }
+
+  /** 会话是否仍然可用:socket 处于 OPEN 状态。 */
+  function sessionAlive(session: ActiveSession): boolean {
+    return session.socket.readyState === WebSocket.OPEN;
   }
 
   function registerPeer(deviceId: string, url?: string): void {
-    peerConnectionCount.set(deviceId, (peerConnectionCount.get(deviceId) ?? 0) + 1);
     if (url) {
       outboundPeerUrls.set(deviceId, url);
-      reconnectAttempts.delete(deviceId);
     }
-  }
-
-  function unregisterPeer(deviceId: string): void {
-    const count = (peerConnectionCount.get(deviceId) ?? 1) - 1;
-    if (count <= 0) {
-      peerConnectionCount.delete(deviceId);
-    } else {
-      peerConnectionCount.set(deviceId, count);
-    }
+    // 连接已建立:作废挂起的重连定时器与退避计数
     const timer = reconnectTimers.get(deviceId);
     if (timer) {
       clearTimeout(timer);
       reconnectTimers.delete(deviceId);
     }
-    // 仅当该对端所有连接都断开时才重连
-    if (count <= 0) {
-      scheduleReconnect(deviceId);
-    }
+    reconnectAttempts.delete(deviceId);
   }
 
   /**
-   * 连接到指定对端并建立同步会话:对端已有连接时关闭重复 socket,
-   * 未授权则拒绝;失败时按调用方策略处理(默认记日志)。
+   * 连接到指定对端并建立同步会话;失败时按调用方策略处理(默认记日志)。
+   * 注意:不要在这里「发现已有会话就关闭新拨号」——对端可能已把这条连接
+   * 登记为书签(它视角里没有存活会话),单方面关闭会杀掉对端唯一的活连接,
+   * 双向同时拨号时会形成互相杀连接的重连风暴。重复连接一律照常注册为
+   * 备份会话(startSyncSession 的书签策略保证书签永远指向存活连接)。
    */
   function connectTo(
     url: string,
@@ -404,11 +404,6 @@ export async function run(args: ParsedArgs): Promise<void> {
   ): void {
     void connectPeer(identity, url, args.port ?? 22000)
       .then(({ socket, remoteDeviceId, key }) => {
-        if (isPeerConnected(remoteDeviceId)) {
-          // 对端已有连接(入站或出站),关闭重复的 socket
-          socket.close();
-          return;
-        }
         opts.onConnected?.(remoteDeviceId);
         if (acceptPeer()) {
           startSyncSession(socket, remoteDeviceId, key, url);
@@ -675,7 +670,13 @@ export async function run(args: ParsedArgs): Promise<void> {
       transports: [],
     };
     activeSessions.push(session);
-    peerSessions.set(remoteDeviceId, session);
+    // 书签策略:仅当当前书签缺失或其 socket 已死时才移交给新会话。
+    // 健康的当前会话保持不动(重复连接照常注册为备份,handlers 可收消息);
+    // 若此处覆盖了健康书签,而这条新连接随即被对端关闭,书签就会孤儿化。
+    const current = peerSessions.get(remoteDeviceId);
+    if (!current || !sessionAlive(current)) {
+      peerSessions.set(remoteDeviceId, session);
+    }
     // 仅对「已互相信任」(在 knownDevices 或某共享目录 devices 中)的对端附加目录 peer 并交换索引;
     // 未确认的对端此时仅建立控制面会话,用于接收配对 / 目录共享邀请并弹「待确认」,不泄漏文件索引。
     const allowed = isPeerAllowed(remoteDeviceId, loadConfig(configPath).sharedFolders, loadConfig(configPath).knownDevices);
@@ -704,13 +705,29 @@ export async function run(args: ParsedArgs): Promise<void> {
       peerSockets.delete(socket);
       const sessionIdx = activeSessions.indexOf(session);
       if (sessionIdx >= 0) activeSessions.splice(sessionIdx, 1);
-      if (peerSessions.get(remoteDeviceId) === session) peerSessions.delete(remoteDeviceId);
       for (const { folder, transport } of session.transports) {
         const idx = folder.transports.indexOf(transport);
         if (idx >= 0) folder.transports.splice(idx, 1);
-        folder.peers.delete(remoteDeviceId);
+        // 仅当 folder.peers 里登记的仍是本会话的 peer 时才删除:
+        // 会话被新连接接管后,新会话可能已登记了自己的 peer,不能误删
+        const myPeer = session.peers.get(folder.id);
+        if (myPeer && folder.peers.get(remoteDeviceId) === myPeer) {
+          folder.peers.delete(remoteDeviceId);
+        }
       }
-      unregisterPeer(remoteDeviceId);
+      // 书签会话断开:先把书签移交给该设备其余存活会话(备份连接,若有),
+      // 没有才清书签并排定重连。被关掉的只是非书签备份会话时不做任何事。
+      if (peerSessions.get(remoteDeviceId) === session) {
+        const backup = activeSessions.find(
+          (s) => s.remoteDeviceId === remoteDeviceId && sessionAlive(s),
+        );
+        if (backup) {
+          peerSessions.set(remoteDeviceId, backup);
+        } else {
+          peerSessions.delete(remoteDeviceId);
+          scheduleReconnect(remoteDeviceId);
+        }
+      }
     });
   }
 
@@ -739,14 +756,18 @@ export async function run(args: ParsedArgs): Promise<void> {
    * 接收侧按 (from, kind, folderId) 去重,幂等安全。
    */
   function pushFolderInvitation(deviceId: string, folderId: string, folderName: string): void {
-    if (!isPeerConnected(deviceId)) return;
-    sendControlTo(deviceId, {
+    if (!isPeerConnected(deviceId)) {
+      logger.info(`folder invitation deferred: ${deviceId} offline (will push on reconnect)`);
+      return;
+    }
+    const ok = sendControlTo(deviceId, {
       kind: 'folder-invitation',
       offerId: makeOfferId('folder', deviceId, folderId),
       fromDeviceId: identity.deviceId,
       folderId,
       folderName,
     });
+    if (!ok) logger.warn(`folder invitation to ${deviceId} could not be delivered (no live session)`);
   }
 
   // 控制 API:在 peer 状态和同步进度可用后创建
@@ -868,9 +889,9 @@ export async function run(args: ParsedArgs): Promise<void> {
         removePeer(configPath, learnedUrl);
       }
       outboundPeerUrls.delete(deviceId);
-      // 断开与该设备的所有连接(入站 + 出站各可能有一条,故遍历 activeSessions 而非只取
-      // peerSessions 里的最后一条)。close 回调会拆掉目录 peer、清 peerSessions 与连接计数;
-      // 此时 outboundPeerUrls 已清空,unregisterPeer 不会排定重连。
+      // 断开与该设备的所有会话连接(遍历 activeSessions 而非只取 peerSessions 里的
+      // 当前一条)。close 回调会拆掉目录 peer;当前会话的 close 会清书签并尝试排定
+      // 重连,但此时 outboundPeerUrls 已清空,scheduleReconnect 直接返回,不会重连。
       const sessions = activeSessions.filter((s) => s.remoteDeviceId === deviceId);
       for (const s of sessions) s.socket.close();
       logger.info(
@@ -944,11 +965,7 @@ export async function run(args: ParsedArgs): Promise<void> {
     identity,
     {
       onPeerConnected(socket, remoteDeviceId, key, listenPort) {
-        logger.debug(`inbound peer connected: ${remoteDeviceId}, count=${peerConnectionCount.get(remoteDeviceId) ?? 0}`);
-        if ((peerConnectionCount.get(remoteDeviceId) ?? 0) >= MAX_CONNECTIONS_PER_PEER) {
-          socket.close();
-          return;
-        }
+        logger.debug(`inbound peer connected: ${remoteDeviceId}`);
         if (acceptPeer()) {
           // 连接方在握手 kx 中广播了监听端口:结合源 IP 拼出反向地址并交给 startSyncSession
           // 记录到 outboundPeerUrls,使本机也能主动重连对端(只填一方地址即可双向重连)

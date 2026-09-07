@@ -15,3 +15,14 @@ export function allocatePort(): Promise<number> {
     });
   });
 }
+
+/**
+ * 派生 daemon 子进程用的干净 env:剥离宿主环境注入的 NODE_OPTIONS
+ * (如 IDE 沙箱的 fs 审计 shim——它会让 daemon 读取 device.key / control.token
+ * 等敏感文件时阻塞等待外部审批,直接拖垮测试的启动超时)。
+ */
+export function cleanDaemonEnv(): NodeJS.ProcessEnv {
+  const env = { ...process.env };
+  delete env.NODE_OPTIONS;
+  return env;
+}

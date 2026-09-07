@@ -17,7 +17,7 @@ import { loadOrCreateIdentity } from '../../src/identity.js';
 import { openIndexStore } from '../../src/indexstore.js';
 import { hashBlock } from '../../src/blockstore.js';
 import { folderIdFor, folderIndexPath } from '../../src/config.js';
-import { allocatePort } from './ports.js';
+import { allocatePort, cleanDaemonEnv } from './ports.js';
 
 const children: ChildProcess[] = [];
 
@@ -131,7 +131,7 @@ function startDaemon(setup: DaemonSetup, peers: string[], peerDeviceIds: string[
       '--control-port',
       String(setup.controlPort),
     ],
-    { cwd: process.cwd(), stdio: ['ignore', 'pipe', 'pipe'] },
+    { cwd: process.cwd(), stdio: ['ignore', 'pipe', 'pipe'], env: cleanDaemonEnv() },
   );
   // 捕获 daemon 输出,失败时可读日志定位
   child.stdout?.pipe(createWriteStream(join(setup.dir, 'daemon.out.log')));

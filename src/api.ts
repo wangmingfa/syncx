@@ -409,7 +409,15 @@ export function createControlServer(deps: ControlServerDeps): Server {
 
     // POST /api/offers/:id/accept : 确认一个待确认项
     // 目录共享邀请需 body 带 localPath(本机落地路径);配对邀请无需路径
-    if (req.method === 'POST' && req.url && pathname(req.url).startsWith('/api/offers/') && acceptOffer) {
+    // 注意必须校验 /accept 后缀:否则会截胡同前缀的 /decline 请求,
+    // 用 ".../decline" 结尾的错误 id 去查 offer → 报 offer not found。
+    if (
+      req.method === 'POST' &&
+      req.url &&
+      pathname(req.url).startsWith('/api/offers/') &&
+      pathname(req.url).endsWith('/accept') &&
+      acceptOffer
+    ) {
       const id = pathname(req.url).slice('/api/offers/'.length).replace(/\/accept$/, '');
       if (!id) {
         sendJson(res, 400, { error: 'offer id is required' });
@@ -429,7 +437,13 @@ export function createControlServer(deps: ControlServerDeps): Server {
     }
 
     // POST /api/offers/:id/decline : 忽略一个待确认项
-    if (req.method === 'POST' && req.url && pathname(req.url).startsWith('/api/offers/') && declineOffer) {
+    if (
+      req.method === 'POST' &&
+      req.url &&
+      pathname(req.url).startsWith('/api/offers/') &&
+      pathname(req.url).endsWith('/decline') &&
+      declineOffer
+    ) {
       const id = pathname(req.url).slice('/api/offers/'.length).replace(/\/decline$/, '');
       if (!id) {
         sendJson(res, 400, { error: 'offer id is required' });
