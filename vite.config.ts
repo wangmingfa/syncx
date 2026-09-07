@@ -58,9 +58,11 @@ export default defineConfig(({ mode }: { mode: string }) => {
     })]),
   ],
   test: {
-    // vitest 运行根目录回到仓库根(测试在 test/),与 vite dev/build 的 web/ 根分开
-    // fileParallelism 保证集成测试串行化
-    root: '..',
+    // vitest 运行根目录回到仓库根(测试在 test/),与 vite dev/build 的 web/ 根分开。
+    // 注意:test.root 是相对「项目根(即本配置所在目录)」解析,不是相对 web/。
+    // 写 '..' 会抬到仓库上级(如 D:/code),连带扫描 wmfx 等兄弟仓库的测试;
+    // 仓库根应为 '.'。fileParallelism 保证集成测试串行化。
+    root: '.',
     fileParallelism: false,
   },
   // 开发模式:Vite dev server 提供 web/ 的热重载(HMR),
