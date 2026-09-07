@@ -63,4 +63,36 @@ describe('offer accept/decline routing', () => {
 
     server.close();
   });
+
+  it('POST /api/offers/:id/restore passes the decoded id to restoreOffer', async () => {
+    const restored: string[] = [];
+    const accepted: string[] = [];
+    const declined: string[] = [];
+    const server = createControlServer({
+      token: '',
+      getStatus: () => ({}),
+      getOffers: () => [],
+      acceptOffer: (id) => {
+        accepted.push(id);
+      },
+      declineOffer: (id) => {
+        declined.push(id);
+      },
+      restoreOffer: (id) => {
+        restored.push(id);
+      },
+    });
+    const port = await listen(server);
+
+    const res = await fetch(`http://127.0.0.1:${port}/api/offers/${encodedId}/restore`, {
+      method: 'POST',
+    });
+
+    expect(res.status).toBe(200);
+    expect(restored).toEqual(['c335b0be:pair:AALQHUYOGA:']);
+    expect(accepted).toEqual([]);
+    expect(declined).toEqual([]);
+
+    server.close();
+  });
 });

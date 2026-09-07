@@ -114,7 +114,7 @@ import { RateLimiter } from './ratelimit.js';
 import { createControlServer } from './api.js';
 import { buildStatus, type DeviceStatus, type SyncProgress } from './status.js';
 import { addSharedFolder, removeSharedFolder, isPeerAllowed, addKnownDevice, removeKnownDevice, addPeer, removePeer, setFolderDevices } from './devices.js';
-import { receiveOffer, markOfferAccepted, markOfferDeclined, listPendingOffers, makeOfferId } from './offers.js';
+import { receiveOffer, markOfferAccepted, markOfferDeclined, restoreDeclinedOffer, listOpenOffers, makeOfferId } from './offers.js';
 import { createInviteCode, parseInviteCode, revokeInviteCode } from './invite.js';
 import { folderIdFor, folderIndexPath, type SharedFolderConfig } from './config.js';
 import { getLanAddresses, formatHost } from './net/addresses.js';
@@ -151,6 +151,9 @@ interface ActiveSession {
   /** 对端宣告的「它与本机在同步的目录 id 集合」(folder-sync-list 消息)。
    *  undefined = 对端是旧版本(未发送该消息),UI 无法区分「已停止共享」。 */
   remoteFolders?: Set<string>;
+  /** 对端宣告的「仍待确认的、来自本机的目录邀请 id 集合」(folder-sync-list)。
+   *  空/缺失时 UI 退回「已停止共享」的旧判断。 */
+  remotePendingFolders?: Set<string>;
 }
 
 function loadOrCreateToken(configDir: string): string {
@@ -592,16 +595,20 @@ export async function run(args: ParsedArgs): Promise<void> {
         });
         logger.info(`pairing request received from ${message.fromDeviceId}`);
         break;
-      case 'folder-invitation':
-        receiveOffer(configPath, {
+      case 'folder-invitation': {
+        const offer = receiveOffer(configPath, {
           id: message.offerId,
           kind: 'folder',
           fromDeviceId: message.fromDeviceId,
           folderId: message.folderId,
           folderName: message.folderName,
         });
+        // 新落成一个待确认项后立即向对方反推目录清单(带 pendingFolderIds),
+        // 让对方设备标签马上从「已停止共享」切到「待对方确认」,不等下次会话事件
+        if (offer) pushFolderSyncList(message.fromDeviceId);
         logger.info(`folder invitation received from ${message.fromDeviceId}: ${message.folderId}`);
         break;
+      }
       case 'pairing-ack':
         logger.info(`pairing ${message.accepted ? 'accepted' : 'declined'} by ${message.fromDeviceId}`);
         break;
@@ -694,6 +701,8 @@ export async function run(args: ParsedArgs): Promise<void> {
     attachPeerMessages(session.peers, socket, key, (message) => {
       if (message.kind === 'folder-sync-list') {
         session.remoteFolders = new Set(message.folderIds);
+        // 新字段可选:旧版本对端不发送 → 记为空集,UI 退回「已停止共享」旧判断
+        session.remotePendingFolders = new Set(message.pendingFolderIds ?? []);
         logger.info(`folder sync list from ${remoteDeviceId}: ${message.folderIds.length} folder(s)`);
         return;
       }
@@ -741,12 +750,22 @@ export async function run(args: ParsedArgs): Promise<void> {
       .map((f) => folderIdFor(f));
   }
 
+  /** 本机仍待确认的、来自某对端的目录邀请 id 列表(pendingOffers 口径)。
+   *  宣告给对端后,对方据此把设备标签显示为「待对方确认」而非「已停止共享」。 */
+  function pendingFolderIdsFor(deviceId: string): string[] {
+    return loadConfig(configPath)
+      .pendingOffers.filter((o) => o.status === 'pending' && o.kind === 'folder' && o.fromDeviceId === deviceId)
+      .map((o) => o.folderId)
+      .filter((id): id is string => id !== undefined);
+  }
+
   /** 向对端宣告本机当前与其同步的目录清单;对端离线则忽略(重连时会话建立时重发)。 */
   function pushFolderSyncList(deviceId: string): void {
     sendControlTo(deviceId, {
       kind: 'folder-sync-list',
       fromDeviceId: identity.deviceId,
       folderIds: syncFolderIdsFor(deviceId),
+      pendingFolderIds: pendingFolderIdsFor(deviceId),
     });
   }
 
@@ -818,6 +837,8 @@ export async function run(args: ParsedArgs): Promise<void> {
           folders: folderDevices.get(deviceId) ?? [],
           // 对端宣告的目录清单:undefined=旧版本对端(无法判断「已停止共享」)
           remoteFolders: session?.remoteFolders ? [...session.remoteFolders] : undefined,
+          // 对端宣告的仍待确认的目录邀请:仅对端为新版本时非空
+          remotePendingFolders: session?.remotePendingFolders ? [...session.remotePendingFolders] : [],
         });
       }
       // 收集各目录同步进度
@@ -846,7 +867,8 @@ export async function run(args: ParsedArgs): Promise<void> {
         { entries, tombstones },
         devices,
         syncProgress,
-        listPendingOffers(configPath),
+        // status.offers 下发 pending + declined:已忽略项在 UI 灰显供「恢复」
+        listOpenOffers(configPath),
       );
     },
     rescan: () => {
@@ -916,7 +938,8 @@ export async function run(args: ParsedArgs): Promise<void> {
         pushFolderSyncList(d);
       }
     },
-    getOffers: () => listPendingOffers(configPath),
+    // 待确认区下发 pending + declined:已忽略项灰显供「恢复」,兜住手误忽略
+    getOffers: () => listOpenOffers(configPath),
     getFolderHistory: (folderId) => listSyncHistory(configPath, folderId),
     acceptOffer: (offerId, localPath) => {
       const offer = markOfferAccepted(configPath, offerId);
@@ -956,7 +979,16 @@ export async function run(args: ParsedArgs): Promise<void> {
         fromDeviceId: identity.deviceId,
         accepted: false,
       });
+      // 待确认项已消失,立即反推目录清单,让对方设备标签从「待对方确认」切回「已停止共享」
+      if (offer.kind === 'folder') pushFolderSyncList(offer.fromDeviceId);
       logger.info(`declined offer from ${offer.fromDeviceId}`);
+    },
+    restoreOffer: (offerId) => {
+      const offer = restoreDeclinedOffer(configPath, offerId);
+      if (!offer) throw new Error('offer not found or not declined');
+      // 恢复后立即反推目录清单,让对方设备标签从「已停止共享」切回「待对方确认」
+      if (offer.kind === 'folder') pushFolderSyncList(offer.fromDeviceId);
+      logger.info(`restored declined offer from ${offer.fromDeviceId}`);
     },
   });
   control.listen(controlPort, controlHost);

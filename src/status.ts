@@ -15,6 +15,9 @@ export interface DeviceStatus {
   /** 对端经 folder-sync-list 宣告的「它与本机在同步的目录 id 集合」。
    *  undefined = 对端为旧版本,UI 无法区分「已停止共享」。 */
   remoteFolders?: string[];
+  /** 对端宣告的「仍待确认的、来自本机的目录邀请 id 集合」(folder-sync-list)。
+   *  UI 据此把「在线但清单里没有本目录」细分为 待对方确认 / 已停止共享。 */
+  remotePendingFolders?: string[];
 }
 
 export interface ProgressCounts {

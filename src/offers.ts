@@ -11,6 +11,14 @@ export function listPendingOffers(configPath: string): PendingOffer[] {
   return loadConfig(configPath).pendingOffers.filter((o) => o.status === 'pending');
 }
 
+/**
+ * 列出「待确认 + 已忽略」的待确认项(已接受的不展示)。
+ * 已忽略项供 UI 灰显并提供「恢复」按钮,兜住手误忽略的场景。
+ */
+export function listOpenOffers(configPath: string): PendingOffer[] {
+  return loadConfig(configPath).pendingOffers.filter((o) => o.status !== 'accepted');
+}
+
 /** 按 id 查找待确认项(任意状态)。 */
 export function findPendingOffer(configPath: string, id: string): PendingOffer | undefined {
   return loadConfig(configPath).pendingOffers.find((o) => o.id === id);
@@ -75,6 +83,16 @@ export function markOfferDeclined(configPath: string, id: string): PendingOffer 
   const offer = config.pendingOffers.find((o) => o.id === id);
   if (!offer) return undefined;
   offer.status = 'declined';
+  saveConfig(configPath, config);
+  return offer;
+}
+
+/** 恢复一个已忽略的待确认项(置回 pending);仅 declined 可恢复,其余返回 undefined。 */
+export function restoreDeclinedOffer(configPath: string, id: string): PendingOffer | undefined {
+  const config = loadConfig(configPath);
+  const offer = config.pendingOffers.find((o) => o.id === id);
+  if (!offer || offer.status !== 'declined') return undefined;
+  offer.status = 'pending';
   saveConfig(configPath, config);
   return offer;
 }

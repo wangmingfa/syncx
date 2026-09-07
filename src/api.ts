@@ -23,6 +23,8 @@ export interface ControlServerDeps {
   acceptOffer?: (offerId: string, localPath?: string) => void;
   /** 忽略一个待确认项。 */
   declineOffer?: (offerId: string) => void;
+  /** 恢复一个已忽略的待确认项(置回 pending)。 */
+  restoreOffer?: (offerId: string) => void;
   /** 手动触发一轮扫描。 */
   rescan?: () => void;
   /** 手动重连指定对端。 */
@@ -189,7 +191,7 @@ async function ensureSsr(): Promise<void> {
  * (见 `isControlRoute`),生产形态下不传该参数。
  */
 export function createControlServer(deps: ControlServerDeps): Server {
-  const { token, getStatus, addFolder, removeFolder, addDevice, removeDevice, setFolderDevices, rescan, reconnect, getOffers, getFolderHistory, acceptOffer, declineOffer, devViteUrl } = deps;
+  const { token, getStatus, addFolder, removeFolder, addDevice, removeDevice, setFolderDevices, rescan, reconnect, getOffers, getFolderHistory, acceptOffer, declineOffer, restoreOffer, devViteUrl } = deps;
 
   return createServer((req, res) => {
     void (async () => {
@@ -451,6 +453,28 @@ export function createControlServer(deps: ControlServerDeps): Server {
       }
       declineOffer(id);
       sendJson(res, 200, { ok: true });
+      return;
+    }
+
+    // POST /api/offers/:id/restore : 恢复一个已忽略的待确认项(手误忽略的兜底)
+    if (
+      req.method === 'POST' &&
+      req.url &&
+      pathname(req.url).startsWith('/api/offers/') &&
+      pathname(req.url).endsWith('/restore') &&
+      restoreOffer
+    ) {
+      const id = pathname(req.url).slice('/api/offers/'.length).replace(/\/restore$/, '');
+      if (!id) {
+        sendJson(res, 400, { error: 'offer id is required' });
+        return;
+      }
+      try {
+        restoreOffer(id);
+        sendJson(res, 200, { ok: true });
+      } catch (e) {
+        sendJson(res, 400, { error: e instanceof Error ? e.message : 'failed to restore offer' });
+      }
       return;
     }
 

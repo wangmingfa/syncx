@@ -23,8 +23,11 @@ export type ControlMessage =
   | { kind: 'pairing-request'; offerId: string; fromDeviceId: string }
   | { kind: 'pairing-ack'; offerId: string; fromDeviceId: string; accepted: boolean }
   /** 会话建立与共享关系变更时互发的「本机当前与你在同步的目录清单」,
-   *  接收方据此在 UI 上区分设备标签的 同步中 / 已停止共享 状态。 */
-  | { kind: 'folder-sync-list'; fromDeviceId: string; folderIds: string[] };
+   *  接收方据此在 UI 上区分设备标签的 同步中 / 已停止共享 状态。
+   *  pendingFolderIds:本机仍待确认的、来自对方的目录邀请 id 集合,
+   *  对方据此把标签显示为「待对方确认」而非误判「已停止共享」。
+   *  旧版本对端不发送该字段(undefined),接收方按未知处理,退回旧逻辑。 */
+  | { kind: 'folder-sync-list'; fromDeviceId: string; folderIds: string[]; pendingFolderIds?: string[] };
 
 export function encodeWireMessage(message: WireMessage): string {
   return JSON.stringify(message);

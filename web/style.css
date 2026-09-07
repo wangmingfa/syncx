@@ -692,7 +692,8 @@ tbody tr:last-child td {
   gap: 5px;
 }
 
-/* 目录卡设备标签三态:状态点 + 配色(同步中=绿 / 已停止共享=橙虚线 / 离线=灰) */
+/* 目录卡设备标签四态:状态点 + 配色(同步中=绿 / 待对方确认=琥珀 / 已停止共享=红虚线 / 离线=灰) */
+/* 悬停说明由 n-tooltip 提供(见 StatusPage.vue),标签本身只负责状态点与配色 */
 .device-tag::before {
   content: '';
   flex: 0 0 auto;
@@ -700,6 +701,14 @@ tbody tr:last-child td {
   height: 6px;
   border-radius: 50%;
   background: var(--online);
+}
+.device-tag.is-pending {
+  background: rgb(217 156 51 / 0.12);
+  border: 1px dashed rgb(217 156 51 / 0.55);
+  color: #a8761f;
+}
+.device-tag.is-pending::before {
+  background: #d99c33;
 }
 .device-tag.is-stopped {
   background: rgb(217 107 107 / 0.1);
@@ -804,6 +813,28 @@ tbody tr:last-child td {
 .offer-card {
   /* 用左缘强调色突出「需要你操作」,与只读状态卡区分 */
   border-left: 3px solid var(--accent-2);
+}
+
+/* 已忽略分组:默认收起为一行小按钮,展开后才显示灰显卡片 */
+.declined-toggle {
+  margin: 2px 0;
+}
+.declined-toggle .n-button {
+  color: var(--muted);
+}
+
+/* 已忽略的待确认项:灰显 + 左缘中性色,与待操作卡片区分 */
+.offer-card.is-declined {
+  opacity: 0.6;
+  border-left-color: var(--border-strong);
+}
+.declined-flag {
+  font-size: 11px;
+  padding: 1px 7px;
+  border-radius: 999px;
+  border: 1px dashed var(--border-strong);
+  color: var(--muted);
+  white-space: nowrap;
 }
 
 .offer-path {

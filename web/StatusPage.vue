@@ -1,6 +1,6 @@
 <script setup lang="ts">
-import { ref, onMounted, onUnmounted, reactive } from 'vue';
-import { NButton, NInput, NCheckbox, NCheckboxGroup } from 'naive-ui';
+import { ref, computed, onMounted, onUnmounted, reactive } from 'vue';
+import { NButton, NInput, NCheckbox, NCheckboxGroup, NTooltip } from 'naive-ui';
 
 interface SyncProgressItem {
   folder: string;
@@ -23,6 +23,8 @@ interface DeviceInfo {
   folders: string[];
   /** 对端宣告的「它与本机在同步的目录 id 集合」;undefined=旧版本对端,无法判断已停止共享。 */
   remoteFolders?: string[];
+  /** 对端宣告的仍待确认的、来自本机的目录邀请 id 集合(区分「待对方确认」与「已停止共享」)。 */
+  remotePendingFolders?: string[];
 }
 
 interface OfferInfo {
@@ -271,13 +273,14 @@ async function doRemoveDevice(deviceId: string): Promise<void> {
 // ---- 按目录指派设备(编辑弹窗:改动需显式保存,避免误触下拉直接生效) ----
 const editDevicesOpen = ref(false);
 
-/** 目录卡设备标签的三态:同步中 / 对方已停止共享 / 设备离线。 */
-type DeviceTagStatus = 'syncing' | 'stopped' | 'offline';
+/** 目录卡设备标签的四态:同步中 / 待对方确认 / 对方已停止共享 / 设备离线。 */
+type DeviceTagStatus = 'syncing' | 'pending' | 'stopped' | 'offline';
 
 /**
  * 依据设备在线状态与其宣告的目录清单(folder-sync-list)判定标签状态:
  * - 离线:设备连接断开;
- * - 已停止:设备在线,但其宣告的清单里没有本目录(旧版本对端无清单,退化为「同步中」);
+ * - 待对方确认:设备在线,其宣告的清单里没有本目录,但它的待确认项里有本目录(共享邀请已送达、尚未确认);
+ * - 已停止:设备在线,清单里没有本目录且无待确认(旧版本对端无清单,退化为「同步中」);
  * - 同步中:设备在线且清单包含本目录。
  */
 function deviceTagStatus(f: FolderInfo, deviceId: string): { key: DeviceTagStatus; label: string } {
@@ -285,9 +288,25 @@ function deviceTagStatus(f: FolderInfo, deviceId: string): { key: DeviceTagStatu
   if (!dev?.online) return { key: 'offline', label: '离线' };
   const fid = f.id ?? f.path;
   if (dev.remoteFolders === undefined) return { key: 'syncing', label: '同步中' };
-  return dev.remoteFolders.includes(fid)
-    ? { key: 'syncing', label: '同步中' }
+  if (dev.remoteFolders.includes(fid)) return { key: 'syncing', label: '同步中' };
+  return (dev.remotePendingFolders ?? []).includes(fid)
+    ? { key: 'pending', label: '待对方确认' }
     : { key: 'stopped', label: '对方已停止共享' };
+}
+
+/** 悬停设备标签时的 tooltip 文案:一句话说清当前状态与接下来会发生什么。 */
+function deviceTagTip(f: FolderInfo, deviceId: string): string {
+  const s = deviceTagStatus(f, deviceId);
+  switch (s.key) {
+    case 'syncing':
+      return '同步中:对方已接受共享且在线,变更会双向同步';
+    case 'pending':
+      return '待对方确认:共享邀请已送达,对方确认后开始同步';
+    case 'stopped':
+      return '对方未共享此目录:可能拒绝了邀请或已停止共享';
+    case 'offline':
+      return '设备离线:对方上线后会自动继续同步';
+  }
 }
 
 /** 正在编辑的目录路径,空串表示弹窗未关联目录。 */
@@ -413,13 +432,13 @@ async function acceptOffer(offer: OfferInfo): Promise<void> {
 
 async function declineOffer(offer: OfferInfo): Promise<void> {
   if (busy.value) return;
-  busy.value = false;
+  busy.value = true;
   try {
     const res = await fetch(`/api/offers/${encodeURIComponent(offer.id)}/decline`, {
       method: 'POST',
     });
     if (!res.ok) throw new Error(`decline ${res.status}`);
-    showToast('已忽略该请求');
+    showToast('已忽略该请求(可在下方「已忽略」中恢复)');
     await refreshStatus();
   } catch {
     showToast('操作失败,请重试');
@@ -427,6 +446,29 @@ async function declineOffer(offer: OfferInfo): Promise<void> {
     busy.value = false;
   }
 }
+
+/** 手误忽略的兜底:把已忽略的待确认项恢复为 pending,重新出现在确认列表。 */
+async function restoreOffer(offer: OfferInfo): Promise<void> {
+  if (busy.value) return;
+  busy.value = true;
+  try {
+    const res = await fetch(`/api/offers/${encodeURIComponent(offer.id)}/restore`, {
+      method: 'POST',
+    });
+    if (!res.ok) throw new Error(`restore ${res.status}`);
+    showToast('已恢复,请重新确认');
+    await refreshStatus();
+  } catch {
+    showToast('恢复失败,请重试');
+  } finally {
+    busy.value = false;
+  }
+}
+
+// 待确认区分两组:pending 可确认/忽略;declined 灰显仅供恢复(默认收起,点按钮展开)
+const pendingOffers = computed(() => status.value.offers.filter((o) => o.status !== 'declined'));
+const declinedOffers = computed(() => status.value.offers.filter((o) => o.status === 'declined'));
+const declinedOpen = ref(false);
 
 // 挂载后立即刷新一次,并确保展示最新状态;之后周期轮询,
 // 让对方推送过来的配对 / 共享邀请(待确认项)能及时在页面上弹出。
@@ -591,14 +633,14 @@ function fmtTime(ts: number): string {
       <span class="stat-pill-item"><b>{{ status.devices.length }}</b><span>已配对设备</span></span>
     </div>
 
-    <!-- 待确认:对方推送的配对 / 目录共享邀请 -->
+    <!-- 待确认:对方推送的配对 / 目录共享邀请(pending 可操作;declined 灰显供恢复) -->
     <div v-if="status.offers && status.offers.length" class="offers">
       <div class="col-head">
         <span>待确认</span>
-        <span class="badge">{{ status.offers.length }}</span>
+        <span class="badge">{{ pendingOffers.length }}</span>
       </div>
       <div
-        v-for="o in status.offers"
+        v-for="o in pendingOffers"
         :key="o.id"
         class="item-card offer-card"
       >
@@ -622,6 +664,37 @@ function fmtTime(ts: number): string {
           <n-button size="small" tertiary :disabled="busy" @click="declineOffer(o)">忽略</n-button>
         </div>
       </div>
+
+      <!-- 已忽略:手误忽略的兜底。默认收起,点按钮展开;已接受的不展示 -->
+      <div v-if="declinedOffers.length" class="declined-toggle">
+        <n-button size="tiny" quaternary :disabled="busy" @click="declinedOpen = !declinedOpen">
+          {{ declinedOpen ? '▾ 收起已忽略' : `▸ 已忽略 (${declinedOffers.length})` }}
+        </n-button>
+      </div>
+      <template v-if="declinedOpen">
+        <div
+          v-for="o in declinedOffers"
+          :key="o.id"
+          class="item-card offer-card is-declined"
+        >
+          <div class="item-top">
+            <span class="avatar" aria-hidden="true">
+              <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
+                <path d="M12 3v18M3 12h18" />
+              </svg>
+            </span>
+            <span class="item-title">
+              <template v-if="o.kind === 'folder'">目录共享邀请 · {{ o.folderName }}</template>
+              <template v-else>配对请求</template>
+            </span>
+            <span class="declined-flag">已忽略</span>
+          </div>
+          <div class="item-sub">来自 <span class="mono">{{ o.fromDeviceId }}</span></div>
+          <div class="actions">
+            <n-button size="small" tertiary :disabled="busy" @click="restoreOffer(o)">恢复</n-button>
+          </div>
+        </div>
+      </template>
     </div>
 
     <!-- 主体:左右两栏(左=共享目录,右=设备) -->
@@ -687,13 +760,12 @@ function fmtTime(ts: number): string {
           <!-- 按目录指派可同步的设备:卡片上只读展示,点「编辑」弹窗修改后显式保存 -->
           <div class="fid-devices">
             <div class="device-tags">
-              <span
-                v-for="d in f.devices"
-                :key="d"
-                class="device-tag mono"
-                :class="`is-${deviceTagStatus(f, d).key}`"
-                :title="deviceTagStatus(f, d).label"
-              >{{ d }}</span>
+              <n-tooltip v-for="d in f.devices" :key="d" trigger="hover" :style="{ maxWidth: '280px' }">
+                <template #trigger>
+                  <span class="device-tag mono" :class="`is-${deviceTagStatus(f, d).key}`">{{ d }}</span>
+                </template>
+                {{ deviceTagTip(f, d) }}
+              </n-tooltip>
               <span v-if="f.devices.length === 0" class="device-tag device-tag-empty">未指派设备</span>
             </div>
             <n-button size="small" tertiary :disabled="busy" @click="openEditDevices(f.path, f.devices)">编辑</n-button>

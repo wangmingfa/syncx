@@ -31,7 +31,7 @@ interface StatusData {
   entries: number;
   tombstones: number;
   folders: Array<{ id?: string; path: string; devices: string[] }>;
-  devices: Array<{ deviceId: string; online: boolean; url?: string; folders: string[]; remoteFolders?: string[] }>;
+  devices: Array<{ deviceId: string; online: boolean; url?: string; folders: string[]; remoteFolders?: string[]; remotePendingFolders?: string[] }>;
   syncProgress: Array<{ folder: string; pending: number; sending: number; receiving: number }>;
   offers: OfferInfo[];
 }
