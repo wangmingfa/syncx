@@ -1,7 +1,6 @@
 import { describe, expect, it, afterEach } from 'vitest';
 import {
   mkdtempSync,
-  rmSync,
   readFileSync,
   writeFileSync,
   mkdirSync,
@@ -10,6 +9,7 @@ import {
   createWriteStream,
   renameSync,
 } from 'node:fs';
+import { rmDir } from '../helpers.js';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { spawn, type ChildProcess } from 'node:child_process';
@@ -216,8 +216,8 @@ describe('two real daemons sync over peers config', () => {
 
       // 先停掉 daemon 再清理临时目录,避免进程写文件导致 ENOTEMPTY
       await stopChildren();
-      rmSync(a.dir, { recursive: true, force: true });
-      rmSync(b.dir, { recursive: true, force: true });
+      rmDir(a.dir);
+      rmDir(b.dir);
     },
     90000,
   );
@@ -255,8 +255,8 @@ describe('two real daemons sync over peers config', () => {
       );
 
       await stopChildren();
-      rmSync(a.dir, { recursive: true, force: true });
-      rmSync(b.dir, { recursive: true, force: true });
+      rmDir(a.dir);
+      rmDir(b.dir);
     },
     45000,
   );
@@ -283,8 +283,8 @@ describe('two real daemons sync over peers config', () => {
       expect(bLog).toContain('not authorized for any shared folder');
 
       await stopChildren();
-      rmSync(a.dir, { recursive: true, force: true });
-      rmSync(b.dir, { recursive: true, force: true });
+      rmDir(a.dir);
+      rmDir(b.dir);
     },
     30000,
   );
@@ -308,7 +308,7 @@ describe('two real daemons sync over peers config', () => {
       expect(readFileSync(join(b.share, 'temp.txt'))).toEqual(Buffer.from('delete me'));
 
       // A 侧删除文件,等待墓碑传播到 B
-      rmSync(join(a.share, 'temp.txt'));
+      rmDir(join(a.share, 'temp.txt'));
       try {
         await waitFor(() => !existsSync(join(b.share, 'temp.txt')), 30000);
       } catch (error) {
@@ -324,8 +324,8 @@ describe('two real daemons sync over peers config', () => {
       expect(aIndex.getEntry('temp.txt')?.deleted).toBe(true);
       aIndex.close();
 
-      rmSync(a.dir, { recursive: true, force: true });
-      rmSync(b.dir, { recursive: true, force: true });
+      rmDir(a.dir);
+      rmDir(b.dir);
     },
     45000,
   );
@@ -376,7 +376,7 @@ describe('two real daemons sync over peers config', () => {
       idx.close();
 
       await stopChildren();
-      rmSync(a.dir, { recursive: true, force: true });
+      rmDir(a.dir);
     },
     45000,
   );

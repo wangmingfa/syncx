@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'vitest';
-import { mkdtempSync, rmSync, chmodSync } from 'node:fs';
+import { mkdtempSync, chmodSync } from 'node:fs';
+import { rmDir } from './helpers.js';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { DatabaseSync } from 'node:sqlite';
@@ -76,7 +77,7 @@ describe('index store', () => {
     expect(reopened.getEntry('persisted.txt')).toEqual(entry('persisted.txt', [['dev-a', 5]]));
     reopened.close();
 
-    rmSync(dir, { recursive: true, force: true });
+    rmDir(dir);
   });
 
   it('rethrows ALTER TABLE errors that are not a duplicate mtime column', () => {
@@ -96,6 +97,6 @@ describe('index store', () => {
 
     expect(() => openIndexStore(`file:${dbPath}?mode=ro`)).toThrow(/readonly/i);
 
-    rmSync(dir, { recursive: true, force: true });
+    rmDir(dir);
   });
 });

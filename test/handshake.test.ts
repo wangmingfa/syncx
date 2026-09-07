@@ -13,7 +13,8 @@ import {
 } from '../src/handshake.js';
 import { connectPeer } from '../src/net/client.js';
 import { startPeerServer } from '../src/net/server.js';
-import { mkdtempSync, rmSync } from 'node:fs';
+import { mkdtempSync } from 'node:fs';
+import { rmDir } from './helpers.js';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { loadOrCreateIdentity } from '../src/identity.js';
@@ -183,7 +184,7 @@ describe('connectPeer handshake', () => {
 
     socket.close();
     await server.close();
-    rmSync(dir, { recursive: true, force: true });
+    rmDir(dir);
   });
 
   it('cleans up the handshake message listener after a successful handshake', async () => {
@@ -199,7 +200,7 @@ describe('connectPeer handshake', () => {
 
     socket.close();
     await server.close();
-    rmSync(dir, { recursive: true, force: true });
+    rmDir(dir);
   });
 
   it('rejects when the peer closes the socket mid-handshake', async () => {
@@ -225,7 +226,7 @@ describe('connectPeer handshake', () => {
     expect(gotConnection).toBe(true);
 
     await new Promise<void>((resolve) => wss.close(() => resolve()));
-    rmSync(dir, { recursive: true, force: true });
+    rmDir(dir);
   });
 });
 
@@ -256,8 +257,8 @@ describe('peer server reverse discovery (listenPort)', () => {
 
     peer.socket.close();
     server.close();
-    rmSync(serverDir, { recursive: true, force: true });
-    rmSync(clientDir, { recursive: true, force: true });
+    rmDir(serverDir);
+    rmDir(clientDir);
   });
 
   it('passes undefined listenPort when the client omits it (old peer)', async () => {
@@ -286,8 +287,8 @@ describe('peer server reverse discovery (listenPort)', () => {
 
     peer.socket.close();
     server.close();
-    rmSync(serverDir, { recursive: true, force: true });
-    rmSync(clientDir, { recursive: true, force: true });
+    rmDir(serverDir);
+    rmDir(clientDir);
   });
 });
 

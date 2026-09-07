@@ -1,5 +1,6 @@
 import { describe, expect, it, afterEach } from 'vitest';
-import { mkdtempSync, rmSync, readFileSync, writeFileSync, mkdirSync, createWriteStream } from 'node:fs';
+import { mkdtempSync, readFileSync, writeFileSync, mkdirSync, createWriteStream } from 'node:fs';
+import { rmDir } from '../helpers.js';
 import { join } from 'node:path';
 import { spawn, type ChildProcess } from 'node:child_process';
 import { loadOrCreateIdentity } from '../../src/identity.js';
@@ -220,8 +221,8 @@ describe('Phase 2 remote confirmation (offer channel)', () => {
       }
 
       await stopChildren();
-      rmSync(a.dir, { recursive: true, force: true });
-      rmSync(b.dir, { recursive: true, force: true });
+      rmDir(a.dir);
+      rmDir(b.dir);
     },
     150000,
   );
@@ -281,8 +282,8 @@ describe('Phase 2 remote confirmation (offer channel)', () => {
       }
 
       await stopChildren();
-      rmSync(a.dir, { recursive: true, force: true });
-      rmSync(b.dir, { recursive: true, force: true });
+      rmDir(a.dir);
+      rmDir(b.dir);
     },
     150000,
   );

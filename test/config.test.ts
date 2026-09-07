@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'vitest';
-import { mkdtempSync, rmSync, readFileSync } from 'node:fs';
+import { mkdtempSync, readFileSync } from 'node:fs';
+import { rmDir } from './helpers.js';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { loadConfig, saveConfig } from '../src/config.js';
@@ -16,7 +17,7 @@ describe('config store', () => {
 
     expect(config).toEqual({ sharedFolders: [], peers: [], knownDevices: [], pendingOffers: [] });
 
-    rmSync(dir, { recursive: true, force: true });
+    rmDir(dir);
   });
 
   it('round-trips a saved config', () => {
@@ -44,7 +45,7 @@ describe('config store', () => {
       peers: ['ws://192.168.1.10:22000'],
     });
 
-    rmSync(dir, { recursive: true, force: true });
+    rmDir(dir);
   });
 
   it('defaults missing peers to an empty list', () => {
@@ -54,6 +55,6 @@ describe('config store', () => {
 
     expect(loadConfig(path)).toEqual({ sharedFolders: [], peers: [], knownDevices: [], pendingOffers: [] });
 
-    rmSync(dir, { recursive: true, force: true });
+    rmDir(dir);
   });
 });

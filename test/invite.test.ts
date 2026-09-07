@@ -1,6 +1,7 @@
 import { describe, expect, it, afterEach } from 'vitest';
 import { generateKeyPairSync } from 'node:crypto';
-import { mkdtempSync, rmSync } from 'node:fs';
+import { mkdtempSync } from 'node:fs';
+import { rmDir } from './helpers.js';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { createInviteCode, parseInviteCode, revokeInviteCode, isInviteRevoked, INVITE_TTL_MS } from '../src/invite.js';
@@ -54,7 +55,7 @@ describe('invite revocation', () => {
   let dir: string;
 
   afterEach(() => {
-    rmSync(dir, { recursive: true, force: true });
+    rmDir(dir);
   });
 
   it('rejects a revoked invite code', () => {

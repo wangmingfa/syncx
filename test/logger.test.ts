@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'vitest';
-import { mkdtempSync, rmSync, readFileSync, existsSync, statSync, createWriteStream, type WriteStream } from 'node:fs';
+import { mkdtempSync, readFileSync, existsSync, statSync, createWriteStream, type WriteStream } from 'node:fs';
+import { rmDir } from './helpers.js';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { createRotatingStream } from '../src/logger.js';
@@ -31,7 +32,7 @@ describe('rotating log stream', () => {
     expect(opened).toHaveLength(1);
     expect(readFileSync(logFile, 'utf8').split('\n').filter(Boolean)).toHaveLength(50);
 
-    rmSync(dir, { recursive: true, force: true });
+    rmDir(dir);
   });
 
   it('attaches an error handler to the underlying WriteStream', async () => {
@@ -58,7 +59,7 @@ describe('rotating log stream', () => {
     expect(created).toHaveLength(1);
     expect(created[0]!.listenerCount('error')).toBeGreaterThan(0);
 
-    rmSync(dir, { recursive: true, force: true });
+    rmDir(dir);
   });
 
   it('rotates the file when it exceeds maxSizeBytes', async () => {
@@ -78,6 +79,6 @@ describe('rotating log stream', () => {
     expect(existsSync(`${logFile}.1`)).toBe(true);
     expect(statSync(logFile).size).toBeLessThanOrEqual(1024 + 256);
 
-    rmSync(dir, { recursive: true, force: true });
+    rmDir(dir);
   });
 });

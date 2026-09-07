@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'vitest';
-import { mkdtempSync, rmSync, readFileSync, mkdirSync, writeFileSync, existsSync, readdirSync } from 'node:fs';
+import { mkdtempSync, readFileSync, mkdirSync, writeFileSync, existsSync, readdirSync } from 'node:fs';
+import { rmDir } from '../helpers.js';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import type { WebSocket } from 'ws';
@@ -55,7 +56,7 @@ async function teardown(devices: TestDevice[], dirs: string[]): Promise<void> {
     device.index.close();
   }
   for (const dir of dirs) {
-    rmSync(dir, { recursive: true, force: true });
+    rmDir(dir);
   }
 }
 

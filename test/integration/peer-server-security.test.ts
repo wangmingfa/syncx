@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'vitest';
-import { mkdtempSync, rmSync } from 'node:fs';
+import { mkdtempSync } from 'node:fs';
+import { rmDir } from '../helpers.js';
 import { createServer } from 'node:http';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -45,7 +46,7 @@ describe('peer WebSocket server hardening', () => {
       first.close();
     } finally {
       server.close();
-      rmSync(dir, { recursive: true, force: true });
+      rmDir(dir);
     }
   });
 
@@ -65,7 +66,7 @@ describe('peer WebSocket server hardening', () => {
       expect(terminated).toBe(true);
     } finally {
       server.close();
-      rmSync(dir, { recursive: true, force: true });
+      rmDir(dir);
     }
   });
 
@@ -87,7 +88,7 @@ describe('peer WebSocket server hardening', () => {
       expect(dropped).toBe(true);
     } finally {
       server.close();
-      rmSync(dir, { recursive: true, force: true });
+      rmDir(dir);
     }
   });
 
@@ -126,6 +127,6 @@ describe('peer WebSocket server hardening', () => {
     }
 
     blocker.close();
-    rmSync(dir, { recursive: true, force: true });
+    rmDir(dir);
   });
 });

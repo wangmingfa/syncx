@@ -1,7 +1,6 @@
 import { describe, expect, it, vi } from 'vitest';
 import {
   mkdtempSync,
-  rmSync,
   readFileSync,
   mkdirSync,
   writeFileSync,
@@ -9,6 +8,7 @@ import {
   symlinkSync,
   readdirSync,
 } from 'node:fs';
+import { rmDir, canCreateSymlinks } from './helpers.js';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { createSyncPeer, type PeerTransport } from '../src/peer.js';
@@ -116,7 +116,7 @@ describe('sync peer session', () => {
     expect(index.getEntry('incoming.txt')?.version.get('dev-b')).toBe(1);
 
     index.close();
-    rmSync(dir, { recursive: true, force: true });
+    rmDir(dir);
   });
 
   it('lands empty files (0 blocks) without any block round-trip', async () => {
@@ -143,7 +143,7 @@ describe('sync peer session', () => {
     expect(index.getEntry('empty.txt')?.version.get('dev-b')).toBe(1);
 
     index.close();
-    rmSync(dir, { recursive: true, force: true });
+    rmDir(dir);
   });
 
   it('ignores duplicate block responses instead of over-counting', async () => {
@@ -179,7 +179,7 @@ describe('sync peer session', () => {
     expect(readFileSync(join(root, 'dup.txt'))).toEqual(content);
 
     index.close();
-    rmSync(dir, { recursive: true, force: true });
+    rmDir(dir);
   });
 
   it('keeps the in-memory index in sync so a repeated peer index does not re-request received files', async () => {
@@ -223,7 +223,7 @@ describe('sync peer session', () => {
     expect(requests.length).toBe(before);
 
     index.close();
-    rmSync(dir, { recursive: true, force: true });
+    rmDir(dir);
   });
 
   it('ignores out-of-range, non-integer, and oversized block responses', async () => {
@@ -267,7 +267,7 @@ describe('sync peer session', () => {
     expect(readFileSync(join(root, 'f.txt'))).toEqual(content);
 
     index.close();
-    rmSync(dir, { recursive: true, force: true });
+    rmDir(dir);
   });
 
   it('rejects out-of-range block requests without reading', async () => {
@@ -333,7 +333,7 @@ describe('sync peer session', () => {
     vi.useRealTimers();
   });
 
-  it('does not serve blocks for paths escaping the root via a symlink', () => {
+  it.skipIf(!canCreateSymlinks())('does not serve blocks for paths escaping the root via a symlink', () => {
     const dir = mkdtempSync(join(tmpdir(), 'syncx-peer-'));
     const root = join(dir, 'share');
     const outside = join(dir, 'outside');
@@ -359,7 +359,7 @@ describe('sync peer session', () => {
     peer.onBlockRequest({ deviceId: 'DEV-B', path: 'link/secret.txt', blockIndex: 0, hash: 'h' });
     expect(responses).toHaveLength(0);
 
-    rmSync(dir, { recursive: true, force: true });
+    rmDir(dir);
   });
 
   it('clears stale pending entries when the peer index no longer references them', async () => {
@@ -505,7 +505,7 @@ describe('sync peer session', () => {
     expect(events).toContain('conflict');
 
     index.close();
-    rmSync(dir, { recursive: true, force: true });
+    rmDir(dir);
   });
 
   it('does not preserve ignored files on receive (lets them be overwritten, avoids re-syncing them out)', async () => {
@@ -547,6 +547,6 @@ describe('sync peer session', () => {
     expect(readFileSync(join(root, 'secret.txt'))).toEqual(remoteContent);
 
     index.close();
-    rmSync(dir, { recursive: true, force: true });
+    rmDir(dir);
   });
 });

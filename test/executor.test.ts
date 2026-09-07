@@ -1,7 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import {
   mkdtempSync,
-  rmSync,
   readFileSync,
   mkdirSync,
   writeFileSync,
@@ -9,6 +8,7 @@ import {
   readdirSync,
   symlinkSync,
 } from 'node:fs';
+import { rmDir, canCreateSymlinks } from './helpers.js';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { createLocalExecutor, resolveSharePath, preserveLocalAsConflict } from '../src/executor.js';
@@ -51,7 +51,7 @@ describe('local executor receive', () => {
     expect(index.getEntry('docs/plan.md')).toMatchObject(remote);
 
     index.close();
-    rmSync(dir, { recursive: true, force: true });
+    rmDir(dir);
   });
 
   it('replaces an existing file atomically on receive', async () => {
@@ -77,7 +77,7 @@ describe('local executor receive', () => {
     expect(index.getEntry('doc.txt')).toMatchObject(remote);
 
     index.close();
-    rmSync(dir, { recursive: true, force: true });
+    rmDir(dir);
   });
 
   it('rejects blocks that do not match the entry hashes', async () => {
@@ -96,10 +96,10 @@ describe('local executor receive', () => {
     expect(index.getEntry('doc.txt')).toBeUndefined();
 
     index.close();
-    rmSync(dir, { recursive: true, force: true });
+    rmDir(dir);
   });
 
-  it('rejects a receive that would write outside the shared folder via a symlink', async () => {
+  it.skipIf(!canCreateSymlinks())('rejects a receive that would write outside the shared folder via a symlink', async () => {
     const dir = mkdtempSync(join(tmpdir(), 'syncx-exec-'));
     const root = join(dir, 'share');
     const escape = join(dir, 'escape'); // 共享目录之外的敏感目录
@@ -124,10 +124,10 @@ describe('local executor receive', () => {
     expect(readFileSync(join(escape, 'secret.txt'))).toEqual(Buffer.from('top secret'));
 
     index.close();
-    rmSync(dir, { recursive: true, force: true });
+    rmDir(dir);
   });
 
-  it('resolveSharePath rejects paths escaping through a symlink (read-side guard)', () => {
+  it.skipIf(!canCreateSymlinks())('resolveSharePath rejects paths escaping through a symlink (read-side guard)', () => {
     const dir = mkdtempSync(join(tmpdir(), 'syncx-exec-'));
     const root = join(dir, 'share');
     const escape = join(dir, 'escape');
@@ -142,7 +142,7 @@ describe('local executor receive', () => {
     // 文本级 ../ 仍被拒
     expect(() => resolveSharePath(root, '../escape/secret.txt')).toThrow(/unsafe path/);
 
-    rmSync(dir, { recursive: true, force: true });
+    rmDir(dir);
   });
 });
 
@@ -165,7 +165,7 @@ describe('local executor delete', () => {
     expect(index.getEntry('doc.txt')).toEqual(tombstone);
 
     index.close();
-    rmSync(dir, { recursive: true, force: true });
+    rmDir(dir);
   });
 
   it('records a tombstone even when the file does not exist', async () => {
@@ -182,7 +182,7 @@ describe('local executor delete', () => {
     expect(index.getEntry('ghost.txt')).toEqual(tombstone);
 
     index.close();
-    rmSync(dir, { recursive: true, force: true });
+    rmDir(dir);
   });
 });
 
@@ -229,7 +229,7 @@ describe('local executor conflict', () => {
     expect(recorded.blocks).toEqual([hashBlock(remoteContent)]);
 
     index.close();
-    rmSync(dir, { recursive: true, force: true });
+    rmDir(dir);
   });
 
   it('does not land a file when both sides are tombstones (concurrent deletes)', async () => {
@@ -259,7 +259,7 @@ describe('local executor conflict', () => {
     expect(recorded.version.get('dev-b')).toBe(2);
 
     index.close();
-    rmSync(dir, { recursive: true, force: true });
+    rmDir(dir);
   });
 
   it('produces distinct conflict copies for two same-second conflicts', async () => {
@@ -323,7 +323,7 @@ describe('local executor conflict', () => {
     expect(readFileSync(target)).toEqual(remoteContent2);
 
     index.close();
-    rmSync(dir, { recursive: true, force: true });
+    rmDir(dir);
   });
 
   it('keeps the local file intact when remote blocks cannot be fetched during a conflict', async () => {
@@ -370,7 +370,7 @@ describe('local executor conflict', () => {
     expect(index.getEntry('doc.txt')?.deleted).toBe(false);
 
     index.close();
-    rmSync(dir, { recursive: true, force: true });
+    rmDir(dir);
   });
 });
 
@@ -395,7 +395,7 @@ describe('preserveLocalAsConflict', () => {
     expect(readFileSync(join(root, copies[0]!))).toEqual(localContent);
 
     index.close();
-    rmSync(dir, { recursive: true, force: true });
+    rmDir(dir);
   });
 
   it('returns false when no local file exists (nothing to preserve)', () => {
@@ -408,7 +408,7 @@ describe('preserveLocalAsConflict', () => {
     expect(readdirSync(root).filter((n) => n.includes('.sync-conflict-'))).toHaveLength(0);
 
     index.close();
-    rmSync(dir, { recursive: true, force: true });
+    rmDir(dir);
   });
 });
 
@@ -432,6 +432,6 @@ describe('local executor send', () => {
     expect(index.getEntry('doc.txt')).toEqual(sent);
 
     index.close();
-    rmSync(dir, { recursive: true, force: true });
+    rmDir(dir);
   });
 });

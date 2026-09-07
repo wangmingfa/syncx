@@ -1,5 +1,6 @@
 import { describe, expect, it, vi } from 'vitest';
-import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { mkdtempSync, writeFileSync } from 'node:fs';
+import { rmDir } from './helpers.js';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { run, parseArgs } from '../src/cli.js';
@@ -47,6 +48,6 @@ describe('join (mutual trust)', () => {
     }
     expect(reciprocalCode).toBeTruthy();
 
-    rmSync(base, { recursive: true, force: true });
+    rmDir(base);
   });
 });

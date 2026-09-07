@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'vitest';
-import { mkdtempSync, rmSync, readFileSync } from 'node:fs';
+import { mkdtempSync, readFileSync } from 'node:fs';
+import { rmDir } from './helpers.js';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { addSharedFolder, removeSharedFolder, isPeerAllowed, addPeer, removePeer } from '../src/devices.js';
@@ -21,7 +22,7 @@ describe('shared folder configuration', () => {
     expect(raw.sharedFolders[0]).toMatchObject({ path: '/data/docs', devices: ['DEV1234567'] });
     expect(raw.sharedFolders[0].id).toMatch(/^[0-9a-f]{12}$/);
 
-    rmSync(dir, { recursive: true, force: true });
+    rmDir(dir);
   });
 
   it('appends a shared folder to an existing config', () => {
@@ -39,7 +40,7 @@ describe('shared folder configuration', () => {
     });
     expect(raw.sharedFolders[1].id).toMatch(/^[0-9a-f]{12}$/);
 
-    rmSync(dir, { recursive: true, force: true });
+    rmDir(dir);
   });
 
   it('removes a shared folder by path', () => {
@@ -55,7 +56,7 @@ describe('shared folder configuration', () => {
     expect(raw.sharedFolders[0]).toMatchObject({ path: '/data/photos', devices: ['DEV1234567'] });
     expect(raw.sharedFolders[0].id).toMatch(/^[0-9a-f]{12}$/);
 
-    rmSync(dir, { recursive: true, force: true });
+    rmDir(dir);
   });
 
   it('rejects a relative path', () => {
@@ -65,10 +66,10 @@ describe('shared folder configuration', () => {
     expect(() => addSharedFolder(configPath, 'relative/path', ['DEV1234567'])).toThrow('must be absolute');
     expect(() => addSharedFolder(configPath, './relative', ['DEV1234567'])).toThrow('must be absolute');
 
-    rmSync(dir, { recursive: true, force: true });
+    rmDir(dir);
   });
 
-  it('rejects system and privacy-sensitive paths', () => {
+  it.skipIf(process.platform === 'win32')('rejects system and privacy-sensitive paths', () => {
     const dir = tempDir();
     const configPath = join(dir, 'config.json');
 
@@ -87,7 +88,7 @@ describe('shared folder configuration', () => {
     expect(() => addSharedFolder(configPath, '/home/user/.local', ['DEV1234567'])).toThrow('not allowed');
     expect(() => addSharedFolder(configPath, '/home/user/.cache', ['DEV1234567'])).toThrow('not allowed');
 
-    rmSync(dir, { recursive: true, force: true });
+    rmDir(dir);
   });
 });
 
@@ -134,7 +135,7 @@ describe('manual peer address (addPeer)', () => {
     const raw = JSON.parse(readFileSync(configPath, 'utf8'));
     expect(raw.peers).toEqual(['ws://10.13.18.36:22000']);
 
-    rmSync(dir, { recursive: true, force: true });
+    rmDir(dir);
   });
 
   it('is idempotent for the same address', () => {
@@ -147,7 +148,7 @@ describe('manual peer address (addPeer)', () => {
     const raw = JSON.parse(readFileSync(configPath, 'utf8'));
     expect(raw.peers).toEqual(['ws://172.25.48.139:22000']);
 
-    rmSync(dir, { recursive: true, force: true });
+    rmDir(dir);
   });
 
   it('rejects a non-ws:// address', () => {
@@ -157,7 +158,7 @@ describe('manual peer address (addPeer)', () => {
     expect(() => addPeer(configPath, 'http://10.13.18.36:22000')).toThrow('ws://');
     expect(() => addPeer(configPath, '10.13.18.36:22000')).toThrow('ws://');
 
-    rmSync(dir, { recursive: true, force: true });
+    rmDir(dir);
   });
 
   it('removePeer deletes the exact address and is idempotent', () => {
@@ -176,6 +177,6 @@ describe('manual peer address (addPeer)', () => {
     raw = JSON.parse(readFileSync(configPath, 'utf8'));
     expect(raw.peers).toEqual(['ws://172.25.48.139:22000']);
 
-    rmSync(dir, { recursive: true, force: true });
+    rmDir(dir);
   });
 });

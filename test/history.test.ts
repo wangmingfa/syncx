@@ -1,5 +1,6 @@
 import { describe, expect, it, afterEach } from 'vitest';
-import { mkdtempSync, rmSync, existsSync } from 'node:fs';
+import { mkdtempSync, existsSync } from 'node:fs';
+import { rmDir } from './helpers.js';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { recordSyncEvent, listSyncHistory, flushSyncHistory, type SyncEvent } from '../src/history.js';
@@ -11,7 +12,7 @@ function tmpConfig(): string {
 
 const created: string[] = [];
 afterEach(() => {
-  for (const d of created) rmSync(d, { recursive: true, force: true });
+  for (const d of created) rmDir(d);
   created.length = 0;
 });
 

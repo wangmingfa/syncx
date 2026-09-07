@@ -1,11 +1,12 @@
 import { describe, expect, it } from 'vitest';
-import { mkdtempSync, rmSync, mkdirSync, writeFileSync, rmSync as rm, statSync } from 'node:fs';
+import { mkdtempSync, mkdirSync, writeFileSync, rmSync as rm, statSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { scanFolder } from '../src/scanner.js';
 import { openIndexStore } from '../src/indexstore.js';
 import { parseIgnoreRules } from '../src/ignore.js';
 import { hashBlock } from '../src/blockstore.js';
+import { rmDir } from './helpers.js';
 
 function setup() {
   const dir = mkdtempSync(join(tmpdir(), 'syncx-scanner-'));
@@ -39,7 +40,8 @@ describe('scanFolder', () => {
 
     expect(changed.sort()).toEqual(['mod.txt', 'new.txt']);
     expect(tombstones).toEqual([]);
-    rmSync(dir, { recursive: true, force: true });
+    index.close();
+    rmDir(dir);
   });
 
   it('detects deletion as a tombstone with an incremented version', () => {
@@ -56,7 +58,8 @@ describe('scanFolder', () => {
     expect(tombstones[0]!.deleted).toBe(true);
     expect(tombstones[0]!.version.get('DEV-A')).toBe(2);
     expect(tombstones[0]!.blocks).toEqual([]);
-    rmSync(dir, { recursive: true, force: true });
+    index.close();
+    rmDir(dir);
   });
 
   it('scans subdirectories recursively and ignores .syncx-tmp files', () => {
@@ -67,8 +70,10 @@ describe('scanFolder', () => {
 
     const { changed } = scanFolder(root, index, [], 'DEV-A');
 
-    expect(changed).toEqual(['sub/deep/nested.txt']);
-    rmSync(dir, { recursive: true, force: true });
+    // scanner 返回 OS 原生分隔符(Windows 为反斜杠),断言需与平台一致
+    expect(changed).toEqual([join('sub', 'deep', 'nested.txt')]);
+    index.close();
+    rmDir(dir);
   });
 
   it('skips files matched by ignore rules, including their deletions', () => {
@@ -83,7 +88,8 @@ describe('scanFolder', () => {
 
     expect(changed).toEqual([]);
     expect(tombstones).toEqual([]);
-    rmSync(dir, { recursive: true, force: true });
+    index.close();
+    rmDir(dir);
   });
 
   it('skips re-hashing when size and mtime are unchanged (fast path)', () => {
@@ -104,7 +110,8 @@ describe('scanFolder', () => {
 
     // mtime 命中快速路径,不再重算哈希,因此即便块哈希过期也判定为未变更
     expect(changed).toEqual([]);
-    rmSync(dir, { recursive: true, force: true });
+    index.close();
+    rmDir(dir);
   });
 
   it('tolerates mtime drift within 2s for FAT32 compatibility', () => {
@@ -125,7 +132,8 @@ describe('scanFolder', () => {
 
     // 在容忍窗口内,不重算哈希
     expect(changed).toEqual([]);
-    rmSync(dir, { recursive: true, force: true });
+    index.close();
+    rmDir(dir);
   });
 
   it('detects change when mtime drift exceeds 2s tolerance', () => {
@@ -146,7 +154,8 @@ describe('scanFolder', () => {
 
     // 超出容忍窗口,进入哈希对比路径,块哈希不匹配 → 判定为变更
     expect(changed).toEqual(['a.txt']);
-    rmSync(dir, { recursive: true, force: true });
+    index.close();
+    rmDir(dir);
   });
 
   it('returns an empty diff when the shared folder root does not exist', () => {
@@ -166,7 +175,7 @@ describe('scanFolder', () => {
     expect(changed).toEqual([]);
     expect(tombstones).toEqual([]);
     index.close();
-    rmSync(dir, { recursive: true, force: true });
+    rmDir(dir);
   });
 
   it('writes back a newer mtime when content is unchanged', () => {
@@ -193,6 +202,6 @@ describe('scanFolder', () => {
     expect(index.getEntry('a.txt')?.version.get('DEV-A')).toBe(1);
 
     index.close();
-    rmSync(dir, { recursive: true, force: true });
+    rmDir(dir);
   });
 });
