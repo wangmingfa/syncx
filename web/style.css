@@ -668,12 +668,15 @@ tbody tr:last-child td {
   gap: 10px;
 }
 
-/* 目录卡片上的 .gitignore 忽略开关行 */
-.gitignore-row {
-  margin-top: 2px;
-  display: flex;
-  align-items: center;
-  gap: 8px;
+/* 弹窗内的小节标签:区分「同步设备」「忽略规则」等分组 */
+.edit-section-label {
+  margin: 18px 0 10px;
+  padding-bottom: 6px;
+  border-bottom: 1px solid var(--border);
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--text);
+  letter-spacing: 0.02em;
 }
 
 /* 表单输入框下方的浅色提示行(如「目录不存在时会自动创建」) */
@@ -923,6 +926,29 @@ tbody tr:last-child td {
   font-weight: 600;
   letter-spacing: -0.01em;
   margin-bottom: 4px;
+}
+
+/* 设置弹窗:标题与目录路径同一行,长路径省略号截断,悬停 title 看全 */
+.modal-title-row {
+  display: flex;
+  align-items: baseline;
+  gap: 10px;
+  min-width: 0;
+  margin-bottom: 12px;
+}
+
+.modal-title-row .modal-title {
+  margin-bottom: 0;
+  flex-shrink: 0;
+}
+
+.modal-title-path {
+  color: var(--muted);
+  font-size: 12px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  min-width: 0;
 }
 
 .modal-lead {

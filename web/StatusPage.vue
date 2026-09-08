@@ -323,11 +323,14 @@ function deviceTagTip(f: FolderInfo, deviceId: string): string {
 /** 正在编辑的目录路径,空串表示弹窗未关联目录。 */
 const editDevicesPath = ref('');
 const editDevicesValue = ref<string[]>([]);
+/** 弹窗内的 .gitignore 忽略开关(随「保存」与设备指派一并提交)。 */
+const editGitignore = ref(true);
 
-/** 点目录卡「编辑」:打开弹窗并预填当前指派,不直接改任何数据。 */
-function openEditDevices(path: string, devices: string[]): void {
-  editDevicesPath.value = path;
-  editDevicesValue.value = [...devices];
+/** 点目录卡「编辑」:打开弹窗并预填当前指派与忽略开关,不直接改任何数据。 */
+function openEditDevices(f: FolderInfo): void {
+  editDevicesPath.value = f.path;
+  editDevicesValue.value = [...f.devices];
+  editGitignore.value = f.useGitignore !== false;
   editDevicesOpen.value = true;
 }
 
@@ -335,9 +338,15 @@ function closeEditDevices(): void {
   editDevicesOpen.value = false;
 }
 
-/** 弹窗「保存」:真正的写操作只有这里。 */
+/** 弹窗「保存」:设备指派与 .gitignore 开关一起提交,真正的写操作只有这里。 */
 async function saveEditDevices(): Promise<void> {
-  await commitFolderDevices(editDevicesPath.value, [...editDevicesValue.value]);
+  const path = editDevicesPath.value;
+  await commitFolderDevices(path, [...editDevicesValue.value]);
+  // refreshStatus 后按最新 folders 找回该目录,开关有变化才额外发一次请求
+  const f = status.value.folders.find((x) => x.path === path);
+  if (f && (f.useGitignore !== false) !== editGitignore.value) {
+    await toggleFolderGitignore(f, editGitignore.value);
+  }
   editDevicesOpen.value = false;
 }
 
@@ -360,7 +369,7 @@ async function commitFolderDevices(path: string, devices: string[]): Promise<voi
   }
 }
 
-// ---- .gitignore 忽略开关(每目录一张卡片上,缺省勾选) ----
+// ---- .gitignore 忽略开关(在目录编辑弹窗内,缺省勾选) ----
 
 /** 勾选 = 忽略 .gitignore 中的文件(不参与同步);取消勾选 = .gitignore 内文件也同步。 */
 async function toggleFolderGitignore(f: FolderInfo, enabled: boolean): Promise<void> {
@@ -992,16 +1001,7 @@ async function removePassword(): Promise<void> {
               </n-tooltip>
               <span v-if="f.devices.length === 0" class="device-tag device-tag-empty">未指派设备</span>
             </div>
-            <n-button size="small" tertiary :disabled="busy" @click="openEditDevices(f.path, f.devices)">编辑</n-button>
-          </div>
-
-          <!-- .gitignore 忽略开关:勾选时目录内 .gitignore 命中的文件不参与同步(.syncxignore 优先级更高) -->
-          <div class="gitignore-row">
-            <n-checkbox
-              :checked="f.useGitignore !== false"
-              :disabled="busy"
-              @update:checked="(v: boolean) => toggleFolderGitignore(f, v)"
-            >忽略 .gitignore 中的文件</n-checkbox>
+            <n-button size="small" tertiary :disabled="busy" @click="openEditDevices(f)">设置</n-button>
           </div>
 
           <div v-if="progressOf(f)" class="item-progress">
@@ -1175,13 +1175,17 @@ async function removePassword(): Promise<void> {
       </div>
     </Transition>
 
-    <!-- 目录设备编辑弹窗:卡片上的指派只读,改动在此确认后保存 -->
+    <!-- 目录编辑弹窗:卡片上的指派/开关只读,改动在此确认后一并保存 -->
     <Transition name="guide">
       <div v-if="editDevicesOpen" class="modal-overlay" @click.self="closeEditDevices">
         <div class="modal" role="dialog" aria-modal="true" aria-labelledby="edit-devices-title">
           <n-button quaternary circle class="modal-close" aria-label="关闭" @click="closeEditDevices">×</n-button>
-          <h2 id="edit-devices-title" class="modal-title">编辑可同步设备</h2>
-          <p class="modal-lead mono break">{{ editDevicesPath }}</p>
+          <div class="modal-title-row">
+            <h2 id="edit-devices-title" class="modal-title">设置</h2>
+            <span class="modal-title-path mono" :title="editDevicesPath">{{ editDevicesPath }}</span>
+          </div>
+
+          <div class="edit-section-label">同步设备</div>
           <n-checkbox-group v-model:value="editDevicesValue">
             <div v-if="status.devices.length > 0" class="device-checks">
               <n-checkbox v-for="d in status.devices" :key="d.deviceId" :value="d.deviceId" :label="d.deviceId" class="mono" />
@@ -1189,6 +1193,11 @@ async function removePassword(): Promise<void> {
             <p v-else class="confirm-note-extra confirm-note-extra--flush">还没有已配对的设备,先在「设备」栏添加。</p>
           </n-checkbox-group>
           <p class="confirm-note-extra">保存后,新加入的设备会立即收到共享邀请(在线时),被移除的设备不再同步此目录。</p>
+
+          <div class="edit-section-label">忽略规则</div>
+          <n-checkbox v-model:checked="editGitignore" :disabled="busy">忽略 .gitignore 中的文件</n-checkbox>
+          <p class="confirm-note-extra">勾选时,该目录内 .gitignore 命中的文件不参与同步(.syncxignore 优先级更高)。</p>
+
           <div class="modal-actions">
             <n-button class="modal-cancel" :disabled="busy" @click="closeEditDevices">取消</n-button>
             <n-button type="primary" :loading="busy" @click="saveEditDevices">保存</n-button>
