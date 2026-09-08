@@ -112,7 +112,7 @@ import { startDiscovery } from './net/discovery.js';
 import { makePeerTransport, attachPeerMessages, sendControlMessage, type ControlMessage } from './net/wire.js';
 import { RateLimiter } from './ratelimit.js';
 import { createControlServer } from './api.js';
-import { buildStatus, type DeviceStatus, type SyncProgress } from './status.js';
+import { buildStatus, type DeviceStatus, type SyncProgress, type FolderErrorStatus } from './status.js';
 import { addSharedFolder, removeSharedFolder, isPeerAllowed, addKnownDevice, removeKnownDevice, addPeer, removePeer, setFolderDevices, setFolderGitignore } from './devices.js';
 import { receiveOffer, markOfferAccepted, markOfferDeclined, restoreDeclinedOffer, listOpenOffers, makeOfferId } from './offers.js';
 import { createInviteCode, parseInviteCode, revokeInviteCode } from './invite.js';
@@ -505,7 +505,7 @@ export async function run(args: ParsedArgs): Promise<void> {
   function createFolderState(f: SharedFolderConfig): FolderState {
     const id = folderIdFor(f);
     const index = openIndexStore(folderIndexPath(configDir, id));
-    const executor = createLocalExecutor(f.path, index);
+    const executor = captureFolderErrors(id, createLocalExecutor(f.path, index));
     // 忽略规则每设备本地:.gitignore(默认并入,可按目录关闭)+ .syncxignore(优先级更高)
     const ignoreLines = readFolderIgnoreLines(f.path, f.useGitignore !== false);
     const localIndex = new Map(
@@ -515,6 +515,47 @@ export async function run(args: ParsedArgs): Promise<void> {
     // daemon 离线期间的真实改动,要写同步记录
     const baselinePending = index.listEntries().length === 0;
     return { id, path: f.path, index, executor, localIndex, ignoreLines, transports: [], peers: new Map(), config: f, baselinePending };
+  }
+
+  // --- 目录级同步错误采集(Web UI 目录卡上的错误提示) ---
+  // 记录每个目录最近一次同步失败的错误信息(内存态,不落盘);同一目录再次出错覆盖,
+  // 一轮完整扫描无新错误则清除(问题自愈后提示自动消失)。
+  const folderErrorsState = new Map<string, { message: string; ts: number }>();
+
+  function recordFolderError(folderId: string, error: unknown, detail?: string): void {
+    const message = error instanceof Error ? error.message : String(error);
+    const full = detail ? `${detail}: ${message}` : message;
+    folderErrorsState.set(folderId, { message: full, ts: Date.now() });
+    logger.warn(`folder ${folderId} sync error: ${full}`);
+  }
+
+  function clearFolderError(folderId: string): void {
+    folderErrorsState.delete(folderId);
+  }
+
+  /**
+   * 给 executor 的四个写操作包一层错误捕获:任何 apply*(本地扫描应用与对端推送
+   * 接收/冲突/删除共用同一执行器)抛错都归到所属目录,失败原因原样抛出,
+   * 不改变既有重试语义。
+   */
+  function captureFolderErrors(folderId: string, executor: LocalExecutor): LocalExecutor {
+    const wrap = <A extends unknown[]>(fn: (...args: A) => Promise<unknown>) =>
+      async (...args: A): Promise<unknown> => {
+        try {
+          return await fn(...args);
+        } catch (error) {
+          recordFolderError(folderId, error);
+          throw error;
+        }
+      };
+    return {
+      applyReceive: wrap((entry, provider) => executor.applyReceive(entry, provider)) as LocalExecutor['applyReceive'],
+      applyDelete: wrap((path, tombstone) => executor.applyDelete(path, tombstone)) as LocalExecutor['applyDelete'],
+      applyConflict: wrap((path, local, remote, provider, deviceId) =>
+        executor.applyConflict(path, local, remote, provider, deviceId),
+      ) as LocalExecutor['applyConflict'],
+      applySend: wrap((path, deviceId) => executor.applySend(path, deviceId)) as LocalExecutor['applySend'],
+    };
   }
 
   // 每个共享目录独立的索引/执行器/本地索引状态(可变:配置热重载可新增/移除目录)
@@ -642,14 +683,24 @@ export async function run(args: ParsedArgs): Promise<void> {
 
   async function scanOnce(): Promise<void> {
     for (const folder of folderStates) {
+      // 一轮扫描走到这里且后续无错误即视为「干净」:清除该目录上一次的错误提示,
+      // 让问题自愈后目录卡上的错误横幅自动消失
+      clearFolderError(folder.id);
       // 每轮扫描重读忽略文件:.gitignore(按目录配置可关)+ .syncxignore,改动即生效
-      folder.ignoreLines = readFolderIgnoreLines(folder.path, folder.config.useGitignore !== false);
-      const diff = scanFolder(
-        folder.path,
-        folder.index,
-        parseIgnoreRules(folder.ignoreLines),
-        identity.deviceId,
-      );
+      let diff;
+      try {
+        folder.ignoreLines = readFolderIgnoreLines(folder.path, folder.config.useGitignore !== false);
+        diff = scanFolder(
+          folder.path,
+          folder.index,
+          parseIgnoreRules(folder.ignoreLines),
+          identity.deviceId,
+        );
+      } catch (error) {
+        // 扫描本身失败(如目录读取权限异常):记录到目录卡,下一轮扫描重试
+        recordFolderError(folder.id, error, '扫描失败');
+        continue;
+      }
       // 建基线的目录(空索引首扫)不写记录,避免把存量文件当成"新增"刷屏;
       // 索引从盘上恢复的目录,首扫 diff 是离线期间的真实改动,要记录
       const recordEvents = !folder.baselinePending;
@@ -666,8 +717,9 @@ export async function run(args: ParsedArgs): Promise<void> {
               direction: 'local',
             });
           }
-        } catch {
-          // 索引写入失败,下一轮扫描重试
+        } catch (error) {
+          // 索引写入失败,下一轮扫描重试;错误已由 executor 包装层归到目录卡
+          recordFolderError(folder.id, error, `删除 ${tomb.path} 失败`);
         }
       }
       const sends: IndexEntry[] = [...diff.tombstones];
@@ -686,8 +738,9 @@ export async function run(args: ParsedArgs): Promise<void> {
               direction: 'local',
             });
           }
-        } catch {
-          // 文件在扫描后被删除/重命名,下一轮扫描处理
+        } catch (error) {
+          // 文件在扫描后被删除/重命名,下一轮扫描处理;错误已由 executor 包装层归到目录卡
+          recordFolderError(folder.id, error, `同步 ${path} 失败`);
         }
       }
       if (sends.length > 0) {
@@ -986,6 +1039,8 @@ export async function run(args: ParsedArgs): Promise<void> {
     devViteUrl: args.devViteUrl,
     // stop 命令经 POST /api/shutdown 触发:与 SIGTERM 走同一条优雅关闭链路
     shutdown: () => triggerShutdown(),
+    // Web UI「日志」弹窗经 GET /api/logs 读取日志尾部;未设置时端点返回 ok:false
+    logFile: args.logFile,
     addFolder: (path, devices, id) => {
       const created = addSharedFolder(configPath, path, devices, id);
       logger.info(`shared folder added: ${path}${created ? ' (auto-created)' : ''}`);
@@ -1055,6 +1110,10 @@ export async function run(args: ParsedArgs): Promise<void> {
         entries += all.filter((e) => !e.deleted).length;
         tombstones += all.filter((e) => e.deleted).length;
       }
+      // 目录级同步错误:按发生时间倒序,前端展示到对应目录卡上
+      const folderErrors: FolderErrorStatus[] = [...folderErrorsState.entries()]
+        .map(([folder, e]) => ({ folder, message: e.message, ts: e.ts }))
+        .sort((a, b) => b.ts - a.ts);
       return buildStatus(
         identity,
         config,
@@ -1063,6 +1122,7 @@ export async function run(args: ParsedArgs): Promise<void> {
         syncProgress,
         // status.offers 下发 pending + declined:已忽略项在 UI 灰显供「恢复」
         listOpenOffers(configPath),
+        folderErrors,
       );
     },
     rescan: () => {
@@ -1308,7 +1368,14 @@ export async function run(args: ParsedArgs): Promise<void> {
         const existing = folderStates.find((s) => s.id === id);
         if (!existing) {
           logger.info(`config updated: adding shared folder ${f.path}`);
-          const folder = createFolderState(f);
+          let folder: FolderState;
+          try {
+            folder = createFolderState(f);
+          } catch (error) {
+            // 热重载建状态失败(索引库打开失败等):归到该目录的错误提示,不影响其它目录
+            recordFolderError(folderIdFor(f), error, '加载目录失败');
+            continue;
+          }
           folderStates.push(folder);
           for (const session of activeSessions) {
             attachFolderToSession(session, folder);

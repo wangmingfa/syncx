@@ -39,6 +39,12 @@ interface OfferInfo {
   createdAt: number;
 }
 
+interface FolderErrorItem {
+  folder: string;
+  message: string;
+  ts: number;
+}
+
 interface StatusData {
   deviceId: string;
   entries: number;
@@ -47,6 +53,7 @@ interface StatusData {
   devices: DeviceInfo[];
   syncProgress: SyncProgressItem[];
   offers: OfferInfo[];
+  folderErrors?: FolderErrorItem[];
 }
 
 const props = defineProps<{ status: StatusData; message?: string }>();
@@ -70,7 +77,9 @@ function closeGuide(): void {
   showGuide.value = false;
 }
 function onKeydown(e: KeyboardEvent): void {
-  if (e.key === 'Escape' && showGuide.value) closeGuide();
+  if (e.key !== 'Escape') return;
+  if (showGuide.value) closeGuide();
+  if (logsOpen.value) closeLogs();
 }
 
 function showToast(msg: string): void {
@@ -521,6 +530,12 @@ function progressOf(f: { id?: string; path: string }): SyncProgressItem | undefi
   return status.value.syncProgress.find((p) => p.folder === key);
 }
 
+// 该目录最近一次同步错误(目录卡上的红色横幅;下一轮扫描干净后自动消失)
+function folderErrorOf(f: { id?: string; path: string }): FolderErrorItem | undefined {
+  const key = folderKey(f);
+  return status.value.folderErrors?.find((e) => e.folder === key);
+}
+
 // 某设备被指派到的目录数量
 function deviceFolderCount(deviceId: string): number {
   return status.value.folders.filter((f) => f.devices.includes(deviceId)).length;
@@ -584,6 +599,54 @@ async function openHistory(f: FolderInfo): Promise<void> {
 
 function closeHistory(): void {
   historyOpen.value = false;
+}
+
+// ---- 日志弹窗:读取 daemon 日志尾部(仅 --log-file 启动时有日志可看) ----
+const logsOpen = ref(false);
+const logsLoading = ref(false);
+const logsLines = ref<string[]>([]);
+const logsError = ref('');
+const logsFile = ref('');
+const logsTruncated = ref(0);
+const logsView = ref<HTMLElement | null>(null);
+
+async function fetchLogs(): Promise<void> {
+  logsLoading.value = true;
+  logsError.value = '';
+  try {
+    const res = await fetch('/api/logs?lines=800');
+    if (!res.ok) throw new Error(`logs ${res.status}`);
+    const data = (await res.json()) as { ok: boolean; error?: string; file?: string; truncated?: number; lines?: string[] };
+    if (!data.ok) {
+      // 未设置 --log-file 或读取失败:展示原因,引导用户补启动参数
+      logsError.value = data.error ?? '读取日志失败';
+      logsLines.value = [];
+      return;
+    }
+    logsLines.value = data.lines ?? [];
+    logsFile.value = data.file ?? '';
+    logsTruncated.value = data.truncated ?? 0;
+    // 下一帧滚到底部:日志按时间正序,最新在最后
+    requestAnimationFrame(() => {
+      const el = logsView.value;
+      if (el) el.scrollTop = el.scrollHeight;
+    });
+  } catch {
+    logsError.value = '读取日志失败,请重试';
+  } finally {
+    logsLoading.value = false;
+  }
+}
+
+async function openLogs(): Promise<void> {
+  logsOpen.value = true;
+  logsLines.value = [];
+  logsError.value = '';
+  await fetchLogs();
+}
+
+function closeLogs(): void {
+  logsOpen.value = false;
 }
 
 function actionLabel(a: string): string {
@@ -718,6 +781,18 @@ async function removePassword(): Promise<void> {
           <div class="brand__sub">P2P LAN SYNC</div>
         </div>
       </div>
+
+      <n-button tertiary @click="openLogs">
+        <template #icon>
+          <svg viewBox="0 0 24 24" width="15" height="15" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+            <path d="M4 5h16" />
+            <path d="M4 10h16" />
+            <path d="M4 15h10" />
+            <path d="M4 20h7" />
+          </svg>
+        </template>
+        日志
+      </n-button>
 
       <n-button tertiary @click="openGuide">
         <template #icon>
@@ -891,6 +966,19 @@ async function removePassword(): Promise<void> {
             <span class="fid-label">目录 ID</span>
             <code class="fid-code break">{{ f.id ?? f.path }}</code>
             <n-button size="small" tertiary @click="copy(f.id ?? f.path)">复制</n-button>
+          </div>
+
+          <!-- 同步错误横幅:该目录最近一次同步失败的原因(扫描干净后自动消失) -->
+          <div v-if="folderErrorOf(f)" class="folder-error" role="alert">
+            <svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" class="folder-error__icon">
+              <path d="M12 3 2.5 20h19z" />
+              <line x1="12" y1="10" x2="12" y2="14" />
+              <line x1="12" y1="17" x2="12" y2="17.1" />
+            </svg>
+            <div class="folder-error__body">
+              <div class="folder-error__msg break">{{ folderErrorOf(f)!.message }}</div>
+              <div class="folder-error__time">{{ fmtTime(folderErrorOf(f)!.ts) }} · 下一轮扫描成功后自动清除</div>
+            </div>
           </div>
 
           <!-- 按目录指派可同步的设备:卡片上只读展示,点「编辑」弹窗修改后显式保存 -->
@@ -1163,6 +1251,34 @@ async function removePassword(): Promise<void> {
             >清除密码</n-button>
             <n-button class="modal-cancel" :disabled="authBusy" @click="closeAuth">取消</n-button>
             <n-button type="primary" :loading="authBusy" @click="savePassword">保存</n-button>
+          </div>
+        </div>
+      </div>
+    </Transition>
+
+    <!-- 日志弹窗:展示 daemon 日志尾部;仅 --log-file 启动时有日志可看 -->
+    <Transition name="guide">
+      <div v-if="logsOpen" class="modal-overlay" @click.self="closeLogs">
+        <div class="modal modal-wide" role="dialog" aria-modal="true" aria-labelledby="logs-title">
+          <n-button quaternary circle class="modal-close" aria-label="关闭" @click="closeLogs">×</n-button>
+          <h2 id="logs-title" class="modal-title">运行日志</h2>
+          <p v-if="logsFile" class="modal-lead mono break">
+            {{ logsFile }}<template v-if="logsTruncated > 0"> · 已省略最早 {{ logsTruncated }} 行</template>
+          </p>
+
+          <div v-if="logsLoading" class="history-loading">读取中…</div>
+          <template v-else-if="logsError">
+            <div class="logs-unavailable" role="alert">{{ logsError }}</div>
+            <p class="confirm-note-extra">
+              在启动 daemon 时加上 <code class="mono">--log-file &lt;路径&gt;</code> 参数(如
+              <code class="mono">syncx start --log-file ~/.syncx/syncx.log</code>),日志会同步写入该文件,这里即可查看。
+            </p>
+          </template>
+          <pre v-else ref="logsView" class="logs-view mono">{{ logsLines.join('\n') }}</pre>
+
+          <div class="modal-actions">
+            <n-button :loading="logsLoading" @click="fetchLogs">刷新</n-button>
+            <n-button type="primary" @click="closeLogs">关闭</n-button>
           </div>
         </div>
       </div>

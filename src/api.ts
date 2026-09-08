@@ -1,4 +1,5 @@
 import { createServer, type Server, type IncomingMessage, type ServerResponse } from 'node:http';
+import { readFileSync } from 'node:fs';
 import { timingSafeEqual } from 'node:crypto';
 import webClientJs from './web-client.js';
 import { FAVICON_SVG } from './favicon.js';
@@ -42,6 +43,11 @@ export interface ControlServerDeps {
   getOffers?: () => unknown;
   /** 读取某共享目录的同步记录(最近变更,倒序)。参数为目录 ID。 */
   getFolderHistory?: (folderId: string) => unknown;
+  /**
+   * 日志文件路径(--log-file 启动参数)。设置后 GET /api/logs 可读取日志尾部;
+   * 未设置时该端点返回 ok:false,前端提示需以 --log-file 启动才有日志可看。
+   */
+  logFile?: string;
   /** 确认一个待确认项;目录共享邀请需附带 localPath(本机落地路径)。 */
   acceptOffer?: (offerId: string, localPath?: string) => void;
   /** 忽略一个待确认项。 */
@@ -246,7 +252,7 @@ async function ensureSsr(): Promise<void> {
  * (见 `isControlRoute`),生产形态下不传该参数。
  */
 export function createControlServer(deps: ControlServerDeps): Server {
-  const { token, authFile, getStatus, shutdown, addFolder, removeFolder, addDevice, removeDevice, setFolderDevices, setFolderUseGitignore, rescan, reconnect, getOffers, getFolderHistory, acceptOffer, declineOffer, restoreOffer, devViteUrl } = deps;
+  const { token, authFile, getStatus, shutdown, addFolder, removeFolder, addDevice, removeDevice, setFolderDevices, setFolderUseGitignore, rescan, reconnect, getOffers, getFolderHistory, acceptOffer, declineOffer, restoreOffer, devViteUrl, logFile } = deps;
 
   /**
    * 会话签名密钥的「基」。
@@ -433,6 +439,34 @@ export function createControlServer(deps: ControlServerDeps): Server {
     // GET /api/status
     if (req.method === 'GET' && req.url && pathname(req.url) === '/api/status') {
       sendJson(res, 200, getStatus());
+      return;
+    }
+
+    // GET /api/logs?lines=500 : 读取日志文件尾部(Web UI「日志」弹窗)。需认证。
+    // 仅在 daemon 以 --log-file 启动时可用:未设置时没有日志文件可读,
+    // 返回 ok:false 而非 404,前端据此提示用户补上启动参数。
+    if (req.method === 'GET' && req.url && pathname(req.url) === '/api/logs') {
+      const url = new URL(req.url, 'http://localhost');
+      const requested = Number.parseInt(url.searchParams.get('lines') ?? '500', 10);
+      const maxLines = Number.isFinite(requested) && requested > 0 ? Math.min(requested, 5000) : 500;
+      if (!logFile) {
+        sendJson(res, 200, {
+          ok: false,
+          error: '未设置 --log-file,daemon 没有记录日志文件。启动时加 --log-file <路径> 后可在此查看日志。',
+        });
+        return;
+      }
+      try {
+        const content = readFileSync(logFile, 'utf8');
+        const all = content.split('\n');
+        // 文件以换行结尾时最后一个元素是空串,不计入日志行
+        if (all.length > 0 && all[all.length - 1] === '') all.pop();
+        const truncated = Math.max(0, all.length - maxLines);
+        const lines = all.slice(-maxLines);
+        sendJson(res, 200, { ok: true, file: logFile, total: all.length, truncated, lines });
+      } catch (e) {
+        sendJson(res, 200, { ok: false, error: `读取日志失败:${e instanceof Error ? e.message : String(e)}` });
+      }
       return;
     }
 

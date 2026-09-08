@@ -739,3 +739,88 @@ describe('routes tolerate query strings', () => {
     server.close();
   });
 });
+
+describe('GET /api/logs', () => {
+  it('returns ok:false when no log file is configured (needs --log-file)', async () => {
+    const server = createControlServer({ token: 'secret', getStatus: () => ({}) });
+    server.listen(0, '127.0.0.1');
+    await once(server, 'listening');
+    const port = (server.address() as AddressInfo).port;
+
+    const res = await fetchJson(port, '/api/logs', 'secret');
+
+    expect(res.status).toBe(200);
+    expect(res.body).toMatchObject({ ok: false });
+    expect((res.body as { error: string }).error).toContain('--log-file');
+
+    server.close();
+  });
+
+  it('requires auth', async () => {
+    const server = createControlServer({ token: 'secret', getStatus: () => ({}) });
+    server.listen(0, '127.0.0.1');
+    await once(server, 'listening');
+    const port = (server.address() as AddressInfo).port;
+
+    const res = await fetchJson(port, '/api/logs');
+
+    expect(res.status).toBe(401);
+
+    server.close();
+  });
+
+  it('returns the tail of the log file with truncation info', async () => {
+    const { mkdtempSync, writeFileSync, rmSync } = await import('node:fs');
+    const { tmpdir } = await import('node:os');
+    const { join } = await import('node:path');
+    const dir = mkdtempSync(join(tmpdir(), 'syncx-logs-'));
+    const logFile = join(dir, 'syncx.log');
+    // 1200 行日志:请求 500 行应返回最后 500 行,truncated = 700
+    const lines = Array.from({ length: 1200 }, (_, i) => `2026-09-08 10:00:${String(i % 60).padStart(2, '0')} line ${i + 1}`);
+    writeFileSync(logFile, lines.join('\n') + '\n');
+
+    const server = createControlServer({ token: 'secret', getStatus: () => ({}), logFile });
+    server.listen(0, '127.0.0.1');
+    await once(server, 'listening');
+    const port = (server.address() as AddressInfo).port;
+
+    const res = await fetchJson(port, '/api/logs?lines=500', 'secret');
+    const body = res.body as { ok: boolean; file: string; total: number; truncated: number; lines: string[] };
+
+    expect(res.status).toBe(200);
+    expect(body.ok).toBe(true);
+    expect(body.file).toBe(logFile);
+    expect(body.total).toBe(1200);
+    expect(body.truncated).toBe(700);
+    expect(body.lines).toHaveLength(500);
+    expect(body.lines[0]).toBe(lines[700]);
+    expect(body.lines[499]).toBe(lines[1199]);
+
+    // lines 参数缺失时默认 500;非法值(负数/非数字)也回退默认
+    const def = await fetchJson(port, '/api/logs', 'secret');
+    expect((def.body as { lines: string[] }).lines).toHaveLength(500);
+    const bad = await fetchJson(port, '/api/logs?lines=-3', 'secret');
+    expect((bad.body as { lines: string[] }).lines).toHaveLength(500);
+
+    server.close();
+    rmSync(dir, { recursive: true, force: true });
+  });
+
+  it('returns ok:false with reason when the log file cannot be read', async () => {
+    const server = createControlServer({
+      token: 'secret',
+      getStatus: () => ({}),
+      logFile: 'Z:\\nonexistent\\syncx.log',
+    });
+    server.listen(0, '127.0.0.1');
+    await once(server, 'listening');
+    const port = (server.address() as AddressInfo).port;
+
+    const res = await fetchJson(port, '/api/logs', 'secret');
+
+    expect(res.status).toBe(200);
+    expect(res.body).toMatchObject({ ok: false });
+
+    server.close();
+  });
+});

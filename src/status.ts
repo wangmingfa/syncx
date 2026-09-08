@@ -30,6 +30,16 @@ export interface SyncProgress extends ProgressCounts {
   folder: string;
 }
 
+/** 某共享目录最近一次同步错误(错误展示到对应目录卡上)。 */
+export interface FolderErrorStatus {
+  /** 目录 id(folderIdFor 口径)。 */
+  folder: string;
+  /** 错误信息(用户可读)。 */
+  message: string;
+  /** 发生时间(毫秒时间戳)。 */
+  ts: number;
+}
+
 export interface StatusPayload {
   deviceId: string;
   folders: SharedFolderConfig[];
@@ -37,6 +47,8 @@ export interface StatusPayload {
   tombstones: number;
   devices: DeviceStatus[];
   syncProgress: SyncProgress[];
+  /** 各共享目录最近一次同步错误(无错误时为空数组)。 */
+  folderErrors: FolderErrorStatus[];
   /** 对方推送过来的待确认项(配对 / 目录共享),供 Web UI 弹「待确认」。 */
   offers: PendingOffer[];
 }
@@ -48,6 +60,7 @@ export function buildStatus(
   devices: DeviceStatus[] = [],
   syncProgress: SyncProgress[] = [],
   offers: PendingOffer[] = [],
+  folderErrors: FolderErrorStatus[] = [],
 ): StatusPayload {
   return {
     deviceId: identity.deviceId,
@@ -57,5 +70,6 @@ export function buildStatus(
     devices,
     syncProgress,
     offers,
+    folderErrors,
   };
 }

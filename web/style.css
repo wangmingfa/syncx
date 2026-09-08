@@ -942,6 +942,64 @@ tbody tr:last-child td {
   padding: 18px 0;
 }
 
+/* 目录卡上的同步错误横幅:红调浅底,一眼定位到出问题的目录 */
+.folder-error {
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
+  padding: 8px 10px;
+  border: 1px solid rgb(224 65 59 / 0.35);
+  border-radius: 10px;
+  background: rgb(224 65 59 / 0.07);
+  color: #c23730;
+  font-size: 12px;
+}
+
+.folder-error__icon {
+  flex: none;
+  margin-top: 1px;
+}
+
+.folder-error__body {
+  min-width: 0;
+}
+
+.folder-error__msg {
+  font-weight: 500;
+}
+
+.folder-error__time {
+  margin-top: 2px;
+  color: rgb(194 55 48 / 0.72);
+  font-size: 11px;
+}
+
+/* 日志弹窗:等宽日志尾部,浅色底仿终端观感 */
+.logs-view {
+  margin: 0;
+  padding: 12px 14px;
+  max-height: 56vh;
+  overflow: auto;
+  background: var(--bg);
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  font-size: 12px;
+  line-height: 1.55;
+  white-space: pre-wrap;
+  word-break: break-all;
+  color: var(--text);
+}
+
+/* 未设置 --log-file 时的提示块 */
+.logs-unavailable {
+  padding: 14px 16px;
+  border: 1px dashed rgb(196 127 0 / 0.5);
+  border-radius: 10px;
+  background: rgb(196 127 0 / 0.07);
+  color: #9a6b00;
+  font-size: 13px;
+}
+
 .history-list {
   list-style: none;
   margin: 0;
