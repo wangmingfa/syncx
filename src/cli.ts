@@ -1,5 +1,5 @@
 export interface ParsedArgs {
-  command: 'start' | 'status' | 'install' | 'invite' | 'join' | 'revoke';
+  command: 'start' | 'stop' | 'status' | 'install' | 'invite' | 'join' | 'revoke';
   /** 位置参数(如 invite/join 的参数)。 */
   positionals: string[];
   configPath?: string;
@@ -13,7 +13,7 @@ export interface ParsedArgs {
   devViteUrl?: string;
 }
 
-const COMMANDS = new Set(['start', 'status', 'install', 'invite', 'join', 'revoke']);
+const COMMANDS = new Set(['start', 'stop', 'status', 'install', 'invite', 'join', 'revoke']);
 
 /** 控制 API 可安全绑定的回环地址;非回环地址必须显式 --expose-control。 */
 const LOOPBACK_HOSTS = new Set(['127.0.0.1', '::1', 'localhost']);
@@ -102,7 +102,7 @@ import type { IndexEntry } from './index.js';
 import { splitIntoBlocks } from './blockstore.js';
 import { recordSyncEvent, listSyncHistory } from './history.js';
 import { broadcastFolderUpdates } from './broadcast.js';
-import { readFileSync, existsSync, writeFileSync, watch } from 'node:fs';
+import { readFileSync, existsSync, writeFileSync, watch, unlinkSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import type { ControlServerDeps } from './api.js';
 
@@ -170,6 +170,91 @@ function loadOrCreateToken(configDir: string): string {
   return token;
 }
 
+/* ---------- stop:查找并停止运行中的 daemon ---------- */
+
+/** pid 文件名与内容:start 时写入 {pid, controlPort},优雅关闭时删除。 */
+const PID_FILE = 'syncx.pid';
+
+interface PidRecord {
+  pid?: number;
+  controlPort?: number;
+}
+
+function pidFilePath(configDir: string): string {
+  return join(configDir, PID_FILE);
+}
+
+/** 进程是否存活(信号 0 = 只探测,不发送)。 */
+function isProcessAlive(pid: number): boolean {
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * 停止运行中的 daemon(stop 命令)。不创建任何文件/身份。
+ *
+ * 优先走控制 API(带令牌):触发 daemon 优雅关闭(关 peer socket、sqlite 索引、
+ * 配置 watcher),跨平台一致 —— Windows 上对其他进程 process.kill(SIGTERM)
+ * 是 TerminateProcess 硬杀,不会经过优雅退出。
+ * API 不可达(端口不通/超时)时回退信号:Unix SIGTERM 仍优雅;Windows 强杀(sqlite 崩溃安全)。
+ */
+async function stopDaemon(configDir: string, controlPortOverride: number | undefined): Promise<void> {
+  const pidFile = pidFilePath(configDir);
+  if (!existsSync(pidFile)) {
+    console.log('syncx is not running');
+    return;
+  }
+
+  let info: PidRecord = {};
+  try {
+    info = JSON.parse(readFileSync(pidFile, 'utf8')) as PidRecord;
+  } catch {
+    // pid 文件损坏:按未知处理,下方尽力清理
+  }
+
+  const port = controlPortOverride ?? info.controlPort ?? 8384;
+  const tokenFile = join(configDir, 'control.token');
+
+  // 1) 优雅路径:控制 API。令牌认证通过即证明目标就是本机 daemon,不会误杀无关进程。
+  if (existsSync(tokenFile)) {
+    const token = readFileSync(tokenFile, 'utf8').trim();
+    try {
+      const res = await fetch(`http://127.0.0.1:${port}/api/shutdown`, {
+        method: 'POST',
+        headers: { Authorization: `Bearer ${token}` },
+        signal: AbortSignal.timeout(5000),
+      });
+      if (res.ok) {
+        // 读掉响应体:keep-alive 连接若挂着会让 CLI 进程在 run() 返回后仍不退出
+        await res.arrayBuffer().catch(() => {});
+        console.log(`syncx stopped (pid ${info.pid ?? 'unknown'})`);
+        return; // daemon 优雅退出时自己删除 pid 文件
+      }
+      await res.arrayBuffer().catch(() => {});
+      console.warn(`[warn] /api/shutdown returned ${res.status}, falling back to signal`);
+    } catch {
+      console.warn('[warn] control API unreachable, falling back to signal');
+    }
+  }
+
+  // 2) 回退:向 pid 发信号。
+  if (typeof info.pid === 'number' && isProcessAlive(info.pid)) {
+    process.kill(info.pid, 'SIGTERM');
+    console.log(`sent SIGTERM to syncx (pid ${info.pid})`);
+  } else {
+    console.log('syncx is not running (stale pid file)');
+  }
+  try {
+    unlinkSync(pidFile);
+  } catch {
+    // 清理失败不影响结果
+  }
+}
+
 /**
  * 由入站 socket 的对端源 IP + 握手 kx 中广播的监听端口,拼出可反向连接的
  * ws:// 地址。@types/ws 未暴露 remoteAddress,故对 ws 实例做防御性读取
@@ -210,6 +295,13 @@ export async function run(args: ParsedArgs): Promise<void> {
   // 日志实例在身份/配置加载后初始化,CLI 一次性命令(status/install/invite/join)
   // 仍用 console.log 直接打印给用户;仅 daemon 运行期用 logger 持久化。
   const logger = createLogger(args.logFile);
+
+  // stop 必须在身份/配置初始化之前处理:对一台没跑过 syncx 的机器执行 stop
+  // 不应该凭空创建身份文件、默认配置等任何东西。
+  if (args.command === 'stop') {
+    await stopDaemon(configDir, args.controlPort);
+    return;
+  }
 
   const identity = loadOrCreateIdentity(configDir);
   const config = loadConfig(configPath);
@@ -297,6 +389,9 @@ export async function run(args: ParsedArgs): Promise<void> {
   const token = loadOrCreateToken(configDir);
   const controlPort = args.controlPort ?? 8384;
   const controlHost = args.host ?? '127.0.0.1';
+  // stop 命令经控制 API 触发的优雅关闭。shutdown 在下方资源全部就绪后才被赋值;
+  // 就绪前收到调用(API 时机上不可能)是无操作,保证不会关到半初始化的资源。
+  let triggerShutdown: () => void = () => {};
 
   const lanAddresses = getLanAddresses();
   logger.info(`control UI (token in ${join(configDir, 'control.token')}):`);
@@ -806,6 +901,8 @@ export async function run(args: ParsedArgs): Promise<void> {
     // 账号密码落盘位置:与 control.token 同一目录,0600。文件不存在即「仅令牌登录」。
     authFile: join(configDir, 'auth.json'),
     devViteUrl: args.devViteUrl,
+    // stop 命令经 POST /api/shutdown 触发:与 SIGTERM 走同一条优雅关闭链路
+    shutdown: () => triggerShutdown(),
     addFolder: (path, devices, id) => {
       addSharedFolder(configPath, path, devices, id);
       logger.info(`shared folder added: ${path}`);
@@ -1006,6 +1103,14 @@ export async function run(args: ParsedArgs): Promise<void> {
   });
   control.listen(controlPort, controlHost);
 
+  // 记录 pid 与控制端口,供 syncx stop 定位目标(优雅关闭时删除)
+  try {
+    const pidRecord: PidRecord = { pid: process.pid, controlPort };
+    writeFileSync(pidFilePath(configDir), JSON.stringify(pidRecord), { mode: 0o600 });
+  } catch (e) {
+    logger.warn(`cannot write pid file (syncx stop will fall back to signal): ${String(e)}`);
+  }
+
   const server = startPeerServer(
     identity,
     {
@@ -1175,9 +1280,17 @@ const shutdown = (): void => {
     for (const folder of folderStates) {
       folder.index.close();
     }
+    // pid 文件:优雅退出即移除,残留的 pid 文件会让 syncx stop 走「stale」分支
+    try {
+      unlinkSync(pidFilePath(configDir));
+    } catch {
+      // 已不存在或删除失败:stop 侧有 stale 检测兜底
+    }
     // 显式退出,确保所有 handle 关闭后进程立即结束
     process.exit(0);
   };
+    // 资源全部就绪,stop 命令经控制 API 触发的关闭从这里开始生效
+    triggerShutdown = shutdown;
     process.on('SIGINT', shutdown);
     process.on('SIGTERM', shutdown);
   });

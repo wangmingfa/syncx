@@ -23,6 +23,8 @@ export interface ControlServerDeps {
    * 文件不存在时同样退回「仅令牌登录」,设置密码后才启用账号登录。
    */
   authFile?: string;
+  /** stop 命令经 POST /api/shutdown 触发的优雅关闭;不传则该端点返回 503。 */
+  shutdown?: () => void;
   getStatus: () => unknown;
   addFolder?: (path: string, devices: string[], id?: string) => void;
   removeFolder?: (path: string) => void;
@@ -241,7 +243,7 @@ async function ensureSsr(): Promise<void> {
  * (见 `isControlRoute`),生产形态下不传该参数。
  */
 export function createControlServer(deps: ControlServerDeps): Server {
-  const { token, authFile, getStatus, addFolder, removeFolder, addDevice, removeDevice, setFolderDevices, rescan, reconnect, getOffers, getFolderHistory, acceptOffer, declineOffer, restoreOffer, devViteUrl } = deps;
+  const { token, authFile, getStatus, shutdown, addFolder, removeFolder, addDevice, removeDevice, setFolderDevices, rescan, reconnect, getOffers, getFolderHistory, acceptOffer, declineOffer, restoreOffer, devViteUrl } = deps;
 
   /**
    * 会话签名密钥的「基」。
@@ -428,6 +430,19 @@ export function createControlServer(deps: ControlServerDeps): Server {
     // GET /api/status
     if (req.method === 'GET' && req.url && pathname(req.url) === '/api/status') {
       sendJson(res, 200, getStatus());
+      return;
+    }
+
+    // POST /api/shutdown : stop 命令的优雅关闭入口。必须已认证(与其它写操作同级):
+    // 令牌只在本机磁盘上,拿到它的人本就能随意处置本机数据,但绝不能让无凭据请求关停服务。
+    if (req.method === 'POST' && req.url && pathname(req.url) === '/api/shutdown') {
+      if (!shutdown) {
+        sendJson(res, 503, { error: 'shutdown not available' });
+        return;
+      }
+      sendJson(res, 200, { ok: true, msg: 'shutting down' });
+      // 先让响应冲出内核缓冲,再走关闭链路(control.close 在其中)
+      setTimeout(shutdown, 50);
       return;
     }
 

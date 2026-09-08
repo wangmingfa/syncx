@@ -43,8 +43,7 @@ function fetchJson(
 }
 
 describe('control api', () => {
-  it('GET /health needs no auth and only reports ok + uptime', async () => {
-    const server = createControlServer({ token: 'secret', getStatus: () => ({ ok: true }) });
+  it('GET /health needs no auth and only reports ok + uptime', async () => {    const server = createControlServer({ token: 'secret', getStatus: () => ({ ok: true }) });
     server.listen(0, '127.0.0.1');
     await once(server, 'listening');
     const port = (server.address() as AddressInfo).port;
@@ -54,6 +53,34 @@ describe('control api', () => {
     expect(res.status).toBe(200);
     expect(res.body).toMatchObject({ ok: true, msg: 'syncx is ok' });
     expect((res.body as { uptime: number }).uptime).toBeGreaterThanOrEqual(0);
+
+    server.close();
+  });
+
+  it('POST /api/shutdown requires auth and invokes the shutdown hook', async () => {
+    let called = 0;
+    const server = createControlServer({
+      token: 'secret',
+      getStatus: () => ({}),
+      shutdown: () => {
+        called += 1;
+      },
+    });
+    server.listen(0, '127.0.0.1');
+    await once(server, 'listening');
+    const port = (server.address() as AddressInfo).port;
+
+    // 无凭据:必须 401,绝不能让匿名请求关停服务
+    const denied = await fetchJson(port, '/api/shutdown', undefined, { method: 'POST' });
+    expect(denied.status).toBe(401);
+    expect(called).toBe(0);
+
+    // 带正确令牌:200 + 50ms 内回调被触发(路由 setTimeout 50ms 后调用)
+    const ok = await fetchJson(port, '/api/shutdown', 'secret', { method: 'POST' });
+    expect(ok.status).toBe(200);
+    expect(ok.body).toMatchObject({ ok: true, msg: 'shutting down' });
+    await new Promise((r) => setTimeout(r, 100));
+    expect(called).toBe(1);
 
     server.close();
   });

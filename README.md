@@ -327,6 +327,9 @@ npm run dev -- --config ~/syncx-home.json --port 24001 --control-port 8385
 # 启动 daemon(前台;部署时配合 systemd/launchd 后台常驻)
 syncx start [--config <路径>] [--port <端口>] [--control-port <端口>] [--host <主机>]
 
+# 停止运行中的 daemon(优先经控制 API 优雅关闭,失败回退信号)
+syncx stop [--config <路径>] [--control-port <端口>]
+
 # 查看状态:设备 ID 与共享目录数
 syncx status [--config <路径>]
 
