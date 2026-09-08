@@ -159,7 +159,11 @@ interface ActiveSession {
 function loadOrCreateToken(configDir: string): string {
   const file = join(configDir, 'control.token');
   if (existsSync(file)) {
-    return readFileSync(file, 'utf8').trim();
+    const existing = readFileSync(file, 'utf8').trim();
+    // 空/纯空白令牌会让「无凭据」也通过常量时间比较(空串 vs 空串恒等),
+    // 等于把整个控制 API 开放出去。这里视同「令牌缺失」重新生成。
+    if (existing) return existing;
+    console.warn(`[warn] ${file} 内容为空,已重新生成令牌`);
   }
   const token = randomBytes(24).toString('hex');
   writeFileSync(file, token, { mode: 0o600 });
@@ -799,6 +803,8 @@ export async function run(args: ParsedArgs): Promise<void> {
   // 控制 API:在 peer 状态和同步进度可用后创建
   const control = createControlServer({
     token,
+    // 账号密码落盘位置:与 control.token 同一目录,0600。文件不存在即「仅令牌登录」。
+    authFile: join(configDir, 'auth.json'),
     devViteUrl: args.devViteUrl,
     addFolder: (path, devices, id) => {
       addSharedFolder(configPath, path, devices, id);

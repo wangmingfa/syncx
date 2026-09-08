@@ -576,6 +576,98 @@ function directionLabel(d: string): string {
 function fmtTime(ts: number): string {
   return new Date(ts).toLocaleString();
 }
+
+// ---- 登录密码:设置 / 修改 / 清除 ----
+const authOpen = ref(false);
+const authMode = ref<'token' | 'password'>('token');
+const authUsername = ref('');
+const authBusy = ref(false);
+
+async function openAuth(): Promise<void> {
+  authOpen.value = true;
+  authUsername.value = '';
+  try {
+    const res = await fetch('/api/auth');
+    if (!res.ok) throw new Error(`auth ${res.status}`);
+    const data = (await res.json()) as { mode?: 'token' | 'password' };
+    authMode.value = data.mode === 'password' ? 'password' : 'token';
+  } catch {
+    authMode.value = 'token';
+  }
+}
+
+function closeAuth(): void {
+  authOpen.value = false;
+}
+
+// ---- 退出登录:清会话 cookie 后回到登录页 ----
+async function logout(): Promise<void> {
+  try {
+    await fetch('/api/logout', { method: 'POST' });
+  } catch {
+    // 网络异常也照走跳转:无凭据时服务端本来就会渲染登录壳
+  }
+  location.replace('/');
+}
+
+const authPassword = ref('');
+const authConfirm = ref('');
+
+async function savePassword(): Promise<void> {
+  if (authBusy.value) return;
+  const u = authUsername.value.trim();
+  if (!u) {
+    showToast('请填写用户名');
+    return;
+  }
+  if (authPassword.value.length < 6) {
+    showToast('密码至少 6 位');
+    return;
+  }
+  if (authPassword.value !== authConfirm.value) {
+    showToast('两次输入的密码不一致');
+    return;
+  }
+  authBusy.value = true;
+  try {
+    const res = await fetch('/api/auth/password', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ username: u, password: authPassword.value }),
+    });
+    if (!res.ok) {
+      const data = (await res.json().catch(() => ({}))) as { error?: string };
+      throw new Error(data.error ?? `http ${res.status}`);
+    }
+    authMode.value = 'password';
+    authPassword.value = '';
+    authConfirm.value = '';
+    showToast('登录密码已设置');
+    closeAuth();
+  } catch (e) {
+    showToast(e instanceof Error ? e.message : '设置失败,请重试');
+  } finally {
+    authBusy.value = false;
+  }
+}
+
+async function removePassword(): Promise<void> {
+  if (authBusy.value) return;
+  authBusy.value = true;
+  try {
+    const res = await fetch('/api/auth/password', { method: 'DELETE' });
+    if (!res.ok) throw new Error(`http ${res.status}`);
+    authMode.value = 'token';
+    authPassword.value = '';
+    authConfirm.value = '';
+    showToast('已清除登录密码,恢复令牌登录');
+    closeAuth();
+  } catch {
+    showToast('清除失败,请重试');
+  } finally {
+    authBusy.value = false;
+  }
+}
 </script>
 
 <template>
@@ -615,6 +707,27 @@ function fmtTime(ts: number): string {
           </svg>
         </template>
         使用指南
+      </n-button>
+
+      <n-button tertiary @click="openAuth">
+        <template #icon>
+          <svg viewBox="0 0 24 24" width="15" height="15" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+            <rect x="4" y="10.5" width="16" height="10" rx="2.5" />
+            <path d="M8 10.5V7a4 4 0 0 1 8 0v3.5" />
+          </svg>
+        </template>
+        登录密码
+      </n-button>
+
+      <n-button tertiary @click="logout">
+        <template #icon>
+          <svg viewBox="0 0 24 24" width="15" height="15" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+            <path d="M14 4h4.5A1.5 1.5 0 0 1 20 5.5v13a1.5 1.5 0 0 1-1.5 1.5H14" />
+            <path d="M10 8 6 12l4 4" />
+            <path d="M6 12h9" />
+          </svg>
+        </template>
+        退出
       </n-button>
 
       <div class="topbar__spacer"></div>
@@ -713,10 +826,10 @@ function fmtTime(ts: number): string {
           <n-input v-model:value="newPath" placeholder="本地目录绝对路径,如 /home/me/Documents" />
           <n-input v-model:value="newFolderId" placeholder="目录 ID(留空自动生成;跨机同步需与对方一致)" />
           <n-checkbox-group v-model:value="newFolderDevices">
-            <div class="device-checks">
+            <div v-if="status.devices.length > 0" class="device-checks">
               <n-checkbox v-for="d in status.devices" :key="d.deviceId" :value="d.deviceId" :label="d.deviceId" class="mono" />
             </div>
-            <p v-if="status.devices.length === 0" class="confirm-note-extra">还没有已配对的设备,可先添加目录,稍后在卡片上指派。</p>
+            <p v-else class="confirm-note-extra confirm-note-extra--flush">还没有已配对的设备,可先添加目录,稍后在卡片上指派。</p>
           </n-checkbox-group>
           <div class="add-form-actions">
             <n-button quaternary :disabled="busy" @click="toggleAddFolder">取消</n-button>
@@ -950,15 +1063,74 @@ function fmtTime(ts: number): string {
           <h2 id="edit-devices-title" class="modal-title">编辑可同步设备</h2>
           <p class="modal-lead mono break">{{ editDevicesPath }}</p>
           <n-checkbox-group v-model:value="editDevicesValue">
-            <div class="device-checks">
+            <div v-if="status.devices.length > 0" class="device-checks">
               <n-checkbox v-for="d in status.devices" :key="d.deviceId" :value="d.deviceId" :label="d.deviceId" class="mono" />
             </div>
-            <p v-if="status.devices.length === 0" class="confirm-note-extra">还没有已配对的设备,先在「设备」栏添加。</p>
+            <p v-else class="confirm-note-extra confirm-note-extra--flush">还没有已配对的设备,先在「设备」栏添加。</p>
           </n-checkbox-group>
           <p class="confirm-note-extra">保存后,新加入的设备会立即收到共享邀请(在线时),被移除的设备不再同步此目录。</p>
           <div class="modal-actions">
             <n-button class="modal-cancel" :disabled="busy" @click="closeEditDevices">取消</n-button>
             <n-button type="primary" :loading="busy" @click="saveEditDevices">保存</n-button>
+          </div>
+        </div>
+      </div>
+    </Transition>
+
+    <!-- 登录密码弹窗:设置后可用账号密码登录,无需再记 48 位令牌 -->
+    <Transition name="guide">
+      <div v-if="authOpen" class="modal-overlay" @click.self="closeAuth">
+        <div class="modal" role="dialog" aria-modal="true" aria-labelledby="auth-title">
+          <n-button quaternary circle class="modal-close" aria-label="关闭" @click="closeAuth">×</n-button>
+          <h2 id="auth-title" class="modal-title">登录密码</h2>
+          <p class="modal-lead">
+            <template v-if="authMode === 'password'">
+              已启用账号密码登录。修改用户名请在下方一并输入。
+            </template>
+            <template v-else>
+              当前使用 <span class="mono">control.token</span> 登录。设置后可用账号密码登录,不必再记那串令牌。
+            </template>
+          </p>
+
+          <label class="field">
+            <span class="field__label">用户名</span>
+            <n-input v-model:value="authUsername" autocomplete="username" placeholder="如 syncx" />
+          </label>
+          <label class="field">
+            <span class="field__label">新密码</span>
+            <n-input
+              v-model:value="authPassword"
+              type="password"
+              show-password-on="click"
+              autocomplete="new-password"
+              placeholder="至少 6 位"
+            />
+          </label>
+          <label class="field">
+            <span class="field__label">确认新密码</span>
+            <n-input
+              v-model:value="authConfirm"
+              type="password"
+              show-password-on="click"
+              autocomplete="new-password"
+              placeholder="再输入一次"
+            />
+          </label>
+
+          <p class="confirm-note-extra">
+            令牌始终是恢复通道:忘记密码时用 <span class="mono">control.token</span> 登录进来重设即可。
+            修改或清除密码会让所有已登录页面重新登录。
+          </p>
+
+          <div class="modal-actions">
+            <n-button
+              v-if="authMode === 'password'"
+              class="modal-cancel"
+              :disabled="authBusy"
+              @click="removePassword"
+            >清除密码</n-button>
+            <n-button class="modal-cancel" :disabled="authBusy" @click="closeAuth">取消</n-button>
+            <n-button type="primary" :loading="authBusy" @click="savePassword">保存</n-button>
           </div>
         </div>
       </div>

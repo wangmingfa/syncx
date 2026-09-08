@@ -10,10 +10,14 @@ import type { AddressInfo } from 'node:net';
 // 因此两个用例都同时注入两个 handler(与真实注入方式一致),缺一不可。
 describe('offer accept/decline routing', () => {
   const encodedId = encodeURIComponent('c335b0be:pair:AALQHUYOGA:');
+  // 注意:不能再用 token: '' 来「免认证」——空令牌会让无凭据请求也通过
+  // 常量时间比较,等于开放控制 API。测试统一带 Bearer 令牌。
+  const TOKEN = 'secret';
+  const AUTH = { Authorization: `Bearer ${TOKEN}` };
 
   function createServer(accepted: string[], declined: string[]) {
     return createControlServer({
-      token: '',
+      token: TOKEN,
       getStatus: () => ({}),
       getOffers: () => [],
       acceptOffer: (id) => {
@@ -38,6 +42,7 @@ describe('offer accept/decline routing', () => {
 
     const res = await fetch(`http://127.0.0.1:${port}/api/offers/${encodedId}/accept`, {
       method: 'POST',
+      headers: AUTH,
     });
 
     expect(res.status).toBe(200);
@@ -55,6 +60,7 @@ describe('offer accept/decline routing', () => {
 
     const res = await fetch(`http://127.0.0.1:${port}/api/offers/${encodedId}/decline`, {
       method: 'POST',
+      headers: AUTH,
     });
 
     expect(res.status).toBe(200);
@@ -69,7 +75,7 @@ describe('offer accept/decline routing', () => {
     const accepted: string[] = [];
     const declined: string[] = [];
     const server = createControlServer({
-      token: '',
+      token: TOKEN,
       getStatus: () => ({}),
       getOffers: () => [],
       acceptOffer: (id) => {
@@ -86,6 +92,7 @@ describe('offer accept/decline routing', () => {
 
     const res = await fetch(`http://127.0.0.1:${port}/api/offers/${encodedId}/restore`, {
       method: 'POST',
+      headers: AUTH,
     });
 
     expect(res.status).toBe(200);

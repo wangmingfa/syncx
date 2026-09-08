@@ -1114,6 +1114,28 @@ tbody tr:last-child td {
   color: var(--muted);
 }
 
+/* 空态提示独占一行时,所在容器已有间距,不再叠加上边距 */
+.confirm-note-extra--flush {
+  margin-top: 0;
+}
+
+/* 弹窗内的表单字段(登录密码等)。与登录页同款标签排版,故提到全局。
+   登录页 <style scoped> 里的同名规则优先,视觉一致。 */
+.field {
+  display: block;
+  margin-top: 14px;
+}
+
+.field__label {
+  display: block;
+  margin-bottom: 6px;
+  font-family: var(--mono);
+  font-size: 10px;
+  letter-spacing: 0.14em;
+  text-transform: uppercase;
+  color: var(--muted);
+}
+
 /* ---------- 使用指南弹窗开合动画(由 <Transition name="guide"> 驱动) ---------- */
 /* 遮罩:淡入/淡出;卡片:上浮 + 轻微缩放,开与关对称。 */
 .guide-enter-active,

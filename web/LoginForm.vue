@@ -1,16 +1,97 @@
 <script setup lang="ts">
-import { ref } from 'vue';
-import { NInput, NButton } from 'naive-ui';
+import { ref, onMounted } from 'vue';
+import { NInput, NButton, NTabs, NTab } from 'naive-ui';
 
 // 登录失败原因:优先取外部传入,否则用本地校验结果。
 const props = defineProps<{ error?: string }>();
 
+/**
+ * 两种登录方式:
+ * - password:已设置账号密码,默认展示用户名 + 密码
+ * - token:未设置(或用户手动切换),用 control.token 登录 —— 也是忘记密码时的恢复通道
+ */
+type Mode = 'password' | 'token';
+
+const mode = ref<Mode>('token');
+/** 服务端是否已设置账号密码:决定是否显示「账号密码 / 控制令牌」切换器 */
+const hasPassword = ref(false);
+const ready = ref(false);
+const username = ref('');
+const password = ref('');
 const token = ref('');
 const busy = ref(false);
 const errorMsg = ref<string | undefined>(props.error);
 
-async function submit(): Promise<void> {
+onMounted(async () => {
+  try {
+    const res = await fetch('/api/auth');
+    if (res.ok) {
+      const data = (await res.json()) as { mode?: Mode };
+      if (data.mode === 'password') {
+        hasPassword.value = true;
+        mode.value = 'password';
+      }
+    }
+  } catch {
+    // 拉取失败就退回令牌登录,不阻塞用户
+  } finally {
+    ready.value = true;
+  }
+});
+
+/** 切换登录方式:只切视图,不清已输入的内容,方便来回对照。 */
+function switchMode(next: string): void {
+  if (mode.value === next) return;
+  mode.value = next as Mode;
+  errorMsg.value = undefined;
+}
+
+function go(): void {
   if (busy.value) return;
+  if (mode.value === 'password') void submitPassword();
+  else void submitToken();
+}
+
+/** 登录成功后统一用 /api/status 复检:部分失败响应也是 200 页面壳,没有错误信号。 */
+async function probeAndEnter(failMsg: string): Promise<void> {
+  const probe = await fetch('/api/status');
+  if (probe.ok) {
+    location.replace('/');
+    return;
+  }
+  errorMsg.value = failMsg;
+}
+
+async function submitPassword(): Promise<void> {
+  const u = username.value.trim();
+  const p = password.value;
+  if (!u || !p) {
+    errorMsg.value = '请输入用户名和密码';
+    return;
+  }
+
+  busy.value = true;
+  errorMsg.value = undefined;
+  try {
+    const res = await fetch('/api/login', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ username: u, password: p }),
+    });
+    if (!res.ok) {
+      const data = (await res.json().catch(() => ({}))) as { error?: string };
+      errorMsg.value = data.error ?? '登录失败,请重试';
+      return;
+    }
+    await probeAndEnter('登录失败,请重试');
+  } catch {
+    errorMsg.value = '网络异常,请重试';
+  } finally {
+    busy.value = false;
+  }
+}
+
+async function submitToken(): Promise<void> {
   const value = token.value.trim();
   if (!value) {
     errorMsg.value = '请输入控制令牌';
@@ -29,12 +110,7 @@ async function submit(): Promise<void> {
       body: `token=${encodeURIComponent(value)}`,
       redirect: 'follow',
     });
-    const probe = await fetch('/api/status');
-    if (probe.ok) {
-      location.replace('/');
-      return;
-    }
-    errorMsg.value = '令牌无效,请重试';
+    await probeAndEnter('令牌无效,请重试');
   } catch {
     errorMsg.value = '网络异常,请重试';
   } finally {
@@ -75,8 +151,43 @@ async function submit(): Promise<void> {
 
       <div class="login__title">Access Control</div>
 
-      <form method="POST" action="/login" @submit.prevent="submit">
-        <label class="field">
+      <!-- 登录方式切换:仅在已设置账号密码时出现,未设置时固定令牌登录 -->
+      <n-tabs
+        v-if="hasPassword"
+        class="login__tabs"
+        type="segment"
+        size="small"
+        :value="mode"
+        @update:value="switchMode"
+      >
+        <n-tab name="password">账号密码</n-tab>
+        <n-tab name="token">控制令牌</n-tab>
+      </n-tabs>
+
+      <form @submit.prevent="go">
+        <template v-if="mode === 'password'">
+          <label class="field">
+            <span class="field__label">用户名</span>
+            <n-input
+              v-model:value="username"
+              autocomplete="username"
+              placeholder="登录用户名"
+            />
+          </label>
+          <label class="field">
+            <span class="field__label">密码</span>
+            <n-input
+              v-model:value="password"
+              type="password"
+              show-password-on="click"
+              autocomplete="current-password"
+              placeholder="登录密码"
+              @keyup.enter="go"
+            />
+          </label>
+        </template>
+
+        <label v-else class="field">
           <span class="field__label">控制令牌</span>
           <n-input
             v-model:value="token"
@@ -94,13 +205,21 @@ async function submit(): Promise<void> {
           type="primary"
           attr-type="submit"
           :loading="busy"
+          :disabled="!ready"
           block
-        >验证并进入</n-button>
+        >登录</n-button>
       </form>
 
       <div class="login__foot">
         <span class="pulse"></span>
-        令牌仅保存在服务器侧,不写入浏览器
+        <span>
+          <template v-if="mode === 'password'">
+            忘记密码? 切到控制令牌登录,进入后可在「登录密码」里重设
+          </template>
+          <template v-else>
+            想用账号密码登录?先用令牌进入,再到「登录密码」里设置
+          </template>
+        </span>
       </div>
     </div>
   </div>
@@ -201,6 +320,12 @@ async function submit(): Promise<void> {
   letter-spacing: 0.16em;
   text-transform: uppercase;
   color: var(--muted);
+}
+
+/* ---------- 登录方式切换(NTabs segment) ---------- */
+
+.login__tabs {
+  margin-top: 14px;
 }
 
 /* ---------- 表单 ---------- */

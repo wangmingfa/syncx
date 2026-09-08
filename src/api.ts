@@ -2,9 +2,27 @@ import { createServer, type Server, type IncomingMessage, type ServerResponse } 
 import { timingSafeEqual } from 'node:crypto';
 import webClientJs from './web-client.js';
 import { FAVICON_SVG } from './favicon.js';
+import {
+  clearPassword,
+  loadAccount,
+  safeEqual,
+  sessionSecret,
+  setPassword,
+  signSession,
+  verifyPassword,
+  verifySession,
+  SESSION_TTL_MS,
+  type SessionPayload,
+} from './auth.js';
 
 export interface ControlServerDeps {
   token: string;
+  /**
+   * 账号密码落盘位置(cli 传 ~/.syncx/auth.json)。
+   * 不传则禁用账号密码登录,只保留 control.token 一条通道;
+   * 文件不存在时同样退回「仅令牌登录」,设置密码后才启用账号登录。
+   */
+  authFile?: string;
   getStatus: () => unknown;
   addFolder?: (path: string, devices: string[], id?: string) => void;
   removeFolder?: (path: string) => void;
@@ -76,6 +94,7 @@ function pathname(rawUrl: string): string {
  */
 function isControlRoute(method: string, path: string): boolean {
   if (path.startsWith('/api/')) return true;
+  if (path === '/health') return true; // dev 模式下探活也命中控制服务,而不是被重定向到 vite
   // 表单提交走 control server:登录写 cookie,目录增删写配置。
   return method === 'POST' && (path === '/login' || path === '/folders' || path === '/actions');
 }
@@ -143,6 +162,37 @@ function tokenMatches(a: string, b: string): boolean {
   return timingSafeEqual(ab, bb);
 }
 
+/** 登录失败限流:同一来源 IP 连续失败 MAX_FAILS 次后锁 LOCK_MS。 */
+const MAX_FAILS = 5;
+const LOCK_MS = 60_000;
+const loginFails = new Map<string, { count: number; until?: number }>();
+
+function clientIp(req: IncomingMessage): string {
+  return req.socket.remoteAddress ?? 'unknown';
+}
+
+/** 返回剩余锁定时长(ms);0 表示未锁定。 */
+function lockRemaining(req: IncomingMessage): number {
+  const rec = loginFails.get(clientIp(req));
+  if (!rec?.until) return 0;
+  return Math.max(0, rec.until - Date.now());
+}
+
+function noteFailure(req: IncomingMessage): void {
+  const ip = clientIp(req);
+  const rec = loginFails.get(ip) ?? { count: 0 };
+  rec.count += 1;
+  if (rec.count >= MAX_FAILS) {
+    rec.until = Date.now() + LOCK_MS;
+    rec.count = 0;
+  }
+  loginFails.set(ip, rec);
+}
+
+function noteSuccess(req: IncomingMessage): void {
+  loginFails.delete(clientIp(req));
+}
+
 /** 读取请求体,超过 maxBytes 直接拒绝,防止大请求体耗尽内存。 */
 function readBody(req: IncomingMessage, maxBytes = 1_000_000): Promise<string> {
   return new Promise((resolve, reject) => {
@@ -191,7 +241,44 @@ async function ensureSsr(): Promise<void> {
  * (见 `isControlRoute`),生产形态下不传该参数。
  */
 export function createControlServer(deps: ControlServerDeps): Server {
-  const { token, getStatus, addFolder, removeFolder, addDevice, removeDevice, setFolderDevices, rescan, reconnect, getOffers, getFolderHistory, acceptOffer, declineOffer, restoreOffer, devViteUrl } = deps;
+  const { token, authFile, getStatus, addFolder, removeFolder, addDevice, removeDevice, setFolderDevices, rescan, reconnect, getOffers, getFolderHistory, acceptOffer, declineOffer, restoreOffer, devViteUrl } = deps;
+
+  /**
+   * 会话签名密钥的「基」。
+   * - 已设置账号密码 → 用密码哈希:改/清密码即让所有旧会话失效
+   * - 未设置 → 用 control.token:未设密码时也能签发会话(值仍是签名串,
+   *   而不是把 token 原文塞进 cookie)
+   */
+  function sessionBase(): string {
+    const acct = authFile ? loadAccount(authFile) : undefined;
+    return acct ? acct.hash : token;
+  }
+
+  /**
+   * token 原文是否匹配。空串一律不算通过 —— 否则 token 为空(或请求伪造空 cookie)时
+   * 常量时间比较「空 vs 空」恒真,整个控制 API 等于不设防。
+   */
+  function tokenAccepted(candidate: string | undefined): boolean {
+    if (!candidate || !token) return false;
+    return tokenMatches(candidate, token);
+  }
+
+  /** 凭据是否有效:Bearer/cookie 里的值可以是 token 原文,也可以是签名会话。 */
+  function credentialOk(raw: string | undefined): boolean {
+    if (!raw) return false;
+    if (tokenAccepted(raw)) return true;
+    const session = verifySession(raw, sessionSecret(sessionBase()));
+    return session !== undefined;
+  }
+
+  /** 下发会话 cookie;值恒定是 base64url 签名串,不含分号/空格/非 ASCII。 */
+  function issueSession(res: ServerResponse, payload: SessionPayload): void {
+    const value = signSession(payload, sessionSecret(sessionBase()));
+    res.setHeader(
+      'Set-Cookie',
+      `${COOKIE_NAME}=${value}; HttpOnly; SameSite=Lax; Path=/; Max-Age=${Math.floor(SESSION_TTL_MS / 1000)}`,
+    );
+  }
 
   return createServer((req, res) => {
     void (async () => {
@@ -206,6 +293,12 @@ export function createControlServer(deps: ControlServerDeps): Server {
         'Cache-Control': 'public, max-age=86400',
       });
       res.end(FAVICON_SVG);
+      return;
+    }
+    // GET /health : 免认证健康检查(监控 / 反向代理 / curl 探活)。
+    // 故意只报存活与进程运行时长,不暴露版本、设备 ID 等任何细节 —— 该端点谁都能访问。
+    if (req.method === 'GET' && path === '/health') {
+      sendJson(res, 200, { ok: true, msg: 'syncx is ok', uptime: Math.floor(process.uptime()) });
       return;
     }
     // 浏览器在无 <link rel="icon"> 时会自动请求 .ico;这里显式给 204,
@@ -227,7 +320,60 @@ export function createControlServer(deps: ControlServerDeps): Server {
     }
 
     const reqToken = readToken(req);
-    const authenticated = tokenMatches(reqToken ?? '', token);
+    const authenticated = credentialOk(reqToken);
+
+    // GET /api/auth : 公开。告诉登录页当前该渲染哪种表单(账号密码 / 令牌)。
+    if (req.method === 'GET' && req.url && pathname(req.url) === '/api/auth') {
+      const acct = authFile ? loadAccount(authFile) : undefined;
+      sendJson(res, 200, {
+        mode: acct ? 'password' : 'token',
+        ...(acct ? { username: acct.username } : {}),
+        ...(authFile ? {} : { passwordLogin: false }),
+      });
+      return;
+    }
+
+    // POST /api/login : 账号密码登录,成功后下发无状态签名会话。
+    if (req.method === 'POST' && req.url && pathname(req.url) === '/api/login') {
+      const locked = lockRemaining(req);
+      if (locked > 0) {
+        sendJson(res, 429, { error: `尝试过于频繁,请 ${Math.ceil(locked / 1000)}s 后重试` });
+        return;
+      }
+      if (!authFile) {
+        sendJson(res, 404, { error: '未启用账号密码登录' });
+        return;
+      }
+      let body: { username?: unknown; password?: unknown } = {};
+      try {
+        body = JSON.parse(await readBody(req)) as typeof body;
+      } catch {
+        sendJson(res, 400, { error: 'invalid json' });
+        return;
+      }
+      const username = typeof body.username === 'string' ? body.username : '';
+      const password = typeof body.password === 'string' ? body.password : '';
+      if (!username || !password) {
+        sendJson(res, 400, { error: '用户名和密码不能为空' });
+        return;
+      }
+      if (await verifyPassword(authFile, username, password)) {
+        noteSuccess(req);
+        issueSession(res, { via: 'password', sub: username, exp: Date.now() + SESSION_TTL_MS });
+        sendJson(res, 200, { ok: true });
+      } else {
+        noteFailure(req);
+        sendJson(res, 401, { error: '用户名或密码错误' });
+      }
+      return;
+    }
+
+    // POST /api/logout : 清 cookie。会话本身无状态,服务端不需要记录。
+    if (req.method === 'POST' && req.url && pathname(req.url) === '/api/logout') {
+      res.setHeader('Set-Cookie', `${COOKIE_NAME}=; HttpOnly; SameSite=Lax; Path=/; Max-Age=0`);
+      sendJson(res, 200, { ok: true });
+      return;
+    }
 
     // GET / : 纯 CSR 页面壳。客户端挂载后自行 fetch /api/status 拉取状态,
     // 交互(手动扫描/重连/增删目录)走 JSON API + fetch,不再整页刷新。
@@ -242,17 +388,24 @@ export function createControlServer(deps: ControlServerDeps): Server {
       return;
     }
 
-    // POST /login : set HttpOnly session cookie and redirect
+    // POST /login : 令牌登录(恢复通道)。同样下发签名会话,不再把 token 原文写进 cookie ——
+    // 分号/空格/非 ASCII 会破坏 cookie 语法(甚至让 writeHead 抛错),签名串天然是安全字符集。
     if (req.method === 'POST' && req.url && pathname(req.url) === '/login') {
+      const locked = lockRemaining(req);
+      if (locked > 0) {
+        res.writeHead(429, { 'Content-Type': 'text/plain; charset=utf-8' });
+        res.end(`尝试过于频繁,请 ${Math.ceil(locked / 1000)}s 后重试`);
+        return;
+      }
       const body = await readBody(req);
       const match = new URLSearchParams(body).get('token');
-      if (match && tokenMatches(match, token)) {
-        res.writeHead(302, {
-          Location: '/',
-          'Set-Cookie': `${COOKIE_NAME}=${token}; HttpOnly; SameSite=Lax; Path=/`,
-        });
+      if (tokenAccepted(match ?? undefined)) {
+        noteSuccess(req);
+        issueSession(res, { via: 'token', sub: 'token', exp: Date.now() + SESSION_TTL_MS });
+        res.writeHead(302, { Location: '/' });
         res.end();
       } else {
+        noteFailure(req);
         sendHtml(res, UI_SHELL);
       }
       return;
@@ -275,6 +428,49 @@ export function createControlServer(deps: ControlServerDeps): Server {
     // GET /api/status
     if (req.method === 'GET' && req.url && pathname(req.url) === '/api/status') {
       sendJson(res, 200, getStatus());
+      return;
+    }
+
+    // 设置 / 修改账号密码。必须已认证(令牌或旧密码均可),
+    // 保证「拿到 control.token 才能设密码」这条链不被绕过。
+    if (req.method === 'POST' && req.url && pathname(req.url) === '/api/auth/password') {
+      if (!authFile) {
+        sendJson(res, 404, { error: '未启用账号密码登录' });
+        return;
+      }
+      let body: { username?: unknown; password?: unknown } = {};
+      try {
+        body = JSON.parse(await readBody(req)) as typeof body;
+      } catch {
+        sendJson(res, 400, { error: 'invalid json' });
+        return;
+      }
+      const username = typeof body.username === 'string' ? body.username.trim() : '';
+      const password = typeof body.password === 'string' ? body.password : '';
+      if (!username) {
+        sendJson(res, 400, { error: '用户名不能为空' });
+        return;
+      }
+      if (password.length < 6) {
+        sendJson(res, 400, { error: '密码至少 6 位' });
+        return;
+      }
+      const rec = await setPassword(authFile, username, password);
+      // 密钥基已变成新密码哈希:旧会话立即失效,给当前这次请求补发一条新会话,
+      // 否则设置完密码当场就被踢下线。
+      issueSession(res, { via: 'password', sub: rec.username, exp: Date.now() + SESSION_TTL_MS });
+      sendJson(res, 200, { ok: true, username: rec.username });
+      return;
+    }
+
+    // 清除账号密码,退回「仅令牌登录」。同样会即时作废所有会话。
+    if (req.method === 'DELETE' && req.url && pathname(req.url) === '/api/auth/password') {
+      if (!authFile) {
+        sendJson(res, 404, { error: '未启用账号密码登录' });
+        return;
+      }
+      clearPassword(authFile);
+      sendJson(res, 200, { ok: true });
       return;
     }
 

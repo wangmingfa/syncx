@@ -43,6 +43,21 @@ function fetchJson(
 }
 
 describe('control api', () => {
+  it('GET /health needs no auth and only reports ok + uptime', async () => {
+    const server = createControlServer({ token: 'secret', getStatus: () => ({ ok: true }) });
+    server.listen(0, '127.0.0.1');
+    await once(server, 'listening');
+    const port = (server.address() as AddressInfo).port;
+
+    const res = await fetchJson(port, '/health');
+
+    expect(res.status).toBe(200);
+    expect(res.body).toMatchObject({ ok: true, msg: 'syncx is ok' });
+    expect((res.body as { uptime: number }).uptime).toBeGreaterThanOrEqual(0);
+
+    server.close();
+  });
+
   it('rejects requests without a token', async () => {
     const server = createControlServer({ token: 'secret', getStatus: () => ({ ok: true }) });
     server.listen(0, '127.0.0.1');
@@ -303,6 +318,8 @@ describe('control api hardening', () => {
   });
 
   it('sets an HttpOnly, Path=/ session cookie on successful login', async () => {
+    // 会话 cookie 存的是**签名串**,不再是把 token 原文塞进去:
+    // 原文含分号/空格/非 ASCII 时会破坏 cookie 语法(后者还会让 writeHead 抛错)。
     const server = createControlServer({ token: 'secret', getStatus: () => ({ ok: true }) });
     server.listen(0, '127.0.0.1');
     await once(server, 'listening');
@@ -310,13 +327,7 @@ describe('control api hardening', () => {
 
     const cookies = await new Promise<string[]>((resolve, reject) => {
       const req = request(
-        {
-          host: '127.0.0.1',
-          port,
-          path: '/login',
-          method: 'POST',
-          headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
-        },
+        { host: '127.0.0.1', port, path: '/login', method: 'POST', headers: { 'Content-Type': 'application/x-www-form-urlencoded' } },
         (res) => {
           resolve((res.headers['set-cookie'] as string[] | undefined) ?? []);
           res.resume();
@@ -327,11 +338,34 @@ describe('control api hardening', () => {
       req.end();
     });
 
-    expect(
-      cookies.some(
-        (c) => c.includes('syncx_session=secret') && c.includes('HttpOnly') && c.includes('Path=/'),
-      ),
-    ).toBe(true);
+    const session = cookies.find((c) => c.startsWith('syncx_session='));
+    expect(session).toBeDefined();
+    expect(session).toContain('HttpOnly');
+    expect(session).toContain('Path=/');
+    // 值是 base64url(payload).base64url(签名),不是 token 原文
+    const value = (session as string).slice('syncx_session='.length, (session as string).indexOf(';'));
+    expect(value).not.toBe('secret');
+    expect(value).toMatch(/^[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+$/);
+
+    server.close();
+  });
+
+  it('rejects unauthenticated requests even when the token is empty (no auth bypass)', async () => {
+    // 回归:曾经的 readToken 缺失时按 '' 参与常量时间比较,
+    // 与空 token 恒等 → 任何无凭据请求都能通过。现在不予放行。
+    const server = createControlServer({ token: '', getStatus: () => ({ ok: true }) });
+    server.listen(0, '127.0.0.1');
+    await once(server, 'listening');
+    const port = (server.address() as AddressInfo).port;
+
+    const noCred = await fetch(`http://127.0.0.1:${port}/api/status`);
+    expect(noCred.status).toBe(401);
+
+    // 显式携带空 cookie 也不放行
+    const emptyCookie = await fetch(`http://127.0.0.1:${port}/api/status`, {
+      headers: { Cookie: 'syncx_session=' },
+    });
+    expect(emptyCookie.status).toBe(401);
 
     server.close();
   });
