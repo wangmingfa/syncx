@@ -27,7 +27,8 @@ const DEFAULT_ROTATION: LogRotation = {
  */
 export function createLogger(logFile?: string): Logger {
   const prettyOpts: Parameters<typeof pretty>[0] = {
-    translateTime: 'yyyy-mm-dd HH:MM:ss',
+    // SYS: 前缀 = 按系统本地时区格式化;pino-pretty 不加前缀时默认 UTC(差 8 小时)
+    translateTime: 'SYS:yyyy-mm-dd HH:MM:ss',
     ignore: 'hostname,pid',
     colorize: false,
     singleLine: true,
