@@ -330,8 +330,9 @@ syncx start [--config <路径>] [--port <端口>] [--control-port <端口>] [--h
 # 停止运行中的 daemon(优先经控制 API 优雅关闭,失败回退信号)
 syncx stop [--config <路径>] [--control-port <端口>]
 
-# 查看状态:设备 ID 与共享目录数
-syncx status [--config <路径>]
+# 查看状态:daemon 运行状态、设备 ID 与共享目录数
+syncx status [--config <路径>] [--control-port <端口>]
+# daemon: running (pid 1234, up 1h02m)   ← daemon 未运行时显示 not running
 
 # 生成系统服务模板
 syncx install

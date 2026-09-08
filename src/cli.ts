@@ -194,6 +194,71 @@ function isProcessAlive(pid: number): boolean {
   }
 }
 
+/** 把秒数格式化成人类可读的运行时长:45s / 12m30s / 3h05m / 2d04h。 */
+export function formatUptime(seconds: number): string {
+  const d = Math.floor(seconds / 86400);
+  const h = Math.floor((seconds % 86400) / 3600);
+  const m = Math.floor((seconds % 3600) / 60);
+  const s = seconds % 60;
+  if (d > 0) return `${d}d${String(h).padStart(2, '0')}h`;
+  if (h > 0) return `${h}h${String(m).padStart(2, '0')}m`;
+  if (m > 0) return `${m}m${String(s).padStart(2, '0')}s`;
+  return `${s}s`;
+}
+
+/**
+ * 读取 daemon 运行状态(status 命令的 daemon 段)。纯读,不创建/不清理任何文件:
+ * - pid 文件不存在 → not running
+ * - pid 探活失败 → not running(提示 stale pid file,清理交给 stop 命令)
+ * - 存活 → running(pid + 经 /health 拿运行时长;health 不通只影响时长显示)
+ */
+export async function daemonStatusLines(
+  configDir: string,
+  controlPortOverride: number | undefined,
+  healthFetch: (url: string, init?: { signal: AbortSignal }) => Promise<{
+    ok: boolean;
+    arrayBuffer: () => Promise<ArrayBuffer>;
+    json: () => Promise<unknown>;
+  }> = fetch,
+): Promise<string[]> {
+  const pidFile = pidFilePath(configDir);
+  if (!existsSync(pidFile)) {
+    return ['daemon: not running'];
+  }
+
+  let info: PidRecord = {};
+  try {
+    info = JSON.parse(readFileSync(pidFile, 'utf8')) as PidRecord;
+  } catch {
+    // pid 文件损坏:按未知处理,与 stale 同等对待
+  }
+
+  const pid = info.pid;
+  if (typeof pid !== 'number' || !isProcessAlive(pid)) {
+    return ['daemon: not running (stale pid file)'];
+  }
+
+  const port = controlPortOverride ?? info.controlPort ?? 8384;
+  let uptime = '';
+  try {
+    const res = await healthFetch(`http://127.0.0.1:${port}/health`, { signal: AbortSignal.timeout(2000) });
+    if (res.ok) {
+      const body = (await res.json()) as { uptime?: unknown };
+      if (typeof body.uptime === 'number' && body.uptime >= 0) {
+        uptime = `, up ${formatUptime(body.uptime)}`;
+      }
+    }
+    await res.arrayBuffer().catch(() => {});
+  } catch {
+    // API 不通(如控制端口被改):进程确实活着,只是拿不到时长
+  }
+
+  return [
+    `daemon: running (pid ${pid}${uptime})`,
+    `control UI: http://127.0.0.1:${port}`,
+  ];
+}
+
 /**
  * 停止运行中的 daemon(stop 命令)。不创建任何文件/身份。
  *
@@ -312,6 +377,9 @@ export async function run(args: ParsedArgs): Promise<void> {
     saveConfig(configPath, config);
   }
   if (args.command === 'status') {
+    for (const line of await daemonStatusLines(configDir, args.controlPort)) {
+      console.log(line);
+    }
     console.log(`device: ${identity.deviceId}`);
     console.log(`shared folders: ${config.sharedFolders.length}`);
     for (const f of config.sharedFolders) {

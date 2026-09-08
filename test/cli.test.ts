@@ -1,7 +1,8 @@
 import { describe, expect, it } from 'vitest';
-import { readFileSync } from 'node:fs';
+import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { parseArgs, reconnectDelayMs } from '../src/cli.js';
+import { daemonStatusLines, formatUptime, parseArgs, reconnectDelayMs } from '../src/cli.js';
 import { helpText, packageVersion, wantsHelp, wantsVersion } from '../src/usage.js';
 
 describe('cli parseArgs', () => {
@@ -215,5 +216,75 @@ describe('cli help/version 开关', () => {
       version: string;
     };
     expect(packageVersion()).toBe(pkg.version);
+  });
+});
+
+describe('daemonStatusLines / formatUptime', () => {
+  const healthFetch = (uptime: number | null) =>
+    (url: string) =>
+      uptime === null
+        ? Promise.reject(new Error('connection refused'))
+        : Promise.resolve({
+            ok: true,
+            arrayBuffer: () => Promise.resolve(new ArrayBuffer(0)),
+            json: () => Promise.resolve({ uptime }),
+          });
+
+  it('formats uptime in human readable units', () => {
+    expect(formatUptime(45)).toBe('45s');
+    expect(formatUptime(750)).toBe('12m30s');
+    expect(formatUptime(3725)).toBe('1h02m');
+    expect(formatUptime(183_600)).toBe('2d03h');
+  });
+
+  it('reports not running when no pid file exists', async () => {
+    const dir = mkdtempSync(join(tmpdir(), 'syncx-status-'));
+    try {
+      expect(await daemonStatusLines(dir, undefined)).toEqual(['daemon: not running']);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it('reports stale pid file when the recorded process is gone', async () => {
+    const dir = mkdtempSync(join(tmpdir(), 'syncx-status-'));
+    try {
+      // 用一个必然已退出的子进程 pid 制造 stale 记录
+      const { spawnSync } = await import('node:child_process');
+      const dead = spawnSync(process.execPath, ['-e', 'process.exit(0)']);
+      const exitedPid = dead.pid ?? 0;
+      writeFileSync(join(dir, 'syncx.pid'), JSON.stringify({ pid: exitedPid, controlPort: 8384 }));
+      expect(await daemonStatusLines(dir, undefined)).toEqual(['daemon: not running (stale pid file)']);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it('reports running with uptime and control URL when alive', async () => {
+    const dir = mkdtempSync(join(tmpdir(), 'syncx-status-'));
+    try {
+      writeFileSync(join(dir, 'syncx.pid'), JSON.stringify({ pid: process.pid, controlPort: 18499 }));
+      const lines = await daemonStatusLines(dir, undefined, healthFetch(3725));
+      expect(lines).toEqual([
+        `daemon: running (pid ${process.pid}, up 1h02m)`,
+        'control UI: http://127.0.0.1:18499',
+      ]);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it('still reports running without uptime when the health endpoint is unreachable', async () => {
+    const dir = mkdtempSync(join(tmpdir(), 'syncx-status-'));
+    try {
+      writeFileSync(join(dir, 'syncx.pid'), JSON.stringify({ pid: process.pid, controlPort: 18499 }));
+      const lines = await daemonStatusLines(dir, undefined, healthFetch(null));
+      expect(lines).toEqual([
+        `daemon: running (pid ${process.pid})`,
+        'control UI: http://127.0.0.1:18499',
+      ]);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
   });
 });
