@@ -61,6 +61,7 @@ export function helpText(version: string): string {
     '  invite <folder-path>      为已配置的共享目录生成一次性邀请码',
     '  join <code> <local-path>  接受邀请并添加本地共享目录',
     '  revoke <code>             吊销一个已发出的邀请码',
+    '  upgrade [tag]             自升级 npm 包(tag 为发布通道,默认 latest,可填 beta)',
     '',
     '选项:',
     '  -h, --help                显示本帮助',
@@ -79,6 +80,8 @@ export function helpText(version: string): string {
     '  syncx status                   查看本机 Device ID',
     '  syncx invite D:/sync           生成邀请码交给对端',
     '  syncx join <code> D:/sync      接受邀请并开始同步',
+    '  syncx upgrade                  升级到最新正式版',
+    '  syncx upgrade beta             切到 beta 预发布通道',
     '',
   ].join('\n');
 }

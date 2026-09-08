@@ -1,5 +1,5 @@
 export interface ParsedArgs {
-  command: 'start' | 'stop' | 'status' | 'install' | 'invite' | 'join' | 'revoke';
+  command: 'start' | 'stop' | 'status' | 'install' | 'invite' | 'join' | 'revoke' | 'upgrade';
   /** 位置参数(如 invite/join 的参数)。 */
   positionals: string[];
   configPath?: string;
@@ -13,7 +13,7 @@ export interface ParsedArgs {
   devViteUrl?: string;
 }
 
-const COMMANDS = new Set(['start', 'stop', 'status', 'install', 'invite', 'join', 'revoke']);
+const COMMANDS = new Set(['start', 'stop', 'status', 'install', 'invite', 'join', 'revoke', 'upgrade']);
 
 /** 控制 API 可安全绑定的回环地址;非回环地址必须显式 --expose-control。 */
 const LOOPBACK_HOSTS = new Set(['127.0.0.1', '::1', 'localhost']);
@@ -121,6 +121,7 @@ import { getLanAddresses, formatHost } from './net/addresses.js';
 import { renderSystemdUnit, renderLaunchdPlist, renderWindowsService } from './install.js';
 import { WebSocket } from 'ws';
 import { createLogger } from './logger.js';
+import { runUpgrade } from './upgrade.js';
 
 /** 一个共享目录的运行期状态:索引、执行器与本地索引,随配置热重载增删。 */
 interface FolderState {
@@ -388,6 +389,12 @@ export async function run(args: ParsedArgs): Promise<void> {
   // 不应该凭空创建身份文件、默认配置等任何东西。
   if (args.command === 'stop') {
     await stopDaemon(configDir, args.controlPort);
+    return;
+  }
+
+  // upgrade 同样不依赖本地身份/配置:自升级 npm 包,与 ~/.syncx 数据无关
+  if (args.command === 'upgrade') {
+    await runUpgrade(args.positionals[0]);
     return;
   }
 
