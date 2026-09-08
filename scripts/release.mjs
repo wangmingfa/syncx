@@ -206,17 +206,28 @@ async function withSpinner(text, fn) {
     }
   }
   let frame = 0;
+  // \r 只回到行首、不清除内容:收尾行比动画帧短时(帧 `X text... (Ns)` 比
+  // `✔ text (Ns)` 多 3 字符),行尾会残留上一帧的尾巴(如 `(2s)2s)`)。
+  // 因此记录上一帧宽度,收尾时补空格盖掉。
+  let lastLen = 0;
+  const writeLine = (s) => {
+    lastLen = s.length;
+    process.stdout.write(`\r${s}`);
+  };
+  const finish = (s) => {
+    process.stdout.write(`\r${s}${' '.repeat(Math.max(0, lastLen - s.length))}\n`);
+  };
   const timer = setInterval(() => {
-    process.stdout.write(`\r${SPINNER_FRAMES[frame++ % SPINNER_FRAMES.length]} ${text}... (${elapsed()}s)`);
+    writeLine(`${SPINNER_FRAMES[frame++ % SPINNER_FRAMES.length]} ${text}... (${elapsed()}s)`);
   }, 100);
   try {
     const r = await fn();
     clearInterval(timer);
-    process.stdout.write(`\r✔ ${text} (${elapsed()}s)\n`);
+    finish(`✔ ${text} (${elapsed()}s)`);
     return r;
   } catch (e) {
     clearInterval(timer);
-    process.stdout.write(`\r✗ ${text}\n`);
+    finish(`✗ ${text}`);
     throw e;
   }
 }
@@ -354,30 +365,37 @@ function bumpBase([maj, min, pat], bump) {
  * @param current        基准版本(远端该通道最新版,或本地 package.json 兜底)
  * @param channel        latest 或 beta 等预发布标签名
  * @param bump           major / minor / patch / iteration
- * @param isFirstRelease 远端该通道查不到任何版本(首发)
+ * @param isFirstRelease 远端该通道查不到任何版本(首发)。此时基准是「本地已拟定、但尚未发布」
+ *                       的版本,patch/iteration 直接采用它(否则 0.1.0 永远发不出去);
+ *                       minor/major 仍按层级抬升 —— 那是用户明确表达的意图。
  */
 function nextVersion(current, channel, bump, isFirstRelease = false) {
   const { nums, pre } = parseVersion(current);
+  const base = `${nums[0]}.${nums[1]}.${nums[2]}`;
 
   if (channel !== 'latest') {
     if (bump === 'iteration') {
       // 当前已在同标签的预发布线上:迭代号 +1(beta.9 → beta.10,按数值比较)
       if (pre && pre.startsWith(`${channel}.`)) {
         const n = Number(pre.slice(channel.length + 1)) || 0;
-        return `${nums[0]}.${nums[1]}.${nums[2]}-${channel}.${n + 1}`;
+        return `${base}-${channel}.${n + 1}`;
       }
       // 当前是 stable 或别的预发布标签:切到下一个 patch 的 -<channel>.1
       //   首发例外:直接用当前 base 挂 -beta.1(如 0.1.0 → 0.1.0-beta.1)
-      if (isFirstRelease) return `${nums[0]}.${nums[1]}.${nums[2]}-${channel}.1`;
+      if (isFirstRelease) return `${base}-${channel}.1`;
       const [maj, min, pat] = bumpBase(nums, 'patch');
       return `${maj}.${min}.${pat}-${channel}.1`;
     }
+    // 预发布 + patch:首发时直接采用 base(0.1.0-beta.1),否则升基础版本
+    if (bump === 'patch' && isFirstRelease) return `${base}-${channel}.1`;
     // 预发布 + major/minor/patch:升基础版本并附 -<channel>.1
     const [maj, min, pat] = bumpBase(nums, bump);
     return `${maj}.${min}.${pat}-${channel}.1`;
   }
 
   // latest 通道:iteration 无预发布概念,等价于 patch
+  // 首发时两者都直接采用 base(本地 0.1.0 尚未发布,+1 会让它永久缺失)
+  if (isFirstRelease && (bump === 'patch' || bump === 'iteration')) return base;
   const [maj, min, pat] = bumpBase(nums, bump === 'iteration' ? 'patch' : bump);
   return `${maj}.${min}.${pat}`;
 }
@@ -626,15 +644,22 @@ if (explicitVersion) {
   // 选项右侧直接预览「选中后得到的版本号」,避免猜
   const preview = (b) => nextVersion(base, channel, b, isFirstRelease);
   const bumpDefault = channel === 'latest' ? 'patch' : 'iteration';
+  // 首发时 patch/iteration 不 +1 而是直接发布 base,文案要跟着改,否则会出现
+  // 「修订号 +1 → 0.1.0」这种自相矛盾的提示。
+  const patchHint = isFirstRelease
+    ? `首发,直接发布 → ${preview('patch')}`
+    : `修订号 +1 → ${preview('patch')}`;
+  const iterationHint =
+    channel === 'latest'
+      ? isFirstRelease
+        ? `正式通道首发,直接发布 → ${preview('iteration')}`
+        : `正式通道等价于 patch → ${preview('iteration')}`
+      : `预发布迭代 +1 → ${preview('iteration')}`;
   const bumpOptions = [
-    { value: 'patch', label: 'patch', hint: `修订号 +1 → ${preview('patch')}` },
+    { value: 'patch', label: 'patch', hint: patchHint },
     { value: 'minor', label: 'minor', hint: `次版本号 +1 → ${preview('minor')}` },
     { value: 'major', label: 'major', hint: `主版本号 +1 → ${preview('major')}` },
-    {
-      value: 'iteration',
-      label: 'iteration',
-      hint: channel === 'latest' ? `正式通道等价于 patch → ${preview('iteration')}` : `预发布迭代 +1 → ${preview('iteration')}`,
-    },
+    { value: 'iteration', label: 'iteration', hint: iterationHint },
   ];
   bump = await selectPrompt('选择版本升级方式:', bumpOptions, bumpOptions.findIndex((o) => o.value === bumpDefault));
 }
