@@ -321,6 +321,72 @@ describe('control api folder config', () => {
   });
 });
 
+describe('control api folder gitignore toggle', () => {
+  it('POST /api/folders/gitignore passes path and enabled to the callback', async () => {
+    const calls: Array<{ path: string; enabled: boolean }> = [];
+    const server = createControlServer({
+      token: 'secret',
+      getStatus: () => ({ ok: true }),
+      setFolderUseGitignore: (path, enabled) => {
+        calls.push({ path, enabled });
+      },
+    });
+    server.listen(0, '127.0.0.1');
+    await once(server, 'listening');
+    const port = (server.address() as AddressInfo).port;
+
+    const on = await fetchJson(port, '/api/folders/gitignore', 'secret', {
+      method: 'POST',
+      body: { path: '/tmp/proj', enabled: true },
+    });
+    const off = await fetchJson(port, '/api/folders/gitignore', 'secret', {
+      method: 'POST',
+      body: { path: '/tmp/proj', enabled: false },
+    });
+    // enabled 缺省按 true 处理
+    const omitted = await fetchJson(port, '/api/folders/gitignore', 'secret', {
+      method: 'POST',
+      body: { path: '/tmp/proj2' },
+    });
+
+    expect(on.status).toBe(200);
+    expect(off.status).toBe(200);
+    expect(omitted.status).toBe(200);
+    expect(calls).toEqual([
+      { path: '/tmp/proj', enabled: true },
+      { path: '/tmp/proj', enabled: false },
+      { path: '/tmp/proj2', enabled: true },
+    ]);
+
+    server.close();
+  });
+
+  it('rejects POST /api/folders/gitignore without a token or path', async () => {
+    const server = createControlServer({
+      token: 'secret',
+      getStatus: () => ({ ok: true }),
+      setFolderUseGitignore: () => {},
+    });
+    server.listen(0, '127.0.0.1');
+    await once(server, 'listening');
+    const port = (server.address() as AddressInfo).port;
+
+    const noAuth = await fetchJson(port, '/api/folders/gitignore', undefined, {
+      method: 'POST',
+      body: { path: '/tmp/proj', enabled: false },
+    });
+    const noPath = await fetchJson(port, '/api/folders/gitignore', 'secret', {
+      method: 'POST',
+      body: { enabled: false },
+    });
+
+    expect(noAuth.status).toBe(401);
+    expect(noPath.status).toBe(400);
+
+    server.close();
+  });
+});
+
 describe('control api hardening', () => {
   it('rejects an oversized request body with 413 instead of hanging', async () => {
     const server = createControlServer({

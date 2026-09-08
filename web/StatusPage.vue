@@ -13,6 +13,8 @@ interface FolderInfo {
   id?: string;
   path: string;
   devices: string[];
+  /** 是否遵循 .gitignore 忽略规则;后端缺省 true(未显式关闭都视为开启)。 */
+  useGitignore?: boolean;
 }
 
 interface DeviceInfo {
@@ -347,6 +349,24 @@ async function commitFolderDevices(path: string, devices: string[]): Promise<voi
   } finally {
     busy.value = false;
   }
+}
+
+// ---- .gitignore 忽略开关(每目录一张卡片上,缺省勾选) ----
+
+/** 勾选 = 忽略 .gitignore 中的文件(不参与同步);取消勾选 = .gitignore 内文件也同步。 */
+async function toggleFolderGitignore(f: FolderInfo, enabled: boolean): Promise<void> {
+  const res = await fetch('/api/folders/gitignore', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ path: f.path, enabled }),
+  });
+  if (!res.ok) {
+    showToast(`更新失败 (${res.status})`);
+    await refreshStatus(); // 回读后端真实状态,避免勾选框与配置不一致
+    return;
+  }
+  f.useGitignore = enabled;
+  showToast(enabled ? '已开启:.gitignore 中的文件将不再同步' : '已关闭:.gitignore 中的文件也会同步');
 }
 
 // ---- 添加共享目录(默认收起,点按钮展开表单) ----
@@ -882,6 +902,15 @@ async function removePassword(): Promise<void> {
               <span v-if="f.devices.length === 0" class="device-tag device-tag-empty">未指派设备</span>
             </div>
             <n-button size="small" tertiary :disabled="busy" @click="openEditDevices(f.path, f.devices)">编辑</n-button>
+          </div>
+
+          <!-- .gitignore 忽略开关:勾选时目录内 .gitignore 命中的文件不参与同步(.syncxignore 优先级更高) -->
+          <div class="gitignore-row">
+            <n-checkbox
+              :checked="f.useGitignore !== false"
+              :disabled="busy"
+              @update:checked="(v: boolean) => toggleFolderGitignore(f, v)"
+            >忽略 .gitignore 中的文件</n-checkbox>
           </div>
 
           <div v-if="progressOf(f)" class="item-progress">

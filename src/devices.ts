@@ -64,6 +64,15 @@ export function setFolderDevices(configPath: string, path: string, devices: stri
   saveConfig(configPath, config);
 }
 
+/** 设置某目录是否遵循 .gitignore 忽略规则(目录卡片上的开关;缺省 true)。 */
+export function setFolderGitignore(configPath: string, path: string, enabled: boolean): void {
+  const config = loadConfig(configPath);
+  const existing = config.sharedFolders.find((f) => f.path === path);
+  if (!existing) throw new Error(`folder not configured: ${path}`);
+  existing.useGitignore = enabled;
+  saveConfig(configPath, config);
+}
+
 /** 按路径移除一个共享目录。 */
 export function removeSharedFolder(configPath: string, path: string): void {
   const config = loadConfig(configPath);

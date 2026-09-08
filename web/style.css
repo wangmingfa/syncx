@@ -668,6 +668,14 @@ tbody tr:last-child td {
   gap: 10px;
 }
 
+/* 目录卡片上的 .gitignore 忽略开关行 */
+.gitignore-row {
+  margin-top: 2px;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
 /* 已指派设备的只读标签行(卡片上不可直接改,编辑走弹窗) */
 .device-tags {
   display: flex;

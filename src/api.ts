@@ -35,6 +35,8 @@ export interface ControlServerDeps {
   removeDevice?: (deviceId: string) => void;
   /** 精确设置某目录的设备列表(按目录多选设备的提交)。 */
   setFolderDevices?: (path: string, devices: string[]) => void;
+  /** 设置某目录是否遵循 .gitignore 忽略规则(缺省 true)。 */
+  setFolderUseGitignore?: (path: string, enabled: boolean) => void;
   /** 列出待确认项(对方推送的配对 / 目录共享邀请)。 */
   getOffers?: () => unknown;
   /** 读取某共享目录的同步记录(最近变更,倒序)。参数为目录 ID。 */
@@ -243,7 +245,7 @@ async function ensureSsr(): Promise<void> {
  * (见 `isControlRoute`),生产形态下不传该参数。
  */
 export function createControlServer(deps: ControlServerDeps): Server {
-  const { token, authFile, getStatus, shutdown, addFolder, removeFolder, addDevice, removeDevice, setFolderDevices, rescan, reconnect, getOffers, getFolderHistory, acceptOffer, declineOffer, restoreOffer, devViteUrl } = deps;
+  const { token, authFile, getStatus, shutdown, addFolder, removeFolder, addDevice, removeDevice, setFolderDevices, setFolderUseGitignore, rescan, reconnect, getOffers, getFolderHistory, acceptOffer, declineOffer, restoreOffer, devViteUrl } = deps;
 
   /**
    * 会话签名密钥的「基」。
@@ -561,6 +563,23 @@ export function createControlServer(deps: ControlServerDeps): Server {
         }
         const devices = ((body as any).devices ?? []).filter((d: unknown): d is string => typeof d === 'string');
         setFolderDevices((body as any).path, devices);
+        sendJson(res, 200, { ok: true });
+      } catch (e) {
+        sendJson(res, 400, { error: e instanceof Error ? e.message : 'invalid json body' });
+      }
+      return;
+    }
+
+    // POST /api/folders/gitignore : 设置某目录是否遵循 .gitignore 忽略规则
+    if (req.method === 'POST' && req.url && pathname(req.url) === '/api/folders/gitignore' && setFolderUseGitignore) {
+      try {
+        const raw = await readBody(req);
+        const body = raw === '' ? {} : JSON.parse(raw);
+        if (typeof (body as any).path !== 'string' || (body as any).path === '') {
+          sendJson(res, 400, { error: 'path is required' });
+          return;
+        }
+        setFolderUseGitignore((body as any).path, (body as any).enabled !== false);
         sendJson(res, 200, { ok: true });
       } catch (e) {
         sendJson(res, 400, { error: e instanceof Error ? e.message : 'invalid json body' });

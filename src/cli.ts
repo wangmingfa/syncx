@@ -113,7 +113,7 @@ import { makePeerTransport, attachPeerMessages, sendControlMessage, type Control
 import { RateLimiter } from './ratelimit.js';
 import { createControlServer } from './api.js';
 import { buildStatus, type DeviceStatus, type SyncProgress } from './status.js';
-import { addSharedFolder, removeSharedFolder, isPeerAllowed, addKnownDevice, removeKnownDevice, addPeer, removePeer, setFolderDevices } from './devices.js';
+import { addSharedFolder, removeSharedFolder, isPeerAllowed, addKnownDevice, removeKnownDevice, addPeer, removePeer, setFolderDevices, setFolderGitignore } from './devices.js';
 import { receiveOffer, markOfferAccepted, markOfferDeclined, restoreDeclinedOffer, listOpenOffers, makeOfferId } from './offers.js';
 import { createInviteCode, parseInviteCode, revokeInviteCode } from './invite.js';
 import { folderIdFor, folderIndexPath, type SharedFolderConfig } from './config.js';
@@ -168,6 +168,29 @@ function loadOrCreateToken(configDir: string): string {
   const token = randomBytes(24).toString('hex');
   writeFileSync(file, token, { mode: 0o600 });
   return token;
+}
+
+/**
+ * 读取一个共享目录的忽略规则行(按优先级从低到高排列,后读的规则可覆盖先读的):
+ * 1. `.gitignore` — 仅当 useGitignore 为 true(目录配置缺省即开启)时并入
+ * 2. `.syncxignore` — syncx 自己的忽略文件,优先级更高,可用 `!` 负向规则覆盖 .gitignore
+ * 两个文件都不存在或不可读时返回空数组,不抛错(目录可能刚创建)。
+ */
+export function readFolderIgnoreLines(folderPath: string, useGitignore: boolean): string[] {
+  const lines: string[] = [];
+  if (useGitignore) {
+    try {
+      lines.push(...readFileSync(join(folderPath, '.gitignore'), 'utf8').split('\n'));
+    } catch {
+      // 无 .gitignore
+    }
+  }
+  try {
+    lines.push(...readFileSync(join(folderPath, '.syncxignore'), 'utf8').split('\n'));
+  } catch {
+    // 无 .syncxignore
+  }
+  return lines;
 }
 
 /* ---------- stop:查找并停止运行中的 daemon ---------- */
@@ -483,13 +506,8 @@ export async function run(args: ParsedArgs): Promise<void> {
     const id = folderIdFor(f);
     const index = openIndexStore(folderIndexPath(configDir, id));
     const executor = createLocalExecutor(f.path, index);
-    // 忽略规则每设备本地,从共享目录的 .syncxignore 读取(不存在则为空)
-    let ignoreLines: string[] = [];
-    try {
-      ignoreLines = readFileSync(join(f.path, '.syncxignore'), 'utf8').split('\n');
-    } catch {
-      // no ignore file
-    }
+    // 忽略规则每设备本地:.gitignore(默认并入,可按目录关闭)+ .syncxignore(优先级更高)
+    const ignoreLines = readFolderIgnoreLines(f.path, f.useGitignore !== false);
     const localIndex = new Map(
       filterIndexedEntries(parseIgnoreRules(ignoreLines), index.listEntries()).map((e) => [e.path, e]),
     );
@@ -624,11 +642,8 @@ export async function run(args: ParsedArgs): Promise<void> {
 
   async function scanOnce(): Promise<void> {
     for (const folder of folderStates) {
-      try {
-        folder.ignoreLines = readFileSync(join(folder.path, '.syncxignore'), 'utf8').split('\n');
-      } catch {
-        // no ignore file
-      }
+      // 每轮扫描重读忽略文件:.gitignore(按目录配置可关)+ .syncxignore,改动即生效
+      folder.ignoreLines = readFolderIgnoreLines(folder.path, folder.config.useGitignore !== false);
       const diff = scanFolder(
         folder.path,
         folder.index,
@@ -1114,6 +1129,20 @@ export async function run(args: ParsedArgs): Promise<void> {
       // 指派变化(新增或摘除)都会改变本机的目录清单,向前后两批设备重推
       for (const d of new Set([...beforeDevices, ...devices])) {
         pushFolderSyncList(d);
+      }
+    },
+    setFolderUseGitignore: (path, enabled) => {
+      setFolderGitignore(configPath, path, enabled);
+      logger.info(`folder gitignore ${enabled ? 'enabled' : 'disabled'}: ${path}`);
+      // 立即生效:重读忽略行并重建本地索引(开关切换会增减被忽略的文件集合)。
+      // 配置 watcher 随后也会热重载,这里是让下一次扫描前就生效。
+      const folder = folderStates.find((f) => f.path === path);
+      if (folder) {
+        folder.config = loadConfig(configPath).sharedFolders.find((f) => f.path === path) ?? folder.config;
+        folder.ignoreLines = readFolderIgnoreLines(folder.path, folder.config.useGitignore !== false);
+        folder.localIndex = new Map(
+          filterIndexedEntries(parseIgnoreRules(folder.ignoreLines), folder.index.listEntries()).map((e) => [e.path, e]),
+        );
       }
     },
     // 待确认区下发 pending + declined:已忽略项灰显供「恢复」,兜住手误忽略

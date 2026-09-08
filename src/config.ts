@@ -15,6 +15,11 @@ export interface SharedFolderConfig {
    * 限制单个对端的发送速率,防止大文件同步占满 LAN 带宽。
    */
   maxBandwidthKbps?: number;
+  /**
+   * 是否把目录内 .gitignore 的规则并入忽略集(缺省 true = 遵循)。
+   * 开启时 .gitignore 命中的文件/目录不参与同步;.syncxignore 优先级更高,可用负向规则覆盖。
+   */
+  useGitignore?: boolean;
 }
 
 /** 目录的 wire 标识:优先 id,缺省用 path。 */

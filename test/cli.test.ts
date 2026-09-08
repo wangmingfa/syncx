@@ -2,7 +2,8 @@ import { describe, expect, it } from 'vitest';
 import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { daemonStatusLines, formatUptime, parseArgs, reconnectDelayMs } from '../src/cli.js';
+import { daemonStatusLines, formatUptime, parseArgs, readFolderIgnoreLines, reconnectDelayMs } from '../src/cli.js';
+import { isIgnored, parseIgnoreRules } from '../src/ignore.js';
 import { helpText, packageVersion, wantsHelp, wantsVersion } from '../src/usage.js';
 
 describe('cli parseArgs', () => {
@@ -283,6 +284,41 @@ describe('daemonStatusLines / formatUptime', () => {
         `daemon: running (pid ${process.pid})`,
         'control UI: http://127.0.0.1:18499',
       ]);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+});
+
+describe('readFolderIgnoreLines', () => {
+  it('merges .gitignore and .syncxignore with syncxignore last (higher precedence)', () => {
+    const dir = mkdtempSync(join(tmpdir(), 'syncx-ignore-'));
+    try {
+      writeFileSync(join(dir, '.gitignore'), 'node_modules/\n*.log\n!keep.log\n');
+      writeFileSync(join(dir, '.syncxignore'), 'secret.txt\n!*.log\n');
+      const lines = readFolderIgnoreLines(dir, true).map((l) => l.trim()).filter((l) => l !== '');
+      // .gitignore 在前,.syncxignore 在后(优先级更高,负向规则可覆盖)
+      expect(lines).toEqual(['node_modules/', '*.log', '!keep.log', 'secret.txt', '!*.log']);
+
+      const rules = parseIgnoreRules(readFolderIgnoreLines(dir, true));
+      expect(isIgnored(rules, 'node_modules', true)).toBe(true);
+      expect(isIgnored(rules, 'secret.txt', false)).toBe(true);
+      expect(isIgnored(rules, 'a/b/c.log', false)).toBe(false); // 被后读的 !*.log 负向覆盖
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it('skips .gitignore when disabled but still reads .syncxignore', () => {
+    const dir = mkdtempSync(join(tmpdir(), 'syncx-ignore-'));
+    try {
+      writeFileSync(join(dir, '.gitignore'), 'node_modules/\n');
+      writeFileSync(join(dir, '.syncxignore'), 'secret.txt\n');
+      const rules = parseIgnoreRules(readFolderIgnoreLines(dir, false));
+      expect(isIgnored(rules, 'node_modules/x.js', false)).toBe(false); // .gitignore 未并入
+      expect(isIgnored(rules, 'secret.txt', false)).toBe(true);
+      // 无任何忽略文件时不抛错,返回空规则
+      expect(readFolderIgnoreLines(mkdtempSync(join(tmpdir(), 'syncx-ignore-empty')), true)).toEqual([]);
     } finally {
       rmSync(dir, { recursive: true, force: true });
     }
