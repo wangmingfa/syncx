@@ -188,6 +188,17 @@ function npmRaw(args) {
 /** 轻量终端 spinner:任务期间显示旋转动画 + 耗时;非 TTY 环境改用周期性「仍在等待」提示,
  *  避免 npm 网络查询较慢时整段静默、看起来像卡死。借鉴 model-gate 的 withSpinner。 */
 const SPINNER_FRAMES = ['⠋', '⠙', '⠹', '⠸', '⠼', '⠴', '⠦', '⠧', '⠇', '⠏'];
+
+/**
+ * 当前活动的 spinner 控制器(没有则 null)。
+ * 用途:spinner 包裹的任务里若需要**向用户提问**(如输 OTP、确认 npm login),
+ * 动画会和提示行抢同一行输出、糊成一坨 —— 提问前 pauseSpinner() 抹掉动画行并停表,
+ * 提问结束 resumeSpinner() 接着转。
+ */
+let spinnerCtl = null;
+const pauseSpinner = () => spinnerCtl?.pause();
+const resumeSpinner = () => spinnerCtl?.resume();
+
 async function withSpinner(text, fn) {
   const start = Date.now();
   const elapsed = () => Math.floor((Date.now() - start) / 1000);
@@ -217,9 +228,21 @@ async function withSpinner(text, fn) {
   const finish = (s) => {
     process.stdout.write(`\r${s}${' '.repeat(Math.max(0, lastLen - s.length))}\n`);
   };
-  const timer = setInterval(() => {
-    writeLine(`${SPINNER_FRAMES[frame++ % SPINNER_FRAMES.length]} ${text}... (${elapsed()}s)`);
-  }, 100);
+  const tick = () => writeLine(`${SPINNER_FRAMES[frame++ % SPINNER_FRAMES.length]} ${text}... (${elapsed()}s)`);
+  let timer = setInterval(tick, 100);
+  // 暂停:停表并抹掉动画行(补空格再回车),把整行让给提问/输出
+  spinnerCtl = {
+    pause() {
+      clearInterval(timer);
+      timer = null;
+      process.stdout.write(`\r${' '.repeat(lastLen)}\r`);
+      lastLen = 0;
+    },
+    resume() {
+      if (timer) return;
+      timer = setInterval(tick, 100);
+    },
+  };
   try {
     const r = await fn();
     clearInterval(timer);
@@ -229,6 +252,8 @@ async function withSpinner(text, fn) {
     clearInterval(timer);
     finish(`✗ ${text}`);
     throw e;
+  } finally {
+    spinnerCtl = null;
   }
 }
 
@@ -438,13 +463,16 @@ async function ensureNpmLogin() {
   if (isInteractive()) {
     // 默认「是」:未登录时直接回车即进入 npm login,发布流程不会被打断。
     // (登录会拉起浏览器授权,完成后回到终端继续;不想登录用 ↓ 选「否」。)
+    pauseSpinner(); // 若外层套了 spinner,先让出整行再提问
     const ok = await selectPrompt('未登录，是否现在执行 npm login？', [
       { value: true, label: '是', hint: '立即 npm login（会拉起浏览器授权，完成后回到终端继续）' },
       { value: false, label: '否', hint: '稍后自行 npm login 再重试（本次发布会中止）' },
     ], 0);
     if (ok) {
+      // npm login 是 inherit 的交互式子进程,同样不能与动画同行 —— 保持暂停,登录结束再恢复
       await npm(['login'], { inherit: true });
       const re = await npmRaw(['whoami']);
+      resumeSpinner();
       if (re.code !== 0) fail('npm login 未完成或失败,请检查登录状态后重试。');
       log(`npm 登录成功: ${re.stdout.trim()}`);
       return;
@@ -868,9 +896,12 @@ if (opts.dryRun) {
         const needOtp = e instanceof ExecError && /EOTP|one[- ]?time password|ENEEDAUTH|incorrect otp/i.test(e.stderrTail);
         if (needOtp && attempts < 3) {
           attempts += 1;
+          // 先抹掉 spinner 动画行再提问,否则动画与提示/输入行会糊在一起
+          pauseSpinner();
           warn(`OTP 缺失或无效(第 ${attempts} 次),请重新输入`);
           otp = await readOtp();
           if (!otp) fail('未提供 OTP。请用 --otp=<code> 或设置 SYNCX_NPM_OTP 后重试。');
+          resumeSpinner();
           continue;
         }
         throw e;
