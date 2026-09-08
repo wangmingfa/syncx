@@ -150,6 +150,7 @@ describe('control api folder config', () => {
       getStatus: () => ({ ok: true }),
       addFolder: (path, devices) => {
         added.push({ path, devices });
+        return true; // 目录不存在被自动创建
       },
     });
     server.listen(0, '127.0.0.1');
@@ -162,6 +163,7 @@ describe('control api folder config', () => {
     });
 
     expect(res.status).toBe(201);
+    expect(res.body).toEqual({ ok: true, created: true });
     expect(added).toEqual([{ path: '/data/docs', devices: ['DEV1234567'] }]);
 
     server.close();

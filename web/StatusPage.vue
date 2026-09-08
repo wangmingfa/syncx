@@ -398,7 +398,8 @@ async function addFolder(): Promise<void> {
       }),
     });
     if (!res.ok) throw new Error(`add folder ${res.status}`);
-    showToast('已添加共享目录');
+    const data = (await res.json()) as { created?: boolean };
+    showToast(data.created ? '已添加共享目录(原路径不存在,已自动创建)' : '已添加共享目录');
     newPath.value = '';
     newFolderId.value = '';
     newFolderDevices.value = [];
@@ -791,6 +792,7 @@ async function removePassword(): Promise<void> {
         <div class="item-sub">来自 <span class="mono">{{ o.fromDeviceId }}</span></div>
         <div v-if="o.kind === 'folder'" class="offer-path">
           <n-input v-model:value="offerPaths[o.id]" placeholder="本机目录绝对路径,如 /home/me/Documents" />
+          <p class="form-hint">目录不存在时会自动创建</p>
         </div>
         <div class="actions">
           <n-button size="small" type="primary" :disabled="busy" @click="acceptOffer(o)">确认</n-button>
@@ -844,6 +846,7 @@ async function removePassword(): Promise<void> {
         <!-- 添加共享目录:头部按钮触发展开;列表为空时表单常显 -->
         <form v-if="addFolderOpen || status.folders.length === 0" class="add-form" @submit.prevent="addFolder">
           <n-input v-model:value="newPath" placeholder="本地目录绝对路径,如 /home/me/Documents" />
+          <p class="form-hint">目录不存在时会自动创建</p>
           <n-input v-model:value="newFolderId" placeholder="目录 ID(留空自动生成;跨机同步需与对方一致)" />
           <n-checkbox-group v-model:value="newFolderDevices">
             <div v-if="status.devices.length > 0" class="device-checks">

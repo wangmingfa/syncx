@@ -26,7 +26,8 @@ export interface ControlServerDeps {
   /** stop 命令经 POST /api/shutdown 触发的优雅关闭;不传则该端点返回 503。 */
   shutdown?: () => void;
   getStatus: () => unknown;
-  addFolder?: (path: string, devices: string[], id?: string) => void;
+  /** 添加共享目录;返回是否自动创建了不存在的目录(供前端提示)。 */
+  addFolder?: (path: string, devices: string[], id?: string) => boolean;
   removeFolder?: (path: string) => void;
   /** 添加一个已知对端设备 ID(按 ID 配对,不依赖邀请码)。可选 address 直接写入
    *  config.peers 并立即直连,用于跨网段/无 mDNS 时手动指定对方 ws:// 地址。 */
@@ -544,8 +545,8 @@ export function createControlServer(deps: ControlServerDeps): Server {
         }
         const devices = ((body as any).devices ?? []).filter((d: unknown): d is string => typeof d === 'string');
         const id = typeof (body as any).id === 'string' && (body as any).id !== '' ? (body as any).id : undefined;
-        addFolder((body as any).path, devices, id);
-        sendJson(res, 201, { ok: true });
+        const created = addFolder((body as any).path, devices, id);
+        sendJson(res, 201, { ok: true, created });
       } catch {
         sendJson(res, 400, { error: 'invalid json body' });
       }

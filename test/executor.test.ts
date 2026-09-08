@@ -144,6 +144,18 @@ describe('local executor receive', () => {
 
     rmDir(dir);
   });
+
+  it('resolveSharePath tolerates a missing shared root instead of throwing ENOENT', () => {
+    const dir = mkdtempSync(join(tmpdir(), 'syncx-exec-'));
+    const root = join(dir, 'not-created-yet');
+
+    // 根目录不存在(刚配置尚未创建):不得抛 ENOENT(曾导致 unhandledRejection),
+    // 返回绝对路径;上层会先 mkdir(auto-create)或由 existsSync 守卫跳过
+    expect(() => resolveSharePath(root, 'a/b.txt')).not.toThrow();
+    expect(resolveSharePath(root, 'a/b.txt')).toBe(join(root, 'a', 'b.txt'));
+
+    rmDir(dir);
+  });
 });
 
 describe('local executor delete', () => {

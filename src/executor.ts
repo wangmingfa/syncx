@@ -30,7 +30,9 @@ export interface LocalExecutor {
  * 尚不存在的路径段(将由 mkdirSync recursive 安全创建)跳过。
  */
 export function resolveSharePath(root: string, relPath: string): string {
-  const rootReal = realpathSync(root);
+  // 根目录可能不存在(刚配置尚未创建 / 运行中被删除):realpathSync 会抛 ENOENT。
+  // 此时任何候选段也不可能存在(其祖先链断了),越界检查自然跳过;根目录恢复后恢复完整校验。
+  const rootReal = existsSync(root) ? realpathSync(root) : undefined;
   const abs = join(root, relPath);
   const rel = relative(root, abs);
   if (rel.startsWith('..') || isAbsolute(rel)) {
@@ -41,7 +43,7 @@ export function resolveSharePath(root: string, relPath: string): string {
   let ancestor = root;
   for (const part of parts) {
     const candidate = join(ancestor, part);
-    if (existsSync(candidate)) {
+    if (existsSync(candidate) && rootReal !== undefined) {
       const resolved = realpathSync(candidate);
       if (resolved !== rootReal && !resolved.startsWith(rootReal + sep)) {
         throw new Error(`unsafe path: ${relPath}`);

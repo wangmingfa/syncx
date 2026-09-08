@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { mkdtempSync, readFileSync } from 'node:fs';
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, statSync, writeFileSync } from 'node:fs';
 import { rmDir } from './helpers.js';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -15,12 +15,49 @@ describe('shared folder configuration', () => {
     const dir = tempDir();
     const configPath = join(dir, 'config.json');
 
-    addSharedFolder(configPath, '/data/docs', ['DEV1234567']);
+    addSharedFolder(configPath, join(dir, 'docs'), ['DEV1234567']);
 
     const raw = JSON.parse(readFileSync(configPath, 'utf8'));
     expect(raw.sharedFolders).toHaveLength(1);
-    expect(raw.sharedFolders[0]).toMatchObject({ path: '/data/docs', devices: ['DEV1234567'] });
+    expect(raw.sharedFolders[0].devices).toEqual(['DEV1234567']);
     expect(raw.sharedFolders[0].id).toMatch(/^[0-9a-f]{12}$/);
+
+    rmDir(dir);
+  });
+
+  it('auto-creates a missing folder path (recursively) and reports it', () => {
+    const dir = tempDir();
+    const configPath = join(dir, 'config.json');
+    const nested = join(dir, 'deeply', 'nested', 'docs');
+
+    const created = addSharedFolder(configPath, nested, ['DEV1234567']);
+
+    expect(created).toBe(true);
+    expect(existsSync(nested) && statSync(nested).isDirectory()).toBe(true);
+
+    rmDir(dir);
+  });
+
+  it('does not recreate an existing folder and reports created=false', () => {
+    const dir = tempDir();
+    const configPath = join(dir, 'config.json');
+    const docs = join(dir, 'docs');
+    mkdirSync(docs);
+
+    const created = addSharedFolder(configPath, docs, ['DEV1234567']);
+
+    expect(created).toBe(false);
+
+    rmDir(dir);
+  });
+
+  it('rejects a path that exists but is a file', () => {
+    const dir = tempDir();
+    const configPath = join(dir, 'config.json');
+    const file = join(dir, 'not-a-dir');
+    writeFileSync(file, 'x');
+
+    expect(() => addSharedFolder(configPath, file, ['DEV1234567'])).toThrow('not a directory');
 
     rmDir(dir);
   });
@@ -28,16 +65,13 @@ describe('shared folder configuration', () => {
   it('appends a shared folder to an existing config', () => {
     const dir = tempDir();
     const configPath = join(dir, 'config.json');
-    addSharedFolder(configPath, '/data/docs', ['DEV1234567']);
+    addSharedFolder(configPath, join(dir, 'docs'), ['DEV1234567']);
 
-    addSharedFolder(configPath, '/data/photos', ['DEV1234567', 'DEVABCDEFG']);
+    addSharedFolder(configPath, join(dir, 'photos'), ['DEV1234567', 'DEVABCDEFG']);
 
     const raw = JSON.parse(readFileSync(configPath, 'utf8'));
     expect(raw.sharedFolders).toHaveLength(2);
-    expect(raw.sharedFolders[1]).toMatchObject({
-      path: '/data/photos',
-      devices: ['DEV1234567', 'DEVABCDEFG'],
-    });
+    expect(raw.sharedFolders[1].devices).toEqual(['DEV1234567', 'DEVABCDEFG']);
     expect(raw.sharedFolders[1].id).toMatch(/^[0-9a-f]{12}$/);
 
     rmDir(dir);
@@ -46,14 +80,14 @@ describe('shared folder configuration', () => {
   it('removes a shared folder by path', () => {
     const dir = tempDir();
     const configPath = join(dir, 'config.json');
-    addSharedFolder(configPath, '/data/docs', ['DEV1234567']);
-    addSharedFolder(configPath, '/data/photos', ['DEV1234567']);
+    addSharedFolder(configPath, join(dir, 'docs'), ['DEV1234567']);
+    addSharedFolder(configPath, join(dir, 'photos'), ['DEV1234567']);
 
-    removeSharedFolder(configPath, '/data/docs');
+    removeSharedFolder(configPath, join(dir, 'docs'));
 
     const raw = JSON.parse(readFileSync(configPath, 'utf8'));
     expect(raw.sharedFolders).toHaveLength(1);
-    expect(raw.sharedFolders[0]).toMatchObject({ path: '/data/photos', devices: ['DEV1234567'] });
+    expect(raw.sharedFolders[0].path).toBe(join(dir, 'photos'));
     expect(raw.sharedFolders[0].id).toMatch(/^[0-9a-f]{12}$/);
 
     rmDir(dir);

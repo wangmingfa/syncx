@@ -987,8 +987,8 @@ export async function run(args: ParsedArgs): Promise<void> {
     // stop 命令经 POST /api/shutdown 触发:与 SIGTERM 走同一条优雅关闭链路
     shutdown: () => triggerShutdown(),
     addFolder: (path, devices, id) => {
-      addSharedFolder(configPath, path, devices, id);
-      logger.info(`shared folder added: ${path}`);
+      const created = addSharedFolder(configPath, path, devices, id);
+      logger.info(`shared folder added: ${path}${created ? ' (auto-created)' : ''}`);
       // 新建目录时即指派的对端,若当前在线立即推送共享邀请,免去对方再建一次目录
       const folder = loadConfig(configPath).sharedFolders.find((f) => f.path === path);
       const fid = folder?.id ?? '';
@@ -996,6 +996,7 @@ export async function run(args: ParsedArgs): Promise<void> {
         pushFolderInvitation(d, fid, fid || path);
         pushFolderSyncList(d);
       }
+      return created;
     },
     removeFolder: (path) => {
       // 移除前先记下原指派设备:移除后要向它们重推目录清单(它们 UI 上应显示「已停止共享」)

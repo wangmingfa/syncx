@@ -1,4 +1,4 @@
-import { existsSync } from 'node:fs';
+import { existsSync, mkdirSync, statSync } from 'node:fs';
 import { resolve, isAbsolute } from 'node:path';
 import { randomBytes } from 'node:crypto';
 import { loadConfig, saveConfig, DEFAULT_CONFIG, type SharedFolderConfig, type DeviceConfig } from './config.js';
@@ -42,9 +42,22 @@ export function generateFolderId(): string {
 /**
  * 添加一个共享目录;目录已存在则合并其设备列表。
  * id 缺省时自动生成;跨设备同步场景下可显式传入对方机器的同一目录 id。
+ * 目录不存在时自动创建(mkdir -p 语义,Web UI 里填「打算新建」的路径是合法用法);
+ * 路径已存在但不是目录(文件/符号链接指向文件)则报错。
+ * 返回是否执行了自动创建(供 API 提示用户)。
  */
-export function addSharedFolder(configPath: string, path: string, devices: string[], id?: string): void {
+export function addSharedFolder(configPath: string, path: string, devices: string[], id?: string): boolean {
   validateFolderPath(path);
+  const resolved = resolve(path);
+  let created = false;
+  if (existsSync(resolved)) {
+    if (!statSync(resolved).isDirectory()) {
+      throw new Error(`path exists and is not a directory: ${resolved}`);
+    }
+  } else {
+    mkdirSync(resolved, { recursive: true });
+    created = true;
+  }
   const config = loadConfig(configPath);
   const existing = config.sharedFolders.find((f) => f.path === path);
   if (existing) {
@@ -53,6 +66,7 @@ export function addSharedFolder(configPath: string, path: string, devices: strin
     config.sharedFolders.push({ path, devices, id: id ?? generateFolderId() });
   }
   saveConfig(configPath, config);
+  return created;
 }
 
 /** 精确设置某目录的设备列表(用于按目录多选设备的提交)。 */
