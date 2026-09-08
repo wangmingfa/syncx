@@ -12,6 +12,14 @@
  *   - 发布前确认 npm 登录态(防止 ENEEDAUTH 中途失败)
  *   - 发布成功后自动 commit 版本变更(package.json + package-lock.json)
  *
+ * 交互流程(TTY 下,与 model-gate 一致的方向键 + Enter):
+ *   1. 选择发布通道:latest / beta / alpha / 自定义 tag(默认 latest)
+ *   2. 选择升级方式:patch / minor / major / iteration —— 选项右侧直接预览算出的版本号
+ *      缺省随通道:latest → patch,beta 等预发布 → iteration
+ *   3. 全部检查通过后才做最后一次「发布 / 取消」确认
+ *   传了 --tag / 升级方式参数则跳过对应那一步;给了显式版本号则跳过 1、2 两步。
+ *   非交互环境(管道 / CI / 沙箱,没有 TTY)自动跳过所有选择,用默认值继续。
+ *
  * 用法:
  *   npm run release [major|minor|patch|iteration|<semver>] [options]
  *
@@ -38,6 +46,8 @@
  *   --otp <code>       npm 一次性密码(2FA)。不传则优先读环境变量 SYNCX_NPM_OTP,
  *                      再退化为交互式隐藏输入。
  *   --tag <tag>        发布通道 / dist-tag(默认 latest)。例如 --tag beta。
+ *                      不传此参数时,交互式选择通道(方向键)。
+ *   --yes / -y         跳过发布前的「发布 / 取消」确认。
  *   --registry <url>   发布到指定 registry(默认沿用当前 npm 配置;若当前不是
  *                      registry.npmjs.org 且未指定本项,会拒绝执行以避免误发镜像源)。
  *   --no-check         跳过 typecheck + vitest。
@@ -350,8 +360,11 @@ async function ensureNpmLogin() {
     return;
   }
   warn('未检测到 npm 登录态(或登录已失效)');
-  if (process.stdin.isTTY) {
-    const ok = await confirmPrompt('是否现在执行 npm login?(否则发布可能报 ENEEDAUTH)');
+  if (isInteractive()) {
+    const ok = await selectPrompt('未登录，是否现在执行 npm login？', [
+      { value: false, label: '否', hint: '稍后自行登录再重试（推荐，避免浏览器登录流程卡住）' },
+      { value: true, label: '是', hint: '立即 npm login（会拉起浏览器授权，需等待完成）' },
+    ], 0);
     if (ok) {
       await npm(['login'], { inherit: true });
       const re = await npmRaw(['whoami']);
@@ -363,13 +376,121 @@ async function ensureNpmLogin() {
   warn('未登录。若发布报 ENEEDAUTH,请先 `npm login` 再重试。');
 }
 
-/** TTY 下的 y/N 确认提示。 */
-function confirmPrompt(question) {
+/* ---------- 交互选择(方向键 + Enter) ---------- */
+/* model-gate 用 inquirer 的 select 实现;这里零依赖手写同款交互,避免为一个发布脚本
+ * 再引入一个依赖包(window misses raw-mode 处理由 node:readline 承担)。 */
+
+/** TTY 下才着色/移动光标;管道与 CI 输出保持纯文本,避免日志里混入转义序列。 */
+const canAnsi = () => Boolean(process.stdout.isTTY);
+const paint = {
+  bold: (s) => (canAnsi() ? `\x1b[1m${s}\x1b[22m` : s),
+  cyan: (s) => (canAnsi() ? `\x1b[36m${s}\x1b[39m` : s),
+  green: (s) => (canAnsi() ? `\x1b[32m${s}\x1b[39m` : s),
+  dim: (s) => (canAnsi() ? `\x1b[2m${s}\x1b[22m` : s),
+};
+
+/** 是否处于可读按键的交互环境。CI / 管道 / 沙箱里没有 TTY,一律走默认值不阻塞。 */
+const isInteractive = () => Boolean(process.stdin.isTTY && process.stdout.isTTY);
+
+/**
+ * 方向键单选提示。
+ *   ↑/↓(或 k/j)移动光标,Enter 选中并折叠为一行结果,Ctrl+C 直接退出。
+ *   非交互环境无法读取按键,直接返回默认项,不阻塞流程。
+ * @param message      提示语
+ * @param choices      [{ value, label, hint }],hint 为右侧说明(可省)
+ * @param defaultIndex 默认高亮项下标
+ * @returns 选中项的 value
+ */
+async function selectPrompt(message, choices, defaultIndex = 0) {
+  const idx0 = Math.min(Math.max(defaultIndex, 0), choices.length - 1);
+  if (!isInteractive()) return choices[idx0].value;
+
+  let index = idx0;
+  // 渲染块高度:提示行 + 每个选项一行 + 末行按键说明
+  const height = choices.length + 2;
+  const pad = Math.max(...choices.map((c) => c.label.length));
+  const width = process.stdout.columns ?? 100;
+  let rendered = false;
+
+  return new Promise((resolve) => {
+    const rl = readline.createInterface({ input: process.stdin, terminal: true });
+    const wasRaw = Boolean(process.stdin.isRaw);
+    if (typeof process.stdin.setRawMode === 'function') process.stdin.setRawMode(true);
+
+    // 光标回到块首并清除已渲染内容，用于原地重绘
+    const rewind = () => {
+      readline.moveCursor(process.stdout, 0, -height);
+      readline.cursorTo(process.stdout, 0);
+      readline.clearScreenDown(process.stdout);
+    };
+
+    const render = () => {
+      if (rendered) rewind();
+      rendered = true;
+      process.stdout.write(`${message}\n`);
+      choices.forEach((c, i) => {
+        const active = i === index;
+        const cursor = active ? paint.cyan('❯') : ' ';
+        const mark = active ? paint.cyan('●') : '○';
+        // 先按原始长度补空格再加粗:若先加粗再 padEnd,ANSI 转义符会被算进宽度导致右侧说明错位
+        const gap = ' '.repeat(Math.max(pad - c.label.length, 0));
+        const head = ` ${cursor} ${mark} ${(active ? paint.bold(c.label) : c.label)}${gap}`;
+        if (c.hint) {
+          // 按终端宽度截断说明，避免换行打乱行数（重绘依赖固定行高）
+          const room = width - head.length - 1;
+          if (room > 8) process.stdout.write(`${head} ${paint.dim(c.hint.slice(0, room))}`);
+          else process.stdout.write(head);
+        } else {
+          process.stdout.write(head);
+        }
+        process.stdout.write('\n');
+      });
+      process.stdout.write(`${paint.dim('  ↑/↓ 或 k/j 移动，Enter 确认，Ctrl+C 退出')}\n`);
+    };
+
+    const done = (value) => {
+      rl.input.removeListener('keypress', onKey);
+      rl.close();
+      if (typeof process.stdin.setRawMode === 'function' && !wasRaw) process.stdin.setRawMode(false);
+      rewind();
+      const chosen = choices.find((c) => c.value === value);
+      process.stdout.write(`${message} ${paint.green(paint.bold(chosen?.label ?? String(value)))}\n`);
+      resolve(value);
+    };
+
+    const onKey = (_seq, key) => {
+      if (!key) return;
+      if (key.ctrl && key.name === 'c') {
+        rl.input.removeListener('keypress', onKey);
+        rl.close();
+        if (typeof process.stdin.setRawMode === 'function' && !wasRaw) process.stdin.setRawMode(false);
+        process.stdout.write('\n');
+        process.exit(130);
+      }
+      if (key.name === 'up' || key.sequence === 'k') {
+        index = (index - 1 + choices.length) % choices.length;
+        render();
+      } else if (key.name === 'down' || key.sequence === 'j') {
+        index = (index + 1) % choices.length;
+        render();
+      } else if (key.name === 'return' || key.name === 'enter') {
+        done(choices[index].value);
+      }
+    };
+
+    rl.input.on('keypress', onKey);
+    render();
+  });
+}
+
+/** 单行文本输入(用于自定义 dist-tag);非交互环境返回默认值。 */
+function textPrompt(question, fallback) {
+  if (!isInteractive()) return fallback;
   return new Promise((resolve) => {
     const rl = readline.createInterface({ input: process.stdin, output: process.stdout });
-    rl.question(`${question} [y/N] `, (ans) => {
+    rl.question(`${question} `, (ans) => {
       rl.close();
-      resolve(/^y(es)?$/i.test(ans.trim()));
+      resolve(ans.trim() || fallback);
     });
   });
 }
@@ -382,6 +503,9 @@ const opts = {
   otp: process.env.SYNCX_NPM_OTP,
   registry: undefined,
   tag: 'latest',
+  tagGiven: false, // 是否显式传了 --tag:显式时不弹交互式通道选择
+  bumpGiven: false, // 是否显式传了升级方式
+  yes: false, // 跳过发布前的二次确认
   doCheck: true,
   doBuild: true,
   doSmoke: true,
@@ -394,13 +518,14 @@ for (const a of argv) {
   else if (a === '--no-smoke') opts.doSmoke = false;
   else if (a === '--no-git') opts.doGit = false;
   else if (a === '--dry-run') opts.dryRun = true;
+  else if (a === '--yes' || a === '-y') opts.yes = true;
   else if (a.startsWith('--otp=')) opts.otp = a.slice('--otp='.length);
   else if (a.startsWith('--registry=')) opts.registry = a.slice('--registry='.length);
-  else if (a.startsWith('--tag=')) opts.tag = a.slice('--tag='.length);
+  else if (a.startsWith('--tag=')) { opts.tag = a.slice('--tag='.length); opts.tagGiven = true; }
   else if (a.startsWith('--otp') || a.startsWith('--registry') || a.startsWith('--tag')) fail(`用法错误:${a} 需以 --x=value 形式传参`);
-  else if (a === 'patch' || a === 'minor' || a === 'major' || a === 'iteration') opts.bumpArg = a;
+  else if (a === 'patch' || a === 'minor' || a === 'major' || a === 'iteration') { opts.bumpArg = a; opts.bumpGiven = true; }
   // 允许显式版本号,含预发布(如 0.1.1-beta.1)—— 此时通道由后缀自动推断
-  else if (/^\d+\.\d+\.\d+(?:-[\w.]+)?$/.test(a)) opts.bumpArg = a;
+  else if (/^\d+\.\d+\.\d+(?:-[\w.]+)?$/.test(a)) { opts.bumpArg = a; opts.bumpGiven = true; }
   else fail(`无法识别的参数:${a}(应为 patch/minor/major/iteration,或如 1.2.3 / 1.2.3-beta.1)`);
 }
 
@@ -409,19 +534,36 @@ const pkg = JSON.parse(readFileSync(PKG_PATH, 'utf8'));
 const pkgName = pkg.name;
 const cur = pkg.version; // 本地版本仅作「远端该通道无版本」时的首发兜底基准
 
-// 显式版本号(如 0.1.1-beta.1):通道由预发布后缀推断,跳过升级计算
+// 显式版本号(如 0.1.1-beta.1):通道由预发布后缀推断,跳过所有选择
 const explicitVersion =
   opts.bumpArg && /^\d+\.\d+\.\d+(?:-[\w.]+)?$/.test(opts.bumpArg) ? opts.bumpArg : undefined;
-const channel = explicitVersion ? channelOfVersion(explicitVersion) : opts.tag;
-const bump = explicitVersion
-  ? 'iteration' // 显式版本下不参与计算,仅作展示
-  : (opts.bumpArg ?? (channel === 'latest' ? 'patch' : 'iteration'));
+
+let channel;
+if (explicitVersion) {
+  channel = channelOfVersion(explicitVersion);
+  log(`使用显式版本号 ${explicitVersion}(通道由后缀推断为 ${channel})`);
+} else if (opts.tagGiven) {
+  channel = opts.tag;
+} else {
+  // 交互选择通道(model-gate 用 inquirer:select;等价于方向键 + Enter)
+  const picked = await selectPrompt('选择发布通道:', [
+    { value: 'latest', label: 'latest', hint: '正式版 x.y.z；npm i -g 默认装到它' },
+    { value: 'beta', label: 'beta', hint: '预发布 x.y.z-beta.N；需显式 @beta 安装' },
+    { value: 'alpha', label: 'alpha', hint: '预发布 x.y.z-alpha.N；早期尝鲜' },
+    { value: '__custom__', label: '自定义 tag', hint: '手动输入 dist-tag(如 rc / next)' },
+  ], 0);
+  channel =
+    picked === '__custom__'
+      ? await textPrompt('请输入 dist-tag:', 'latest')
+      : picked;
+  if (!/^[a-z][\w.-]*$/i.test(channel)) fail(`dist-tag 不合法: ${channel}(应为字母开头,如 latest / beta / rc)`);
+}
+opts.tag = channel;
 
 let base;
 let isFirstRelease = false;
 if (explicitVersion) {
   base = explicitVersion;
-  log(`使用显式版本号 ${explicitVersion}(通道由后缀推断为 ${channel})`);
 } else {
   const remote = await withSpinner(
     `查询 npm 上 ${pkgName} 在 ${channel} 通道的最新版本`,
@@ -434,6 +576,28 @@ if (explicitVersion) {
   } else {
     log(`npm ${channel} 通道最新版本 ${remote}(本地 package.json 为 ${cur})`);
   }
+}
+
+let bump;
+if (explicitVersion) {
+  bump = 'iteration'; // 显式版本下不参与计算,仅作展示
+} else if (opts.bumpGiven) {
+  bump = opts.bumpArg;
+} else {
+  // 选项右侧直接预览「选中后得到的版本号」,避免猜
+  const preview = (b) => nextVersion(base, channel, b, isFirstRelease);
+  const bumpDefault = channel === 'latest' ? 'patch' : 'iteration';
+  const bumpOptions = [
+    { value: 'patch', label: 'patch', hint: `修订号 +1 → ${preview('patch')}` },
+    { value: 'minor', label: 'minor', hint: `次版本号 +1 → ${preview('minor')}` },
+    { value: 'major', label: 'major', hint: `主版本号 +1 → ${preview('major')}` },
+    {
+      value: 'iteration',
+      label: 'iteration',
+      hint: channel === 'latest' ? `正式通道等价于 patch → ${preview('iteration')}` : `预发布迭代 +1 → ${preview('iteration')}`,
+    },
+  ];
+  bump = await selectPrompt('选择版本升级方式:', bumpOptions, bumpOptions.findIndex((o) => o.value === bumpDefault));
 }
 
 let target = explicitVersion ?? nextVersion(base, channel, bump, isFirstRelease);
@@ -497,7 +661,12 @@ if (!opts.dryRun) {
 
 /* ---------- 网络预检 2:登录态(仅真正发布时,提前失败避免构建白做) ---------- */
 if (!opts.dryRun) {
-  await withSpinner('确认 npm 登录态', async () => { await ensureNpmLogin(); });
+  if (isInteractive()) {
+    // 交互态下要问「是否 npm login」,不能再套 spinner —— 否则动画会和用户提示抢同一行输出
+    await ensureNpmLogin();
+  } else {
+    await withSpinner('确认 npm 登录态', async () => { await ensureNpmLogin(); });
+  }
 }
 
 /* ---------- 1. 类型检查 + 测试 ---------- */
@@ -565,6 +734,18 @@ if (opts.doSmoke) {
 if (opts.dryRun) {
   log(`dry-run 结束:未发布、未改版本号、未 commit。可去掉 --dry-run 执行真实发布(${target})`);
 } else {
+  // 最后一次方向键确认(model-gate 同样在所有检查之后才 confirm)
+  if (!opts.yes) {
+    const go = await selectPrompt(`确认发布 ${pkgName}@${target} ?`, [
+      { value: true, label: '发布', hint: `npm publish, dist-tag = ${opts.tag}` },
+      { value: false, label: '取消', hint: '放弃本次发布,不做任何远端变更' },
+    ], 0);
+    if (!go) {
+      log(`已取消发布:${pkgName}@${target}(未执行 npm publish)`);
+      process.exit(0);
+    }
+  }
+
   const otpHint = opts.otp ? `(--otp=${'*'.repeat(opts.otp.length)})` : '(未提供 OTP)';
   log(`执行 npm publish… ${otpHint}`);
   const publishArgs = ['publish', '--access', 'public', '--tag', opts.tag];
