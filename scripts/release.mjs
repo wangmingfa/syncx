@@ -68,7 +68,9 @@ const ROOT = fileURLToPath(new URL('..', import.meta.url).href).replace(/[\\/]$/
 const PKG_PATH = join(ROOT, 'package.json');
 const DIST = join(ROOT, 'dist', 'syncx.js');
 const NPM = process.platform === 'win32' ? 'npm.cmd' : 'npm';
-const GIT = process.platform === 'win32' ? 'git.cmd' : 'git';
+// Windows 上 PATH 里是真实可执行文件 git.exe,可直接 spawn —— 写死 git.cmd 在多数
+// Git for Windows 安装里并不存在(会 ENOENT),导致发布后的自动 commit 失败。
+const GIT = 'git';
 const IS_WIN = process.platform === 'win32';
 
 const log = (msg) => console.log(`[release] ${msg}`);
@@ -95,10 +97,35 @@ class ExecError extends Error {
   }
 }
 
+/**
+ * cmd.exe 参数转义:给含空白/引号的参数整体加双引号(内部的引号与结尾反斜杠按 cmd 规则
+ * 翻倍),不含空白但含 cmd 元字符时逐个用 ^ 脱字符转义。
+ * 注意:未处理 %VAR% 展开 —— 本脚本的参数(版本号、临时路径、中文 commit message)
+ * 不含百分号,故不涉及。
+ */
+function quoteForCmd(arg) {
+  if (arg === '') return '""';
+  if (!/[\s"]/.test(arg)) return /[&|<>^()!]/.test(arg) ? arg.replace(/[&|<>^()!]/g, '^$&') : arg;
+  return `"${arg.replace(/(\\*)"/g, '$1$1\\"').replace(/(\\+)$/, '$1$1')}"`;
+}
+
+/**
+ * Windows 下 .cmd/.bat 不能直接 spawn(会 EINVAL),必须经 shell;但 Node 24 对
+ * 「shell:true + args 数组」报 DEP0190 —— 那种写法下参数只被简单拼接、不加引号,
+ * 有注入风险。这里改为自己拼好整条命令行(带 cmd 引号)后交给 shell、args 留空:
+ * 告警消失,且比 Node 原先的裸拼接更安全(路径含空格也不会被拆成多个参数)。
+ */
+function spawnShellAware(cmd, args, opts) {
+  if (opts.shell && IS_WIN) {
+    return spawn([cmd, ...args.map(quoteForCmd)].join(' '), [], { ...opts, shell: true });
+  }
+  return spawn(cmd, args, opts);
+}
+
 /** 执行命令:inherit=true 直接透传;否则捕获输出(可转发),非零退出抛 ExecError。 */
 function exec(cmd, args, { inherit = false, forward = true, cwd = ROOT, shell = false } = {}) {
   return new Promise((resolve, reject) => {
-    const child = spawn(cmd, args, {
+    const child = spawnShellAware(cmd, args, {
       cwd,
       shell,
       stdio: inherit ? 'inherit' : ['ignore', 'pipe', 'pipe'],
@@ -121,9 +148,21 @@ function exec(cmd, args, { inherit = false, forward = true, cwd = ROOT, shell = 
   });
 }
 
-// Windows 上 npm/git 是 .cmd,直接 spawn 会 EINVAL,须经 shell 执行。
+// Windows 上 npm 是 .cmd,直接 spawn 会 EINVAL,须经 shell 执行。
 const npm = (args, opts) => exec(NPM, args, { ...opts, shell: IS_WIN });
-const git = (args, opts) => exec(GIT, args, { ...opts, shell: IS_WIN });
+
+/** git 走无 shell 直连(git.exe 是真实可执行文件,args 数组安全传递、也不会触发 DEP0190);
+ *  极少数环境把 git 装成 .cmd 包装器(某些包管理器),这时才退回 shell 形式。 */
+async function git(args, opts) {
+  try {
+    return await exec(GIT, args, opts);
+  } catch (e) {
+    if (e instanceof Error && (e.code === 'ENOENT' || e.code === 'EINVAL')) {
+      return exec('git.cmd', args, { ...opts, shell: IS_WIN });
+    }
+    throw e;
+  }
+}
 
 /**
  * 底层 npm 探测:不抛错,返回 { code, stdout, stderr }。
@@ -131,7 +170,7 @@ const git = (args, opts) => exec(GIT, args, { ...opts, shell: IS_WIN });
  */
 function npmRaw(args) {
   return new Promise((resolve) => {
-    const child = spawn(NPM, args, {
+    const child = spawnShellAware(NPM, args, {
       cwd: ROOT,
       shell: IS_WIN,
       stdio: ['ignore', 'pipe', 'pipe'],
