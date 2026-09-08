@@ -1,6 +1,6 @@
 {
   "name": "@wangmingfa/syncx",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "description": "Peer-to-peer LAN file synchronization tool (Syncthing-like) in Node.js",
   "type": "module",
   "engines": {
