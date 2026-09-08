@@ -18,18 +18,18 @@
 
 ## 快速上手(普通用户)
 
-下面是最短路径:装好 → 启动 → 配对 → 开始同步。
+下面是最短路径:装好 → 启动 → 配对 → 开始同步。全程用 `syncx` 命令,不需要克隆仓库。
 
 ### 1. 安装与启动
 
 要求 **Node.js ≥ 22.13**(内置 SQLite,无额外依赖)。
 
 ```bash
-git clone <repo-url> && cd syncx
-npm install
-npm run build
-node dist/syncx.js start
+npm i -g @wangmingfa/syncx
+syncx start
 ```
+
+> 开发者 / 想跑源码:见下方「从源码运行(开发者)」。
 
 首次启动会自动完成:
 
@@ -37,7 +37,8 @@ node dist/syncx.js start
 - 启动 **P2P 同步服务**(默认端口 `22000`)——其他设备通过这个端口连你
 - 启动 **Web UI**(默认端口 `8384`,默认仅本机可访问)
 
-日志会打印你的 **Device ID**(形如 `GP72F7K72B`)、Web UI 地址与访问令牌。保持终端运行即可;后台常驻见「系统服务安装」。
+日志会打印你的 **Device ID**(形如 `GP72F7K72B`)、Web UI 地址与访问令牌。保持终端运行即可;
+想开机自启 / 后台常驻,用 `syncx install` 生成 systemd / launchd / Windows 服务模板(见「生产命令」)。
 
 ### 2. 用 Web UI 管理(推荐)
 
@@ -54,7 +55,7 @@ node dist/syncx.js start
 
 ### 3. 两台设备配对(Syncthing 式)
 
-每台设备先各自启动 daemon,记下自己的 Device ID(网页顶部,或 `node dist/syncx.js status`)。
+每台设备先各自启动 daemon,记下自己的 Device ID(网页顶部,或 `syncx status`)。
 
 syncx 采用类 Syncthing 的配对模型:**粘贴对方设备 ID 即发起配对,对方网页点「确认」即双向生效;
 把目录指派给某设备即发出共享邀请,对方网页点「确认」并选好本地路径即开始同步**。
@@ -108,8 +109,10 @@ syncx 采用类 Syncthing 的配对模型:**粘贴对方设备 ID 即发起配�
 | Web UI 打不开? | 默认仅监听本机。局域网访问需 `--host 0.0.0.0 --expose-control` 启动 |
 | 两台设备互相找不到? | mDNS 依赖同一局域网;跨网段或路由器隔离时,双方在 `peers` 互填 `ws://IP:22000`,并放行 UDP 5353 与 TCP 22000 |
 | 启动提示端口被占用? | `--port 24001` 改同步端口;`--control-port 8385` 改 Web UI 端口 |
-| 忘了自己的 Device ID? | `node dist/syncx.js status` |
-| 想撤销已发出的 CLI 邀请码? | `node dist/syncx.js revoke <邀请码>`(仅对命令行邀请码有效;Web UI 的配对/共享可在对方确认前于「待确认」里忽略,或移除设备/取消目录指派) |
+| 忘了自己的 Device ID? | `syncx status` |
+| 想撤销已发出的 CLI 邀请码? | `syncx revoke <邀请码>`(仅对命令行邀请码有效;Web UI 的配对/共享可在对方确认前于「待确认」里忽略,或移除设备/取消目录指派) |
+| 想升级 / 卸载? | 升级:`npm i -g @wangmingfa/syncx@latest`;卸载:`npm uninstall -g @wangmingfa/syncx`(配置与数据在 `~/.syncx/`,需手动删除) |
+| 忘了命令 / 想确认装的是哪个版本? | `syncx --help` 看全部命令与选项,`syncx --version` 看版本号 |
 | 对方没收到配对 / 共享邀请? | 邀请经实时连接推送,双方须同时在线且已互连(状态页该设备显示「在线」);离线时会于对方上线并互连后自动补发。先确认设备 ID 填写正确、且对方 daemon 已启动 |
 | 换电脑了,原来配对的设备怎么办? | 新设备按「配对」一节重新配对即可;旧设备 ID 不再出现在任何 `devices` 白名单中即断开 |
 
@@ -135,10 +138,28 @@ syncx 采用类 Syncthing 的配对模型:**粘贴对方设备 ID 即发起配�
 
 要求 **Node.js ≥ 22.13**(内置 `node:sqlite` 无需额外依赖)。
 
+### 全局安装(普通用户)
+
+```bash
+npm i -g @wangmingfa/syncx     # 安装 / 升级
+syncx start                    # 装完即可用,无需克隆仓库
+npm uninstall -g @wangmingfa/syncx
+```
+
+全局安装后命令名就是 `syncx`,下文所有 `node dist/syncx.js …` 都可写成 `syncx …`。
+
+### 从源码运行(开发者)
+
+改代码、跑测试、或用未发布的功能时才需要:
+
 ```bash
 git clone <repo-url> && cd syncx
 npm install
+npm run build          # 编译到 dist/
+node dist/syncx.js start
 ```
+
+日常开发用 `npm run dev`(热重载,见「开发命令」),只在验证生产产物时才 `npm run build` + `node dist/syncx.js`。
 
 ## 配置
 
@@ -272,16 +293,28 @@ npm run dev -- --config ~/syncx-home.json --port 24001 --control-port 8385
 
 ## 生产命令
 
+全局安装(`npm i -g @wangmingfa/syncx`)后直接用 `syncx`:
+
 ```bash
 # 启动 daemon(前台;部署时配合 systemd/launchd 后台常驻)
-npm run build
-node dist/syncx.js start [--config <路径>] [--port <端口>] [--control-port <端口>] [--host <主机>]
+syncx start [--config <路径>] [--port <端口>] [--control-port <端口>] [--host <主机>]
 
 # 查看状态:设备 ID 与共享目录数
-node dist/syncx.js status [--config <路径>]
+syncx status [--config <路径>]
 
 # 生成系统服务模板
-node dist/syncx.js install
+syncx install
+
+# 查看用法 / 版本号
+syncx --help
+syncx --version
+```
+
+从源码运行时把 `syncx` 换成 `node dist/syncx.js`(需先 `npm run build`):
+
+```bash
+npm run build
+node dist/syncx.js start
 ```
 
 常用选项:
@@ -292,6 +325,10 @@ node dist/syncx.js install
 | `--port <port>` | peer 同步端口(默认 22000) |
 | `--control-port <port>` | Web UI/控制 API 端口(默认 8384) |
 | `--host <host>` | 控制服务绑定地址(默认 `127.0.0.1`;`0.0.0.0` 暴露局域网) |
+| `--expose-control` | 允许把控制 API 绑到非回环地址(需与 `--host` 同用;明文 HTTP,谨慎) |
+| `--log-file <path>` | 同时把日志写入文件(默认仅输出到 stdout) |
+| `-h, --help` | 查看全部命令与选项 |
+| `-v, --version` | 查看当前版本号 |
 
 ## 双设备同步测试
 

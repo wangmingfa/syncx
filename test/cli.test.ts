@@ -1,5 +1,8 @@
 import { describe, expect, it } from 'vitest';
+import { readFileSync } from 'node:fs';
+import { join } from 'node:path';
 import { parseArgs, reconnectDelayMs } from '../src/cli.js';
+import { helpText, packageVersion, wantsHelp, wantsVersion } from '../src/usage.js';
 
 describe('cli parseArgs', () => {
   it('defaults to the start command when invoked with no arguments', () => {
@@ -163,5 +166,54 @@ describe('reconnectDelayMs', () => {
     expect(reconnectDelayMs(5)).toBe(16000);
     expect(reconnectDelayMs(6)).toBe(30000);
     expect(reconnectDelayMs(10)).toBe(30000);
+  });
+});
+
+describe('cli help/version 开关', () => {
+  it('-h / --help 在任意位置都能命中,且与相似前缀不混淆', () => {
+    expect(wantsHelp(['-h'])).toBe(true);
+    expect(wantsHelp(['--help'])).toBe(true);
+    // 常见于 `syncx start -h`:开关跟在命令后面也应生效
+    expect(wantsHelp(['start', '-h'])).toBe(true);
+    expect(wantsHelp([])).toBe(false);
+    expect(wantsHelp(['start'])).toBe(false);
+    // --host 以 --h 开头但不是帮助开关,不能误命中
+    expect(wantsHelp(['start', '--host', '127.0.0.1'])).toBe(false);
+  });
+
+  it('-v / --version 同理', () => {
+    expect(wantsVersion(['-v'])).toBe(true);
+    expect(wantsVersion(['--version'])).toBe(true);
+    expect(wantsVersion(['status', '--version'])).toBe(true);
+    expect(wantsVersion([])).toBe(false);
+    expect(wantsVersion(['start', '--dev-vite', 'http://127.0.0.1:5173'])).toBe(false);
+  });
+
+  it('帮助文本列出全部命令与选项', () => {
+    const text = helpText('0.1.0');
+    expect(text.startsWith('syncx 0.1.0')).toBe(true);
+    for (const cmd of ['start', 'status', 'install', 'invite', 'join', 'revoke']) {
+      expect(text).toContain(cmd);
+    }
+    for (const flag of [
+      '-h, --help',
+      '-v, --version',
+      '--config',
+      '--port',
+      '--control-port',
+      '--host',
+      '--expose-control',
+      '--log-file',
+      '--dev-vite',
+    ]) {
+      expect(text).toContain(flag);
+    }
+  });
+
+  it('packageVersion 读到的是 syncx 自己的版本号', () => {
+    const pkg = JSON.parse(readFileSync(join(process.cwd(), 'package.json'), 'utf8')) as {
+      version: string;
+    };
+    expect(packageVersion()).toBe(pkg.version);
   });
 });

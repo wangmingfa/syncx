@@ -43,8 +43,10 @@
  *   预发布 + iteration 时若目标已被占用,会自动顺延迭代号直到找到可用版本。
  *
  * Options:
- *   --otp <code>       npm 一次性密码(2FA)。不传则优先读环境变量 SYNCX_NPM_OTP,
- *                      再退化为交互式隐藏输入。
+ *   --otp <code>       npm 一次性密码(2FA)。不传则优先读环境变量 SYNCX_NPM_OTP;
+ *                      都没有时,交互式环境把终端交给 npm 自己处理(按 ~/.npmrc 的 auth-type
+ *                      提示 OTP 或打开浏览器验证,等同手动 npm publish),npm 验证失败才回退到
+ *                      脚本内的隐藏输入;非交互环境(CI)必须给 --otp 或 SYNCX_NPM_OTP。
  *   --tag <tag>        发布通道 / dist-tag(默认 latest)。例如 --tag beta。
  *                      不传此参数时,交互式选择通道(方向键)。
  *   --yes / -y         跳过发布前的「发布 / 取消」确认。
@@ -122,13 +124,22 @@ function spawnShellAware(cmd, args, opts) {
   return spawn(cmd, args, opts);
 }
 
-/** 执行命令:inherit=true 直接透传;否则捕获输出(可转发),非零退出抛 ExecError。 */
-function exec(cmd, args, { inherit = false, forward = true, cwd = ROOT, shell = false } = {}) {
+/**
+ * 执行命令。
+ *   inherit=true     三路全透传(子进程独占终端,拿不到输出)
+ *   interactive=true stdin/stdout 透传 + stderr 捕获:子进程能用终端提问(OTP / 浏览器验证),
+ *                    我们仍能从 stderr 判定失败原因 —— npm publish 就是靠这个模式工作的。
+ *                    注意此时 stdout 不再被捕获,取到的是空串。
+ *   其余              捕获输出(forward 决定是否转发),stdin 关闭。
+ * 非零退出抛 ExecError(stderr 尾部 8 行作为 stderrTail)。
+ */
+function exec(cmd, args, { inherit = false, forward = true, interactive = false, cwd = ROOT, shell = false } = {}) {
+  const stdio = inherit ? 'inherit' : interactive ? ['inherit', 'inherit', 'pipe'] : ['ignore', 'pipe', 'pipe'];
   return new Promise((resolve, reject) => {
     const child = spawnShellAware(cmd, args, {
       cwd,
       shell,
-      stdio: inherit ? 'inherit' : ['ignore', 'pipe', 'pipe'],
+      stdio,
       env: process.env,
     });
     if (inherit) {
@@ -138,8 +149,9 @@ function exec(cmd, args, { inherit = false, forward = true, cwd = ROOT, shell = 
     }
     let out = '';
     let err = '';
-    child.stdout.on('data', (d) => { out += d; if (forward) process.stdout.write(d); });
-    child.stderr.on('data', (d) => { err += d; if (forward) process.stderr.write(d); });
+    // interactive 模式下 stdout 是 inherit,child.stdout 为 null —— 必须可选链,否则崩
+    child.stdout?.on('data', (d) => { out += d; if (forward) process.stdout.write(d); });
+    child.stderr?.on('data', (d) => { err += d; if (forward) process.stderr.write(d); });
     child.on('exit', (code) => {
       if (code === 0) resolve({ stdout: out, stderr: err });
       else reject(new ExecError(`${cmd} ${args.join(' ')}`, code ?? -1, err.trim().split('\n').slice(-8).join('\n')));
@@ -886,19 +898,23 @@ if (opts.dryRun) {
 
   let otp = opts.otp;
   let attempts = 0;
-  await withSpinner(`发布到 npm (${opts.tag})`, async () => {
+  // 交互环境下把终端交还给 npm:它自己会按 ~/.npmrc 的 auth-type 提示 OTP 或**打开浏览器验证**
+  // (即手动执行 npm publish 的体验)。原先 stdio 是 ['ignore','pipe','pipe'] 且输出不转发,
+  // 等于既不让 npm 读输入、又把它的提示/验证链接吞掉,于是只能报 EOTP 后由我们代问。
+  const pubOpts = isInteractive() ? { interactive: true } : { forward: false };
+  const runPublish = async () => {
     for (;;) {
       try {
         const args = otp ? [...publishArgs, '--otp', otp] : publishArgs;
-        await npm(args, { forward: false });
+        await npm(args, pubOpts);
         return; // 发布成功
       } catch (e) {
         const needOtp = e instanceof ExecError && /EOTP|one[- ]?time password|ENEEDAUTH|incorrect otp/i.test(e.stderrTail);
         if (needOtp && attempts < 3) {
           attempts += 1;
-          // 先抹掉 spinner 动画行再提问,否则动画与提示/输入行会糊在一起
+          // npm 自己的验证没过(如 OTP 输错),才回退到手动输入;先抹掉动画行避免糊在一起
           pauseSpinner();
-          warn(`OTP 缺失或无效(第 ${attempts} 次),请重新输入`);
+          warn(`npm 认证未通过(第 ${attempts} 次),请重新输入 OTP`);
           otp = await readOtp();
           if (!otp) fail('未提供 OTP。请用 --otp=<code> 或设置 SYNCX_NPM_OTP 后重试。');
           resumeSpinner();
@@ -907,7 +923,10 @@ if (opts.dryRun) {
         throw e;
       }
     }
-  });
+  };
+  // 交互模式下 npm 会自己往终端打进度/链接,再套 spinner 只会互相覆盖 —— 直接跑
+  if (isInteractive()) await runPublish();
+  else await withSpinner(`发布到 npm (${opts.tag})`, runPublish);
 
   log(`✅ 已发布 syncx@${target}:npm i -g syncx@${target} 后可直接运行 syncx`);
 
