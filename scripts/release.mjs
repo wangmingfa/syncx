@@ -400,6 +400,24 @@ function nextVersion(current, channel, bump, isFirstRelease = false) {
   return `${maj}.${min}.${pat}`;
 }
 
+/**
+ * 把目标版本号写入 package.json(+ package-lock.json)。
+ * 与当前版本相同时**直接跳过**:npm version 会认为「版本没变」并报 `Version not changed` 退出 1
+ * —— 首发(远端无版本,基准取本地)或显式指定当前版本号时都会走到这条路径。
+ * 重新读一次文件而不是用脚本开头缓存的 cur:构建等步骤理论上可能改过 package.json。
+ * @returns 是否真的改动了版本号
+ */
+async function writeVersion(target) {
+  const nowVer = JSON.parse(readFileSync(PKG_PATH, 'utf8')).version;
+  if (nowVer === target) {
+    log(`package.json 版本已是 ${target},跳过 npm version(无变化可写)`);
+    return false;
+  }
+  await npm(['version', target, '--no-git-tag-version'], { inherit: true });
+  log(`版本号已更新为 ${target}(package.json + package-lock.json)`);
+  return true;
+}
+
 /** 从版本号推断通道:带 -beta 等预发布后缀 → 该后缀标签,否则 latest。 */
 function channelOfVersion(v) {
   const pre = v.includes('-') ? v.slice(v.indexOf('-') + 1) : null;
@@ -418,9 +436,11 @@ async function ensureNpmLogin() {
   }
   warn('未检测到 npm 登录态(或登录已失效)');
   if (isInteractive()) {
+    // 默认「是」:未登录时直接回车即进入 npm login,发布流程不会被打断。
+    // (登录会拉起浏览器授权,完成后回到终端继续;不想登录用 ↓ 选「否」。)
     const ok = await selectPrompt('未登录，是否现在执行 npm login？', [
-      { value: false, label: '否', hint: '稍后自行登录再重试（推荐，避免浏览器登录流程卡住）' },
-      { value: true, label: '是', hint: '立即 npm login（会拉起浏览器授权，需等待完成）' },
+      { value: true, label: '是', hint: '立即 npm login（会拉起浏览器授权，完成后回到终端继续）' },
+      { value: false, label: '否', hint: '稍后自行 npm login 再重试（本次发布会中止）' },
     ], 0);
     if (ok) {
       await npm(['login'], { inherit: true });
@@ -429,7 +449,10 @@ async function ensureNpmLogin() {
       log(`npm 登录成功: ${re.stdout.trim()}`);
       return;
     }
+    // 选「否」直接中止:此处位于检查/构建之前,早失败好过构建完才在 publish 撞 ENEEDAUTH。
+    fail('未登录,已中止。请先执行 `npm login`,再重新运行 npm run release。');
   }
+  // 非交互(CI/管道):给指引但不阻塞 —— 由后续 publish 的真实结果决定成败
   warn('未登录。若发布报 ENEEDAUTH,请先 `npm login` 再重试。');
 }
 
@@ -760,8 +783,7 @@ if (!existsSync(DIST)) fail(`构建产物不存在:${DIST}(请先 npm run build,
 
 /* ---------- 4. 递增版本号(置于检查/构建/冒烟之后,中途失败时不污染版本号) ---------- */
 if (!opts.dryRun) {
-  await npm(['version', target, '--no-git-tag-version'], { inherit: true });
-  log(`版本号已更新为 ${target}(package.json + package-lock.json)`);
+  await writeVersion(target);
 }
 
 /* ---------- 5. 打包预览 + 临时全局安装验证 ---------- */
