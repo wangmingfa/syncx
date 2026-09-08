@@ -1123,8 +1123,10 @@ async function removePassword(): Promise<void> {
       <div v-if="historyOpen" class="modal-overlay" @click.self="closeHistory">
         <div class="modal modal-wide" role="dialog" aria-modal="true" aria-labelledby="history-title">
           <n-button quaternary circle class="modal-close" aria-label="关闭" @click="closeHistory">×</n-button>
-          <h2 id="history-title" class="modal-title">同步记录</h2>
-          <p class="modal-lead mono break">{{ historyFolderPath }}</p>
+          <div class="modal-title-row">
+            <h2 id="history-title" class="modal-title">同步记录</h2>
+            <span class="modal-title-path mono" :title="historyFolderPath">{{ historyFolderPath }}</span>
+          </div>
 
           <div v-if="historyLoading" class="history-loading">读取中…</div>
           <div v-else-if="historyEvents.length === 0" class="empty">还没有同步记录</div>
