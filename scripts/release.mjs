@@ -2,8 +2,9 @@
 /**
  * syncx npm 发布脚本。
  *
- * 流程(真实发布):网络预检 → 检查(可选)→ 构建 → 冒烟 → 递增版本号 →
- *       打包预览 → 临时全局安装验证 → 确认登录 → 真正 publish → 自动 commit。
+ * 流程(真实发布):并行预检(登录态/registry/版本历史,一次拿全)→ 交互块(通道/升级方式/登录/总确认) →
+ *       检查(可选)→ 构建 → 冒烟 → 递增版本号 → 打包预览 → 临时全局安装验证 → 真正 publish → 自动 commit。
+ *       交互块之后全程无人值守,人可以离开。
  *
  * 参考 D:/code/model-gate/scripts/release.ts 移植的健壮性能力:
  *   - 发布前校验「目标版本号是否已被 npm 占用」(防止 403/409 撞车)
@@ -12,11 +13,15 @@
  *   - 发布前确认 npm 登录态(防止 ENEEDAUTH 中途失败)
  *   - 发布成功后自动 commit 版本变更(package.json + package-lock.json)
  *
- * 交互流程(TTY 下,与 model-gate 一致的方向键 + Enter):
+ * 交互流程(TTY 下,方向键 + Enter,集中在一个连续交互块内完成,块内零网络等待):
+ *   0. 预检(唯一前置等待):并行查询 npm 登录态 / registry / 全量版本历史,
+ *      此后基准版本、占用判断、iteration 顺延全部本地计算,不再中途查 npm
  *   1. 选择发布通道:latest / beta / alpha / 自定义 tag(默认 latest)
  *   2. 选择升级方式:patch / minor / major / iteration —— 选项右侧直接预览算出的版本号
  *      缺省随通道:latest → patch,beta 等预发布 → iteration
- *   3. 全部检查通过后才做最后一次「发布 / 取消」确认
+ *   3. (未登录时)引导 npm login → 4. 发布计划总确认
+ *   确认后 typecheck / build / 冒烟 / 版本号 / publish / commit 全程无人值守;
+ *   唯一例外是 publish 时刻 npm 自己的 OTP / 浏览器 2FA(TOTP 30s 时效,无法前置)。
  *   传了 --tag / 升级方式参数则跳过对应那一步;给了显式版本号则跳过 1、2 两步。
  *   非交互环境(管道 / CI / 沙箱,没有 TTY)自动跳过所有选择,用默认值继续。
  *
@@ -288,29 +293,6 @@ async function withRetry(task, { retries, delayMs, onRetry }) {
   throw lastErr;
 }
 
-/**
- * 该版本号是否已在 npm 上发布过(占用)。
- *   - true                          已发布(占用)
- *   - false                         包/版本不存在(404,视为可发布)
- *   - 抛错                          传输 / 网络等临时性错误(会重试;重试耗尽仍失败则向上抛错,
- *                                   避免把「查询失败」误判为「未占用」而覆盖已发布版本)
- */
-async function versionExists(name, version) {
-  return await withRetry(
-    async () => {
-      const r = await npmRaw(['view', `${name}@${version}`, 'version']);
-      if (r.code === 0) return true;
-      if (/E?404|Not Found/i.test(r.stderr)) return false;
-      throw new Error(`npm view 查询失败 (exit ${r.code}): ${(r.stderr.trim() || r.stdout.trim()).slice(0, 300)}`);
-    },
-    {
-      retries: 3,
-      delayMs: 1000,
-      onRetry: (attempt, e) => warn(`第 ${attempt} 次查询 npm 失败,1s 后重试:${e.message}`),
-    },
-  );
-}
-
 /** 执行 `npm view <name> versions --json`,返回 { found, versions }。
  *  found=false 表示包在 registry 上不存在(404,视为首发);其它错误抛错以便重试。 */
 async function npmViewVersions(name) {
@@ -370,15 +352,13 @@ function parseVersion(v) {
 }
 
 /**
- * 从 npm registry 拉取该包「当前通道」已发布的最新版本(按 semver 取最大)。
+ * 从预取的全量版本列表中取「当前通道」的最新版本(按 semver 取最大)。
  *   - 通道 latest:只看 stable 版本(无预发布后缀)
  *   - 通道 beta / 其它:只看预发布标签与该通道同名的版本(如 x.y.z-beta.N)
  * 该通道没有任何已发布版本(含从未发布)返回 null。
  * 注意:不能用 `npm view <pkg> version`(它只看 latest dist-tag,会漏掉 beta 版本)。
  */
-async function fetchLatestVersion(name, channel) {
-  const result = await npmViewVersions(name);
-  if (!result.found) return null;
+function latestInChannel(versions, channel) {
   const preTagOf = (v) => {
     const pre = v.includes('-') ? v.slice(v.indexOf('-') + 1) : null;
     if (!pre) return null;
@@ -386,7 +366,7 @@ async function fetchLatestVersion(name, channel) {
     return dot === -1 ? pre : pre.slice(0, dot);
   };
   const inChannel = channel === 'latest' ? (v) => preTagOf(v) === null : (v) => preTagOf(v) === channel;
-  const candidates = result.versions.filter(inChannel).sort(cmpSemver);
+  const candidates = versions.filter(inChannel).sort(cmpSemver);
   return candidates.length ? candidates[candidates.length - 1] : null;
 }
 
@@ -464,32 +444,31 @@ function channelOfVersion(v) {
 }
 
 /** 发布前确保已登录 npm:未登录/登录态失效时,交互终端引导 npm login,非交互环境明确提示。
- *  登录成功后再次校验,确保后续 publish 不会因 ENEEDAUTH 而中途失败。 */
+ *  登录态来自预检的 whoami(避免交互块内再查一次网络);登录成功后回写预检状态并再次校验,
+ *  确保后续 publish 不会因 ENEEDAUTH 而中途失败。调用点在交互块内,无 spinner 抢行问题。 */
 async function ensureNpmLogin() {
-  const who = await npmRaw(['whoami']);
-  if (who.code === 0) {
-    log(`npm 已登录: ${who.stdout.trim()}`);
+  if (whoamiOk) {
+    log(`npm 已登录: ${whoamiName}`);
     return;
   }
-  warn('未检测到 npm 登录态(或登录已失效)');
   if (isInteractive()) {
     // 默认「是」:未登录时直接回车即进入 npm login,发布流程不会被打断。
     // (登录会拉起浏览器授权,完成后回到终端继续;不想登录用 ↓ 选「否」。)
-    pauseSpinner(); // 若外层套了 spinner,先让出整行再提问
     const ok = await selectPrompt('未登录，是否现在执行 npm login？', [
       { value: true, label: '是', hint: '立即 npm login（会拉起浏览器授权，完成后回到终端继续）' },
       { value: false, label: '否', hint: '稍后自行 npm login 再重试（本次发布会中止）' },
     ], 0);
     if (ok) {
-      // npm login 是 inherit 的交互式子进程,同样不能与动画同行 —— 保持暂停,登录结束再恢复
+      // npm login 是 inherit 的交互式子进程
       await npm(['login'], { inherit: true });
       const re = await npmRaw(['whoami']);
-      resumeSpinner();
       if (re.code !== 0) fail('npm login 未完成或失败,请检查登录状态后重试。');
-      log(`npm 登录成功: ${re.stdout.trim()}`);
+      whoamiOk = true;
+      whoamiName = re.stdout.trim();
+      log(`npm 登录成功: ${whoamiName}`);
       return;
     }
-    // 选「否」直接中止:此处位于检查/构建之前,早失败好过构建完才在 publish 撞 ENEEDAUTH。
+    // 选「否」直接中止:检查/构建尚未开始,早失败好过构建完才在 publish 撞 ENEEDAUTH。
     fail('未登录,已中止。请先执行 `npm login`,再重新运行 npm run release。');
   }
   // 非交互(CI/管道):给指引但不阻塞 —— 由后续 publish 的真实结果决定成败
@@ -649,7 +628,10 @@ for (const a of argv) {
   else fail(`无法识别的参数:${a}(应为 patch/minor/major/iteration,或如 1.2.3 / 1.2.3-beta.1)`);
 }
 
-/* ---------- 解析通道与基准版本(基准取自 npm 远端该通道的最新版本) ---------- */
+/* ---------- 0. 预检:一次并行拉全 npm 数据(唯一的前置等待) ---------- */
+// 登录态 / registry / 全量版本历史并行查完,此后基准版本、占用判断、iteration 顺延
+// 全部本地计算,交互块内零网络等待。预检失败在交互前直接中止,避免用户答完问题
+// 才撞上网络错误。与确认到 publish 之间隔数分钟的理论抢发窗口由 publish 的 409 兜底。
 const pkg = JSON.parse(readFileSync(PKG_PATH, 'utf8'));
 const pkgName = pkg.name;
 const cur = pkg.version; // 本地版本仅作「远端该通道无版本」时的首发兜底基准
@@ -658,6 +640,36 @@ const cur = pkg.version; // 本地版本仅作「远端该通道无版本」时�
 const explicitVersion =
   opts.bumpArg && /^\d+\.\d+\.\d+(?:-[\w.]+)?$/.test(opts.bumpArg) ? opts.bumpArg : undefined;
 
+let whoamiOk = false;
+let whoamiName = '';
+let registryUrl = '';
+let remoteVersions = [];
+await withSpinner(`预检:npm 登录态 / registry / ${pkgName} 版本历史`, async () => {
+  const [who, reg, vers] = await Promise.all([
+    npmRaw(['whoami']),
+    npmRaw(['config', 'get', 'registry']),
+    npmViewVersions(pkgName),
+  ]);
+  whoamiOk = who.code === 0;
+  whoamiName = who.stdout.trim();
+  registryUrl = reg.stdout.trim();
+  remoteVersions = vers.versions;
+});
+if (!whoamiOk) warn('未检测到 npm 登录态(或登录已失效),稍后会在交互块中引导登录');
+
+/* registry 预检(仅真正发布时):镜像源不接受 publish,交互前就失败 */
+let publisher;
+if (!opts.dryRun) {
+  if (!registryUrl.includes('registry.npmjs.org') && !opts.registry) {
+    fail(
+      `当前 registry 为 ${registryUrl},不是 npmjs 官方源。` +
+      '镜像源不接受 publish;确需发布请加 --registry=https://registry.npmjs.org 或在 ~/.npmrc 配置官方源。',
+    );
+  }
+  publisher = opts.registry ?? registryUrl;
+}
+
+/* ---------- 1. 交互块:通道 → 升级方式 → (登录)→ 总确认,连续完成、块内零等待 ---------- */
 let channel;
 if (explicitVersion) {
   channel = channelOfVersion(explicitVersion);
@@ -685,10 +697,7 @@ let isFirstRelease = false;
 if (explicitVersion) {
   base = explicitVersion;
 } else {
-  const remote = await withSpinner(
-    `查询 npm 上 ${pkgName} 在 ${channel} 通道的最新版本`,
-    () => fetchLatestVersion(pkgName, channel),
-  );
+  const remote = latestInChannel(remoteVersions, channel);
   isFirstRelease = remote === null;
   base = remote ?? cur;
   if (isFirstRelease) {
@@ -744,24 +753,17 @@ if (!explicitVersion) {
   }
 }
 
-/* ---------- 网络预检 1:目标版本号是否已被 npm 占用 ---------- */
+/* ---------- 占用判断本地化:预检已拿到全量版本列表,不再逐个查 npm ---------- */
 // 预发布 + iteration 时若已占用则自动顺延迭代号(beta.1 被占 → beta.2),与 model-gate 一致;
 // 其它升级方式被占用则直接失败,不静默跳版本。
-let occupied = await withSpinner(
-  `校验 ${pkgName}@${target} 是否已被 npm 占用`,
-  () => versionExists(pkgName, target),
-);
+let occupied = remoteVersions.includes(target);
 if (occupied) {
   if (channel !== 'latest' && bump === 'iteration') {
     let guard = 0;
     while (occupied) {
-      const next = nextVersion(target, channel, 'iteration', false);
       if (++guard > 50) fail('iteration 顺延超过 50 次仍被占用,请检查 npm 版本历史');
-      target = next;
-      occupied = await withSpinner(
-        `校验 ${pkgName}@${target} 是否已被 npm 占用`,
-        () => versionExists(pkgName, target),
-      );
+      target = nextVersion(target, channel, 'iteration', false);
+      occupied = remoteVersions.includes(target);
     }
     warn(`基准 ${base} 的下一版已被占用,已自动顺延到 ${target}`);
   } else {
@@ -773,26 +775,33 @@ if (occupied) {
 }
 log(`版本 ${target} 未被占用,可发布`);
 
-/* ---------- registry 预检(仅真正发布时) ---------- */
+/* 登录(仅真正发布时):在交互块内完成,确认前就绪 */
 if (!opts.dryRun) {
-  const reg = (await npm(['config', 'get', 'registry'])).stdout.trim();
-  if (!reg.includes('registry.npmjs.org') && !opts.registry) {
-    fail(
-      `当前 registry 为 ${reg},不是 npmjs 官方源。` +
-      '镜像源不接受 publish;确需发布请加 --registry=https://registry.npmjs.org 或在 ~/.npmrc 配置官方源。',
-    );
-  }
-  const publisher = opts.registry ?? reg;
+  await ensureNpmLogin();
   log(`将发布到 ${publisher} (dist-tag: ${opts.tag})`);
 }
 
-/* ---------- 网络预检 2:登录态(仅真正发布时,提前失败避免构建白做) ---------- */
+/* ---------- 2. 发布计划总确认(交互块最后一项,确认后全程无人值守) ---------- */
 if (!opts.dryRun) {
-  if (isInteractive()) {
-    // 交互态下要问「是否 npm login」,不能再套 spinner —— 否则动画会和用户提示抢同一行输出
-    await ensureNpmLogin();
-  } else {
-    await withSpinner('确认 npm 登录态', async () => { await ensureNpmLogin(); });
+  log('—— 发布计划 ——');
+  log(`  ${pkgName}@${target} → ${publisher} (dist-tag: ${opts.tag})`);
+  const steps = [];
+  if (opts.doCheck) steps.push('typecheck + vitest');
+  if (opts.doBuild) steps.push('build');
+  steps.push(opts.doSmoke ? '冒烟 + 临时全局安装验证' : '冒烟');
+  steps.push(`npm version ${target}`);
+  steps.push(`npm publish --tag ${opts.tag}`);
+  if (opts.doGit) steps.push('git commit 版本变更');
+  log(`  步骤:${steps.join(' → ')}`);
+  if (!opts.yes) {
+    const go = await selectPrompt(`确认发布 ${pkgName}@${target} ?`, [
+      { value: true, label: '发布', hint: '确认后全自动执行到底,中途失败会立即中止' },
+      { value: false, label: '取消', hint: '放弃本次发布,不做任何远端/本地变更' },
+    ], 0);
+    if (!go) {
+      log(`已取消发布:${pkgName}@${target}(未执行 npm publish)`);
+      process.exit(0);
+    }
   }
 }
 
@@ -860,18 +869,7 @@ if (opts.doSmoke) {
 if (opts.dryRun) {
   log(`dry-run 结束:未发布、未改版本号、未 commit。可去掉 --dry-run 执行真实发布(${target})`);
 } else {
-  // 最后一次方向键确认(model-gate 同样在所有检查之后才 confirm)
-  if (!opts.yes) {
-    const go = await selectPrompt(`确认发布 ${pkgName}@${target} ?`, [
-      { value: true, label: '发布', hint: `npm publish, dist-tag = ${opts.tag}` },
-      { value: false, label: '取消', hint: '放弃本次发布,不做任何远端变更' },
-    ], 0);
-    if (!go) {
-      log(`已取消发布:${pkgName}@${target}(未执行 npm publish)`);
-      process.exit(0);
-    }
-  }
-
+  // 发布确认已在交互块内完成(发布计划总确认),此处直接执行
   const otpHint = opts.otp ? `(--otp=${'*'.repeat(opts.otp.length)})` : '(未提供 OTP)';
   log(`执行 npm publish… ${otpHint}`);
   const publishArgs = ['publish', '--access', 'public', '--tag', opts.tag];
