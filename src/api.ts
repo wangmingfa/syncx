@@ -26,6 +26,16 @@ export interface ControlServerDeps {
   authFile?: string;
   /** stop 命令经 POST /api/shutdown 触发的优雅关闭;不传则该端点返回 503。 */
   shutdown?: () => void;
+  /**
+   * Web UI 触发的「从对端拉取安装包自更新」:完成校验与 updater 派发后返回新版本号;
+   * 路由在响应完 HTTP 后调用 shutdown 优雅关闭,由 updater 完成换入与重启。
+   * 抛错(设备离线/版本不匹配/校验失败)时路由返回 400 与原因。
+   */
+  selfUpdate?: (deviceId: string) => Promise<{ version: string }>;
+  /** Web UI「检查更新」:立即查一次 npm registry;返回 undefined = 无可用更新。 */
+  checkForUpdate?: () => Promise<{ latest: string; current: string } | undefined>;
+  /** Web UI 确认后的 npm 自升级:下载官方 tgz → 校验 → updater 接管;抛错返回 400。 */
+  selfUpdateNpm?: () => Promise<{ version: string }>;
   getStatus: () => unknown;
   /** 添加共享目录;返回是否自动创建了不存在的目录(供前端提示)。 */
   addFolder?: (path: string, devices: string[], id?: string) => boolean;
@@ -252,7 +262,7 @@ async function ensureSsr(): Promise<void> {
  * (见 `isControlRoute`),生产形态下不传该参数。
  */
 export function createControlServer(deps: ControlServerDeps): Server {
-  const { token, authFile, getStatus, shutdown, addFolder, removeFolder, addDevice, removeDevice, setFolderDevices, setFolderUseGitignore, rescan, reconnect, getOffers, getFolderHistory, acceptOffer, declineOffer, restoreOffer, devViteUrl, logFile } = deps;
+  const { token, authFile, getStatus, shutdown, selfUpdate, checkForUpdate, selfUpdateNpm, addFolder, removeFolder, addDevice, removeDevice, setFolderDevices, setFolderUseGitignore, rescan, reconnect, getOffers, getFolderHistory, acceptOffer, declineOffer, restoreOffer, devViteUrl, logFile } = deps;
 
   /**
    * 会话签名密钥的「基」。
@@ -480,6 +490,67 @@ export function createControlServer(deps: ControlServerDeps): Server {
       sendJson(res, 200, { ok: true, msg: 'shutting down' });
       // 先让响应冲出内核缓冲,再走关闭链路(control.close 在其中)
       setTimeout(shutdown, 50);
+      return;
+    }
+
+    // POST /api/devices/upgrade : 从对端拉取其安装包(tgz)并自更新(需认证)。
+    // 失败(设备离线/版本不低于对方/校验不通过)返回 400 与原因,进程不动;
+    // 成功时 updater 已派发,响应后延迟触发优雅关闭,由 updater 换入新包并重启。
+    if (req.method === 'POST' && req.url && pathname(req.url) === '/api/devices/upgrade') {
+      if (!selfUpdate) {
+        sendJson(res, 503, { error: 'self-update not available' });
+        return;
+      }
+      let body: { deviceId?: unknown } = {};
+      try {
+        body = JSON.parse(await readBody(req)) as typeof body;
+      } catch {
+        sendJson(res, 400, { error: 'invalid json' });
+        return;
+      }
+      if (typeof body.deviceId !== 'string' || body.deviceId === '') {
+        sendJson(res, 400, { error: 'deviceId required' });
+        return;
+      }
+      try {
+        const r = await selfUpdate(body.deviceId);
+        sendJson(res, 200, { ok: true, version: r.version, restarting: true });
+        setTimeout(() => shutdown?.(), 150);
+      } catch (e) {
+        sendJson(res, 400, { ok: false, error: e instanceof Error ? e.message : String(e) });
+      }
+      return;
+    }
+
+    // POST /api/self-update/check : 立即查一次 npm registry(需认证),返回有无可用更新
+    if (req.method === 'POST' && req.url && pathname(req.url) === '/api/self-update/check') {
+      if (!checkForUpdate) {
+        sendJson(res, 503, { error: 'update check not available' });
+        return;
+      }
+      try {
+        const update = await checkForUpdate();
+        sendJson(res, 200, { ok: true, update: update ?? null });
+      } catch (e) {
+        sendJson(res, 400, { ok: false, error: e instanceof Error ? e.message : String(e) });
+      }
+      return;
+    }
+
+    // POST /api/self-update : 用户确认后的 npm 自升级(需认证)。
+    // 成功时响应后延迟触发优雅关闭,updater 完成换入并拉起新进程(端口不变)。
+    if (req.method === 'POST' && req.url && pathname(req.url) === '/api/self-update') {
+      if (!selfUpdateNpm) {
+        sendJson(res, 503, { error: 'self-update not available' });
+        return;
+      }
+      try {
+        const r = await selfUpdateNpm();
+        sendJson(res, 200, { ok: true, version: r.version, restarting: true });
+        setTimeout(() => shutdown?.(), 150);
+      } catch (e) {
+        sendJson(res, 400, { ok: false, error: e instanceof Error ? e.message : String(e) });
+      }
       return;
     }
 

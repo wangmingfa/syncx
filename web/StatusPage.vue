@@ -27,6 +27,10 @@ interface DeviceInfo {
   remoteFolders?: string[];
   /** 对端宣告的仍待确认的、来自本机的目录邀请 id 集合(区分「待对方确认」与「已停止共享」)。 */
   remotePendingFolders?: string[];
+  /** 对端运行版本;dev 态为 'dev',undefined=旧版本对端未发 hello。 */
+  version?: string;
+  /** 本机(打包态)版本低于该对端时为 true,UI 提供「从对方升级」入口。 */
+  canUpgrade?: boolean;
 }
 
 interface OfferInfo {
@@ -47,6 +51,8 @@ interface FolderErrorItem {
 
 interface StatusData {
   deviceId: string;
+  /** 本机运行版本;dev 态为 'dev'。 */
+  version?: string;
   entries: number;
   tombstones: number;
   folders: FolderInfo[];
@@ -54,6 +60,8 @@ interface StatusData {
   syncProgress: SyncProgressItem[];
   offers: OfferInfo[];
   folderErrors?: FolderErrorItem[];
+  /** npm 检查到的可用更新(打包态且发现更高版本时才有值)。 */
+  updateAvailable?: { latest: string; current: string } | null;
 }
 
 const props = defineProps<{ status: StatusData; message?: string }>();
@@ -164,9 +172,9 @@ async function runConfirm(): Promise<void> {
   try {
     await state.action();
     confirmState.value = null;
-  } catch {
-    // 失败时保留弹窗,便于取消或重试,不做任何数据假设
-    showToast('操作失败,请重试');
+  } catch (error) {
+    // 失败时保留弹窗,便于取消或重试,不做任何数据假设;后端给的原因(如有)优先展示
+    showToast(error instanceof Error && error.message ? error.message : '操作失败,请重试');
   } finally {
     confirmBusy.value = false;
     busy.value = false;
@@ -278,6 +286,33 @@ async function doRemoveDevice(deviceId: string): Promise<void> {
   });
   if (!res.ok) throw new Error(`remove device ${res.status}`);
   showToast('已移除设备');
+  await refreshStatus();
+}
+
+// ---- 从对端升级(设备卡版本低于对方时显示;dev↔build 混跑不出现) ----
+
+/** 点设备卡「升级到 x.y.z」:二次确认后从对方拉取产物并自动重启。 */
+function askUpgrade(p: DeviceInfo): void {
+  askConfirm({
+    title: '从该设备升级?',
+    message: `将从对方拉取 syncx ${p.version} 替换本机产物,并自动重启服务。重启期间 Web UI 会短暂断开,稍后自动恢复。`,
+    detail: p.deviceId,
+    confirmText: '升级并重启',
+    action: () => upgradeDevice(p.deviceId),
+  });
+}
+
+async function upgradeDevice(deviceId: string): Promise<void> {
+  const res = await fetch('/api/devices/upgrade', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ deviceId }),
+  });
+  const data = (await res.json().catch(() => ({}))) as { ok?: boolean; version?: string; error?: string };
+  if (!res.ok || !data.ok) throw new Error(data.error ?? `升级失败 (${res.status})`);
+  showToast(`已更新到 ${data.version},daemon 重启中…`);
+  // daemon 即将重启:稍等片刻再刷新,让状态先落回「离线/重启中」
+  await new Promise((resolve) => setTimeout(resolve, 1200));
   await refreshStatus();
 }
 
@@ -658,6 +693,68 @@ function closeLogs(): void {
   logsOpen.value = false;
 }
 
+// ---- npm 更新(后端定时检查,发现新版本经 status.updateAvailable 下发) ----
+/** 本会话已点「忽略」的版本号,避免横幅反复出现。 */
+const updateDismissed = ref('');
+/** 升级进行中:隐藏横幅并防止重复触发。 */
+const upgrading = ref(false);
+
+const updateAvailable = computed(() => {
+  const u = status.value.updateAvailable;
+  if (!u || upgrading.value || u.latest === updateDismissed.value) return null;
+  return u;
+});
+
+/** 横幅「立即升级」:二次确认后走 npm 自升级,服务重启完成自动刷新页面。 */
+function askSelfUpdate(): void {
+  const u = updateAvailable.value;
+  if (!u) return;
+  askConfirm({
+    title: `升级到 ${u.latest}?`,
+    message: `将从 npm 下载官方安装包,校验通过后自动重启服务(当前 ${u.current})。重启期间页面会短暂失去连接,完成后自动刷新。`,
+    confirmText: '开始升级',
+    action: () => doSelfUpdate(u.latest),
+  });
+}
+
+async function doSelfUpdate(latest: string): Promise<void> {
+  upgrading.value = true;
+  const res = await fetch('/api/self-update', { method: 'POST' });
+  const body = (await res.json().catch(() => ({}))) as { ok?: boolean; error?: string };
+  if (!res.ok || !body.ok) throw new Error(body.error ?? `self-update ${res.status}`);
+  showToast(`已开始升级到 ${latest},服务重启中,请稍候…`);
+  await waitForRestart();
+  // 新 daemon 已在同一端口就绪:整页刷新加载新版本前端
+  window.location.reload();
+}
+
+/** 轮询 /health(免认证)直到服务回来;超时抛错由确认弹窗展示。 */
+async function waitForRestart(): Promise<void> {
+  for (let i = 0; i < 40; i++) {
+    await new Promise((r) => setTimeout(r, 1500));
+    try {
+      const res = await fetch('/health', { cache: 'no-store' });
+      if (res.ok) return;
+    } catch {
+      // 还没起来,继续等
+    }
+  }
+  throw new Error('服务重启超时,请到终端确认 daemon 状态');
+}
+
+/** 顶栏「检查更新」:立即查一次 registry 并刷新状态。 */
+async function checkForUpdate(): Promise<void> {
+  const res = await fetch('/api/self-update/check', { method: 'POST' });
+  const body = (await res.json().catch(() => ({}))) as {
+    ok?: boolean;
+    error?: string;
+    update?: { latest: string } | null;
+  };
+  if (!res.ok || !body.ok) throw new Error(body.error ?? `check ${res.status}`);
+  await refreshStatus();
+  showToast(body.update ? `发现新版本 ${body.update.latest}` : `已是最新版本 ${status.value.version ?? ''}`);
+}
+
 function actionLabel(a: string): string {
   return ({ add: '新增', update: '修改', delete: '删除', conflict: '冲突' } as Record<string, string>)[a] ?? a;
 }
@@ -791,6 +888,16 @@ async function removePassword(): Promise<void> {
         </div>
       </div>
 
+      <n-button tertiary :disabled="busy" @click="checkForUpdate">
+        <template #icon>
+          <svg viewBox="0 0 24 24" width="15" height="15" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+            <path d="M21 12a9 9 0 1 1-3-6.7" />
+            <path d="M21 3v5h-5" />
+          </svg>
+        </template>
+        检查更新
+      </n-button>
+
       <n-button tertiary @click="openLogs">
         <template #icon>
           <svg viewBox="0 0 24 24" width="15" height="15" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
@@ -841,6 +948,20 @@ async function removePassword(): Promise<void> {
         <span class="dot" :class="status.devices.some((p) => p.online) ? 'dot-online' : 'dot-offline'"></span>
         <span class="mono">{{ status.deviceId }}</span>
       </span>
+    </div>
+
+    <!-- 发现新版本横幅:npm 定时检查到更高版本时出现,可忽略(本会话不再提示) -->
+    <div v-if="updateAvailable" class="update-banner" role="status">
+      <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+        <path d="M12 3v10" />
+        <path d="m8 9 4 4 4-4" />
+        <path d="M4 17v2a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2v-2" />
+      </svg>
+      <span class="update-banner__text">
+        发现新版本 <b class="mono">{{ updateAvailable.latest }}</b>(当前 {{ updateAvailable.current }})
+      </span>
+      <n-button size="tiny" type="primary" :disabled="busy" @click="askSelfUpdate">立即升级</n-button>
+      <n-button size="tiny" quaternary @click="updateDismissed = updateAvailable.latest">忽略</n-button>
     </div>
 
     <!-- 概览胶囊 -->
@@ -1059,8 +1180,14 @@ async function removePassword(): Promise<void> {
           <div class="item-sub">
             共享 {{ deviceFolderCount(p.deviceId) }} 个目录
           </div>
+          <div class="item-addr">
+            <span class="addr-label">版本</span><span class="addr-value mono">{{ p.version ?? '未知' }}</span>
+          </div>
           <div v-if="p.url" class="item-addr">
             <span class="addr-label">地址</span><span class="addr-value mono">{{ stripWs(p.url) }}</span>
+          </div>
+          <div v-if="p.online && p.canUpgrade" class="actions">
+            <n-button size="small" type="primary" tertiary :disabled="busy" @click="askUpgrade(p)">升级到 {{ p.version }}</n-button>
           </div>
           <div v-if="!p.online" class="actions">
             <n-button size="small" tertiary :disabled="busy" @click="reconnect(p.deviceId)">重连</n-button>

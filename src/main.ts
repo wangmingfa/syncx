@@ -34,7 +34,18 @@ try {
   process.exit(1);
 }
 
-run(args).catch((error: unknown) => {
+// 自更新重启拉起的新进程:先等旧进程走完优雅关闭、释放端口,再开始绑定,
+// 避免 EADDRINUSE(延迟值由 src/selfupdate.ts 的 spawnRestart 注入)。
+const restartDelayMs = Number(process.env.SYNCX_RESTART_DELAY_MS ?? '0') || 0;
+
+const boot = async (): Promise<void> => {
+  if (restartDelayMs > 0) {
+    await new Promise((resolve) => setTimeout(resolve, restartDelayMs));
+  }
+  await run(args);
+};
+
+boot().catch((error: unknown) => {
   console.error(error instanceof Error ? error.message : error);
   process.exit(1);
 });

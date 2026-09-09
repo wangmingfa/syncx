@@ -27,7 +27,16 @@ export type ControlMessage =
    *  pendingFolderIds:本机仍待确认的、来自对方的目录邀请 id 集合,
    *  对方据此把标签显示为「待对方确认」而非误判「已停止共享」。
    *  旧版本对端不发送该字段(undefined),接收方按未知处理,退回旧逻辑。 */
-  | { kind: 'folder-sync-list'; fromDeviceId: string; folderIds: string[]; pendingFolderIds?: string[] };
+  | { kind: 'folder-sync-list'; fromDeviceId: string; folderIds: string[]; pendingFolderIds?: string[] }
+  /** 会话建立时互发的版本宣告。dev 态(src 直跑)version 为 'dev'。
+   *  旧版本对端不发送,接收方 version 为 undefined,UI 显示「未知」且不给升级入口。 */
+  | { kind: 'hello'; fromDeviceId: string; version: string }
+  /** 请求对端的自身安装包(tgz,整包),用于「版本低于对方时从对方升级」。
+   *  仅经握手签名校验过的会话可发;对端 dev 态时 response.data 为 undefined。 */
+  | { kind: 'self-binary-request'; requestId: string; fromDeviceId: string }
+  /** 对端安装包回传:base64 的整包 tgz(含 package.json 与 dist/syncx.js)+ 内容
+   *  sha256 指纹;data 缺省 = 对端无法提供(dev 态或打包失败)。 */
+  | { kind: 'self-binary-response'; requestId: string; fromDeviceId: string; version: string; sha256: string; data?: string };
 
 export function encodeWireMessage(message: WireMessage): string {
   return JSON.stringify(message);

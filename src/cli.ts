@@ -122,6 +122,16 @@ import { renderSystemdUnit, renderLaunchdPlist, renderWindowsService } from './i
 import { WebSocket } from 'ws';
 import { createLogger } from './logger.js';
 import { runUpgrade } from './upgrade.js';
+import { compareVersions } from './upgrade.js';
+import {
+  consumeUpdateDoneFile,
+  isBundledRuntime,
+  packSelfTgz,
+  runSelfUpdate,
+  runtimeVersion,
+  sha256Hex,
+} from './selfupdate.js';
+import { createUpdateChecker, downloadTarball } from './update-check.js';
 
 /** 一个共享目录的运行期状态:索引、执行器与本地索引,随配置热重载增删。 */
 interface FolderState {
@@ -155,6 +165,9 @@ interface ActiveSession {
   /** 对端宣告的「仍待确认的、来自本机的目录邀请 id 集合」(folder-sync-list)。
    *  空/缺失时 UI 退回「已停止共享」的旧判断。 */
   remotePendingFolders?: Set<string>;
+  /** 对端经 hello 宣告的运行版本('dev' = 对端为源码 dev 态)。
+   *  undefined = 对端旧版本未发 hello,UI 显示「未知」且不给升级入口。 */
+  remoteVersion?: string;
 }
 
 function loadOrCreateToken(configDir: string): string {
@@ -490,6 +503,14 @@ export async function run(args: ParsedArgs): Promise<void> {
   // stop 命令经控制 API 触发的优雅关闭。shutdown 在下方资源全部就绪后才被赋值;
   // 就绪前收到调用(API 时机上不可能)是无操作,保证不会关到半初始化的资源。
   let triggerShutdown: () => void = () => {};
+
+  // npm 更新检查(仅打包态):定时查 registry,发现新版本经 status 下发,Web UI 弹升级提示
+  const updateChecker = isBundledRuntime() ? createUpdateChecker(runtimeVersion()) : undefined;
+  updateChecker?.start();
+  // 自更新结果上报:updater 在观察期(默认 2.5s)后才写结果文件,这里延时读取并记日志
+  if (process.env.SYNCX_UPDATE_DONE) {
+    setTimeout(() => consumeUpdateDoneFile(logger), 5_000).unref();
+  }
 
   const lanAddresses = getLanAddresses();
   logger.info(`control UI (token in ${join(configDir, 'control.token')}):`);
@@ -859,7 +880,75 @@ export async function run(args: ParsedArgs): Promise<void> {
       case 'folder-invitation-ack':
         logger.info(`folder invitation ${message.accepted ? 'accepted' : 'declined'} by ${message.fromDeviceId}`);
         break;
+      case 'self-binary-request': {
+        // 对端请求本机安装包(它版本更低、想从本机升级)。会话已经握手签名校验,
+        // 对端身份真实;dev 态无安装包(或打包失败),回 data:undefined。
+        // 打包走系统 tar 有 IO 耗时,异步化避免阻塞控制消息循环。
+        void (async () => {
+          const tgz = await packSelfTgz();
+          logger.info(`self-binary request from ${message.fromDeviceId}: ${tgz ? `serving ${tgz.length} bytes` : 'unavailable (dev runtime or pack failed)'}`);
+          sendControlTo(message.fromDeviceId, {
+            kind: 'self-binary-response',
+            requestId: message.requestId,
+            fromDeviceId: identity.deviceId,
+            version: runtimeVersion(),
+            // 内容指纹:接收方落地前重算比对(传输完整性由 GCM 保证,这层绑定
+            // 「消息内容」与「发送方实际打包的内容」,挡序列化/重组类错位)
+            sha256: tgz ? sha256Hex(tgz) : '',
+            data: tgz?.toString('base64'),
+          });
+        })();
+        break;
+      }
     }
+  }
+
+  /** 等待对端 self-binary-response 的挂起请求(requestId → resolver)。 */
+  const pendingBinary = new Map<string, (resp: Extract<ControlMessage, { kind: 'self-binary-response' }>) => void>();
+
+  /**
+   * 从对端拉取其安装包(tgz)并自更新:发送请求 → 等回传(30s 超时)→
+   * 指纹校验 → runSelfUpdate(temp 校验 + updater 接管换入 + 拉起新 daemon)。
+   * 本进程在 API 路由响应完 HTTP 后优雅关闭,换入由独立 updater 进程完成。
+   */
+  async function upgradeFromPeer(deviceId: string): Promise<{ version: string }> {
+    const session = peerSessions.get(deviceId);
+    if (!session || !sessionAlive(session)) throw new Error('设备离线,无法升级');
+    const targetVersion = session.remoteVersion;
+    if (!targetVersion) throw new Error('对方版本未知(对端 syncx 版本过旧),无法升级');
+    if (targetVersion === 'dev') throw new Error('对方为 dev 运行态,没有可拉取的产物');
+    if (!isBundledRuntime()) throw new Error('本机为 dev 运行态,不支持自更新');
+    const mine = runtimeVersion();
+    if (compareVersions(mine, targetVersion) >= 0) throw new Error(`本机 ${mine} 不低于对方 ${targetVersion},无需升级`);
+
+    const requestId = randomBytes(8).toString('hex');
+    const resp = await new Promise<Extract<ControlMessage, { kind: 'self-binary-response' }>>((resolve, reject) => {
+      const timer = setTimeout(() => {
+        pendingBinary.delete(requestId);
+        reject(new Error('对方响应超时(30s)'));
+      }, 30_000);
+      pendingBinary.set(requestId, (r) => {
+        clearTimeout(timer);
+        resolve(r);
+      });
+      if (!sendControlTo(deviceId, { kind: 'self-binary-request', requestId, fromDeviceId: identity.deviceId })) {
+        clearTimeout(timer);
+        pendingBinary.delete(requestId);
+        reject(new Error('发送升级请求失败(设备可能刚离线)'));
+      }
+    });
+    if (!resp.data) throw new Error(`对方 ${resp.version} 未能提供安装包(dev 运行态或打包失败)`);
+    const tgz = Buffer.from(resp.data, 'base64');
+    // 指纹校验:重算 sha256 必须与发送方宣告一致,不一致说明内容错位,拒绝升级
+    const actual = sha256Hex(tgz);
+    if (actual !== resp.sha256) {
+      throw new Error(`安装包指纹校验失败(期望 ${resp.sha256.slice(0, 12)}…,实际 ${actual.slice(0, 12)}…),已放弃升级`);
+    }
+    // temp 校验 + 派发 updater:本进程响应完 HTTP 优雅关闭后,由 updater
+    // 完成等退出 → 整目录换入 → 拉起新 daemon(失败自动回滚旧包)
+    await runSelfUpdate(tgz, resp.version);
+    logger.info(`self-update staged: ${mine} → ${resp.version} (from ${deviceId}), shutting down for swap`);
+    return { version: resp.version };
   }
 
   /**
@@ -921,6 +1010,12 @@ export async function run(args: ParsedArgs): Promise<void> {
       transports: [],
     };
     activeSessions.push(session);
+    // 版本握手:双方各发一次 hello,设备卡显示对端版本,并据此计算「可否从对方升级」
+    sendControlMessage(socket, key, {
+      kind: 'hello',
+      fromDeviceId: identity.deviceId,
+      version: runtimeVersion(),
+    });
     // 书签策略:仅当当前书签缺失或其 socket 已死时才移交给新会话。
     // 健康的当前会话保持不动(重复连接照常注册为备份,handlers 可收消息);
     // 若此处覆盖了健康书签,而这条新连接随即被对端关闭,书签就会孤儿化。
@@ -948,6 +1043,16 @@ export async function run(args: ParsedArgs): Promise<void> {
       logger.info(`peer ${remoteDeviceId} connected but not authorized for any shared folder; control-only session until trusted`);
     }
     attachPeerMessages(session.peers, socket, key, (message) => {
+      if (message.kind === 'hello') {
+        session.remoteVersion = message.version;
+        logger.info(`peer ${remoteDeviceId} runs syncx ${message.version}`);
+        return;
+      }
+      if (message.kind === 'self-binary-response') {
+        pendingBinary.get(message.requestId)?.(message);
+        pendingBinary.delete(message.requestId);
+        return;
+      }
       if (message.kind === 'folder-sync-list') {
         session.remoteFolders = new Set(message.folderIds);
         // 新字段可选:旧版本对端不发送 → 记为空集,UI 退回「已停止共享」旧判断
@@ -1046,6 +1151,29 @@ export async function run(args: ParsedArgs): Promise<void> {
     devViteUrl: args.devViteUrl,
     // stop 命令经 POST /api/shutdown 触发:与 SIGTERM 走同一条优雅关闭链路
     shutdown: () => triggerShutdown(),
+    // Web UI「从对端升级」:拉取对端安装包并整包替换;重启由 api 路由响应后触发
+    selfUpdate: (deviceId) => upgradeFromPeer(deviceId),
+    // Web UI「检查更新」:立即查一次 npm registry,返回是否有可用更新
+    checkForUpdate: async () => {
+      await updateChecker?.check();
+      const avail = updateChecker?.available();
+      return avail ? { latest: avail.latest, current: avail.current } : undefined;
+    },
+    // Web UI 确认后的 npm 自升级:下载官方 tgz → 校验 → updater 接管换入
+    selfUpdateNpm: async () => {
+      if (!isBundledRuntime()) throw new Error('本机为 dev 运行态,不支持自更新');
+      let avail = updateChecker?.available();
+      if (!avail) {
+        // 没有缓存的可用更新时再查一次(可能刚发了新版)
+        await updateChecker?.check();
+        avail = updateChecker?.available();
+      }
+      if (!avail) throw new Error(`当前已是最新版本 ${runtimeVersion()},无需升级`);
+      const tgz = await downloadTarball(avail.tarballUrl);
+      await runSelfUpdate(tgz, avail.latest);
+      logger.info(`self-update staged: ${runtimeVersion()} → ${avail.latest} (npm), shutting down for swap`);
+      return { version: avail.latest };
+    },
     // Web UI「日志」弹窗经 GET /api/logs 读取日志尾部;未设置时端点返回 ok:false
     logFile: args.logFile,
     addFolder: (path, devices, id) => {
@@ -1083,9 +1211,14 @@ export async function run(args: ParsedArgs): Promise<void> {
         ...config.knownDevices.map((d) => d.id),
         ...folderDevices.keys(),
       ]);
+      // 自更新资格只认打包态 + 双方都是具体 semver:dev↔build 混跑不做跨形态更新
+      const selfVersion = runtimeVersion();
+      const isRealVersion = (v: string | undefined): v is string =>
+        !!v && v !== 'dev' && /^\d+\.\d+\.\d+/.test(v);
       const devices: DeviceStatus[] = [];
       for (const deviceId of deviceIds) {
         const session = peerSessions.get(deviceId);
+        const peerVersion = session?.remoteVersion;
         devices.push({
           deviceId,
           online: isPeerConnected(deviceId),
@@ -1095,6 +1228,11 @@ export async function run(args: ParsedArgs): Promise<void> {
           remoteFolders: session?.remoteFolders ? [...session.remoteFolders] : undefined,
           // 对端宣告的仍待确认的目录邀请:仅对端为新版本时非空
           remotePendingFolders: session?.remotePendingFolders ? [...session.remotePendingFolders] : [],
+          version: peerVersion,
+          canUpgrade:
+            isRealVersion(selfVersion) &&
+            isRealVersion(peerVersion) &&
+            compareVersions(selfVersion, peerVersion) < 0,
         });
       }
       // 收集各目录同步进度
@@ -1130,6 +1268,9 @@ export async function run(args: ParsedArgs): Promise<void> {
         // status.offers 下发 pending + declined:已忽略项在 UI 灰显供「恢复」
         listOpenOffers(configPath),
         folderErrors,
+        selfVersion,
+        // npm 检查到的可用更新:仅打包态有检查器,发现更高版本才非空
+        updateChecker?.available(),
       );
     },
     rescan: () => {
@@ -1432,6 +1573,7 @@ export async function run(args: ParsedArgs): Promise<void> {
   await new Promise<void>((resolve) => {
 const shutdown = (): void => {
     clearInterval(scanTimer);
+    updateChecker?.stop();
     configWatcher?.close();
     for (const timer of reconnectTimers.values()) clearTimeout(timer);
     reconnectTimers.clear();

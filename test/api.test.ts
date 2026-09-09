@@ -824,3 +824,228 @@ describe('GET /api/logs', () => {
     server.close();
   });
 });
+
+describe('POST /api/devices/upgrade', () => {
+  it('requires auth', async () => {
+    const server = createControlServer({
+      token: 'secret',
+      getStatus: () => ({}),
+      selfUpdate: async () => ({ version: '0.2.0' }),
+    });
+    server.listen(0, '127.0.0.1');
+    await once(server, 'listening');
+    const port = (server.address() as AddressInfo).port;
+
+    const res = await fetchJson(port, '/api/devices/upgrade', undefined, {
+      method: 'POST',
+      body: { deviceId: 'DEV1' },
+    });
+
+    expect(res.status).toBe(401);
+    server.close();
+  });
+
+  it('returns 400 with the reason when self-update throws', async () => {
+    let shutdownCalled = false;
+    const server = createControlServer({
+      token: 'secret',
+      getStatus: () => ({}),
+      selfUpdate: async () => {
+        throw new Error('本机 0.1.0 不低于对方 0.2.0,无需升级');
+      },
+      shutdown: () => {
+        shutdownCalled = true;
+      },
+    });
+    server.listen(0, '127.0.0.1');
+    await once(server, 'listening');
+    const port = (server.address() as AddressInfo).port;
+
+    const res = await fetchJson(port, '/api/devices/upgrade', 'secret', {
+      method: 'POST',
+      body: { deviceId: 'DEV1' },
+    });
+
+    expect(res.status).toBe(400);
+    expect(res.body).toMatchObject({ ok: false, error: '本机 0.1.0 不低于对方 0.2.0,无需升级' });
+    await new Promise((r) => setTimeout(r, 250));
+    expect(shutdownCalled).toBe(false);
+    server.close();
+  });
+
+  it('responds ok then schedules the graceful shutdown', async () => {
+    let shutdownCalled = false;
+    const server = createControlServer({
+      token: 'secret',
+      getStatus: () => ({}),
+      selfUpdate: async () => ({ version: '0.2.0' }),
+      shutdown: () => {
+        shutdownCalled = true;
+      },
+    });
+    server.listen(0, '127.0.0.1');
+    await once(server, 'listening');
+    const port = (server.address() as AddressInfo).port;
+
+    const res = await fetchJson(port, '/api/devices/upgrade', 'secret', {
+      method: 'POST',
+      body: { deviceId: 'DEV1' },
+    });
+
+    expect(res.status).toBe(200);
+    expect(res.body).toMatchObject({ ok: true, version: '0.2.0', restarting: true });
+    // 响应发出后再延迟触发关闭(路由内 150ms)
+    await new Promise((r) => setTimeout(r, 400));
+    expect(shutdownCalled).toBe(true);
+    server.close();
+  });
+
+  it('rejects a missing deviceId', async () => {
+    const server = createControlServer({
+      token: 'secret',
+      getStatus: () => ({}),
+      selfUpdate: async () => ({ version: '0.2.0' }),
+    });
+    server.listen(0, '127.0.0.1');
+    await once(server, 'listening');
+    const port = (server.address() as AddressInfo).port;
+
+    const res = await fetchJson(port, '/api/devices/upgrade', 'secret', {
+      method: 'POST',
+      body: {},
+    });
+
+    expect(res.status).toBe(400);
+    server.close();
+  });
+});
+
+describe('POST /api/self-update (npm 自升级)', () => {
+  it('requires auth', async () => {
+    const server = createControlServer({
+      token: 'secret',
+      getStatus: () => ({}),
+      selfUpdateNpm: async () => ({ version: '0.2.0' }),
+    });
+    server.listen(0, '127.0.0.1');
+    await once(server, 'listening');
+    const port = (server.address() as AddressInfo).port;
+
+    const res = await fetchJson(port, '/api/self-update', undefined, { method: 'POST' });
+
+    expect(res.status).toBe(401);
+    server.close();
+  });
+
+  it('returns 503 when npm self-update is unavailable (dev runtime)', async () => {
+    const server = createControlServer({ token: 'secret', getStatus: () => ({}), selfUpdateNpm: undefined });
+    server.listen(0, '127.0.0.1');
+    await once(server, 'listening');
+    const port = (server.address() as AddressInfo).port;
+
+    const res = await fetchJson(port, '/api/self-update', 'secret', { method: 'POST' });
+
+    expect(res.status).toBe(503);
+    server.close();
+  });
+
+  it('returns 400 with the reason when npm self-update throws', async () => {
+    let shutdownCalled = false;
+    const server = createControlServer({
+      token: 'secret',
+      getStatus: () => ({}),
+      selfUpdateNpm: async () => {
+        throw new Error('当前已是最新版本 0.1.6,无需升级');
+      },
+      shutdown: () => {
+        shutdownCalled = true;
+      },
+    });
+    server.listen(0, '127.0.0.1');
+    await once(server, 'listening');
+    const port = (server.address() as AddressInfo).port;
+
+    const res = await fetchJson(port, '/api/self-update', 'secret', { method: 'POST' });
+
+    expect(res.status).toBe(400);
+    expect(res.body).toMatchObject({ ok: false, error: '当前已是最新版本 0.1.6,无需升级' });
+    await new Promise((r) => setTimeout(r, 250));
+    expect(shutdownCalled).toBe(false);
+    server.close();
+  });
+
+  it('responds ok then schedules the graceful shutdown', async () => {
+    let shutdownCalled = false;
+    const server = createControlServer({
+      token: 'secret',
+      getStatus: () => ({}),
+      selfUpdateNpm: async () => ({ version: '0.2.0' }),
+      shutdown: () => {
+        shutdownCalled = true;
+      },
+    });
+    server.listen(0, '127.0.0.1');
+    await once(server, 'listening');
+    const port = (server.address() as AddressInfo).port;
+
+    const res = await fetchJson(port, '/api/self-update', 'secret', { method: 'POST' });
+
+    expect(res.status).toBe(200);
+    expect(res.body).toMatchObject({ ok: true, version: '0.2.0', restarting: true });
+    await new Promise((r) => setTimeout(r, 400));
+    expect(shutdownCalled).toBe(true);
+    server.close();
+  });
+});
+
+describe('POST /api/self-update/check', () => {
+  it('requires auth', async () => {
+    const server = createControlServer({
+      token: 'secret',
+      getStatus: () => ({}),
+      checkForUpdate: async () => undefined,
+    });
+    server.listen(0, '127.0.0.1');
+    await once(server, 'listening');
+    const port = (server.address() as AddressInfo).port;
+
+    const res = await fetchJson(port, '/api/self-update/check', undefined, { method: 'POST' });
+
+    expect(res.status).toBe(401);
+    server.close();
+  });
+
+  it('returns update info when a newer version exists', async () => {
+    const server = createControlServer({
+      token: 'secret',
+      getStatus: () => ({}),
+      checkForUpdate: async () => ({ latest: '0.2.0', current: '0.1.6' }),
+    });
+    server.listen(0, '127.0.0.1');
+    await once(server, 'listening');
+    const port = (server.address() as AddressInfo).port;
+
+    const res = await fetchJson(port, '/api/self-update/check', 'secret', { method: 'POST' });
+
+    expect(res.status).toBe(200);
+    expect(res.body).toMatchObject({ ok: true, update: { latest: '0.2.0', current: '0.1.6' } });
+    server.close();
+  });
+
+  it('returns null update when already up to date', async () => {
+    const server = createControlServer({
+      token: 'secret',
+      getStatus: () => ({}),
+      checkForUpdate: async () => undefined,
+    });
+    server.listen(0, '127.0.0.1');
+    await once(server, 'listening');
+    const port = (server.address() as AddressInfo).port;
+
+    const res = await fetchJson(port, '/api/self-update/check', 'secret', { method: 'POST' });
+
+    expect(res.status).toBe(200);
+    expect(res.body).toMatchObject({ ok: true, update: null });
+    server.close();
+  });
+});

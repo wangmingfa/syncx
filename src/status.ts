@@ -18,6 +18,12 @@ export interface DeviceStatus {
   /** 对端宣告的「仍待确认的、来自本机的目录邀请 id 集合」(folder-sync-list)。
    *  UI 据此把「在线但清单里没有本目录」细分为 待对方确认 / 已停止共享。 */
   remotePendingFolders?: string[];
+  /** 对端会话建立时经 hello 宣告的运行版本;dev 态为 'dev'。
+   *  undefined = 对端是旧版本(未发 hello),UI 显示「未知」且不给升级入口。 */
+  version?: string;
+  /** 本机(打包态)版本是否低于该对端:为 true 时 UI 提供「从对方升级」入口。
+   *  dev↔build 混跑时恒为 false(dev 无产物,不做跨形态更新)。 */
+  canUpgrade?: boolean;
 }
 
 export interface ProgressCounts {
@@ -42,6 +48,8 @@ export interface FolderErrorStatus {
 
 export interface StatusPayload {
   deviceId: string;
+  /** 本机运行版本(runtimeVersion 口径):打包态为具体版本号,dev 态为 'dev'。 */
+  version: string;
   folders: SharedFolderConfig[];
   entries: number;
   tombstones: number;
@@ -51,6 +59,8 @@ export interface StatusPayload {
   folderErrors: FolderErrorStatus[];
   /** 对方推送过来的待确认项(配对 / 目录共享),供 Web UI 弹「待确认」。 */
   offers: PendingOffer[];
+  /** npm 检查到的可用更新(打包态且发现更高版本时才有值),Web UI 据此弹升级提示。 */
+  updateAvailable?: { latest: string; current: string };
 }
 
 export function buildStatus(
@@ -61,9 +71,12 @@ export function buildStatus(
   syncProgress: SyncProgress[] = [],
   offers: PendingOffer[] = [],
   folderErrors: FolderErrorStatus[] = [],
+  selfVersion = 'unknown',
+  updateAvailable?: { latest: string; current: string },
 ): StatusPayload {
   return {
     deviceId: identity.deviceId,
+    version: selfVersion,
     folders: config.sharedFolders,
     entries: stats.entries,
     tombstones: stats.tombstones,
@@ -71,5 +84,6 @@ export function buildStatus(
     syncProgress,
     offers,
     folderErrors,
+    updateAvailable,
   };
 }
