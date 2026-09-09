@@ -1,4 +1,5 @@
-import { parseArgs, run, type ParsedArgs } from './cli.js';
+import { run } from './cli.js';
+import { parseArgs, type ParsedArgs } from './args.js';
 import { helpText, packageVersion, wantsHelp, wantsVersion } from './usage.js';
 
 // 捕获未处理异常/拒绝,避免进程静默崩溃导致集成测试中子进程无法响应 SIGTERM

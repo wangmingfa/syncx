@@ -19,7 +19,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { loadOrCreateIdentity } from '../src/identity.js';
 import { WebSocketServer } from 'ws';
-import { learnPeerUrl } from '../src/cli.js';
+import { learnPeerUrl } from '../src/net/addresses.js';
 
 function makeKeypair() {
   const { publicKey, privateKey } = generateKeyPairSync('ed25519', {

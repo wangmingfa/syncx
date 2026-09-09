@@ -4,7 +4,7 @@ import { mkdtempSync, writeFileSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { compareVersions, isDaemonRunning, normalizeUpgradeTag, runUpgrade } from '../src/upgrade.js';
-import { parseArgs } from '../src/cli.js';
+import { parseArgs } from '../src/args.js';
 
 describe('normalizeUpgradeTag', () => {
   it('defaults to latest when omitted or blank', () => {

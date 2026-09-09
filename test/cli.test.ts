@@ -2,7 +2,9 @@ import { describe, expect, it } from 'vitest';
 import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { daemonStatusLines, formatUptime, parseArgs, readFolderIgnoreLines, reconnectDelayMs } from '../src/cli.js';
+import { daemonStatusLines, formatUptime } from '../src/daemon.js';
+import { parseArgs, reconnectDelayMs } from '../src/args.js';
+import { readFolderIgnoreLines } from '../src/ignore.js';
 import { isIgnored, parseIgnoreRules } from '../src/ignore.js';
 import { helpText, packageVersion, wantsHelp, wantsVersion } from '../src/usage.js';
 

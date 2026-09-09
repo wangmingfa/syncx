@@ -1,3 +1,6 @@
+import { readFileSync } from 'node:fs';
+import { join } from 'node:path';
+
 export interface IgnoreRule {
   pattern: string;
   negated: boolean;
@@ -133,4 +136,26 @@ import type { IndexEntry } from './index.js';
  */
 export function filterIndexedEntries(rules: IgnoreRule[], entries: IndexEntry[]): IndexEntry[] {
   return entries.filter((entry) => entry.deleted || !isIgnored(rules, entry.path, false));
+}
+/**
+ * 读取一个共享目录的忽略规则行(按优先级从低到高排列,后读的规则可覆盖先读的):
+ * 1. `.gitignore` — 仅当 useGitignore 为 true(目录配置缺省即开启)时并入
+ * 2. `.syncxignore` — syncx 自己的忽略文件,优先级更高,可用 `!` 负向规则覆盖 .gitignore
+ * 两个文件都不存在或不可读时返回空数组,不抛错(目录可能刚创建)。
+ */
+export function readFolderIgnoreLines(folderPath: string, useGitignore: boolean): string[] {
+  const lines: string[] = [];
+  if (useGitignore) {
+    try {
+      lines.push(...readFileSync(join(folderPath, '.gitignore'), 'utf8').split('\n'));
+    } catch {
+      // 无 .gitignore
+    }
+  }
+  try {
+    lines.push(...readFileSync(join(folderPath, '.syncxignore'), 'utf8').split('\n'));
+  } catch {
+    // 无 .syncxignore
+  }
+  return lines;
 }
