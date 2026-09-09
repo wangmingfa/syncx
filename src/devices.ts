@@ -1,7 +1,7 @@
 import { existsSync, mkdirSync, statSync } from 'node:fs';
 import { resolve, isAbsolute } from 'node:path';
 import { randomBytes } from 'node:crypto';
-import { loadConfig, saveConfig, DEFAULT_CONFIG, type SharedFolderConfig, type DeviceConfig } from './config.js';
+import { loadConfig, saveConfig, normalizePeerUrl, DEFAULT_CONFIG, type SharedFolderConfig, type DeviceConfig } from './config.js';
 
 const FORBIDDEN_PATTERNS = [
   /^\/(etc|usr|bin|sbin|boot|dev|proc|sys|lib|lib64|var|opt|root)\b/i,
@@ -109,14 +109,16 @@ export function addKnownDevice(configPath: string, deviceId: string): void {
   }
 }
 
-/** 添加一个手动配置的对端地址(已存在则幂等)。仅接受 ws:// 开头的地址。 */
+/** 添加一个手动配置的对端地址(已存在则幂等)。仅接受 ws:// 开头的地址;
+ *  入库前规范化(::ffff: 剥离、host 小写),使 [::ffff:10.0.0.2]:22000 与 10.0.0.2:22000 视为同一条。 */
 export function addPeer(configPath: string, address: string): void {
   if (!/^ws:\/\//i.test(address)) {
     throw new Error('peer address must start with ws://');
   }
   const config = loadConfig(configPath);
-  if (!config.peers.includes(address)) {
-    config.peers.push(address);
+  const normalized = normalizePeerUrl(address);
+  if (!config.peers.includes(normalized)) {
+    config.peers.push(normalized);
     saveConfig(configPath, config);
   }
 }

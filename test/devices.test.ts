@@ -185,6 +185,20 @@ describe('manual peer address (addPeer)', () => {
     rmDir(dir);
   });
 
+  it('treats ::ffff:-mapped IPv6 form as equivalent to plain IPv4 (normalized on write)', () => {
+    const dir = tempDir();
+    const configPath = join(dir, 'config.json');
+
+    // 入站反向发现学到 ::ffff: 形式(旧版遗留场景),手动又填了纯 IPv4:应合并为一条
+    addPeer(configPath, 'ws://[::ffff:10.13.18.36]:22000');
+    addPeer(configPath, 'ws://10.13.18.36:22000');
+
+    const raw = JSON.parse(readFileSync(configPath, 'utf8'));
+    expect(raw.peers).toEqual(['ws://10.13.18.36:22000']);
+
+    rmDir(dir);
+  });
+
   it('rejects a non-ws:// address', () => {
     const dir = tempDir();
     const configPath = join(dir, 'config.json');

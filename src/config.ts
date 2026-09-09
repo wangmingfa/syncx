@@ -72,6 +72,45 @@ export const DEFAULT_CONFIG: Config = {
   pendingOffers: [],
 };
 
+/**
+ * 规范化一条 ws:// 对端地址:
+ *   - 剥离 IPv4-mapped IPv6 前缀(::ffff:a.b.c.d → a.b.c.d)。peer server 双栈监听(::),
+ *     旧版本入站反向发现会把 IPv4 对端存成 ws://[::ffff:a.b.c.d]:port,与手动填的
+ *     纯 IPv4 形式无法按字符串去重,同一对端在 config.peers 里留下两条等价记录。
+ *   - host 统一小写;IPv6 host 保持方括号形式。
+ * 解析失败(不符合 ws://host:port 形态)原样返回,交由上层校验逻辑处理。
+ */
+export function normalizePeerUrl(address: string): string {
+  const m = /^ws:\/\/\[([^\]]+)\]:(\d+)$/i.exec(address) ?? /^ws:\/\/([^[\]:]+):(\d+)$/i.exec(address);
+  const hostRaw = m?.[1];
+  const port = m?.[2];
+  if (!m || hostRaw === undefined || port === undefined) return address;
+  let host = hostRaw.toLowerCase();
+  if (host.startsWith('::ffff:')) host = host.slice('::ffff:'.length);
+  return `ws://${host.includes(':') ? `[${host}]` : host}:${port}`;
+}
+
+/**
+ * 规范化并对 config.peers 去重(加载时自愈旧数据):
+ * 丢弃非字符串/空项,逐条规范化后按首次出现顺序保留唯一形式。
+ * 例如旧配置里的 ws://[::ffff:10.0.0.2]:22000 会归一成 ws://10.0.0.2:22000,
+ * 与手动配置的纯 IPv4 条目合并为一条。
+ */
+export function normalizePeerList(peers: unknown): string[] {
+  if (!Array.isArray(peers)) return [];
+  const seen = new Set<string>();
+  const out: string[] = [];
+  for (const p of peers) {
+    if (typeof p !== 'string' || p === '') continue;
+    const norm = normalizePeerUrl(p);
+    if (!seen.has(norm)) {
+      seen.add(norm);
+      out.push(norm);
+    }
+  }
+  return out;
+}
+
 export function loadConfig(configPath: string): Config {
   if (!existsSync(configPath)) {
     return structuredClone(DEFAULT_CONFIG);
@@ -80,7 +119,8 @@ export function loadConfig(configPath: string): Config {
   const parsed = JSON.parse(raw) as Config;
   return {
     sharedFolders: parsed.sharedFolders ?? [],
-    peers: parsed.peers ?? [],
+    // 加载时规范化 + 去重:旧版本遗留的 ::ffff: 形式条目自愈合并,不必手动清理 config.json
+    peers: normalizePeerList(parsed.peers),
     knownDevices: parsed.knownDevices ?? [],
     pendingOffers: parsed.pendingOffers ?? [],
   };
