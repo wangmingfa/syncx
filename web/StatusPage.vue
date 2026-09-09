@@ -68,7 +68,11 @@ const props = defineProps<{ status: StatusData; message?: string }>();
 
 // 本地响应式状态:SSR 注入的初始 status 作为起点,交互后由 fetch 更新
 const status = ref<StatusData>(props.status);
-const toast = ref<string | undefined>(props.message);
+// toast 分级:info=普通操作反馈(底部小胶囊);alert=重要通知(配对/升级,顶部高对比)
+type ToastKind = 'info' | 'alert';
+const toast = ref<{ msg: string; kind: ToastKind } | undefined>(
+  props.message ? { msg: props.message, kind: 'alert' } : undefined,
+);
 const busy = ref(false);
 
 // 使用指南弹窗
@@ -90,11 +94,11 @@ function onKeydown(e: KeyboardEvent): void {
   if (logsOpen.value) closeLogs();
 }
 
-function showToast(msg: string): void {
-  toast.value = msg;
+function showToast(msg: string, kind: ToastKind = 'info'): void {
+  toast.value = { msg, kind };
   // 3 秒后自动消失
   setTimeout(() => {
-    if (toast.value === msg) toast.value = undefined;
+    if (toast.value?.msg === msg) toast.value = undefined;
   }, 3000);
 }
 
@@ -310,7 +314,7 @@ async function upgradeDevice(deviceId: string): Promise<void> {
   });
   const data = (await res.json().catch(() => ({}))) as { ok?: boolean; version?: string; error?: string };
   if (!res.ok || !data.ok) throw new Error(data.error ?? `升级失败 (${res.status})`);
-  showToast(`已更新到 ${data.version},daemon 重启中…`);
+  showToast(`已更新到 ${data.version},daemon 重启中…`, 'alert');
   // daemon 即将重启:稍等片刻再刷新,让状态先落回「离线/重启中」
   await new Promise((resolve) => setTimeout(resolve, 1200));
   await refreshStatus();
@@ -495,7 +499,7 @@ async function acceptOffer(offer: OfferInfo): Promise<void> {
       body: JSON.stringify({ localPath }),
     });
     if (!res.ok) throw new Error(`accept ${res.status}`);
-    showToast(offer.kind === 'folder' ? '已接受目录共享,开始同步' : '已接受配对');
+    showToast(offer.kind === 'folder' ? '已接受目录共享,开始同步' : '已接受配对', 'alert');
     await refreshStatus();
   } catch {
     showToast('确认失败,请重试');
@@ -722,7 +726,7 @@ async function doSelfUpdate(latest: string): Promise<void> {
   const res = await fetch('/api/self-update', { method: 'POST' });
   const body = (await res.json().catch(() => ({}))) as { ok?: boolean; error?: string };
   if (!res.ok || !body.ok) throw new Error(body.error ?? `self-update ${res.status}`);
-  showToast(`已开始升级到 ${latest},服务重启中,请稍候…`);
+  showToast(`已开始升级到 ${latest},服务重启中,请稍候…`, 'alert');
   await waitForRestart();
   // 新 daemon 已在同一端口就绪:整页刷新加载新版本前端
   window.location.reload();
@@ -752,7 +756,10 @@ async function checkForUpdate(): Promise<void> {
   };
   if (!res.ok || !body.ok) throw new Error(body.error ?? `check ${res.status}`);
   await refreshStatus();
-  showToast(body.update ? `发现新版本 ${body.update.latest}` : `已是最新版本 ${status.value.version ?? ''}`);
+  showToast(
+    body.update ? `发现新版本 ${body.update.latest}` : `已是最新版本 ${status.value.version ?? ''}`,
+    body.update ? 'alert' : 'info',
+  );
 }
 
 function actionLabel(a: string): string {
@@ -862,7 +869,13 @@ async function removePassword(): Promise<void> {
 
 <template>
   <div class="container">
-    <div v-if="toast" class="toast">{{ toast }}</div>
+    <div v-if="toast" class="toast" :class="{ 'toast--alert': toast.kind === 'alert' }">
+      <svg v-if="toast.kind === 'alert'" viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+        <path d="M18 8a6 6 0 0 0-12 0c0 7-3 9-3 9h18s-3-2-3-9" />
+        <path d="M13.7 21a2 2 0 0 1-3.4 0" />
+      </svg>
+      {{ toast.msg }}
+    </div>
 
     <!-- 顶部:品牌条 -->
     <div class="topbar">
@@ -1188,7 +1201,15 @@ async function removePassword(): Promise<void> {
             <span class="addr-label">地址</span><span class="addr-value mono">{{ stripWs(p.url) }}</span>
           </div>
           <div v-if="p.online && p.canUpgrade" class="actions">
-            <n-button size="small" type="primary" tertiary :disabled="busy" @click="askUpgrade(p)">升级到 {{ p.version }}</n-button>
+            <n-button size="small" type="warning" :disabled="busy" class="btn-upgrade" @click="askUpgrade(p)">
+              <template #icon>
+                <svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+                  <path d="M12 19V5" />
+                  <path d="m5 12 7-7 7 7" />
+                </svg>
+              </template>
+              升级到 {{ p.version }}
+            </n-button>
           </div>
           <div v-if="!p.online" class="actions">
             <n-button size="small" tertiary :disabled="busy" @click="reconnect(p.deviceId)">重连</n-button>

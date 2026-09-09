@@ -272,6 +272,29 @@ tbody tr:last-child td {
   z-index: 50;
 }
 
+/* 重要通知(配对确认 / 升级等):顶部居中、品牌渐变实色、白字加粗、下滑入场,与普通反馈一眼区分 */
+.toast--alert {
+  top: 16px;
+  bottom: auto;
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  background: linear-gradient(135deg, #4a7fc0, #2bb6ac);
+  border: none;
+  border-radius: 12px;
+  padding: 12px 20px;
+  color: #fff;
+  font-size: 14px;
+  font-weight: 600;
+  box-shadow: 0 10px 30px rgba(0, 0, 0, 0.3);
+  animation: toast-alert-in 0.3s ease;
+}
+.toast--alert svg { flex: none; }
+
+@keyframes toast-alert-in {
+  from { opacity: 0; transform: translate(-50%, -10px); }
+}
+
 .loading {
   color: var(--muted);
   padding: 48px 0;
@@ -349,21 +372,32 @@ tbody tr:last-child td {
 }
 
 /* 概览胶囊行 */
-/* 发现新版本横幅(状态栏下方,可忽略) */
+/* 发现新版本横幅(状态栏下方,可忽略)——重要通知,高对比 */
 .update-banner {
   display: flex;
   align-items: center;
   gap: 10px;
   margin-bottom: 16px;
-  padding: 10px 14px;
-  border: 1px solid var(--border);
-  border-left: 3px solid var(--accent, #4f7cff);
+  padding: 12px 14px;
+  border: 1px solid color-mix(in srgb, var(--accent, #4f7cff) 45%, transparent);
+  border-left: 4px solid var(--accent, #4f7cff);
   border-radius: 10px;
-  background: color-mix(in srgb, var(--accent, #4f7cff) 7%, transparent);
+  background: color-mix(in srgb, var(--accent, #4f7cff) 14%, transparent);
   color: var(--text);
   font-size: 13px;
+  font-weight: 500;
 }
 .update-banner__text { flex: 1; }
+
+/* 设备卡「升级到 x.x.x」:实色 warning + 呼吸光圈,一眼可见 */
+.btn-upgrade {
+  font-weight: 600;
+  animation: upgrade-pulse 2s ease-in-out infinite;
+}
+@keyframes upgrade-pulse {
+  0%, 100% { box-shadow: 0 0 0 0 rgba(240, 160, 32, 0.45); }
+  50% { box-shadow: 0 0 0 7px rgba(240, 160, 32, 0); }
+}
 
 .stat-pills {
   display: flex;
