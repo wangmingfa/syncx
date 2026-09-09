@@ -104,6 +104,7 @@ import { recordSyncEvent, listSyncHistory } from './history.js';
 import { broadcastFolderUpdates } from './broadcast.js';
 import { readFileSync, existsSync, writeFileSync, watch, unlinkSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
+import type { Server as HttpServer } from 'node:http';
 import type { ControlServerDeps } from './api.js';
 
 import { startPeerServer } from './net/server.js';
@@ -386,6 +387,86 @@ export function learnPeerUrl(socket: WebSocket, listenPort?: number): string | u
 }
 
 /**
+ * EACCES(绑定被拒绝)的平台专属提示。同一错误码在各平台根因不同:
+ *   - Windows:几乎总是 WinNAT 排除端口范围(Hyper-V/WSL/Docker 依赖,每次重启漂移),
+ *     而非端口被占用 → 给 netsh 排查 + 管理员永久预占命令;
+ *   - Linux:绑定 <1024 特权端口,或 SELinux/AppArmor 策略拦截非标端口(Fedora/RHEL 常见);
+ *   - macOS:基本只有 <1024 特权端口(root 才能绑定)。
+ * 返回的最后一行之后由调用方统一追加「换端口」提示。
+ */
+function eaccessHints(port: number): string[] {
+  if (process.platform === 'win32') {
+    return [
+      'Windows 上这通常不是端口被占用,而是被系统保留——Hyper-V/WSL/Docker 依赖的',
+      'WinNAT 会在每次重启后动态保留一批 TCP 端口段,该端口恰好落在本次保留范围内。',
+      '  排查:netsh interface ipv4 show excludedportrange protocol=tcp',
+      '  修复(管理员,永久预占该端口):',
+      '    net stop winnat',
+      `    netsh int ipv4 add excludedportrange protocol=tcp startport=${port} numberofports=1 store=persistent`,
+      '    net start winnat',
+    ];
+  }
+  if (process.platform === 'linux') {
+    return [
+      port < 1024
+        ? 'Linux 上绑定 1024 以下特权端口需要 root——建议直接换一个 ≥1024 的端口。'
+        : 'Linux 上绑定被拒绝通常是安全策略拦截(Fedora/RHEL 的 SELinux 常拦截非标端口):',
+      ...(port >= 1024
+        ? [
+            '  SELinux 排查:semanage port -l | grep ' + port,
+            `  SELinux 放行(管理员):semanage port -a -t http_port_t -p tcp ${port}`,
+          ]
+        : []),
+    ];
+  }
+  if (process.platform === 'darwin') {
+    return [
+      port < 1024
+        ? 'macOS 上绑定 1024 以下特权端口需要 root(sudo)——建议直接换一个 ≥1024 的端口。'
+        : 'macOS 上该端口被系统策略拒绝,未占用的情况下可尝试关闭防火墙/安全软件后重试。',
+    ];
+  }
+  return ['该端口被系统策略拒绝绑定。'];
+}
+
+/**
+ * 绑定控制 API 端口:成功 resolve;失败输出可操作的中文提示后立即退出进程。
+ *
+ * 此前 listen 错误经 uncaughtException 异步抵达,启动日志照常输出,
+ * `[fatal]` 淹没在正常日志里且毫无指向性。现在改为:
+ *  - 绑定失败 → 打印根因(EACCES 在 Windows 上几乎总是 Hyper-V/WSL/Docker 的
+ *    WinNAT 排除端口范围,且范围每次重启漂移,而非端口被占用)+ 排查/修复命令,
+ *    process.exit(1);调用方把启动日志全部放在 await 之后,失败时一句多余日志都没有。
+ *  - 监听成功 → 换挂常驻 error 处理,运行期错误只记日志,不再崩溃。
+ */
+function listenControl(server: HttpServer, port: number, host: string, logError: (msg: string) => void): Promise<void> {
+  return new Promise((resolve) => {
+    let listening = false;
+    server.on('error', (err: NodeJS.ErrnoException) => {
+      if (!listening) {
+        if (err.code === 'EACCES') {
+          console.error(`[fatal] 控制端口绑定被拒绝(EACCES): ${host}:${port}`);
+          for (const line of eaccessHints(port)) console.error(line);
+          console.error(`  或换端口启动:syncx start --control-port <其他端口>`);
+        } else if (err.code === 'EADDRINUSE') {
+          console.error(`[fatal] 控制端口已被占用(EADDRINUSE): ${host}:${port}`);
+          console.error('可能已有 syncx daemon 在运行(先执行 syncx status / syncx stop),或其他程序占用了该端口;也可用 --control-port 换端口。');
+        } else {
+          console.error(`[fatal] 控制端口绑定失败: ${host}:${port} (${err.code ?? '未知错误'}) ${err.message}`);
+        }
+        process.exit(1);
+      }
+      logError(`control server error: ${err.message}`);
+    });
+    server.once('listening', () => {
+      listening = true;
+      resolve();
+    });
+    server.listen(port, host);
+  });
+}
+
+/**
  * Run a command against the daemon's data directory. The lifecycle is kept
  * thin on purpose: real daemon integration tests are a later batch.
  */
@@ -512,22 +593,9 @@ export async function run(args: ParsedArgs): Promise<void> {
     setTimeout(() => consumeUpdateDoneFile(logger), 5_000).unref();
   }
 
+  // 启动信息(control UI 地址 / dev 模式 / daemon started 等)统一在控制端口绑定成功后输出:
+  // 绑定失败(EACCES/EADDRINUSE)时进程直接退出,不会出现 fatal 淹没在正常启动日志里的情况。
   const lanAddresses = getLanAddresses();
-  logger.info(`control UI (token in ${join(configDir, 'control.token')}):`);
-  logger.info(`  http://${controlHost === '0.0.0.0' ? 'localhost' : controlHost}:${controlPort}`);
-  if (controlHost === '0.0.0.0') {
-    for (const lan of lanAddresses) {
-      logger.info(`  http://${formatHost(lan.address, lan.family)}:${controlPort}`);
-    }
-  }
-  if (args.devViteUrl) {
-    logger.info(
-      `dev mode: 访问 ${controlPort} 端口的页面会自动重定向到 vite dev server ${args.devViteUrl}(HMR 已启用)`,
-    );
-    logger.info(
-      `  请用 ${args.devViteUrl} 打开 Web UI;生产构建(不带 --dev-vite)才由 ${controlPort} 端口直接提供页面`,
-    );
-  }
 
   /** 为一个共享目录创建运行期状态(索引/执行器/本地索引/忽略规则)。 */
   function createFolderState(f: SharedFolderConfig): FolderState {
@@ -588,10 +656,8 @@ export async function run(args: ParsedArgs): Promise<void> {
 
   // 每个共享目录独立的索引/执行器/本地索引状态(可变:配置热重载可新增/移除目录)
   let folderStates: FolderState[] = config.sharedFolders.map(createFolderState);
-  if (folderStates.length === 0) {
-    // 无目录时 daemon 保持运行,通过 Web UI 添加目录后由热重载生效,无需重启
-    logger.info('no shared folders configured; the daemon stays up and picks up folders added via the web UI');
-  }
+  // 无目录提示也延迟到端口绑定成功后输出(与其它启动日志同批)
+  const noFoldersAtBoot = folderStates.length === 0;
 
   /**
    * 入站连接授权:握手阶段已用 Ed25519 签名校验对端身份(verifyKxMessage),
@@ -1407,7 +1473,30 @@ export async function run(args: ParsedArgs): Promise<void> {
       logger.info(`restored declined offer from ${offer.fromDeviceId}`);
     },
   });
-  control.listen(controlPort, controlHost);
+  // 绑定控制端口:失败(EACCES/EADDRINUSE 等)在 listenControl 内打印根因与修复指引后
+  // 直接退出进程;成功才继续往下走,启动日志见下批输出
+  await listenControl(control, controlPort, controlHost, (msg) => logger.error(msg));
+
+  // --- 端口绑定成功,输出启动信息 ---
+  logger.info(`control UI (token in ${join(configDir, 'control.token')}):`);
+  logger.info(`  http://${controlHost === '0.0.0.0' ? 'localhost' : controlHost}:${controlPort}`);
+  if (controlHost === '0.0.0.0') {
+    for (const lan of lanAddresses) {
+      logger.info(`  http://${formatHost(lan.address, lan.family)}:${controlPort}`);
+    }
+  }
+  if (args.devViteUrl) {
+    logger.info(
+      `dev mode: 访问 ${controlPort} 端口的页面会自动重定向到 vite dev server ${args.devViteUrl}(HMR 已启用)`,
+    );
+    logger.info(
+      `  请用 ${args.devViteUrl} 打开 Web UI;生产构建(不带 --dev-vite)才由 ${controlPort} 端口直接提供页面`,
+    );
+  }
+  if (noFoldersAtBoot) {
+    // 无目录时 daemon 保持运行,通过 Web UI 添加目录后由热重载生效,无需重启
+    logger.info('no shared folders configured; the daemon stays up and picks up folders added via the web UI');
+  }
 
   // 记录 pid 与控制端口,供 syncx stop 定位目标(优雅关闭时删除)
   try {
