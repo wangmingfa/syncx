@@ -336,6 +336,13 @@ tbody tr:last-child td {
   box-shadow: var(--shadow);
 }
 
+/* 本机版本号:与设备 id 同 chip 弱化展示(v0.1.8 / vdev) */
+.chip-version {
+  padding-left: 6px;
+  border-left: 1px solid var(--border);
+  color: var(--muted);
+}
+
 /* 区块标题栏里的操作按钮统一推到最右 */
 .col-head .n-button:first-of-type {
   margin-left: auto;

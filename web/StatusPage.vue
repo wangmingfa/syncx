@@ -947,6 +947,7 @@ async function removePassword(): Promise<void> {
       <span class="device-chip">
         <span class="dot" :class="status.devices.some((p) => p.online) ? 'dot-online' : 'dot-offline'"></span>
         <span class="mono">{{ status.deviceId }}</span>
+        <span v-if="status.version" class="chip-version">{{ status.version === 'dev' ? status.version : `v${status.version}` }}</span>
       </span>
     </div>
 
