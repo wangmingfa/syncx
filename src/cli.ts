@@ -902,6 +902,36 @@ export async function run(args: ParsedArgs): Promise<void> {
     transport.sendEntries([...folder.localIndex.values()]);
   }
 
+  /** 从一个存活会话上摘除指定目录的 peer/transport(设备被移出目录的 devices 时)。 */
+  function detachFolderFromSession(session: ActiveSession, folder: FolderState): void {
+    const removed = session.transports.filter((t) => t.folder.id === folder.id).map((t) => t.transport);
+    session.transports = session.transports.filter((t) => t.folder.id !== folder.id);
+    for (const t of removed) {
+      const i = folder.transports.indexOf(t);
+      if (i !== -1) folder.transports.splice(i, 1);
+    }
+    folder.peers.delete(session.remoteDeviceId);
+    session.peers.delete(folder.id);
+  }
+
+  /**
+   * 会话目录对账:让「会话上挂了哪些目录的同步通道」与配置严格一致——
+   *   - devices 包含对端但会话缺失该目录 → 补挂(attach 会互发索引,补挂即开始同步);
+   *   - devices 不再包含对端但会话仍挂着 → 摘除(否则会继续向已无权接收的设备推变更)。
+   * 幂等:双向都有 has 守卫,可随时对任意会话重复调用。
+   * 调用时机:邀请确认回执(promoteSession)、配置热重载(watcher)、会话建立。
+   */
+  function reconcileSessionFolders(session: ActiveSession): void {
+    for (const folder of folderStates) {
+      const allowed = (folder.config.devices ?? []).includes(session.remoteDeviceId);
+      if (allowed && !session.peers.has(folder.id)) {
+        attachFolderToSession(session, folder);
+      } else if (!allowed && session.peers.has(folder.id)) {
+        detachFolderFromSession(session, folder);
+      }
+    }
+  }
+
   /** 向已连接对端推送一条 control 控制面消息;对端离线(无存活会话)则忽略。 */
   function sendControlTo(deviceId: string, message: ControlMessage): boolean {
     const session = peerSessions.get(deviceId);
@@ -945,6 +975,10 @@ export async function run(args: ParsedArgs): Promise<void> {
         break;
       case 'folder-invitation-ack':
         logger.info(`folder invitation ${message.accepted ? 'accepted' : 'declined'} by ${message.fromDeviceId}`);
+        // 对端确认接受:立即对账本机会话,把 devices 含对端的目录补挂上去(互发索引,
+        // 内容开始流动)。此前这里只打日志,导致「邀请发出后 A 侧会话一直没有该目录的
+        // 同步通道」,B 建好了目录却收不到内容,直到重连才恢复。
+        if (message.accepted) promoteSession(message.fromDeviceId);
         break;
       case 'self-binary-request': {
         // 对端请求本机安装包(它版本更低、想从本机升级)。会话已经握手签名校验,
@@ -1053,12 +1087,7 @@ export async function run(args: ParsedArgs): Promise<void> {
   function promoteSession(remoteDeviceId: string): void {
     const session = peerSessions.get(remoteDeviceId);
     if (!session) return;
-    const config = loadConfig(configPath);
-    for (const folder of folderStates) {
-      if ((folder.config.devices ?? []).includes(remoteDeviceId) && !session.peers.has(folder.id)) {
-        attachFolderToSession(session, folder);
-      }
-    }
+    reconcileSessionFolders(session);
     pushSharesTo(session);
     // 共享意图变化(如刚接受邀请新建目录)后,同步重推目录清单
     pushFolderSyncList(session.remoteDeviceId);
@@ -1093,11 +1122,7 @@ export async function run(args: ParsedArgs): Promise<void> {
     // 未确认的对端此时仅建立控制面会话,用于接收配对 / 目录共享邀请并弹「待确认」,不泄漏文件索引。
     const allowed = isPeerAllowed(remoteDeviceId, loadConfig(configPath).sharedFolders, loadConfig(configPath).knownDevices);
     if (allowed) {
-      for (const folder of folderStates) {
-        if ((folder.config.devices ?? []).includes(remoteDeviceId)) {
-          attachFolderToSession(session, folder);
-        }
-      }
+      reconcileSessionFolders(session);
       // 连接就绪后把本机当前的配对 / 目录共享意图推送给对端(对方会弹「待确认」)
       pushSharesTo(session);
       // 同时宣告本机当前与其同步的目录清单,供对端 UI 区分 同步中 / 已停止共享
@@ -1599,7 +1624,7 @@ export async function run(args: ParsedArgs): Promise<void> {
         }
       }
       folderStates = folderStates.filter((f) => newFolderById.has(f.id));
-      // 新增目录:创建运行期状态,并补建到所有存活会话;已存在目录则应用最新配置
+      // 新增目录:创建运行期状态;已存在目录则应用最新配置(路径变更重建执行器)
       for (const f of newConfig.sharedFolders) {
         const id = folderIdFor(f);
         const existing = folderStates.find((s) => s.id === id);
@@ -1614,9 +1639,6 @@ export async function run(args: ParsedArgs): Promise<void> {
             continue;
           }
           folderStates.push(folder);
-          for (const session of activeSessions) {
-            attachFolderToSession(session, folder);
-          }
         } else {
           if (existing.path !== f.path) {
             // 路径变更:以新路径重建执行器与本地索引(索引库按 id 复用)
@@ -1628,6 +1650,13 @@ export async function run(args: ParsedArgs): Promise<void> {
           }
           existing.config = f;
         }
+      }
+
+      // 目录集合/设备指派变更后,对所有存活会话统一对账:
+      // 新目录补挂、devices 新增设备补挂(修「邀请确认前通道未建」)、
+      // devices 移除设备摘除通道(不再向无权接收的对端推变更)。
+      for (const session of activeSessions) {
+        reconcileSessionFolders(session);
       }
 
       // 对端列表变更:新增对端主动连接
