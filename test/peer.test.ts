@@ -119,6 +119,70 @@ describe('sync peer session', () => {
     rmDir(dir);
   });
 
+  it('skips requesting blocks whose hash already exists locally', async () => {
+    const dir = mkdtempSync(join(tmpdir(), 'syncx-peer-'));
+    const root = join(dir, 'share');
+    mkdirSync(root, { recursive: true });
+    const index = openIndexStore(join(dir, 'index.db'));
+    const executor = createLocalExecutor(root, index);
+    const { transport, requests } = fakeTransport();
+
+    // 本地文件 3 块:A/B/C;对端改为 A/X/C(仅中间块变化)
+    const blockA = Buffer.alloc(BLOCK_SIZE, 0x61);
+    const blockB = Buffer.alloc(BLOCK_SIZE, 0x62);
+    const blockC = Buffer.from('tail-content'); // 不足一块
+    const blockX = Buffer.alloc(BLOCK_SIZE, 0x78);
+    const localContent = Buffer.concat([blockA, blockB, blockC]);
+    const remoteContent = Buffer.concat([blockA, blockX, blockC]);
+    writeFileSync(join(root, 'changed.bin'), localContent);
+
+    const localEntry = entry(
+      'changed.bin',
+      [['dev-b', 1]],
+      [hashBlock(blockA), hashBlock(blockB), hashBlock(blockC)],
+      localContent.length,
+    );
+    const remoteEntry = entry(
+      'changed.bin',
+      [['dev-b', 2]],
+      [hashBlock(blockA), hashBlock(blockX), hashBlock(blockC)],
+      remoteContent.length,
+    );
+
+    const peer = createSyncPeer({
+      transport,
+      localIndex: new Map([['changed.bin', localEntry]]),
+      executor,
+      readLocalBlock: (_path, blockIndex) => {
+        const offset = blockIndex * BLOCK_SIZE;
+        return localContent.subarray(offset, Math.min(offset + BLOCK_SIZE, localContent.length));
+      },
+      deviceId: 'DEV-A',
+    });
+
+    await peer.onPeerIndex([remoteEntry]);
+
+    // 仅中间块(哈希不同)走网络请求;首尾块哈希相同,直接从本地填充
+    expect(requests).toEqual([
+      { deviceId: 'DEV-A', path: 'changed.bin', blockIndex: 1, hash: hashBlock(blockX) },
+    ]);
+
+    // 回传缺失块后文件落地,内容与对端一致
+    peer.onBlockResponse({
+      deviceId: 'DEV-B',
+      path: 'changed.bin',
+      blockIndex: 1,
+      hash: hashBlock(blockX),
+      data: blockX,
+    });
+    await new Promise((r) => setTimeout(r, 10));
+    expect(readFileSync(join(root, 'changed.bin'))).toEqual(remoteContent);
+    expect(index.getEntry('changed.bin')?.version.get('dev-b')).toBe(2);
+
+    index.close();
+    rmDir(dir);
+  });
+
   it('lands empty files (0 blocks) without any block round-trip', async () => {
     const dir = mkdtempSync(join(tmpdir(), 'syncx-peer-'));
     const root = join(dir, 'share');

@@ -114,8 +114,36 @@ export function createSyncPeer(deps: SyncPeerDeps): SyncPeer {
     pendingBlocks.set(key, { retries: nextRetries, timeout });
   }
 
-  function requestAllBlocks(entry: IndexEntry): void {
-    entry.blocks.forEach((hash, blockIndex) => requestBlock(entry.path, blockIndex, hash));
+  /**
+   * 请求一个文件缺失的块:先与本地索引按下标比对块哈希,哈希相同的块直接从
+   * 本地文件读取填充(免网络重传),其余才向对端发块请求。
+   * 本地条目为墓碑(文件已删)或读取/校验失败时回退为网络请求,正确性不受影响。
+   * 仅改文件尾部块、追加、逐块对齐修改等场景可显著减少传输量;文件头部插入
+   * 导致块整体错位时哈希全不匹配,退化为全量请求(与原行为一致)。
+   */
+  function requestMissingBlocks(path: string, entry: IndexEntry): void {
+    const item = pending.get(path);
+    if (!item) return;
+    const localEntry = localIndex.get(path);
+    // 墓碑条目内容不可信(文件已删,块哈希指向旧内容):整体走网络请求
+    const localBlocks = localEntry && !localEntry.deleted ? localEntry.blocks : undefined;
+    entry.blocks.forEach((hash, blockIndex) => {
+      if (item.blocks[blockIndex] !== undefined) return; // 已预填或已收到,不重复
+      if (localBlocks?.[blockIndex] === hash) {
+        try {
+          const data = readLocalBlock(path, blockIndex);
+          // 本地文件可能在扫描与规划之间被改写:哈希校验不过就不信本地块
+          if (verifyBlock(data, hash)) {
+            item.blocks[blockIndex] = data;
+            item.received += 1;
+            return;
+          }
+        } catch {
+          // 文件被移动/删除/暂时不可读:回退网络请求
+        }
+      }
+      requestBlock(path, blockIndex, hash);
+    });
   }
 
   /** 收齐全部块(或空文件本身)后把条目落地;未就绪则无操作。 */
@@ -214,7 +242,7 @@ export function createSyncPeer(deps: SyncPeerDeps): SyncPeer {
                 received: 0,
               });
               livePending.add(remoteEntry.path);
-              requestAllBlocks(remoteEntry);
+              requestMissingBlocks(remoteEntry.path, remoteEntry);
               // 空文件(0 块)不产生块请求,直接落地
               await completeIfReady(remoteEntry.path);
             }
@@ -232,7 +260,7 @@ export function createSyncPeer(deps: SyncPeerDeps): SyncPeer {
                 received: 0,
               });
               livePending.add(remoteEntry.path);
-              requestAllBlocks(remoteEntry);
+              requestMissingBlocks(remoteEntry.path, remoteEntry);
               await completeIfReady(remoteEntry.path);
             }
             break;
