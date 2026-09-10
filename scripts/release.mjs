@@ -28,7 +28,7 @@
  *   非交互环境(管道 / CI / 沙箱,没有 TTY)自动跳过所有选择,用默认值继续。
  *
  * 用法:
- *   npm run release [major|minor|patch|iteration|<semver>] [--via=github|local] [options]
+ *   npm run release [major|minor|patch|iteration|<semver>] [--via=github|local] [--redeploy <version>] [options]
  *
  * 发布通道(--tag):
  *   --tag=latest(默认)  正式版,版本号形如 x.y.z
@@ -67,6 +67,10 @@
  *   --via=github       打 vX.Y.Z tag 并 push,由 GitHub Actions + npm Trusted Publishing 自动发布(免 OTP/Token)。
  *                      交互环境会提示选择;非交互环境默认 github。等价于 --github。
  *   --via=local        沿用旧流程,本地 npm login + OTP 直接发布。等价于 --local。
+ *   --redeploy <ver>    重发已存在版本号(如某次 tag 触发的 CI 因测试失败未真正发布)。
+ *                      仅适用于 github 通道:强制把该 tag 移到当前 HEAD 并 force-push 该 tag,
+ *                      重新触发 Actions 自动发布,不动分支历史。需显式给出版本号,如
+ *                      npm run release --redeploy 0.1.10 --via=github
  *   (若选中 github 通道,--no-git 会被忽略——GitHub 发布必须 commit + push tag 才能触发 Actions)
  */
 import { spawn } from 'node:child_process';
@@ -618,6 +622,7 @@ const opts = {
   dryRun: false,
   via: undefined, // 发布方式:github(GitHub Actions + Trusted Publishing 自动发布) | local(本地 npm publish)
   viaGiven: false,
+  redeploy: false, // 重发已存在 tag(force 更新该 tag 指向并 force-push,仅 github 通道),不动分支历史
 };
 for (const a of argv) {
   if (a === '--no-check') opts.doCheck = false;
@@ -636,6 +641,7 @@ for (const a of argv) {
   else if (a.startsWith('--via=')) { opts.via = a.slice('--via='.length); opts.viaGiven = true; }
   else if (a === '--github') { opts.via = 'github'; opts.viaGiven = true; }
   else if (a === '--local') { opts.via = 'local'; opts.viaGiven = true; }
+  else if (a === '--redeploy') { opts.redeploy = true; }
   else fail(`无法识别的参数:${a}(应为 patch/minor/major/iteration,或如 1.2.3 / 1.2.3-beta.1)`);
 }
 
@@ -650,6 +656,15 @@ const cur = pkg.version; // 本地版本仅作「远端该通道无版本」时�
 // 显式版本号(如 0.1.1-beta.1):通道由预发布后缀推断,跳过所有选择
 const explicitVersion =
   opts.bumpArg && /^\d+\.\d+\.\d+(?:-[\w.]+)?$/.test(opts.bumpArg) ? opts.bumpArg : undefined;
+
+if (opts.redeploy) {
+  if (!explicitVersion) {
+    fail('redeploy 需显式指定要重发的版本号,如 npm run release --redeploy 0.1.10 --via=github');
+  }
+  if (opts.via === 'local') {
+    fail('redeploy 仅适用于 github 通道(重发 tag 触发 Actions 重新发布),不支持 local');
+  }
+}
 
 let whoamiOk = false;
 let whoamiName = '';
@@ -774,7 +789,8 @@ if (opts.via === 'github') {
     log('--no-git 与 GitHub 发布不兼容,已强制启用 git commit + tag push');
     opts.doGit = true;
   }
-  log(`发布方式:GitHub 自动发布(打 tag v${target} 并 push,触发 Actions)`);
+  const redeployHint = opts.redeploy ? '(redeploy:强制更新已存在 tag 并重新触发 Actions)' : '';
+  log(`发布方式:GitHub 自动发布(打 tag v${target} 并 push,触发 Actions)${redeployHint}`);
 } else {
   log(`发布方式:本地 npm publish`);
 }
@@ -782,7 +798,7 @@ if (opts.via === 'github') {
 // 目标的基础版本不得低于本地 package.json(防止误发回退版本)。
 // 只比 x.y.z 基础部分:预发布按 semver 本就低于同 base 的正式版(0.1.1-beta.1 < 0.1.1),
 // 首个 beta 属合法场景,不能因后缀而被拦;真正要拦的是基础版本倒退(如本地 0.5.0 却发 0.2.0-beta.1)。
-if (!explicitVersion) {
+if (!explicitVersion && !opts.redeploy) {
   const targetBase = target.split('-')[0];
   const localBase = cur.split('-')[0];
   if (cmpSemver(targetBase, localBase) < 0) {
@@ -797,7 +813,10 @@ if (!explicitVersion) {
 // 预发布 + iteration 时若已占用则自动顺延迭代号(beta.1 被占 → beta.2),与 model-gate 一致;
 // 其它升级方式被占用则直接失败,不静默跳版本。
 let occupied = remoteVersions.includes(target);
-if (occupied) {
+if (opts.redeploy && occupied) {
+  // 重发场景:若该版本在 npm 上已存在,仍允许触发 Actions(真已发布成功则 npm 报 409 冲突,由用户感知)
+  warn(`版本 ${pkgName}@${target} 在 npm 上已存在,redeploy 将重新触发该 tag 的 Actions 发布(npm 若已发布成功会报 409 冲突)`);
+} else if (occupied) {
   if (channel !== 'latest' && bump === 'iteration') {
     let guard = 0;
     while (occupied) {
@@ -813,7 +832,7 @@ if (occupied) {
     );
   }
 }
-log(`版本 ${target} 未被占用,可发布`);
+log(opts.redeploy ? `版本 ${target} 准备重发(已存在 tag 将强制更新并重新触发 Actions)` : `版本 ${target} 未被占用,可发布`);
 
 /* 登录(仅真正发布、且走本地 npm publish 时):GitHub 自动发布用 OIDC,无需登录 */
 if (!opts.dryRun && opts.via !== 'github') {
@@ -831,7 +850,11 @@ if (!opts.dryRun) {
   steps.push(opts.doSmoke ? '冒烟 + 临时全局安装验证' : '冒烟');
   steps.push(`npm version ${target}`);
   if (opts.via === 'github') {
-    steps.push(`git tag v${target} + push(触发 GitHub Actions 自动发布)`);
+    steps.push(
+      opts.redeploy
+        ? `git tag -f v${target} + push -f(重发已存在 tag,重新触发 Actions)`
+        : `git tag v${target} + push(触发 GitHub Actions 自动发布)`,
+    );
   } else {
     steps.push(`npm publish --tag ${opts.tag}`);
     if (opts.doGit) steps.push('git commit 版本变更');
@@ -875,7 +898,8 @@ if (!existsSync(DIST)) fail(`构建产物不存在:${DIST}(请先 npm run build,
 }
 
 /* ---------- 4. 递增版本号(置于检查/构建/冒烟之后,中途失败时不污染版本号) ---------- */
-if (!opts.dryRun) {
+// redeploy 不改动 package.json 版本号:CI 端「Sync version from tag」会按 tag 对齐,避免本地 main 领先 origin
+if (!opts.dryRun && !opts.redeploy) {
   await writeVersion(target);
 }
 
@@ -911,7 +935,7 @@ if (opts.doSmoke) {
 
 /* ---------- 6. 真正发布 ---------- */
 if (opts.dryRun) {
-  log(`dry-run 结束:未发布、未改版本号、未 commit。可去掉 --dry-run 执行真实发布(${target});发布方式=${opts.via === 'github' ? 'GitHub 自动发布(tag+push)' : '本地 npm publish'}`);
+  log(`dry-run 结束:未发布、未改版本号、未 commit。可去掉 --dry-run 执行真实发布(${target});发布方式=${opts.via === 'github' ? (opts.redeploy ? 'GitHub 重发(force tag + push)' : 'GitHub 自动发布(tag+push)') : '本地 npm publish'}`);
 } else if (opts.via === 'github') {
   // GitHub 自动发布:本地只负责打 tag + push,真正的 npm publish 由 Actions + Trusted Publishing 完成(免 OTP/Token)
   if (opts.doGit) {
@@ -922,10 +946,18 @@ if (opts.dryRun) {
       await git(['add', 'package.json', 'package-lock.json'], { inherit: true });
       await git(['commit', '-m', `chore: 发布 v${target}`], { inherit: true });
     }
-    await git(['tag', `v${target}`], { inherit: true });
-    log('已打 tag v' + target + ',推送到 GitHub…');
-    await git(['push'], { inherit: true });
-    await git(['push', '--tags'], { inherit: true });
+    if (opts.redeploy) {
+      // 重发:强制把已存在的 tag 移到当前 HEAD,并仅 force-push 该 tag(不动分支历史)
+      const t = `v${target}`;
+      await git(['tag', '-f', t], { inherit: true });
+      log(`已强制更新 tag ${t} 指向当前 HEAD(重发),force-push 到 GitHub 重新触发 Actions…`);
+      await git(['push', '-f', 'origin', t], { inherit: true });
+    } else {
+      await git(['tag', `v${target}`], { inherit: true });
+      log('已打 tag v' + target + ',推送到 GitHub…');
+      await git(['push'], { inherit: true });
+      await git(['push', '--tags'], { inherit: true });
+    }
   }
   log(`✅ 已推送 tag v${target} 到 GitHub, Actions 将自动构建并发布到 npm(Trusted Publishing,免 OTP)。`);
   log('   Actions: https://github.com/wangmingfa/syncx/actions');
