@@ -18,13 +18,16 @@
  * 交互流程(TTY 下,方向键 + Enter,集中在一个连续交互块内完成,块内零网络等待):
  *   0. 预检(唯一前置等待):并行查询 npm 登录态 / registry / 全量版本历史,
  *      此后基准版本、占用判断、iteration 顺延全部本地计算,不再中途查 npm
- *   1. 选择发布通道:latest / beta / alpha / 自定义 tag(默认 latest)
- *   2. 选择升级方式:patch / minor / major / iteration —— 选项右侧直接预览算出的版本号
+ *   1. 选择发布方式:GitHub 自动发布 / 本地 npm publish(默认 GitHub)
+ *   2. 选了 GitHub 后:选择「发新版本」或「重发已存在版本」(默认发新版本;
+ *      选重发则列出本地 git tag 供挑选,不必手敲版本号)
+ *   3. 选择发布通道:latest / beta / alpha / 自定义 tag(默认 latest)
+ *   4. 选择升级方式:patch / minor / major / iteration —— 选项右侧直接预览算出的版本号
  *      缺省随通道:latest → patch,beta 等预发布 → iteration
- *   3. (未登录时)引导 npm login → 4. 发布计划总确认
+ *   5. (未登录时,仅本地发布)引导 npm login → 6. 发布计划总确认
  *   确认后 typecheck / build / 冒烟 / 版本号 / publish / commit 全程无人值守;
- *   唯一例外是 publish 时刻 npm 自己的 OTP / 浏览器 2FA(TOTP 30s 时效,无法前置)。
- *   传了 --tag / 升级方式参数则跳过对应那一步;给了显式版本号则跳过 1、2 两步。
+ *   唯一例外是本地 publish 时刻 npm 自己的 OTP / 浏览器 2FA(TOTP 30s 时效,无法前置)。
+ *   传了 --tag / 升级方式 / --via / --redeploy 参数则跳过对应那一步;给了显式版本号则跳过 3、4 两步。
  *   非交互环境(管道 / CI / 沙箱,没有 TTY)自动跳过所有选择,用默认值继续。
  *
  * 用法:
@@ -67,9 +70,11 @@
  *   --via=github       打 vX.Y.Z tag 并 push,由 GitHub Actions + npm Trusted Publishing 自动发布(免 OTP/Token)。
  *                      交互环境会提示选择;非交互环境默认 github。等价于 --github。
  *   --via=local        沿用旧流程,本地 npm login + OTP 直接发布。等价于 --local。
- *   --redeploy <ver>    重发已存在版本号(如某次 tag 触发的 CI 因测试失败未真正发布)。
+ *   --redeploy [<ver>] 重发已存在版本号(如某次 tag 触发的 CI 因测试失败未真正发布)。
  *                      仅适用于 github 通道:强制把该 tag 移到当前 HEAD 并 force-push 该 tag,
- *                      重新触发 Actions 自动发布,不动分支历史。需显式给出版本号,如
+ *                      重新触发 Actions 自动发布,不动分支历史。
+ *                      交互式(选了 github 后还会问「重发 / 发新版本」):不写版本号会从本地 git tag
+ *                      列表里挑,默认高亮「发新版本」;非交互式必须显式给出版本号,如
  *                      npm run release --redeploy 0.1.10 --via=github
  *   (若选中 github 通道,--no-git 会被忽略——GitHub 发布必须 commit + push tag 才能触发 Actions)
  */
@@ -604,6 +609,22 @@ function textPrompt(question, fallback) {
   });
 }
 
+/** 列出本地 git tag 中形如 vX.Y.Z / X.Y.Z 的版本号(去重、按 semver 降序),供 redeploy 交互挑选。 */
+async function listGitTags() {
+  try {
+    const r = await git(['tag', '--list'], { forward: false });
+    const vers = r.stdout
+      .split('\n')
+      .map((s) => s.trim())
+      .filter(Boolean)
+      .map((t) => (t.startsWith('v') ? t.slice(1) : t))
+      .filter((t) => /^\d+\.\d+\.\d+(?:-[\w.]+)?$/.test(t));
+    return [...new Set(vers)].sort((a, b) => cmpSemver(b, a));
+  } catch {
+    return [];
+  }
+}
+
 /* ---------- 参数解析 ---------- */
 const argv = process.argv.slice(2);
 const opts = {
@@ -654,16 +675,11 @@ const pkgName = pkg.name;
 const cur = pkg.version; // 本地版本仅作「远端该通道无版本」时的首发兜底基准
 
 // 显式版本号(如 0.1.1-beta.1):通道由预发布后缀推断,跳过所有选择
-const explicitVersion =
+let explicitVersion =
   opts.bumpArg && /^\d+\.\d+\.\d+(?:-[\w.]+)?$/.test(opts.bumpArg) ? opts.bumpArg : undefined;
 
-if (opts.redeploy) {
-  if (!explicitVersion) {
-    fail('redeploy 需显式指定要重发的版本号,如 npm run release --redeploy 0.1.10 --via=github');
-  }
-  if (opts.via === 'local') {
-    fail('redeploy 仅适用于 github 通道(重发 tag 触发 Actions 重新发布),不支持 local');
-  }
+if (opts.redeploy && opts.via === 'local') {
+  fail('redeploy 仅适用于 github 通道(重发 tag 触发 Actions 重新发布),不支持 local');
 }
 
 let whoamiOk = false;
@@ -683,7 +699,26 @@ await withSpinner(`预检:npm 登录态 / registry / ${pkgName} 版本历史`, a
 });
 if (!whoamiOk) warn('未检测到 npm 登录态(或登录已失效),稍后会在交互块中引导登录');
 
-/* registry 预检(仅真正发布时):镜像源不接受 publish,交互前就失败 */
+/* ---------- 1. 发布方式(github / local):移到最前,后续通道 / 升级方式 / redeploy 都依赖它 ---------- */
+if (!opts.via) {
+  if (isInteractive()) {
+    opts.via = await selectPrompt('选择发布方式:', [
+      { value: 'github', label: 'GitHub 自动发布', hint: '打 tag 推送到 GitHub,由 Actions + Trusted Publishing 自动发 npm(免 OTP/Token)' },
+      { value: 'local', label: '本地 npm publish', hint: '沿用旧流程,本地登录 + OTP 直接发布' },
+    ], 0);
+  } else {
+    // 非交互环境(管道/CI/沙箱)无 TTY、无法输 OTP,默认走 GitHub 通道
+    opts.via = 'github';
+  }
+}
+if (opts.via !== 'github' && opts.via !== 'local') {
+  fail(`--via 仅支持 github / local,收到:${opts.via}`);
+}
+if (opts.redeploy && opts.via === 'local') {
+  fail('redeploy 仅适用于 github 通道,不能选 local');
+}
+
+/* registry 预检(仅真正发布、且走本地 npm publish 时):镜像源不接受 publish,交互前就失败 */
 let publisher;
 if (!opts.dryRun && opts.via !== 'github') {
   if (!registryUrl.includes('registry.npmjs.org') && !opts.registry) {
@@ -695,7 +730,39 @@ if (!opts.dryRun && opts.via !== 'github') {
   publisher = opts.registry ?? registryUrl;
 }
 
-/* ---------- 1. 交互块:通道 → 升级方式 → (登录)→ 总确认,连续完成、块内零等待 ---------- */
+/* ---------- 2. GitHub 模式:重发已存在版本 / 发新版本 ---------- */
+// 选了 github 之后,再决定是「重发某个已有 tag」还是「正常发一个新版本」。
+//   - 命令行已给 --redeploy <ver>:直接进入重发,且版本号已知
+//   - 命令行只给 --redeploy(无版本)或非交互:稍后在 github 块里按「无版本可选」报错
+//   - 交互式且未指定:方向键选 重发 / 新版本;选重发则列出本地 git tag 供挑选(默认发新版本)
+if (opts.via === 'github') {
+  let redeployMode = opts.redeploy;
+  if (!explicitVersion && !opts.redeploy) {
+    const mode = await selectPrompt('GitHub 发布方式:', [
+      { value: 'new', label: '发新版本', hint: '计算并发布一个更高的版本号(走通道 / 升级方式选择)' },
+      { value: 'redeploy', label: '重发已存在版本', hint: '重新推送某个已有 tag 触发 Actions 重发,用于修复 CI 失败导致的未发布' },
+    ], 0);
+    redeployMode = mode === 'redeploy';
+  }
+  if (redeployMode) {
+    opts.redeploy = true;
+    if (!explicitVersion) {
+      const tags = await listGitTags();
+      if (tags.length) {
+        const picked = await selectPrompt('选择要重发的版本(tag):', tags.map((t) => ({ value: t, label: t })), 0);
+        explicitVersion = picked;
+      } else if (isInteractive()) {
+        const typed = await textPrompt('本地没有可用 tag,请手动输入要重发的版本号(如 0.1.10):', '');
+        if (!/^\d+\.\d+\.\d+(?:-[\w.]+)?$/.test(typed)) fail(`版本号格式不合法: ${typed}`);
+        explicitVersion = typed;
+      } else {
+        fail('redeploy 需显式指定版本号(非交互环境无可用的 tag 列表),如 npm run release --redeploy 0.1.10 --via=github');
+      }
+    }
+  }
+}
+
+/* ---------- 3. 交互块:通道 → 升级方式 → (登录)→ 总确认,连续完成、块内零等待 ---------- */
 let channel;
 if (explicitVersion) {
   channel = channelOfVersion(explicitVersion);
@@ -765,24 +832,7 @@ if (explicitVersion) {
 let target = explicitVersion ?? nextVersion(base, channel, bump, isFirstRelease);
 log(`通道 ${channel} | 升级方式 ${bump} | 基准 ${base} → 目标 ${target}`);
 
-/* ---------- 发布方式:GitHub 自动发布 / 本地 npm publish ---------- */
-// 复用同一套版本选择逻辑,仅在「怎么发出去」上二选一,最大化代码复用。
-//   github:打 vX.Y.Z tag 并 push,由 GitHub Actions + npm Trusted Publishing 自动发布(免 OTP/Token)
-//   local :沿用旧逻辑,本地登录 + OTP 直接 npm publish
-if (!opts.via) {
-  if (isInteractive()) {
-    opts.via = await selectPrompt('选择发布方式:', [
-      { value: 'github', label: 'GitHub 自动发布', hint: '打 tag 推送到 GitHub,由 Actions + Trusted Publishing 自动发 npm(免 OTP/Token)' },
-      { value: 'local', label: '本地 npm publish', hint: '沿用旧流程,本地登录 + OTP 直接发布' },
-    ], 0);
-  } else {
-    // 非交互环境(管道/CI/沙箱)无 TTY、无法输 OTP,默认走 GitHub 通道
-    opts.via = 'github';
-  }
-}
-if (opts.via !== 'github' && opts.via !== 'local') {
-  fail(`--via 仅支持 github / local,收到:${opts.via}`);
-}
+/* ---------- 发布方式日志 + GitHub 兼容处理 ---------- */
 if (opts.via === 'github') {
   // GitHub 发布依赖 git tag push 触发 Actions,必须 commit+push;--no-git 与之冲突
   if (!opts.doGit) {
