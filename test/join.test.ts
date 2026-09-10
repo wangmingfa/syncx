@@ -21,8 +21,11 @@ describe('join (mutual trust)', () => {
 
     const logs: string[] = [];
     const spy = vi.spyOn(console, 'log').mockImplementation((m) => logs.push(String(m)));
+    // 本地挂载目录用 temp 内的真实可写路径,避免 Linux CI 上 resolve('/local/share')
+    // 变成根级绝对路径触发真实 mkdir 而 EACCES(Windows 下则变成 D:\local\share)。
+    const localMount = join(base, 'local-share');
     try {
-      await run(parseArgs(['join', code, '/local/share', '--config', configPath]));
+      await run(parseArgs(['join', code, localMount, '--config', configPath]));
     } finally {
       spy.mockRestore();
     }
@@ -30,7 +33,7 @@ describe('join (mutual trust)', () => {
     // 本机已把邀请方加入白名单
     const cfg = loadConfig(configPath);
     expect(cfg.sharedFolders).toHaveLength(1);
-    expect(cfg.sharedFolders[0]!.path).toBe(resolve('/local/share'));
+    expect(cfg.sharedFolders[0]!.path).toBe(resolve(localMount));
     expect(cfg.sharedFolders[0]!.devices).toContain(inviter.deviceId);
 
     // 输出了回邀码,且回邀码解析出本机设备 ID(邀请方据此把本机加入白名单)
