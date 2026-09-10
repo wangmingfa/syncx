@@ -71,14 +71,14 @@
  *                      交互环境会提示选择;非交互环境默认 github。等价于 --github。
  *   --via=local        沿用旧流程,本地 npm login + OTP 直接发布。等价于 --local。
  *   --redeploy [<ver>] 重发已存在版本号(如某次 tag 触发的 CI 因测试失败未真正发布)。
- *                      仅适用于 github 通道:以更高的新版本号重新触发 Actions 自动发布,不动分支历史。
- *                      注意 npm 规则:版本一旦发布过(即使已 unpublish)该版本号永久作废、不可复用,
- *                      因此 redeploy 一律改用更高的新版本号发布,而非复用原版本号(否则 Actions 的
- *                      npm publish 必失败)。原版本号若当前仍在 npm 上,会先尽力 unpublish 清理它(需 npm 登录)。
+ *                      仅适用于 github 通道:强制把该 tag 移到当前 HEAD 并 force-push,重新触发 Actions 自动发布。
+ *                      版本号决策(关键):
+ *                        - 若目标版本当前仍在 npm 上(occupied)→ 升级一个版本号重新发布,不复用,
+ *                          并先尽力 unpublish 清理原版本(需 npm 登录);
+ *                        - 若目标版本已不在 npm 上(已成功 unpublish 或从未真正发布)→ 直接复用原版本号重发,不升级。
  *                      交互式(选了 github 后还会问「重发 / 发新版本」):不写版本号会从本地 git tag
  *                      列表里挑,默认高亮「发新版本」;非交互式必须显式给出版本号,如
  *                      npm run release --redeploy 0.1.10 --via=github
- *                      → 实际以 0.1.11(或更高未占用版本号)重新发布,0.1.10 不可复用。
  *   (若选中 github 通道,--no-git 会被忽略——GitHub 发布必须 commit + push tag 才能触发 Actions)
  */
 import { spawn } from 'node:child_process';
@@ -933,24 +933,24 @@ function nextUnusedVersion(base, channel, occupiedSet) {
 // 预发布 + iteration 时若已占用则自动顺延迭代号(beta.1 被占 → beta.2),与 model-gate 一致;
 // 其它升级方式被占用则直接失败,不静默跳版本。
 let occupied = remoteVersions.includes(target);
-// 重发(redeploy):npm 规则——版本一旦发布过(即使已 unpublish)该版本号永久作废、不可复用。
-//   因此重发时一律改用更高的新版本号重新发布,而不是复用原版本号(否则 Actions 的 npm publish 必失败)。
-//   原版本号若当前仍在 npm 上(occupied),则先尽力清理掉;若已被 unpublish 则无需清理、直接发新号即可。
+// 重发(redeploy)的版本号决策:
+//   - npm 上仍存在该旧版本(occupied)→ 升级一个版本号重新发布,不复用(避免覆盖/冲突);
+//     原版本稍后尽力 unpublish 清理(需本地登录)。
+//   - npm 上已无该旧版本(已被成功 unpublish 或从未真正发布)→ 直接复用原版本号重发,不升级。
 let needUnpublish = false;
 let unpublishVersion = null;
 if (opts.redeploy) {
   if (occupied) {
     unpublishVersion = target; // 仍在 npm 上的旧版本,稍后先清理
     needUnpublish = true;
+    const from = target;
+    const bumped = nextUnusedVersion(target, channel, remoteVersions);
+    warn(`版本 ${from} 仍在 npm 上,redeploy 将发布新版本号 ${bumped},不再复用 ${from}。`);
+    target = bumped;
+    occupied = false;
+  } else {
+    log(`版本 ${target} 已不在 npm 上,redeploy 将直接复用该版本号重新触发 Actions`);
   }
-  const from = target;
-  const bumped = nextUnusedVersion(target, channel, remoteVersions);
-  warn(
-    `重发将发布新版本号 ${bumped}:npm 不允许复用任何「曾发布过(含已 unpublish)」的版本号 ${from}` +
-    (occupied ? `,并将先清理 npm 上已存在的 ${from}。` : `。`),
-  );
-  target = bumped;
-  occupied = false;
 } else if (occupied) {
   // 非重发场景:目标被占用按原规则处理(预发布 iteration 自动顺延,其余直接失败)
   if (channel !== 'latest' && bump === 'iteration') {
@@ -969,7 +969,11 @@ if (opts.redeploy) {
   }
 }
 if (opts.redeploy) {
-  log(`重发将以新版本 ${target} 重新触发 Actions(原版本 ${unpublishVersion ?? explicitVersion} 不可复用${unpublishVersion ? ',已先清理' : ''})`);
+  if (unpublishVersion) {
+    log(`重发将以新版本 ${target} 重新触发 Actions(原版本 ${unpublishVersion} 仍在 npm,已先清理)`);
+  } else {
+    log(`重发将复用版本 ${target} 重新触发 Actions(npm 上无该版本,直接重发)`);
+  }
 } else {
   log(`版本 ${target} 未被占用,可发布`);
 }
