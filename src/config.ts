@@ -20,6 +20,13 @@ export interface SharedFolderConfig {
    * 开启时 .gitignore 命中的文件/目录不参与同步;.syncxignore 优先级更高,可用负向规则覆盖。
    */
   useGitignore?: boolean;
+  /**
+   * 该共享目录是否来自「接收对端邀请」(而非本机主动 add 共享自有目录)。
+   * 仅用于展示/诊断区分;嵌套约束对本机自有与接收映射同等生效:
+   * 任意两个共享目录都不得物理嵌套(共享是双向的,本机嵌套在对方侧即表现为接收映射嵌套)。
+   * 旧配置缺省为 undefined,按「本机自有」处理。
+   */
+  remote?: boolean;
 }
 
 /** 目录的 wire 标识:优先 id,缺省用 path。 */

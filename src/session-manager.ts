@@ -14,7 +14,7 @@
  *  - P2P 自更新(upgradeFromPeer:请求对端 tgz → sha256 校验 → updater 接管)
  */
 import { readFileSync } from 'node:fs';
-import { join } from 'node:path';
+import { join, resolve } from 'node:path';
 import { randomBytes } from 'node:crypto';
 import type { Logger } from 'pino';
 import { WebSocket } from 'ws';
@@ -238,6 +238,9 @@ export class SyncSessionManager {
   }
 
   private async scanOnce(): Promise<void> {
+    // 其它共享目录的归一化根路径:扫描某目录时,命中这些路径的子目录视为嵌套共享根,不重复索引
+    // (含 baselinePending 的新建目录——父目录在其基线扫描期间也不应重复索引子目录文件)
+    const otherRoots = this.folderStates.map((f) => resolve(f.path));
     for (const folder of this.folderStates) {
       // 一轮扫描走到这里且后续无错误即视为「干净」:清除该目录上一次的错误提示,
       // 让问题自愈后目录卡上的错误横幅自动消失
@@ -246,11 +249,14 @@ export class SyncSessionManager {
       let diff;
       try {
         folder.ignoreLines = readFolderIgnoreLines(folder.path, folder.config.useGitignore !== false);
+        // 嵌套共享根:排除自身,其余共享根传入扫描器,使父目录不再重复索引子目录文件
+        const nestedRoots = otherRoots.filter((r) => r !== resolve(folder.path));
         diff = scanFolder(
           folder.path,
           folder.index,
           parseIgnoreRules(folder.ignoreLines),
           this.identity.deviceId,
+          nestedRoots,
         );
       } catch (error) {
         // 扫描本身失败(如目录读取权限异常):记录到目录卡,下一轮扫描重试

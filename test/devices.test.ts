@@ -2,7 +2,7 @@ import { describe, expect, it } from 'vitest';
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, statSync, writeFileSync } from 'node:fs';
 import { rmDir } from './helpers.js';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { join, resolve } from 'node:path';
 import { addSharedFolder, removeSharedFolder, isPeerAllowed, addPeer, removePeer } from '../src/devices.js';
 import type { SharedFolderConfig } from '../src/config.js';
 
@@ -73,6 +73,25 @@ describe('shared folder configuration', () => {
     expect(raw.sharedFolders).toHaveLength(2);
     expect(raw.sharedFolders[1].devices).toEqual(['DEV1234567', 'DEVABCDEFG']);
     expect(raw.sharedFolders[1].id).toMatch(/^[0-9a-f]{12}$/);
+
+    rmDir(dir);
+  });
+
+  it('collapses equivalent path spellings into one entry (normalize before dedup)', () => {
+    const dir = tempDir();
+    const configPath = join(dir, 'config.json');
+    const base = join(dir, 'docs');
+    mkdirSync(base);
+
+    addSharedFolder(configPath, base, ['DEV1234567']);
+    // 等价写法:尾斜杠(Windows 上 C:\a\b\、POSIX 上 /a/b/),应并到同一条目而非新增
+    addSharedFolder(configPath, join(dir, 'docs', ''), ['DEVABCDEFG']);
+
+    const raw = JSON.parse(readFileSync(configPath, 'utf8'));
+    expect(raw.sharedFolders).toHaveLength(1);
+    expect(raw.sharedFolders[0].devices.sort()).toEqual(['DEV1234567', 'DEVABCDEFG']);
+    // 存储路径被归一化(无尾斜杠),与 resolve 结果一致
+    expect(raw.sharedFolders[0].path).toBe(resolve(base));
 
     rmDir(dir);
   });
@@ -226,5 +245,79 @@ describe('manual peer address (addPeer)', () => {
     expect(raw.peers).toEqual(['ws://172.25.48.139:22000']);
 
     rmDir(dir);
+  });
+
+  describe('shared folder mount must not nest (any source)', () => {
+    it('rejects a received mount nested inside another received folder', () => {
+      const dir = tempDir();
+      const configPath = join(dir, 'config.json');
+      const D = join(dir, 'D');
+      const C = join(D, 'C');
+      mkdirSync(C, { recursive: true });
+
+      addSharedFolder(configPath, D, ['peer'], 'fd', true);
+      expect(() => addSharedFolder(configPath, C, ['peer'], 'fc', true)).toThrow(/must not nest/);
+
+      rmDir(dir);
+    });
+
+    it('rejects a received mount containing another received folder (either order)', () => {
+      const dir = tempDir();
+      const configPath = join(dir, 'config.json');
+      const D = join(dir, 'D');
+      const C = join(D, 'C');
+      mkdirSync(C, { recursive: true });
+
+      // 反向顺序:先加内部的 C,再加外层的 D
+      addSharedFolder(configPath, C, ['peer'], 'fc', true);
+      expect(() => addSharedFolder(configPath, D, ['peer'], 'fd', true)).toThrow(/must not nest/);
+
+      rmDir(dir);
+    });
+
+    it('rejects nested mounts for local/own shared folders too (bidirectional sharing)', () => {
+      const dir = tempDir();
+      const configPath = join(dir, 'config.json');
+      const A = join(dir, 'A');
+      const B = join(A, 'child');
+      mkdirSync(B, { recursive: true });
+
+      // 不传 remote(本机自有共享),嵌套父+子目录同样拒绝:共享是双向的,
+      // 本机嵌套在对方侧即表现为接收映射嵌套,会产生重复订阅与同步歧义。
+      addSharedFolder(configPath, A, ['peer'], 'fa');
+      expect(() => addSharedFolder(configPath, B, ['peer'], 'fb')).toThrow(/must not nest/);
+
+      rmDir(dir);
+    });
+
+    it('rejects a local folder nested inside a received folder (mixed source)', () => {
+      const dir = tempDir();
+      const configPath = join(dir, 'config.json');
+      const D = join(dir, 'D');
+      const C = join(D, 'C');
+      mkdirSync(C, { recursive: true });
+
+      // 先接收映射 D,再本机 add 内部 C:混合来源嵌套同样拒绝
+      addSharedFolder(configPath, D, ['peer'], 'fd', true);
+      expect(() => addSharedFolder(configPath, C, ['peer'], 'fc')).toThrow(/must not nest/);
+
+      rmDir(dir);
+    });
+
+    it('merges an exact-duplicate path instead of rejecting (any source)', () => {
+      const dir = tempDir();
+      const configPath = join(dir, 'config.json');
+      const D = join(dir, 'D');
+      mkdirSync(D, { recursive: true });
+
+      addSharedFolder(configPath, D, ['p1'], 'fd', true);
+      expect(() => addSharedFolder(configPath, D, ['p2'], 'fd', true)).not.toThrow();
+
+      const raw = JSON.parse(readFileSync(configPath, 'utf8'));
+      expect(raw.sharedFolders).toHaveLength(1);
+      expect(raw.sharedFolders[0].devices).toEqual(['p1', 'p2']);
+
+      rmDir(dir);
+    });
   });
 });

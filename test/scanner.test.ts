@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import { mkdtempSync, mkdirSync, writeFileSync, rmSync as rm, statSync } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { join, resolve } from 'node:path';
 import { scanFolder } from '../src/scanner.js';
 import { openIndexStore } from '../src/indexstore.js';
 import { parseIgnoreRules } from '../src/ignore.js';
@@ -200,6 +200,95 @@ describe('scanFolder', () => {
     expect(index.getEntry('a.txt')?.mtime).toBeGreaterThan(Date.now() - 5_000);
     // 版本不变(mtime 不在同步协议内,不递增版本、不触发广播)
     expect(index.getEntry('a.txt')?.version.get('DEV-A')).toBe(1);
+
+    index.close();
+    rmDir(dir);
+  });
+
+  it('skips nested shared roots: no double-index of child files, no tombstone on their deletion', () => {
+    const { dir, root, index } = setup();
+    const child = join(root, 'child');
+    mkdirSync(child, { recursive: true });
+    writeFileSync(join(child, 'inner.txt'), 'child content');
+
+    // 根目录自身的新增文件仍应被检出
+    writeFileSync(join(root, 'root.txt'), 'root content');
+
+    // 模拟迁移前的历史状态:父目录索引里残留了子目录文件(曾被重复索引)
+    seed(root, index, 'child/inner.txt', 'child content');
+
+    const childRoot = resolve(child);
+    const { changed, tombstones } = scanFolder(root, index, [], 'DEV-A', [childRoot]);
+
+    // 只检出根目录自身的新增;子目录文件不重复进 changed
+    expect(changed).toEqual(['root.txt']);
+    expect(tombstones).toEqual([]);
+
+    // 即便子目录文件在盘上被删,也不应被父目录当作"已删除"产生墓碑(避免迁移期误删)
+    rm(join(child, 'inner.txt'));
+    const after = scanFolder(root, index, [], 'DEV-A', [childRoot]);
+    expect(after.changed).toEqual([]);
+    expect(after.tombstones).toEqual([]);
+    // 残留的索引条目仍在(交由子目录共享自行管理)
+    expect(index.getEntry('child/inner.txt')).toBeDefined();
+
+    index.close();
+    rmDir(dir);
+  });
+
+  it('does not skip a non-shared subdir (still indexes its files)', () => {
+    const { dir, root, index } = setup();
+    const plain = join(root, 'plain');
+    mkdirSync(plain, { recursive: true });
+    writeFileSync(join(plain, 'x.txt'), 'x');
+
+    // 不传 nestedRoots:普通子目录照常递归索引
+    const { changed } = scanFolder(root, index, [], 'DEV-A');
+    expect(changed).toContain('plain/x.txt');
+
+    index.close();
+    rmDir(dir);
+  });
+
+  it('child folder deletions propagate even though its parent is a nested root (P2 child fix)', () => {
+    const dir = mkdtempSync(join(tmpdir(), 'syncx-p2child-'));
+    const A = join(dir, 'A');
+    const B = join(A, 'child'); // B ⊂ A,扫描 B 时 nestedRoots=[A]
+    mkdirSync(B, { recursive: true });
+    const index = openIndexStore(join(dir, 'index.db'));
+    writeFileSync(join(B, 'foo.txt'), 'data');
+    seed(B, index, 'foo.txt', 'data');
+
+    rm(join(B, 'foo.txt'));
+
+    // 修复前:parent A 是 B 路径的祖先,nestedRoots 前缀守卫会把 B 的全部删除吞掉;
+    // 修复后:守卫只在「被保护根是当前扫描根的后代」时生效,所以子目录删除正常生成墓碑。
+    const { changed, tombstones } = scanFolder(B, index, [], 'DEV-A', [resolve(A)]);
+    expect(changed).toEqual([]);
+    expect(tombstones).toHaveLength(1);
+    expect(tombstones[0]!.path).toBe('foo.txt');
+
+    index.close();
+    rmDir(dir);
+  });
+
+  it('inverted-topology inner mount deletions propagate (received mapping fix)', () => {
+    // 父共享挂载 C ⊂ 子共享挂载 D,扫描 folder1(C) 时 nestedRoots=[D](祖先)——
+    // 修复前 C 内删除被前缀守卫全吞;修复后正常生成墓碑。
+    const dir = mkdtempSync(join(tmpdir(), 'syncx-inv-'));
+    const D = join(dir, 'D');
+    const C = join(D, 'C');
+    mkdirSync(C, { recursive: true });
+    const index = openIndexStore(join(dir, 'index.db'));
+    writeFileSync(join(C, 'foo.txt'), 'data');
+    seed(C, index, 'foo.txt', 'data');
+
+    rm(join(C, 'foo.txt'));
+
+    const { changed, tombstones } = scanFolder(C, index, [], 'DEV-A', [resolve(D)]);
+    expect(changed).toEqual([]);
+    expect(tombstones).toHaveLength(1);
+    expect(tombstones[0]!.path).toBe('foo.txt');
 
     index.close();
     rmDir(dir);

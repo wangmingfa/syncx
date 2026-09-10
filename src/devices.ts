@@ -1,5 +1,5 @@
 import { existsSync, mkdirSync, statSync } from 'node:fs';
-import { resolve, isAbsolute } from 'node:path';
+import { resolve, isAbsolute, sep } from 'node:path';
 import { randomBytes } from 'node:crypto';
 import { loadConfig, saveConfig, normalizePeerUrl, DEFAULT_CONFIG, type SharedFolderConfig, type DeviceConfig } from './config.js';
 
@@ -46,9 +46,11 @@ export function generateFolderId(): string {
  * 路径已存在但不是目录(文件/符号链接指向文件)则报错。
  * 返回是否执行了自动创建(供 API 提示用户)。
  */
-export function addSharedFolder(configPath: string, path: string, devices: string[], id?: string): boolean {
-  validateFolderPath(path);
+export function addSharedFolder(configPath: string, path: string, devices: string[], id?: string, remote?: boolean): boolean {
+  // 归一化:尾斜杠、大小写(Windows)、./ 段等写法差异都收敛为同一个绝对路径,
+  // 避免同一物理目录因输入字符串不同而被登记成两个共享条目(导致双扫双同步、设备去重失效)。
   const resolved = resolve(path);
+  validateFolderPath(resolved);
   let created = false;
   if (existsSync(resolved)) {
     if (!statSync(resolved).isDirectory()) {
@@ -59,11 +61,24 @@ export function addSharedFolder(configPath: string, path: string, devices: strin
     created = true;
   }
   const config = loadConfig(configPath);
-  const existing = config.sharedFolders.find((f) => f.path === path);
+  // 任意两个共享目录之间都不允许物理嵌套(本机自有 / 接收映射同等对待):
+  // 嵌套会让同一批文件同时参与两份独立的索引与版本向量,产生重复订阅(fan-in)与同步歧义;
+  // 共享是双向的,本机侧嵌套在对方设备上即表现为接收映射嵌套,故统一禁止,不区分来源。
+  for (const f of config.sharedFolders) {
+    const ep = resolve(f.path);
+    if (ep === resolved) continue; // 完全重复交给下方去重合并,不在此报错
+    if (resolved.startsWith(ep + sep) || ep.startsWith(resolved + sep)) {
+      throw new Error(
+        `shared folder must not nest inside or contain another shared folder: ${resolved} overlaps ${ep}`,
+      );
+    }
+  }
+  // 用归一化后的路径做去重(对已有条目也先 resolve 比对),等价写法(/a/b、/a/b/、/A/b)都落到同一条目
+  const existing = config.sharedFolders.find((f) => resolve(f.path) === resolved);
   if (existing) {
     existing.devices = [...new Set([...existing.devices, ...devices])];
   } else {
-    config.sharedFolders.push({ path, devices, id: id ?? generateFolderId() });
+    config.sharedFolders.push({ path: resolved, devices, id: id ?? generateFolderId(), remote });
   }
   saveConfig(configPath, config);
   return created;
@@ -72,7 +87,7 @@ export function addSharedFolder(configPath: string, path: string, devices: strin
 /** 精确设置某目录的设备列表(用于按目录多选设备的提交)。 */
 export function setFolderDevices(configPath: string, path: string, devices: string[]): void {
   const config = loadConfig(configPath);
-  const existing = config.sharedFolders.find((f) => f.path === path);
+  const existing = config.sharedFolders.find((f) => resolve(f.path) === resolve(path));
   if (!existing) throw new Error(`folder not configured: ${path}`);
   existing.devices = [...new Set(devices)];
   saveConfig(configPath, config);
@@ -81,7 +96,7 @@ export function setFolderDevices(configPath: string, path: string, devices: stri
 /** 设置某目录是否遵循 .gitignore 忽略规则(目录卡片上的开关;缺省 true)。 */
 export function setFolderGitignore(configPath: string, path: string, enabled: boolean): void {
   const config = loadConfig(configPath);
-  const existing = config.sharedFolders.find((f) => f.path === path);
+  const existing = config.sharedFolders.find((f) => resolve(f.path) === resolve(path));
   if (!existing) throw new Error(`folder not configured: ${path}`);
   existing.useGitignore = enabled;
   saveConfig(configPath, config);
@@ -90,7 +105,7 @@ export function setFolderGitignore(configPath: string, path: string, enabled: bo
 /** 按路径移除一个共享目录。 */
 export function removeSharedFolder(configPath: string, path: string): void {
   const config = loadConfig(configPath);
-  config.sharedFolders = config.sharedFolders.filter((f) => f.path !== path);
+  config.sharedFolders = config.sharedFolders.filter((f) => resolve(f.path) !== resolve(path));
   saveConfig(configPath, config);
 }
 

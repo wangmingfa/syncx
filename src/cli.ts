@@ -115,7 +115,8 @@ export async function run(args: ParsedArgs): Promise<void> {
       throw new Error('usage: syncx join <invite-code> <local-path>');
     }
     const invite = parseInviteCode(code, configDir);
-    addSharedFolder(configPath, localPath, [invite.deviceId]);
+    // join 是接受对端邀请的接收映射,标记 remote=true 以启用接收映射间的嵌套约束
+    addSharedFolder(configPath, localPath, [invite.deviceId], undefined, true);
     console.log(`paired with device ${invite.deviceId} (invited folder ${invite.folder})`);
     console.log(`shared folder added: ${localPath}`);
     // 关系是双向的:本机已信任对方,但对方尚未把本机加入白名单,
@@ -348,7 +349,8 @@ export async function run(args: ParsedArgs): Promise<void> {
         if (!localPath || localPath.trim() === '') {
           throw new Error('local path is required to accept a folder invitation');
         }
-        addSharedFolder(configPath, localPath, [offer.fromDeviceId], offer.folderId);
+        // acceptOffer 是接受对端文件夹邀请的接收映射,标记 remote=true 以启用接收映射间的嵌套约束
+        addSharedFolder(configPath, localPath, [offer.fromDeviceId], offer.folderId, true);
         manager.sendControlTo(offer.fromDeviceId, {
           kind: 'folder-invitation-ack',
           offerId: offer.id,
