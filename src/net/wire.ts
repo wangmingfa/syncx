@@ -29,8 +29,9 @@ export type ControlMessage =
    *  旧版本对端不发送该字段(undefined),接收方按未知处理,退回旧逻辑。 */
   | { kind: 'folder-sync-list'; fromDeviceId: string; folderIds: string[]; pendingFolderIds?: string[] }
   /** 会话建立时互发的版本宣告。dev 态(src 直跑)version 为 'dev'。
-   *  旧版本对端不发送,接收方 version 为 undefined,UI 显示「未知」且不给升级入口。 */
-  | { kind: 'hello'; fromDeviceId: string; version: string }
+   *  hostname 为本机 node:os 主机名,供对端在设备卡 / 配对 / 共享邀请上展示来源主机,
+   *  旧版本对端不发送该字段,接收方按 undefined 处理(不展示主机名)。 */
+  | { kind: 'hello'; fromDeviceId: string; version: string; hostname?: string }
   /** 请求对端的自身安装包(tgz,整包),用于「版本低于对方时从对方升级」。
    *  仅经握手签名校验过的会话可发;对端 dev 态时 response.data 为 undefined。 */
   | { kind: 'self-binary-request'; requestId: string; fromDeviceId: string }

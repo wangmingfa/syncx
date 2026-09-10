@@ -681,7 +681,7 @@ async function logout(): Promise<void> {
             <template v-else>配对请求</template>
           </span>
         </div>
-        <div class="item-sub">来自 <span class="mono">{{ o.fromDeviceId }}</span></div>
+        <div class="item-sub">来自 <span class="mono">{{ o.fromDeviceId }}</span><span v-if="o.fromIp || o.fromHostname" class="muted"> · <template v-if="o.fromIp">{{ o.fromIp }}</template><template v-if="o.fromHostname">{{ o.fromIp ? ' · ' : '' }}{{ o.fromHostname }}</template></span></div>
         <div v-if="o.kind === 'folder'" class="offer-path">
           <n-input v-model:value="offerPaths[o.id]" placeholder="本机目录绝对路径,如 /home/me/Documents" />
           <p class="form-hint">目录不存在时会自动创建</p>
@@ -716,7 +716,7 @@ async function logout(): Promise<void> {
             </span>
             <span class="declined-flag">已忽略</span>
           </div>
-          <div class="item-sub">来自 <span class="mono">{{ o.fromDeviceId }}</span></div>
+          <div class="item-sub">来自 <span class="mono">{{ o.fromDeviceId }}</span><span v-if="o.fromIp || o.fromHostname" class="muted"> · <template v-if="o.fromIp">{{ o.fromIp }}</template><template v-if="o.fromHostname">{{ o.fromIp ? ' · ' : '' }}{{ o.fromHostname }}</template></span></div>
           <div class="actions">
             <n-button size="small" tertiary :disabled="busy" @click="restoreOffer(o)">恢复</n-button>
           </div>
@@ -872,6 +872,9 @@ async function logout(): Promise<void> {
           </div>
           <div v-if="p.url" class="item-addr">
             <span class="addr-label">地址</span><span class="addr-value mono">{{ stripWs(p.url) }}</span>
+          </div>
+          <div v-if="p.hostname" class="item-addr">
+            <span class="addr-label">主机名</span><span class="addr-value mono">{{ p.hostname }}</span>
           </div>
           <div v-if="p.online && p.canUpgrade" class="actions">
             <n-button size="small" type="warning" :disabled="busy" class="btn-upgrade" @click="askUpgrade(p)">

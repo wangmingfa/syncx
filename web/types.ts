@@ -19,6 +19,8 @@ export interface DeviceInfo {
   deviceId: string;
   online: boolean;
   url?: string;
+  /** 对端主机名(hello 宣告);undefined=旧版本对端未发,不展示。 */
+  hostname?: string;
   /** 该设备被指派到的目录 id 列表(用于展示「共享 N 个目录」)。 */
   folders: string[];
   /** 对端宣告的「它与本机在同步的目录 id 集合」;undefined=旧版本对端,无法判断已停止共享。 */
@@ -37,6 +39,10 @@ export interface OfferInfo {
   fromDeviceId: string;
   folderId?: string;
   folderName?: string;
+  /** 发起方主机名(hello 宣告);undefined=旧版本对端未发或不展示。 */
+  fromHostname?: string;
+  /** 发起方入站源 IP(本机视角);undefined=无法取到(如本机主动出站收到的邀请)。 */
+  fromIp?: string;
   status: 'pending' | 'accepted' | 'declined';
   createdAt: number;
 }

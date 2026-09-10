@@ -58,6 +58,11 @@ export interface PendingOffer {
   folderId?: string;
   /** 目录共享邀请:展示用名称(同 folderId)。 */
   folderName?: string;
+  /** 发起方主机名(hello 宣告);用于邀请卡展示来源主机。旧版本对端不发送时为 undefined。 */
+  fromHostname?: string;
+  /** 发起方入站源 IP(本机视角,从入站 socket 提取);用于邀请卡展示来源 IP。
+   *  本机主动出站连接收到的邀请无法取到对方源 IP,为 undefined。 */
+  fromIp?: string;
   status: 'pending' | 'accepted' | 'declined';
   createdAt: number;
 }

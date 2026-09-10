@@ -30,6 +30,24 @@ export function formatHost(address: string, family: 'IPv4' | 'IPv6'): string {
 }
 
 /**
+ * 由入站 socket 提取对端源 IP(规范化后):剥离方括号、还原 IPv4-mapped IPv6
+ * 前缀(::ffff:a.b.c.d → a.b.c.d)。@types/ws 未暴露 remoteAddress,故对 ws 实例
+ * 做防御性读取(优先 socket.remoteAddress,回退底层 _socket.remoteAddress)。
+ * 取不到时返回 undefined(主要用于配对 / 共享邀请卡展示来源 IP)。
+ */
+export function learnPeerIp(socket: WebSocket): string | undefined {
+  const anySock = socket as unknown as {
+    remoteAddress?: string;
+    _socket?: { remoteAddress?: string };
+  };
+  let addr = anySock.remoteAddress ?? anySock._socket?.remoteAddress;
+  if (!addr) return undefined;
+  if (addr.startsWith('[') && addr.endsWith(']')) addr = addr.slice(1, -1);
+  if (addr.startsWith('::ffff:')) addr = addr.slice('::ffff:'.length);
+  return addr;
+}
+
+/**
  * 由入站 socket 的对端源 IP + 握手 kx 中广播的监听端口,拼出可反向连接的
  * ws:// 地址。@types/ws 未暴露 remoteAddress,故对 ws 实例做防御性读取
  * (优先 socket.remoteAddress,回退底层 _socket.remoteAddress)。IPv6 自动加方括号。
@@ -42,16 +60,8 @@ export function formatHost(address: string, family: 'IPv4' | 'IPv6'): string {
  */
 export function learnPeerUrl(socket: WebSocket, listenPort?: number): string | undefined {
   if (typeof listenPort !== 'number' || listenPort <= 0 || listenPort > 65535) return undefined;
-  const anySock = socket as unknown as {
-    remoteAddress?: string;
-    _socket?: { remoteAddress?: string };
-  };
-  let addr = anySock.remoteAddress ?? anySock._socket?.remoteAddress;
+  const addr = learnPeerIp(socket);
   if (!addr) return undefined;
-  // 去方括号
-  if (addr.startsWith('[') && addr.endsWith(']')) addr = addr.slice(1, -1);
-  // 还原 IPv4-mapped IPv6 地址(::ffff:a.b.c.d → a.b.c.d)
-  if (addr.startsWith('::ffff:')) addr = addr.slice('::ffff:'.length);
   // 仅真正的 IPv6(仍含冒号)才加方括号
   const host = addr.includes(':') && !addr.startsWith('[') ? `[${addr}]` : addr;
   return `ws://${host}:${listenPort}`;

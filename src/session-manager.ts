@@ -31,7 +31,8 @@ import { recordSyncEvent } from './history.js';
 import { broadcastFolderUpdates } from './broadcast.js';
 import { connectPeer } from './net/client.js';
 import { makePeerTransport, attachPeerMessages, sendControlMessage, type ControlMessage } from './net/wire.js';
-import { learnPeerUrl } from './net/addresses.js';
+import { learnPeerUrl, learnPeerIp } from './net/addresses.js';
+import { hostname as osHostname } from 'node:os';
 import { RateLimiter } from './ratelimit.js';
 import { isPeerAllowed, addPeer } from './devices.js';
 import { receiveOffer, makeOfferId } from './offers.js';
@@ -75,6 +76,9 @@ export interface ActiveSession {
   /** 对端经 hello 宣告的运行版本('dev' = 对端为源码 dev 态)。
    *  undefined = 对端旧版本未发 hello,UI 显示「未知」且不给升级入口。 */
   remoteVersion?: string;
+  /** 对端经 hello 宣告的主机名(node:os hostname);用于设备卡 / 配对 / 共享邀请展示来源主机。
+   *  undefined = 对端旧版本未发 hello 主机名。 */
+  remoteHostname?: string;
 }
 
 export interface DeviceLinkInfo {
@@ -83,6 +87,8 @@ export interface DeviceLinkInfo {
   remoteFolders?: string[];
   remotePendingFolders: string[];
   version?: string;
+  /** 对端主机名(hello 宣告);undefined=旧版本对端未发。 */
+  hostname?: string;
 }
 
 export interface SessionManagerDeps {
@@ -506,14 +512,22 @@ export class SyncSessionManager {
 
   /** 收到对端 control 消息:把配对 / 目录共享邀请落成待确认项;确认回执触发会话对账。 */
   private onControl(message: ControlMessage): void {
+    // 邀请来源的网络信息(主机名 + 入站源 IP),供 UI 在配对 / 共享邀请卡上展示来源。
+    // 旧版本对端未发 hello → remoteHostname 为 undefined;非入站(本机主动出站连接)
+    // 收到的邀请则 socket 取不到对端源 IP → fromIp 为 undefined。两者缺省都不展示。
+    const srcSession = this.peerSessions.get(message.fromDeviceId);
+    const fromHostname = srcSession?.remoteHostname;
+    const fromIp = srcSession?.socket ? learnPeerIp(srcSession.socket) : undefined;
+    const srcMeta = { fromIp, fromHostname };
     switch (message.kind) {
       case 'pairing-request':
         receiveOffer(this.configPath, {
           id: message.offerId,
           kind: 'pairing',
           fromDeviceId: message.fromDeviceId,
+          ...srcMeta,
         });
-        this.logger.info(`pairing request received from ${message.fromDeviceId}`);
+        this.logger.info(`pairing request received from ${message.fromDeviceId}${fromHostname ? ` (host ${fromHostname})` : ''}`);
         break;
       case 'folder-invitation': {
         const offer = receiveOffer(this.configPath, {
@@ -522,6 +536,7 @@ export class SyncSessionManager {
           fromDeviceId: message.fromDeviceId,
           folderId: message.folderId,
           folderName: message.folderName,
+          ...srcMeta,
         });
         // 新落成一个待确认项后立即向对方反推目录清单(带 pendingFolderIds),
         // 让对方设备标签马上从「已停止共享」切到「待对方确认」,不等下次会话事件
@@ -673,11 +688,12 @@ export class SyncSessionManager {
       transports: [],
     };
     this.activeSessions.push(session);
-    // 版本握手:双方各发一次 hello,设备卡显示对端版本,并据此计算「可否从对方升级」
+    // 版本握手:双方各发一次 hello,设备卡显示对端版本与主机名,并据此计算「可否从对方升级」
     sendControlMessage(socket, key, {
       kind: 'hello',
       fromDeviceId: this.identity.deviceId,
       version: runtimeVersion(),
+      hostname: osHostname(),
     });
     // 书签策略:仅当当前书签缺失或其 socket 已死时才移交给新会话。
     // 健康的当前会话保持不动(重复连接照常注册为备份,handlers 可收消息);
@@ -704,7 +720,8 @@ export class SyncSessionManager {
     attachPeerMessages(session.peers, socket, key, (message) => {
       if (message.kind === 'hello') {
         session.remoteVersion = message.version;
-        this.logger.info(`peer ${remoteDeviceId} runs syncx ${message.version}`);
+        session.remoteHostname = message.hostname;
+        this.logger.info(`peer ${remoteDeviceId} runs syncx ${message.version}${message.hostname ? ` (host ${message.hostname})` : ''}`);
         return;
       }
       if (message.kind === 'self-binary-response') {
@@ -827,7 +844,7 @@ export class SyncSessionManager {
     if (!ok) this.logger.warn(`folder invitation to ${deviceId} could not be delivered (no live session)`);
   }
 
-  /** 某对端的连接信息(在线/地址/对端宣告的目录清单/对端版本),供 status 组装。 */
+  /** 某对端的连接信息(在线/地址/对端宣告的目录清单/对端版本/对端主机名),供 status 组装。 */
   describeDevice(deviceId: string): DeviceLinkInfo {
     const session = this.peerSessions.get(deviceId);
     return {
@@ -836,6 +853,7 @@ export class SyncSessionManager {
       remoteFolders: session?.remoteFolders ? [...session.remoteFolders] : undefined,
       remotePendingFolders: session?.remotePendingFolders ? [...session.remotePendingFolders] : [],
       version: session?.remoteVersion,
+      hostname: session?.remoteHostname,
     };
   }
 

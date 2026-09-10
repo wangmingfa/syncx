@@ -32,7 +32,15 @@ export function findPendingOffer(configPath: string, id: string): PendingOffer |
  */
 export function receiveOffer(
   configPath: string,
-  offer: { id: string; kind: PendingOffer['kind']; fromDeviceId: string; folderId?: string; folderName?: string },
+  offer: {
+    id: string;
+    kind: PendingOffer['kind'];
+    fromDeviceId: string;
+    folderId?: string;
+    folderName?: string;
+    fromIp?: string;
+    fromHostname?: string;
+  },
 ): PendingOffer | null {
   const config = loadConfig(configPath);
 
@@ -59,6 +67,8 @@ export function receiveOffer(
     fromDeviceId: offer.fromDeviceId,
     folderId: offer.folderId,
     folderName: offer.folderName ?? offer.folderId,
+    fromIp: offer.fromIp,
+    fromHostname: offer.fromHostname,
     status: 'pending',
     createdAt: Date.now(),
   };

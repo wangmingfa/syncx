@@ -10,6 +10,9 @@ export interface DeviceStatus {
   deviceId: string;
   online: boolean;
   url?: string;
+  /** 对端经 hello 宣告的主机名(node:os hostname);用于设备卡展示来源主机。
+   *  undefined = 对端旧版本未发 hello,UI 不展示主机名。 */
+  hostname?: string;
   /** 本机配置里该设备被指派到的目录 id 列表(用于界面展示「共享 N 个目录」)。 */
   folders: string[];
   /** 对端经 folder-sync-list 宣告的「它与本机在同步的目录 id 集合」。

@@ -246,6 +246,7 @@ export async function run(args: ParsedArgs): Promise<void> {
           deviceId,
           online: link.online,
           url: link.url,
+          hostname: link.hostname,
           folders: folderDevices.get(deviceId) ?? [],
           // 对端宣告的目录清单:undefined=旧版本对端(无法判断「已停止共享」)
           remoteFolders: link.remoteFolders,
