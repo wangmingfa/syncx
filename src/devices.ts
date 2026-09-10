@@ -47,6 +47,11 @@ export function generateFolderId(): string {
  * 返回是否执行了自动创建(供 API 提示用户)。
  */
 export function addSharedFolder(configPath: string, path: string, devices: string[], id?: string, remote?: boolean): boolean {
+  // 归一化前先拒绝相对路径:resolve 会把相对路径拼到 cwd 变成绝对路径,绕过 isAbsolute 校验,
+  // 导致此前「rejects a relative path」的语义失效。必须在 resolve 之前判定。
+  if (!isAbsolute(path)) {
+    throw new Error(`folder path must be absolute: ${path}`);
+  }
   // 归一化:尾斜杠、大小写(Windows)、./ 段等写法差异都收敛为同一个绝对路径,
   // 避免同一物理目录因输入字符串不同而被登记成两个共享条目(导致双扫双同步、设备去重失效)。
   const resolved = resolve(path);

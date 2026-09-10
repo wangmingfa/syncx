@@ -209,9 +209,9 @@ export class SyncSessionManager {
 
   /** 指派/忽略开关变化后立即使某目录的忽略规则与本地索引生效(配置 watcher 随后兜底)。 */
   refreshFolderIgnoreRules(path: string): void {
-    const folder = this.folderStates.find((f) => f.path === path);
+    const folder = this.folderStates.find((f) => resolve(f.path) === resolve(path));
     if (folder) {
-      folder.config = loadConfig(this.configPath).sharedFolders.find((f) => f.path === path) ?? folder.config;
+      folder.config = loadConfig(this.configPath).sharedFolders.find((f) => resolve(f.path) === resolve(path)) ?? folder.config;
       folder.ignoreLines = readFolderIgnoreLines(folder.path, folder.config.useGitignore !== false);
       folder.localIndex = new Map(
         filterIndexedEntries(parseIgnoreRules(folder.ignoreLines), folder.index.listEntries()).map((e) => [e.path, e]),

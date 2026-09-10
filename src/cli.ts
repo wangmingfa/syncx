@@ -1,5 +1,5 @@
 import type { ParsedArgs } from './args.js';
-import { dirname, join } from 'node:path';
+import { dirname, join, resolve } from 'node:path';
 import { homedir } from 'node:os';
 import { loadOrCreateIdentity } from './identity.js';
 import { loadConfig, saveConfig } from './config.js';
@@ -101,7 +101,7 @@ export async function run(args: ParsedArgs): Promise<void> {
     if (!folderPath) {
       throw new Error('usage: syncx invite <folder-path>');
     }
-    if (!config.sharedFolders.some((f) => f.path === folderPath)) {
+    if (!config.sharedFolders.some((f) => resolve(f.path) === resolve(folderPath))) {
       throw new Error(`folder not configured: ${folderPath}`);
     }
     console.log(createInviteCode(identity, folderPath));
@@ -204,7 +204,7 @@ export async function run(args: ParsedArgs): Promise<void> {
       const created = addSharedFolder(configPath, path, devices, id);
       logger.info(`shared folder added: ${path}${created ? ' (auto-created)' : ''}`);
       // 新建目录时即指派的对端,若当前在线立即推送共享邀请,免去对方再建一次目录
-      const folder = loadConfig(configPath).sharedFolders.find((f) => f.path === path);
+      const folder = loadConfig(configPath).sharedFolders.find((f) => resolve(f.path) === resolve(path));
       const fid = folder?.id ?? '';
       for (const d of devices ?? []) {
         manager.pushFolderInvitation(d, fid, fid || path);
@@ -214,7 +214,7 @@ export async function run(args: ParsedArgs): Promise<void> {
     },
     removeFolder: (path) => {
       // 移除前先记下原指派设备:移除后要向它们重推目录清单(它们 UI 上应显示「已停止共享」)
-      const affected = new Set(loadConfig(configPath).sharedFolders.find((f) => f.path === path)?.devices ?? []);
+      const affected = new Set(loadConfig(configPath).sharedFolders.find((f) => resolve(f.path) === resolve(path))?.devices ?? []);
       removeSharedFolder(configPath, path);
       logger.info(`shared folder removed: ${path}`);
       for (const d of affected) manager.pushFolderSyncList(d);
@@ -315,12 +315,12 @@ export async function run(args: ParsedArgs): Promise<void> {
       );
     },
     setFolderDevices: (path, devices) => {
-      const before = loadConfig(configPath).sharedFolders.find((f) => f.path === path);
+      const before = loadConfig(configPath).sharedFolders.find((f) => resolve(f.path) === resolve(path));
       const beforeDevices = new Set(before?.devices ?? []);
       setFolderDevices(configPath, path, devices);
       logger.info(`folder devices updated: ${path}`);
       // 对本次新加入的对端,若当前在线立即推送目录共享邀请(无需等下次重连;离线由重连补推)
-      const folder = manager.folderStates.find((f) => f.path === path);
+      const folder = manager.folderStates.find((f) => resolve(f.path) === resolve(path));
       const fid = folder ? folder.id : before?.id ?? '';
       for (const d of devices) {
         if (!beforeDevices.has(d)) {
