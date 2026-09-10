@@ -4,6 +4,8 @@
  *
  * 流程(真实发布):并行预检(登录态/registry/版本历史,一次拿全)→ 交互块(通道/升级方式/登录/总确认) →
  *       检查(可选)→ 构建 → 冒烟 → 递增版本号 → 打包预览 → 临时全局安装验证 → 真正 publish → 自动 commit。
+ *       注:--via=github 时「真正 publish」这一步改为「打 vX.Y.Z tag + push」,由 GitHub Actions 经 npm
+ *       Trusted Publishing 自动发布,本地不再执行 npm publish、也不需要 OTP/Token;--via=local 才是上面的本地发布流程。
  *       交互块之后全程无人值守,人可以离开。
  *
  * 参考 D:/code/model-gate/scripts/release.ts 移植的健壮性能力:
@@ -26,7 +28,7 @@
  *   非交互环境(管道 / CI / 沙箱,没有 TTY)自动跳过所有选择,用默认值继续。
  *
  * 用法:
- *   npm run release [major|minor|patch|iteration|<semver>] [options]
+ *   npm run release [major|minor|patch|iteration|<semver>] [--via=github|local] [options]
  *
  * 发布通道(--tag):
  *   --tag=latest(默认)  正式版,版本号形如 x.y.z
@@ -62,6 +64,10 @@
  *   --no-smoke         跳过「打包 → 临时 --prefix 全局安装 → syncx status」验证。
  *   --no-git           发布成功后不自动 commit 版本变更(默认会自动 commit,不 push)。
  *   --dry-run          只做网络预检/校验/构建/冒烟/打包预览,不发布、不递增版本号、不 commit。
+ *   --via=github       打 vX.Y.Z tag 并 push,由 GitHub Actions + npm Trusted Publishing 自动发布(免 OTP/Token)。
+ *                      交互环境会提示选择;非交互环境默认 github。等价于 --github。
+ *   --via=local        沿用旧流程,本地 npm login + OTP 直接发布。等价于 --local。
+ *   (若选中 github 通道,--no-git 会被忽略——GitHub 发布必须 commit + push tag 才能触发 Actions)
  */
 import { spawn } from 'node:child_process';
 import { mkdtempSync, rmSync, existsSync, readFileSync } from 'node:fs';
@@ -610,6 +616,8 @@ const opts = {
   doSmoke: true,
   doGit: true,
   dryRun: false,
+  via: undefined, // 发布方式:github(GitHub Actions + Trusted Publishing 自动发布) | local(本地 npm publish)
+  viaGiven: false,
 };
 for (const a of argv) {
   if (a === '--no-check') opts.doCheck = false;
@@ -625,6 +633,9 @@ for (const a of argv) {
   else if (a === 'patch' || a === 'minor' || a === 'major' || a === 'iteration') { opts.bumpArg = a; opts.bumpGiven = true; }
   // 允许显式版本号,含预发布(如 0.1.1-beta.1)—— 此时通道由后缀自动推断
   else if (/^\d+\.\d+\.\d+(?:-[\w.]+)?$/.test(a)) { opts.bumpArg = a; opts.bumpGiven = true; }
+  else if (a.startsWith('--via=')) { opts.via = a.slice('--via='.length); opts.viaGiven = true; }
+  else if (a === '--github') { opts.via = 'github'; opts.viaGiven = true; }
+  else if (a === '--local') { opts.via = 'local'; opts.viaGiven = true; }
   else fail(`无法识别的参数:${a}(应为 patch/minor/major/iteration,或如 1.2.3 / 1.2.3-beta.1)`);
 }
 
@@ -659,7 +670,7 @@ if (!whoamiOk) warn('未检测到 npm 登录态(或登录已失效),稍后会在
 
 /* registry 预检(仅真正发布时):镜像源不接受 publish,交互前就失败 */
 let publisher;
-if (!opts.dryRun) {
+if (!opts.dryRun && opts.via !== 'github') {
   if (!registryUrl.includes('registry.npmjs.org') && !opts.registry) {
     fail(
       `当前 registry 为 ${registryUrl},不是 npmjs 官方源。` +
@@ -739,6 +750,35 @@ if (explicitVersion) {
 let target = explicitVersion ?? nextVersion(base, channel, bump, isFirstRelease);
 log(`通道 ${channel} | 升级方式 ${bump} | 基准 ${base} → 目标 ${target}`);
 
+/* ---------- 发布方式:GitHub 自动发布 / 本地 npm publish ---------- */
+// 复用同一套版本选择逻辑,仅在「怎么发出去」上二选一,最大化代码复用。
+//   github:打 vX.Y.Z tag 并 push,由 GitHub Actions + npm Trusted Publishing 自动发布(免 OTP/Token)
+//   local :沿用旧逻辑,本地登录 + OTP 直接 npm publish
+if (!opts.via) {
+  if (isInteractive()) {
+    opts.via = await selectPrompt('选择发布方式:', [
+      { value: 'github', label: 'GitHub 自动发布', hint: '打 tag 推送到 GitHub,由 Actions + Trusted Publishing 自动发 npm(免 OTP/Token)' },
+      { value: 'local', label: '本地 npm publish', hint: '沿用旧流程,本地登录 + OTP 直接发布' },
+    ], 0);
+  } else {
+    // 非交互环境(管道/CI/沙箱)无 TTY、无法输 OTP,默认走 GitHub 通道
+    opts.via = 'github';
+  }
+}
+if (opts.via !== 'github' && opts.via !== 'local') {
+  fail(`--via 仅支持 github / local,收到:${opts.via}`);
+}
+if (opts.via === 'github') {
+  // GitHub 发布依赖 git tag push 触发 Actions,必须 commit+push;--no-git 与之冲突
+  if (!opts.doGit) {
+    log('--no-git 与 GitHub 发布不兼容,已强制启用 git commit + tag push');
+    opts.doGit = true;
+  }
+  log(`发布方式:GitHub 自动发布(打 tag v${target} 并 push,触发 Actions)`);
+} else {
+  log(`发布方式:本地 npm publish`);
+}
+
 // 目标的基础版本不得低于本地 package.json(防止误发回退版本)。
 // 只比 x.y.z 基础部分:预发布按 semver 本就低于同 base 的正式版(0.1.1-beta.1 < 0.1.1),
 // 首个 beta 属合法场景,不能因后缀而被拦;真正要拦的是基础版本倒退(如本地 0.5.0 却发 0.2.0-beta.1)。
@@ -775,8 +815,8 @@ if (occupied) {
 }
 log(`版本 ${target} 未被占用,可发布`);
 
-/* 登录(仅真正发布时):在交互块内完成,确认前就绪 */
-if (!opts.dryRun) {
+/* 登录(仅真正发布、且走本地 npm publish 时):GitHub 自动发布用 OIDC,无需登录 */
+if (!opts.dryRun && opts.via !== 'github') {
   await ensureNpmLogin();
   log(`将发布到 ${publisher} (dist-tag: ${opts.tag})`);
 }
@@ -790,8 +830,12 @@ if (!opts.dryRun) {
   if (opts.doBuild) steps.push('build');
   steps.push(opts.doSmoke ? '冒烟 + 临时全局安装验证' : '冒烟');
   steps.push(`npm version ${target}`);
-  steps.push(`npm publish --tag ${opts.tag}`);
-  if (opts.doGit) steps.push('git commit 版本变更');
+  if (opts.via === 'github') {
+    steps.push(`git tag v${target} + push(触发 GitHub Actions 自动发布)`);
+  } else {
+    steps.push(`npm publish --tag ${opts.tag}`);
+    if (opts.doGit) steps.push('git commit 版本变更');
+  }
   log(`  步骤:${steps.join(' → ')}`);
   if (!opts.yes) {
     const go = await selectPrompt(`确认发布 ${pkgName}@${target} ?`, [
@@ -867,7 +911,24 @@ if (opts.doSmoke) {
 
 /* ---------- 6. 真正发布 ---------- */
 if (opts.dryRun) {
-  log(`dry-run 结束:未发布、未改版本号、未 commit。可去掉 --dry-run 执行真实发布(${target})`);
+  log(`dry-run 结束:未发布、未改版本号、未 commit。可去掉 --dry-run 执行真实发布(${target});发布方式=${opts.via === 'github' ? 'GitHub 自动发布(tag+push)' : '本地 npm publish'}`);
+} else if (opts.via === 'github') {
+  // GitHub 自动发布:本地只负责打 tag + push,真正的 npm publish 由 Actions + Trusted Publishing 完成(免 OTP/Token)
+  if (opts.doGit) {
+    const st = await git(['status', '--porcelain', 'package.json', 'package-lock.json'], { forward: false });
+    if (!st.stdout.trim()) {
+      log('package.json 无改动,跳过 commit');
+    } else {
+      await git(['add', 'package.json', 'package-lock.json'], { inherit: true });
+      await git(['commit', '-m', `chore: 发布 v${target}`], { inherit: true });
+    }
+    await git(['tag', `v${target}`], { inherit: true });
+    log('已打 tag v' + target + ',推送到 GitHub…');
+    await git(['push'], { inherit: true });
+    await git(['push', '--tags'], { inherit: true });
+  }
+  log(`✅ 已推送 tag v${target} 到 GitHub, Actions 将自动构建并发布到 npm(Trusted Publishing,免 OTP)。`);
+  log('   Actions: https://github.com/wangmingfa/syncx/actions');
 } else {
   // 发布确认已在交互块内完成(发布计划总确认),此处直接执行
   const otpHint = opts.otp ? `(--otp=${'*'.repeat(opts.otp.length)})` : '(未提供 OTP)';
