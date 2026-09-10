@@ -13,7 +13,7 @@ const webClientPath = fileURLToPath(new URL('../dist/web/client.js', import.meta
 const webClientPlugin = {
   name: 'web-client-embed',
   setup(b) {
-    b.onResolve({ filter: /^\.\/web-client(\.js)?$/ }, () => ({
+    b.onResolve({ filter: /web-client(\.js)?$/ }, () => ({
       path: 'web-client-embedded',
       namespace: 'web-client-embedded',
     }));
