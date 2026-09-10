@@ -2,7 +2,7 @@ import { describe, expect, it, vi } from 'vitest';
 import { mkdtempSync, writeFileSync } from 'node:fs';
 import { rmDir } from './helpers.js';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { join, resolve } from 'node:path';
 import { run } from '../src/cli.js';
 import { parseArgs } from '../src/args.js';
 import { loadOrCreateIdentity } from '../src/identity.js';
@@ -30,7 +30,7 @@ describe('join (mutual trust)', () => {
     // 本机已把邀请方加入白名单
     const cfg = loadConfig(configPath);
     expect(cfg.sharedFolders).toHaveLength(1);
-    expect(cfg.sharedFolders[0]!.path).toBe('/local/share');
+    expect(cfg.sharedFolders[0]!.path).toBe(resolve('/local/share'));
     expect(cfg.sharedFolders[0]!.devices).toContain(inviter.deviceId);
 
     // 输出了回邀码,且回邀码解析出本机设备 ID(邀请方据此把本机加入白名单)

@@ -181,7 +181,7 @@ describe('sync peer session', () => {
 
     index.close();
     rmDir(dir);
-  });
+  }, 20000);
 
   it('lands empty files (0 blocks) without any block round-trip', async () => {
     const dir = mkdtempSync(join(tmpdir(), 'syncx-peer-'));

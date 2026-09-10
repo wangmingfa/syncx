@@ -224,6 +224,9 @@ describe('scanFolder', () => {
     expect(changed).toEqual(['root.txt']);
     expect(tombstones).toEqual([]);
 
+    // 模拟真实运行:首扫检出的 root.txt 会被 session-manager 落库;否则二扫仍会把它当新文件
+    seed(root, index, 'root.txt', 'root content');
+
     // 即便子目录文件在盘上被删,也不应被父目录当作"已删除"产生墓碑(避免迁移期误删)
     rm(join(child, 'inner.txt'));
     const after = scanFolder(root, index, [], 'DEV-A', [childRoot]);
@@ -242,9 +245,9 @@ describe('scanFolder', () => {
     mkdirSync(plain, { recursive: true });
     writeFileSync(join(plain, 'x.txt'), 'x');
 
-    // 不传 nestedRoots:普通子目录照常递归索引
+    // 不传 nestedRoots:普通子目录照常递归索引(断言用平台分隔符,Windows 为反斜杠)
     const { changed } = scanFolder(root, index, [], 'DEV-A');
-    expect(changed).toContain('plain/x.txt');
+    expect(changed).toContain(join('plain', 'x.txt'));
 
     index.close();
     rmDir(dir);
