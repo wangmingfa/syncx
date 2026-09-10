@@ -338,12 +338,42 @@ async function npmViewVersions(name) {
  *  必须正确处理预发布:无后缀 > 有后缀;同为后缀时按「标签名 + 迭代号数值」比较,
  *  不可用字符串比较,否则会掉进 beta.10 < beta.9 的字典序陷阱,把旧版本排成最大。 */
 /** 从 npm 移除已发布的指定版本(用于 github 重发且该版本已存在时,先清掉再重新触发 Actions)。
- *  用 npmRaw 执行、自行判定失败原因:
- *   - ENEEDAUTH / 认证失败 → 直接 fail(提示先 `npm login`)
- *   - 其它(如超过 72h 的 unpublish 限制、网络错误)→ warn 并继续,交由 Actions 重发时面对(可能 409)
+ *  unpublish 常触发 npm 的 OTP/浏览器认证(EOTP):
+ *   - TTY 环境优先以「交互模式」(stdin/stdout 透传、stderr 捕获)执行,让 npm 能弹出浏览器
+ *     认证链接并由用户在终端完成认证;认证通过则 unpublish 真正成功,无需再手动收尾。
+ *   - 非 TTY 环境(CI/管道)无终端可交互,退回静默捕获式:失败仅 warn 并继续,
+ *     交由 Actions 重发时面对(可能 409)。
+ *  失败判定:
+ *   - ENEEDAUTH(未登录)→ 直接 fail,提示先 `npm login`
+ *   - 其它(超过 72h 的 unpublish 限制、网络错误)→ warn 并继续
  *  dry-run 由调用方跳过,本函数只负责真正执行。 */
 async function unpublishExistingVersion(name, version) {
   log(`移除 npm 上已存在的版本 ${name}@${version}…`);
+
+  // 交互模式:终端可用时优先走,解决 EOTP(浏览器认证需要真实 TTY 才能弹出链接)
+  if (process.stdout.isTTY && process.stdin.isTTY) {
+    try {
+      pauseSpinner();
+      await npm(['unpublish', `${name}@${version}`, '--yes'], { interactive: true });
+      resumeSpinner();
+      log(`已移除 ${name}@${version}(npm 上该版本已删除,可重新发布)`);
+      return;
+    } catch (e) {
+      resumeSpinner();
+      const err = e?.stderrTail || String(e);
+      if (/ENEEDAUTH/i.test(err)) {
+        fail(`移除 ${name}@${version} 失败:未登录 npm(需要本地认证才能 unpublish)。请先运行 \`npm login\` 后重试。`);
+      }
+      warn(
+        `交互式移除 ${name}@${version} 失败(exit ${e?.exitCode ?? '?'},可能是超过 72h 的 unpublish 限制或网络错误):\n` +
+        `  ${err.slice(0, 400)}\n` +
+        '  将继续 force-push tag 重新触发 Actions;若该版本仍在 npm 上,Actions 的 npm publish 会报 409,届时需手动处理。',
+      );
+      return;
+    }
+  }
+
+  // 非交互环境(CI/管道):静默捕获式,区分 ENEEDAUTH 与其余失败
   const r = await npmRaw(['unpublish', `${name}@${version}`, '--yes']);
   if (r.code === 0) {
     log(`已移除 ${name}@${version}(npm 上该版本已删除,可重新发布)`);
