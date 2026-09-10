@@ -1,0 +1,65 @@
+# 自动化发布 @wangmingfa/syncx 到 npm(Trusted Publishing / OIDC,无需 NPM_TOKEN)
+#
+# 原理:打 tag 推送到 GitHub → Actions 用 OIDC 短期凭证向 npm 证明
+# 「这个发布请求来自我信任的 GitHub 仓库 + 此 workflow」→ 直接发布并自动生成 provenance。
+#
+# 本地发布只需:
+#   npm version patch        # 或 minor / major,自动改 package.json 并打 vX.Y.Z tag
+#   git push && git push --tags
+# (版本会与 tag 自动对齐,见下方 Sync version from tag 步骤)
+#
+# 前置(一次性,需你本人在 npm 站点做):
+#   npm 包 Settings → Trusted publishing → GitHub Actions
+#   Organization or user: wangmingfa
+#   Repository:          syncx
+#   Workflow filename:   publish.yml
+#   Allowed action:      npm publish   (直接发布,不要选 stage-only)
+
+name: Publish Package
+
+on:
+  push:
+    tags:
+      - 'v*'
+
+# id-token: write 是 Trusted Publishing 的关键——允许 workflow 向 npm 申请 OIDC 短期凭证。
+permissions:
+  id-token: write
+  contents: read
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Bun
+        uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: latest
+
+      - name: Setup Node(for npm OIDC publish)
+        uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          registry-url: 'https://registry.npmjs.org'
+
+      - name: Install dependencies
+        run: bun install
+
+      - name: Build(single-file bundle 内含 web UI)
+        run: bun run build
+
+      - name: Test
+        run: bun run test
+
+      - name: Sync version from tag
+        # 确保发布版本与 tag 一致(即使忘记先 npm version 也不至于发旧号)
+        run: |
+          VERSION="${GITHUB_REF_NAME#v}"
+          npm version "$VERSION" --no-git-tag-version --allow-same-version
+
+      - name: Publish(Trusted Publishing,无 NPM_TOKEN)
+        run: npm publish

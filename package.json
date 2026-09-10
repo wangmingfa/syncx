@@ -25,6 +25,14 @@
   },
   "license": "MIT",
   "author": "wangmingfa",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/wangmingfa/syncx.git"
+  },
+  "homepage": "https://github.com/wangmingfa/syncx#readme",
+  "bugs": {
+    "url": "https://github.com/wangmingfa/syncx/issues"
+  },
   "keywords": [
     "sync",
     "file-sync",
@@ -34,7 +42,8 @@
     "cli"
   ],
   "publishConfig": {
-    "access": "public"
+    "access": "public",
+    "provenance": true
   },
   "devDependencies": {
     "@types/multicast-dns": "^7.2.4",
