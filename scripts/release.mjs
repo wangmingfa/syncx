@@ -71,12 +71,14 @@
  *                      交互环境会提示选择;非交互环境默认 github。等价于 --github。
  *   --via=local        沿用旧流程,本地 npm login + OTP 直接发布。等价于 --local。
  *   --redeploy [<ver>] 重发已存在版本号(如某次 tag 触发的 CI 因测试失败未真正发布)。
- *                      仅适用于 github 通道:强制把该 tag 移到当前 HEAD 并 force-push 该 tag,
- *                      重新触发 Actions 自动发布,不动分支历史。若该版本已在 npm 上发布过,
- *                      会先用本地登录态 unpublish 移除它(需 npm 登录),再重新触发,避免 409 冲突。
+ *                      仅适用于 github 通道:以更高的新版本号重新触发 Actions 自动发布,不动分支历史。
+ *                      注意 npm 规则:版本一旦发布过(即使已 unpublish)该版本号永久作废、不可复用,
+ *                      因此 redeploy 一律改用更高的新版本号发布,而非复用原版本号(否则 Actions 的
+ *                      npm publish 必失败)。原版本号若当前仍在 npm 上,会先尽力 unpublish 清理它(需 npm 登录)。
  *                      交互式(选了 github 后还会问「重发 / 发新版本」):不写版本号会从本地 git tag
  *                      列表里挑,默认高亮「发新版本」;非交互式必须显式给出版本号,如
  *                      npm run release --redeploy 0.1.10 --via=github
+ *                      → 实际以 0.1.11(或更高未占用版本号)重新发布,0.1.10 不可复用。
  *   (若选中 github 通道,--no-git 会被忽略——GitHub 发布必须 commit + push tag 才能触发 Actions)
  */
 import { spawn } from 'node:child_process';
@@ -893,7 +895,7 @@ if (opts.via === 'github') {
     log('--no-git 与 GitHub 发布不兼容,已强制启用 git commit + tag push');
     opts.doGit = true;
   }
-  const redeployHint = opts.redeploy ? '(redeploy:强制更新已存在 tag 并重新触发 Actions)' : '';
+  const redeployHint = opts.redeploy ? '(redeploy:清理旧版本并以新版本号重新触发 Actions)' : '';
   log(`发布方式:GitHub 自动发布(打 tag v${target} 并 push,触发 Actions)${redeployHint}`);
 } else {
   log(`发布方式:本地 npm publish`);
@@ -913,16 +915,44 @@ if (!explicitVersion && !opts.redeploy) {
   }
 }
 
+/** 计算大于 base 且未被 npm 占用的下一个版本号(latest 通道按 patch +1、预发布通道按 iteration +1 顺延)。
+ *  用于「重发已存在版本」场景:由于 npm 不允许复用任何曾发布过(含已 unpublish)的版本号,
+ *  重发时必须跳过旧版本号、用更高的新号重新发布。 */
+function nextUnusedVersion(base, channel, occupiedSet) {
+  const bump = channel === 'latest' ? 'patch' : 'iteration';
+  let v = nextVersion(base, channel, bump, false);
+  let guard = 0;
+  while (occupiedSet.includes(v)) {
+    if (++guard > 50) break;
+    v = nextVersion(v, channel, bump, false);
+  }
+  return v;
+}
+
 /* ---------- 占用判断本地化:预检已拿到全量版本列表,不再逐个查 npm ---------- */
 // 预发布 + iteration 时若已占用则自动顺延迭代号(beta.1 被占 → beta.2),与 model-gate 一致;
 // 其它升级方式被占用则直接失败,不静默跳版本。
 let occupied = remoteVersions.includes(target);
-// redeploy 且目标版本已在 npm 上:先移除该版本,再重新触发 Actions,避免 Actions 的 npm publish 报 409 冲突
+// 重发(redeploy):npm 规则——版本一旦发布过(即使已 unpublish)该版本号永久作废、不可复用。
+//   因此重发时一律改用更高的新版本号重新发布,而不是复用原版本号(否则 Actions 的 npm publish 必失败)。
+//   原版本号若当前仍在 npm 上(occupied),则先尽力清理掉;若已被 unpublish 则无需清理、直接发新号即可。
 let needUnpublish = false;
-if (opts.redeploy && occupied) {
-  needUnpublish = true;
-  warn(`版本 ${pkgName}@${target} 已在 npm 上发布过,redeploy 将先移除该版本、再重新触发 Actions(避免 409 冲突)`);
+let unpublishVersion = null;
+if (opts.redeploy) {
+  if (occupied) {
+    unpublishVersion = target; // 仍在 npm 上的旧版本,稍后先清理
+    needUnpublish = true;
+  }
+  const from = target;
+  const bumped = nextUnusedVersion(target, channel, remoteVersions);
+  warn(
+    `重发将发布新版本号 ${bumped}:npm 不允许复用任何「曾发布过(含已 unpublish)」的版本号 ${from}` +
+    (occupied ? `,并将先清理 npm 上已存在的 ${from}。` : `。`),
+  );
+  target = bumped;
+  occupied = false;
 } else if (occupied) {
+  // 非重发场景:目标被占用按原规则处理(预发布 iteration 自动顺延,其余直接失败)
   if (channel !== 'latest' && bump === 'iteration') {
     let guard = 0;
     while (occupied) {
@@ -938,7 +968,11 @@ if (opts.redeploy && occupied) {
     );
   }
 }
-log(opts.redeploy ? `版本 ${target} 准备重发(已存在 tag 将强制更新并重新触发 Actions)` : `版本 ${target} 未被占用,可发布`);
+if (opts.redeploy) {
+  log(`重发将以新版本 ${target} 重新触发 Actions(原版本 ${unpublishVersion ?? explicitVersion} 不可复用${unpublishVersion ? ',已先清理' : ''})`);
+} else {
+  log(`版本 ${target} 未被占用,可发布`);
+}
 
 /* ---------- 登录 ---------- */
 // 本地 npm publish 需要登录;github 通道本身用 OIDC 免登录,但若 redeploy 且目标版本在 npm 已存在、
@@ -960,7 +994,7 @@ if (!opts.dryRun) {
   steps.push(`npm version ${target}`);
   if (opts.via === 'github') {
     if (opts.redeploy && needUnpublish) {
-      steps.push(`npm unpublish ${pkgName}@${target}(移除 npm 上已存在的版本)`);
+      steps.push(`npm unpublish ${pkgName}@${unpublishVersion}(清理 npm 上已存在的旧版本)`);
     }
     steps.push(
       opts.redeploy
@@ -1062,7 +1096,7 @@ if (opts.dryRun) {
       // 重发:强制把已存在的 tag 移到当前 HEAD,并仅 force-push 该 tag(不动分支历史)
       const t = `v${target}`;
       if (needUnpublish && !opts.dryRun) {
-        await unpublishExistingVersion(pkgName, target);
+        await unpublishExistingVersion(pkgName, unpublishVersion);
       }
       await git(['tag', '-f', t], { inherit: true });
       log(`已强制更新 tag ${t} 指向当前 HEAD(重发),force-push 到 GitHub 重新触发 Actions…`);
