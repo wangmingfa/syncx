@@ -72,7 +72,8 @@
  *   --via=local        沿用旧流程,本地 npm login + OTP 直接发布。等价于 --local。
  *   --redeploy [<ver>] 重发已存在版本号(如某次 tag 触发的 CI 因测试失败未真正发布)。
  *                      仅适用于 github 通道:强制把该 tag 移到当前 HEAD 并 force-push 该 tag,
- *                      重新触发 Actions 自动发布,不动分支历史。
+ *                      重新触发 Actions 自动发布,不动分支历史。若该版本已在 npm 上发布过,
+ *                      会先用本地登录态 unpublish 移除它(需 npm 登录),再重新触发,避免 409 冲突。
  *                      交互式(选了 github 后还会问「重发 / 发新版本」):不写版本号会从本地 git tag
  *                      列表里挑,默认高亮「发新版本」;非交互式必须显式给出版本号,如
  *                      npm run release --redeploy 0.1.10 --via=github
@@ -336,6 +337,29 @@ async function npmViewVersions(name) {
 /** semver 比较:a<b 返回负数,a===b 返回 0,a>b 返回正数。
  *  必须正确处理预发布:无后缀 > 有后缀;同为后缀时按「标签名 + 迭代号数值」比较,
  *  不可用字符串比较,否则会掉进 beta.10 < beta.9 的字典序陷阱,把旧版本排成最大。 */
+/** 从 npm 移除已发布的指定版本(用于 github 重发且该版本已存在时,先清掉再重新触发 Actions)。
+ *  用 npmRaw 执行、自行判定失败原因:
+ *   - ENEEDAUTH / 认证失败 → 直接 fail(提示先 `npm login`)
+ *   - 其它(如超过 72h 的 unpublish 限制、网络错误)→ warn 并继续,交由 Actions 重发时面对(可能 409)
+ *  dry-run 由调用方跳过,本函数只负责真正执行。 */
+async function unpublishExistingVersion(name, version) {
+  log(`移除 npm 上已存在的版本 ${name}@${version}…`);
+  const r = await npmRaw(['unpublish', `${name}@${version}`, '--yes']);
+  if (r.code === 0) {
+    log(`已移除 ${name}@${version}(npm 上该版本已删除,可重新发布)`);
+    return;
+  }
+  const err = r.stderr.trim();
+  if (/ENEEDAUTH/i.test(err)) {
+    fail(`移除 ${name}@${version} 失败:未登录 npm(需要本地认证才能 unpublish)。请先运行 \`npm login\` 后重试。`);
+  }
+  warn(
+    `移除 ${name}@${version} 失败(npm 拒绝,可能是超过 72h 的 unpublish 限制或网络错误):\n` +
+    `  ${err.slice(0, 400)}\n` +
+    '  将继续 force-push tag 重新触发 Actions;若该版本仍在 npm 上,Actions 的 npm publish 会报 409,届时需手动处理。',
+  );
+}
+
 function cmpSemver(a, b) {
   const na = a.split('-')[0].split('.').map(Number);
   const nb = b.split('-')[0].split('.').map(Number);
@@ -863,9 +887,11 @@ if (!explicitVersion && !opts.redeploy) {
 // 预发布 + iteration 时若已占用则自动顺延迭代号(beta.1 被占 → beta.2),与 model-gate 一致;
 // 其它升级方式被占用则直接失败,不静默跳版本。
 let occupied = remoteVersions.includes(target);
+// redeploy 且目标版本已在 npm 上:先移除该版本,再重新触发 Actions,避免 Actions 的 npm publish 报 409 冲突
+let needUnpublish = false;
 if (opts.redeploy && occupied) {
-  // 重发场景:若该版本在 npm 上已存在,仍允许触发 Actions(真已发布成功则 npm 报 409 冲突,由用户感知)
-  warn(`版本 ${pkgName}@${target} 在 npm 上已存在,redeploy 将重新触发该 tag 的 Actions 发布(npm 若已发布成功会报 409 冲突)`);
+  needUnpublish = true;
+  warn(`版本 ${pkgName}@${target} 已在 npm 上发布过,redeploy 将先移除该版本、再重新触发 Actions(避免 409 冲突)`);
 } else if (occupied) {
   if (channel !== 'latest' && bump === 'iteration') {
     let guard = 0;
@@ -884,10 +910,13 @@ if (opts.redeploy && occupied) {
 }
 log(opts.redeploy ? `版本 ${target} 准备重发(已存在 tag 将强制更新并重新触发 Actions)` : `版本 ${target} 未被占用,可发布`);
 
-/* 登录(仅真正发布、且走本地 npm publish 时):GitHub 自动发布用 OIDC,无需登录 */
-if (!opts.dryRun && opts.via !== 'github') {
+/* ---------- 登录 ---------- */
+// 本地 npm publish 需要登录;github 通道本身用 OIDC 免登录,但若 redeploy 且目标版本在 npm 已存在、
+// 需要先用本地认证 unpublish 掉旧版本,也需确保已登录。
+const needLocalAuth = !opts.dryRun && (opts.via !== 'github' || needUnpublish);
+if (needLocalAuth) {
   await ensureNpmLogin();
-  log(`将发布到 ${publisher} (dist-tag: ${opts.tag})`);
+  if (opts.via !== 'github') log(`将发布到 ${publisher} (dist-tag: ${opts.tag})`);
 }
 
 /* ---------- 2. 发布计划总确认(交互块最后一项,确认后全程无人值守) ---------- */
@@ -900,6 +929,9 @@ if (!opts.dryRun) {
   steps.push(opts.doSmoke ? '冒烟 + 临时全局安装验证' : '冒烟');
   steps.push(`npm version ${target}`);
   if (opts.via === 'github') {
+    if (opts.redeploy && needUnpublish) {
+      steps.push(`npm unpublish ${pkgName}@${target}(移除 npm 上已存在的版本)`);
+    }
     steps.push(
       opts.redeploy
         ? `git tag -f v${target} + push -f(重发已存在 tag,重新触发 Actions)`
@@ -999,6 +1031,9 @@ if (opts.dryRun) {
     if (opts.redeploy) {
       // 重发:强制把已存在的 tag 移到当前 HEAD,并仅 force-push 该 tag(不动分支历史)
       const t = `v${target}`;
+      if (needUnpublish && !opts.dryRun) {
+        await unpublishExistingVersion(pkgName, target);
+      }
       await git(['tag', '-f', t], { inherit: true });
       log(`已强制更新 tag ${t} 指向当前 HEAD(重发),force-push 到 GitHub 重新触发 Actions…`);
       await git(['push', '-f', 'origin', t], { inherit: true });
