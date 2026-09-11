@@ -747,7 +747,12 @@ async function logout(): Promise<void> {
           <n-input v-model:value="newFolderId" placeholder="目录 ID(留空自动生成;跨机同步需与对方一致)" />
           <n-checkbox-group v-model:value="newFolderDevices">
             <div v-if="status.devices.length > 0" class="device-checks">
-              <n-checkbox v-for="d in status.devices" :key="d.deviceId" :value="d.deviceId" :label="d.deviceId" class="mono" />
+              <n-checkbox v-for="d in status.devices" :key="d.deviceId" :value="d.deviceId">
+                <span class="device-check-text">
+                  <span class="mono device-check-id">{{ d.deviceId }}</span>
+                  <span v-if="deviceAddrLine(d)" class="device-check-meta mono">{{ deviceAddrLine(d) }}</span>
+                </span>
+              </n-checkbox>
             </div>
             <p v-else class="confirm-note-extra confirm-note-extra--flush">还没有已配对的设备,可先添加目录,稍后在卡片上指派。</p>
           </n-checkbox-group>

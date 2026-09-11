@@ -827,6 +827,22 @@ tbody tr:last-child td {
   padding: 4px 0;
 }
 
+/* 设备勾选项:ID 为主标识,下挂「地址 · 主机名」小字,避免只靠难认的设备 ID 区分 */
+.device-check-text {
+  display: inline-flex;
+  flex-direction: column;
+  line-height: 1.35;
+}
+
+.device-check-id {
+  font-size: 13px;
+}
+
+.device-check-meta {
+  font-size: 12px;
+  color: var(--muted);
+}
+
 /* 添加共享目录:收起态的虚线按钮与展开态的操作行 */
 
 .add-form-actions {

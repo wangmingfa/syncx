@@ -34,6 +34,12 @@ function onSave(): void {
   if (props.busy || !props.folder) return;
   emit('save', { path: path.value, devices: [...selected.value], gitignore: gitignore.value });
 }
+
+// 地址(host:port)与主机名合并成一行,在设备 ID 之外提供可辨认的信息;两者都可能缺失
+function deviceAddrLine(p: DeviceInfo): string {
+  const addr = p.url ? (p.url.startsWith('ws://') ? p.url.slice(5) : p.url) : '';
+  return [addr, p.hostname].filter(Boolean).join(' · ');
+}
 </script>
 
 <template>
@@ -49,7 +55,12 @@ function onSave(): void {
         <div class="edit-section-label">同步设备</div>
         <n-checkbox-group v-model:value="selected">
           <div v-if="devices.length > 0" class="device-checks">
-            <n-checkbox v-for="d in devices" :key="d.deviceId" :value="d.deviceId" :label="d.deviceId" class="mono" />
+            <n-checkbox v-for="d in devices" :key="d.deviceId" :value="d.deviceId">
+              <span class="device-check-text">
+                <span class="mono device-check-id">{{ d.deviceId }}</span>
+                <span v-if="deviceAddrLine(d)" class="device-check-meta mono">{{ deviceAddrLine(d) }}</span>
+              </span>
+            </n-checkbox>
           </div>
           <p v-else class="confirm-note-extra confirm-note-extra--flush">还没有已配对的设备,先在「设备」栏添加。</p>
         </n-checkbox-group>
