@@ -45,7 +45,22 @@ export function receiveOffer(
   const config = loadConfig(configPath);
 
   const key = dedupeKey(offer);
-  if (config.pendingOffers.some((o) => dedupeKey(o) === key)) {
+  const existing = config.pendingOffers.find((o) => dedupeKey(o) === key);
+  if (existing) {
+    // 命中去重即不再新建(避免重连重推刷屏),但来源信息要顺带回填:
+    // 该记录可能创建于 fromIp / fromHostname 字段引入之前,或对端当时版本较旧
+    // 没带 hostname —— 老卡片否则永远只有「来自 <id>」,对方重推也补不上。
+    // 仅补空值,不覆盖已有信息(IP 可能因换网段而变化,以首次记录为准)。
+    let dirty = false;
+    if (!existing.fromIp && offer.fromIp) {
+      existing.fromIp = offer.fromIp;
+      dirty = true;
+    }
+    if (!existing.fromHostname && offer.fromHostname) {
+      existing.fromHostname = offer.fromHostname;
+      dirty = true;
+    }
+    if (dirty) saveConfig(configPath, config);
     return null;
   }
 

@@ -42,6 +42,52 @@ describe('offers', () => {
     expect(listPendingOffers(configPath)).toHaveLength(1);
   });
 
+  it('backfills missing source ip / hostname when a duplicate offer arrives', () => {
+    const configPath = tempConfig();
+    // 模拟「字段引入之前」落库的老记录(没有 fromIp / fromHostname)
+    receiveOffer(configPath, { id: 'o1', kind: 'folder', fromDeviceId: 'REMOTE', folderId: 'docs' });
+    expect(findPendingOffer(configPath, 'o1')?.fromIp).toBeUndefined();
+
+    const again = receiveOffer(configPath, {
+      id: 'o2',
+      kind: 'folder',
+      fromDeviceId: 'REMOTE',
+      folderId: 'docs',
+      fromIp: '192.168.1.5',
+      fromHostname: 'peer-pc',
+    });
+    expect(again).toBeNull();
+    const backfilled = findPendingOffer(configPath, 'o1');
+    expect(backfilled?.fromIp).toBe('192.168.1.5');
+    expect(backfilled?.fromHostname).toBe('peer-pc');
+    // 去重语义不变:仍然只有一条
+    expect(listPendingOffers(configPath)).toHaveLength(1);
+    // 回填已落盘
+    const raw = JSON.parse(readFileSync(configPath, 'utf8'));
+    expect(raw.pendingOffers[0].fromHostname).toBe('peer-pc');
+  });
+
+  it('does not overwrite existing source info on a duplicate offer', () => {
+    const configPath = tempConfig();
+    receiveOffer(configPath, {
+      id: 'o1',
+      kind: 'pairing',
+      fromDeviceId: 'REMOTE',
+      fromIp: '10.0.0.1',
+      fromHostname: 'old-name',
+    });
+    receiveOffer(configPath, {
+      id: 'o2',
+      kind: 'pairing',
+      fromDeviceId: 'REMOTE',
+      fromIp: '10.0.0.9',
+      fromHostname: 'new-name',
+    });
+    const kept = findPendingOffer(configPath, 'o1');
+    expect(kept?.fromIp).toBe('10.0.0.1');
+    expect(kept?.fromHostname).toBe('old-name');
+  });
+
   it('skips a folder invitation when already mutually shared', () => {
     const configPath = tempConfig({
       sharedFolders: [{ id: 'docs', path: '/x', devices: ['REMOTE'] }],
