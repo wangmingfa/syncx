@@ -2,7 +2,7 @@ import { describe, expect, it } from 'vitest';
 import { mkdtempSync, rmSync, writeFileSync, readFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { receiveOffer, listPendingOffers, findPendingOffer, markOfferAccepted, markOfferDeclined } from '../src/offers.js';
+import { receiveOffer, listPendingOffers, findPendingOffer, markOfferAccepted, markOfferDeclined, pruneRevokedOffers } from '../src/offers.js';
 import type { Config } from '../src/config.js';
 
 function tempConfig(initial: Partial<Config> = {}): string {
@@ -125,5 +125,47 @@ describe('offers', () => {
     const configPath = tempConfig();
     expect(markOfferAccepted(configPath, 'nope')).toBeUndefined();
     expect(markOfferDeclined(configPath, 'nope')).toBeUndefined();
+  });
+
+  it('prunes a pending folder offer whose folder is no longer announced', () => {
+    const configPath = tempConfig();
+    receiveOffer(configPath, { id: 'a', kind: 'folder', fromDeviceId: 'REMOTE', folderId: 'docs' });
+    receiveOffer(configPath, { id: 'b', kind: 'folder', fromDeviceId: 'REMOTE', folderId: 'photos' });
+
+    // 对端只宣告了 docs(仍共享),photos 已被撤销
+    const removed = pruneRevokedOffers(configPath, 'REMOTE', ['docs']);
+    expect(removed).toBe(1);
+    expect(findPendingOffer(configPath, 'a')).toBeDefined();
+    expect(findPendingOffer(configPath, 'b')).toBeUndefined();
+    // 已落盘
+    const raw = JSON.parse(readFileSync(configPath, 'utf8'));
+    expect(raw.pendingOffers).toHaveLength(1);
+  });
+
+  it('prunes every pending folder offer when the peer announces an empty list', () => {
+    const configPath = tempConfig();
+    receiveOffer(configPath, { id: 'a', kind: 'folder', fromDeviceId: 'REMOTE', folderId: 'docs' });
+    const removed = pruneRevokedOffers(configPath, 'REMOTE', []);
+    expect(removed).toBe(1);
+    expect(listPendingOffers(configPath)).toHaveLength(0);
+  });
+
+  it('does not prune accepted or declined offers, nor other devices / pairing offers', () => {
+    const configPath = tempConfig();
+    receiveOffer(configPath, { id: 'keep-pending', kind: 'folder', fromDeviceId: 'REMOTE', folderId: 'docs' });
+    receiveOffer(configPath, { id: 'accepted', kind: 'folder', fromDeviceId: 'REMOTE', folderId: 'gone-accepted' });
+    receiveOffer(configPath, { id: 'declined', kind: 'folder', fromDeviceId: 'REMOTE', folderId: 'gone-declined' });
+    receiveOffer(configPath, { id: 'other-device', kind: 'folder', fromDeviceId: 'OTHER', folderId: 'gone-other' });
+    receiveOffer(configPath, { id: 'pairing', kind: 'pairing', fromDeviceId: 'REMOTE' });
+    markOfferAccepted(configPath, 'accepted');
+    markOfferDeclined(configPath, 'declined');
+
+    const removed = pruneRevokedOffers(configPath, 'REMOTE', ['docs']);
+    expect(removed).toBe(0);
+    expect(findPendingOffer(configPath, 'keep-pending')).toBeDefined();
+    expect(findPendingOffer(configPath, 'accepted')?.status).toBe('accepted');
+    expect(findPendingOffer(configPath, 'declined')?.status).toBe('declined');
+    expect(findPendingOffer(configPath, 'other-device')).toBeDefined();
+    expect(findPendingOffer(configPath, 'pairing')).toBeDefined();
   });
 });

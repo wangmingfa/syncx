@@ -35,7 +35,7 @@ import { learnPeerUrl, learnPeerIp } from './net/addresses.js';
 import { hostname as osHostname } from 'node:os';
 import { RateLimiter } from './ratelimit.js';
 import { isPeerAllowed, addPeer } from './devices.js';
-import { receiveOffer, makeOfferId } from './offers.js';
+import { receiveOffer, makeOfferId, pruneRevokedOffers } from './offers.js';
 import type { DeviceIdentity } from './identity.js';
 import { isBundledRuntime, packSelfTgz, runSelfUpdate, runtimeVersion, sha256Hex } from './selfupdate.js';
 import { compareVersions } from './upgrade.js';
@@ -709,14 +709,18 @@ export class SyncSessionManager {
       this.reconcileSessionFolders(session);
       // 连接就绪后把本机当前的配对 / 目录共享意图推送给对端(对方会弹「待确认」)
       this.pushSharesTo(session);
-      // 同时宣告本机当前与其同步的目录清单,供对端 UI 区分 同步中 / 已停止共享
-      this.pushFolderSyncList(remoteDeviceId);
     } else {
       // 设计:未授权对端不断连(否则对方收不到配对请求、弹不出「待确认」),
       // 但文件同步被上面 allowed 闸门挡住,不会泄漏任何目录内容。这里仅记录一条
       // 日志,便于排查「对方在线却不同步」而非「被拒」。
       this.logger.info(`peer ${remoteDeviceId} connected but not authorized for any shared folder; control-only session until trusted`);
     }
+    // 无条件宣告目录清单(不再受 allowed 约束):
+    // - 已授权:对端 UI 据此区分 同步中 / 已停止共享
+    // - 未授权:syncFolderIdsFor 会过滤掉未指派给该对端的目录 → 列表为空,不泄漏任何目录信息;
+    //   但对端若曾持有一张来自本机的目录邀请,空清单即「本机已撤销」的信号,可据此清理残留卡片
+    //   (否则删掉唯一一个共享目录后,allowed 变 false,清单永远不发,对方的卡片不会消失)
+    this.pushFolderSyncList(remoteDeviceId);
     attachPeerMessages(session.peers, socket, key, (message) => {
       if (message.kind === 'hello') {
         session.remoteVersion = message.version;
@@ -733,6 +737,12 @@ export class SyncSessionManager {
         session.remoteFolders = new Set(message.folderIds);
         // 新字段可选:旧版本对端不发送 → 记为空集,UI 退回「已停止共享」旧判断
         session.remotePendingFolders = new Set(message.pendingFolderIds ?? []);
+        // 对端宣告的 folderIds 即「它当前仍共享给本机的目录集合」:据此清理本机上
+        // 来源为该对端、已被对方撤销的待确认目录邀请(对方删除共享后不再残留卡片)。
+        const pruned = pruneRevokedOffers(this.configPath, remoteDeviceId, message.folderIds);
+        if (pruned > 0) {
+          this.logger.info(`pruned ${pruned} revoked folder invitation(s) from ${remoteDeviceId}`);
+        }
         this.logger.info(`folder sync list from ${remoteDeviceId}: ${message.folderIds.length} folder(s)`);
         return;
       }

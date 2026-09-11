@@ -122,6 +122,37 @@ export function restoreDeclinedOffer(configPath: string, id: string): PendingOff
   return offer;
 }
 
+/**
+ * 清理「已被对方撤销」的目录邀请。
+ *
+ * 对端经 folder-sync-list 宣告的 folderIds 是它**当前仍想共享给本机**的目录集合
+ * (session-manager 的 syncFolderIdsFor 口径)。因此本机上来源为该对端、仍为 pending 的
+ * 目录邀请里,folderId 不在该集合中的,说明对方已删除该共享 → 移除,避免对方删除后
+ * 本机残留一张永远点不动的「待确认」卡片。
+ *
+ * - 只动 pending:accepted 走正常的「已停止共享」逻辑,declined 保留供「恢复」
+ * - folderIds 为空数组是有效输入(对方撤销了全部共享),会清空该对端所有 pending 目录邀请
+ * - 返回被清理的条数
+ */
+export function pruneRevokedOffers(configPath: string, fromDeviceId: string, folderIds: string[]): number {
+  const config = loadConfig(configPath);
+  const keep = new Set(folderIds);
+  const before = config.pendingOffers.length;
+  config.pendingOffers = config.pendingOffers.filter(
+    (o) =>
+      !(
+        o.kind === 'folder' &&
+        o.status === 'pending' &&
+        o.fromDeviceId === fromDeviceId &&
+        o.folderId !== undefined &&
+        !keep.has(o.folderId)
+      ),
+  );
+  const removed = before - config.pendingOffers.length;
+  if (removed > 0) saveConfig(configPath, config);
+  return removed;
+}
+
 /** 生成本机发起邀请的确定性 id(便于对端重推时幂等)。 */
 export function makeOfferId(prefix: string, remoteDeviceId: string, folderId?: string): string {
   const raw = `${prefix}:${remoteDeviceId}:${folderId ?? ''}`;
