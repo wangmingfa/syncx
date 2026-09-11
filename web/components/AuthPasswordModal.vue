@@ -14,6 +14,8 @@ const username = ref('');
 const busy = ref(false);
 const password = ref('');
 const confirm = ref('');
+/** 设置/清除密码必须当场提供的 control.token 原文(防止已登录机器被他人顺手改密)。 */
+const token = ref('');
 
 // 每次打开都回读当前认证模式(token / password)
 watch(
@@ -21,6 +23,7 @@ watch(
   async (open) => {
     if (!open) return;
     username.value = '';
+    token.value = '';
     try {
       const res = await fetch('/api/auth');
       if (!res.ok) throw new Error(`auth ${res.status}`);
@@ -35,6 +38,11 @@ watch(
 async function savePassword(): Promise<void> {
   if (busy.value) return;
   const u = username.value.trim();
+  const tk = token.value.trim();
+  if (!tk) {
+    props.notify('请输入控制令牌');
+    return;
+  }
   if (!u) {
     props.notify('请填写用户名');
     return;
@@ -52,7 +60,7 @@ async function savePassword(): Promise<void> {
     const res = await fetch('/api/auth/password', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ username: u, password: password.value }),
+      body: JSON.stringify({ username: u, password: password.value, token: tk }),
     });
     if (!res.ok) {
       const data = (await res.json().catch(() => ({}))) as { error?: string };
@@ -61,6 +69,7 @@ async function savePassword(): Promise<void> {
     mode.value = 'password';
     password.value = '';
     confirm.value = '';
+    token.value = '';
     props.notify('登录密码已设置');
     emit('close');
   } catch (e) {
@@ -72,17 +81,30 @@ async function savePassword(): Promise<void> {
 
 async function removePassword(): Promise<void> {
   if (busy.value) return;
+  const tk = token.value.trim();
+  if (!tk) {
+    props.notify('请输入控制令牌');
+    return;
+  }
   busy.value = true;
   try {
-    const res = await fetch('/api/auth/password', { method: 'DELETE' });
-    if (!res.ok) throw new Error(`http ${res.status}`);
+    const res = await fetch('/api/auth/password', {
+      method: 'DELETE',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ token: tk }),
+    });
+    if (!res.ok) {
+      const data = (await res.json().catch(() => ({}))) as { error?: string };
+      throw new Error(data.error ?? `http ${res.status}`);
+    }
     mode.value = 'token';
     password.value = '';
     confirm.value = '';
+    token.value = '';
     props.notify('已清除登录密码,恢复令牌登录');
     emit('close');
-  } catch {
-    props.notify('清除失败,请重试');
+  } catch (e) {
+    props.notify(e instanceof Error ? e.message : '清除失败,请重试');
   } finally {
     busy.value = false;
   }
@@ -103,6 +125,18 @@ async function removePassword(): Promise<void> {
             当前使用 <span class="mono">control.token</span> 登录。设置后可用账号密码登录,不必再记那串令牌。
           </template>
         </p>
+
+        <label class="field">
+          <span class="field__label">控制令牌</span>
+          <n-input
+            v-model:value="token"
+            type="password"
+            show-password-on="click"
+            autocomplete="off"
+            placeholder="粘贴 ~/.syncx/control.token 的内容"
+          />
+          <p class="form-hint">设置或清除登录密码都需当场提供控制令牌,防止他人在已登录的机器上顺手改密。</p>
+        </label>
 
         <label class="field">
           <span class="field__label">用户名</span>

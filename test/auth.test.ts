@@ -187,7 +187,7 @@ describe('control server: 令牌 + 账号密码双通道', () => {
     const setRes = await fetch(`http://127.0.0.1:${s.port}/api/auth/password`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json', Cookie: `syncx_session=${bootstrap}` },
-      body: JSON.stringify({ username: 'wmf', password: 'hunter2!' }),
+      body: JSON.stringify({ username: 'wmf', password: 'hunter2!', token: TOKEN }),
     });
     expect(setRes.status).toBe(200);
 
@@ -249,11 +249,11 @@ describe('control server: 令牌 + 账号密码双通道', () => {
     });
     const oldSession = cookieOf(r1);
 
-    // 用旧会话改密码
+    // 用旧会话改密码(需一并提交 control.token)
     const change = await fetch(`http://127.0.0.1:${s.port}/api/auth/password`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json', Cookie: `syncx_session=${oldSession}` },
-      body: JSON.stringify({ username: 'wmf', password: 'second-pass' }),
+      body: JSON.stringify({ username: 'wmf', password: 'second-pass', token: TOKEN }),
     });
     expect(change.status).toBe(200);
     // 改密码时给当前请求补发了新会话,所以这次请求本身不会被踢
@@ -267,9 +267,18 @@ describe('control server: 令牌 + 账号密码双通道', () => {
 
   it('清除密码后退回令牌模式,账号登录不可用', async () => {
     await setPassword(authFile, 'wmf', 'hunter2!');
-    const del = await fetch(`http://127.0.0.1:${s.port}/api/auth/password`, {
+
+    // 已认证但未提交 control.token → 403(避免「已登录机器被顺手清除保护」)
+    const noToken = await fetch(`http://127.0.0.1:${s.port}/api/auth/password`, {
       method: 'DELETE',
       headers: { Authorization: `Bearer ${TOKEN}` },
+    });
+    expect(noToken.status).toBe(403);
+
+    const del = await fetch(`http://127.0.0.1:${s.port}/api/auth/password`, {
+      method: 'DELETE',
+      headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${TOKEN}` },
+      body: JSON.stringify({ token: TOKEN }),
     });
     expect(del.status).toBe(200);
     const info = await (await fetch(`http://127.0.0.1:${s.port}/api/auth`)).json();
@@ -282,14 +291,23 @@ describe('control server: 令牌 + 账号密码双通道', () => {
     expect(res.status).toBe(401);
   });
 
-  it('密码太短被拒;设置密码需要已认证', async () => {
+  it('密码太短被拒;设置密码需已认证且需提交 control.token', async () => {
     const short = await fetch(`http://127.0.0.1:${s.port}/api/auth/password`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${TOKEN}` },
-      body: JSON.stringify({ username: 'wmf', password: '123' }),
+      body: JSON.stringify({ username: 'wmf', password: '123', token: TOKEN }),
     });
     expect(short.status).toBe(400);
 
+    // 已认证(凭证有效)但未提交 control.token → 403:挡住「已登录机器被别人顺手改密」
+    const noToken = await fetch(`http://127.0.0.1:${s.port}/api/auth/password`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${TOKEN}` },
+      body: JSON.stringify({ username: 'wmf', password: 'hunter2!' }),
+    });
+    expect(noToken.status).toBe(403);
+
+    // 完全未认证 → 401(认证门先于业务域)
     const anon = await fetch(`http://127.0.0.1:${s.port}/api/auth/password`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },

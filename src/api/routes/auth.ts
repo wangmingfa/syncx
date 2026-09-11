@@ -138,18 +138,25 @@ export async function tryAccountRoutes(
   const { authFile } = deps;
   const path = req.url ? pathname(req.url) : '/';
 
-  // 设置 / 修改账号密码。必须已认证(令牌或旧密码均可),
-  // 保证「拿到 control.token 才能设密码」这条链不被绕过。
+  // 设置 / 修改账号密码。除已认证(令牌或旧密码会话)外,**必须额外提交 control.token 原文**:
+  // 会话 cookie 会在浏览器里长期驻留,若仅凭会话即可改密,那么「已登录的机器被别人操作」
+  // 时任何人都能重设密码、变相接管账号。要求当场提供 control.token(只存在于本机
+  // ~/.syncx/control.token 或启动日志里)可挡住这种顺手操作。
   if (req.method === 'POST' && path === '/api/auth/password') {
     if (!authFile) {
       sendJson(res, 404, { error: '未启用账号密码登录' });
       return true;
     }
-    let body: { username?: unknown; password?: unknown } = {};
+    let body: { username?: unknown; password?: unknown; token?: unknown } = {};
     try {
       body = JSON.parse(await readBody(req)) as typeof body;
     } catch {
       sendJson(res, 400, { error: 'invalid json' });
+      return true;
+    }
+    const token = typeof body.token === 'string' ? body.token : '';
+    if (!auth.tokenAccepted(token)) {
+      sendJson(res, 403, { error: '需要 control.token 才能设置或修改登录密码' });
       return true;
     }
     const username = typeof body.username === 'string' ? body.username.trim() : '';
@@ -170,10 +177,22 @@ export async function tryAccountRoutes(
     return true;
   }
 
-  // 清除账号密码,退回「仅令牌登录」。同样会即时作废所有会话。
+  // 清除账号密码,退回「仅令牌登录」。同样会即时作废所有会话;
+  // 与设置对称,也要求提供 control.token(避免被顺手清除保护)。
   if (req.method === 'DELETE' && path === '/api/auth/password') {
     if (!authFile) {
       sendJson(res, 404, { error: '未启用账号密码登录' });
+      return true;
+    }
+    let body: { token?: unknown } = {};
+    try {
+      body = JSON.parse(await readBody(req)) as typeof body;
+    } catch {
+      body = {};
+    }
+    const token = typeof body.token === 'string' ? body.token : '';
+    if (!auth.tokenAccepted(token)) {
+      sendJson(res, 403, { error: '需要 control.token 才能清除登录密码' });
       return true;
     }
     clearPassword(authFile);
