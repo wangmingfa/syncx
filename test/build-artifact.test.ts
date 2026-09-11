@@ -35,6 +35,11 @@ function httpGet(
 ): Promise<{ status: number; contentType: string; body: string }> {
   return new Promise((resolve, reject) => {
     const req = request({ host: '127.0.0.1', port, path, method: 'GET' }, (res) => {
+      // 必须启用流式解码:否则 `data += chunk` 会对每个 chunk 单独做 utf8 解码,
+      // 一旦 socket 分块切在多字节字符(如中文)中间,两半各自变成 U+FFFD(乱码),
+      // 且是否触发取决于分块边界,表现为偶发失败。setEncoding 让 Node 用 StringDecoder
+      // 跨块拼接不完整序列,与整体一次性解码等价。
+      res.setEncoding('utf8');
       let data = '';
       res.on('data', (chunk) => {
         data += chunk;

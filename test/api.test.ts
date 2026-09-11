@@ -24,6 +24,8 @@ function fetchJson(
         },
       },
       (res) => {
+        // 流式解码,避免 `data += chunk` 在 socket 分块切到多字节字符中间时产生 U+FFFD 乱码
+        res.setEncoding('utf8');
         let data = '';
         res.on('data', (chunk) => {
           data += chunk;
