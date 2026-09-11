@@ -444,6 +444,11 @@ function stripWs(url: string): string {
   return url.startsWith('ws://') ? url.slice(5) : url;
 }
 
+// 地址(host:port)与主机名合并到一行,避免纵向多占一行;两者都可能缺失
+function deviceAddrLine(p: DeviceInfo): string {
+  return [p.url ? stripWs(p.url) : '', p.hostname].filter(Boolean).join(' · ');
+}
+
 function progressPercent(p: SyncProgressItem): number {
   const total = p.pending + p.sending + p.receiving;
   return total > 0 ? Math.round((p.receiving / total) * 100) : 0;
@@ -870,11 +875,8 @@ async function logout(): Promise<void> {
           <div class="item-addr">
             <span class="addr-label">版本</span><span class="addr-value mono">{{ p.version ?? '未知' }}</span>
           </div>
-          <div v-if="p.url" class="item-addr">
-            <span class="addr-label">地址</span><span class="addr-value mono">{{ stripWs(p.url) }}</span>
-          </div>
-          <div v-if="p.hostname" class="item-addr">
-            <span class="addr-label">主机名</span><span class="addr-value mono">{{ p.hostname }}</span>
+          <div v-if="p.url || p.hostname" class="item-addr">
+            <span class="addr-label">{{ p.url ? '地址' : '主机名' }}</span><span class="addr-value mono">{{ deviceAddrLine(p) }}</span>
           </div>
           <div v-if="p.online && p.canUpgrade" class="actions">
             <n-button size="small" type="warning" :disabled="busy" class="btn-upgrade" @click="askUpgrade(p)">

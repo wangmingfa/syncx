@@ -28,7 +28,7 @@ const visible = computed(() => {
       <path d="M4 17v2a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2v-2" />
     </svg>
     <span class="update-banner__text">
-      发现新版本 <b class="mono">{{ visible.latest }}</b>(当前 {{ visible.current }})
+      发现新版本 <b class="mono">{{ visible.latest }}</b>（当前 {{ visible.current }}）
     </span>
     <n-button size="tiny" type="primary" :disabled="busy" @click="emit('upgrade', visible)">立即升级</n-button>
     <n-button size="tiny" quaternary @click="dismissed = visible.latest">忽略</n-button>

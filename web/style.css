@@ -623,6 +623,11 @@ tbody tr:last-child td {
   border: 1px solid var(--border);
   border-radius: 6px;
   padding: 1px 6px;
+  /* 地址 + 主机名同行,窄屏下允许收缩并省略,避免撑破卡片 */
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .item-progress {
