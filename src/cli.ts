@@ -15,7 +15,7 @@ import { getLanAddresses, formatHost } from './net/addresses.js';
 import { createControlServer } from './api.js';
 import { buildStatus, type DeviceStatus, type SyncProgress, type FolderErrorStatus } from './status.js';
 import { addSharedFolder, removeSharedFolder, isPeerAllowed, addKnownDevice, removeKnownDevice, addPeer, removePeer, setFolderDevices, setFolderGitignore } from './devices.js';
-import { markOfferAccepted, markOfferDeclined, restoreDeclinedOffer, listOpenOffers } from './offers.js';
+import { markOfferAccepted, markOfferDeclined, restoreDeclinedOffer, listOpenOffers, findPendingOffer } from './offers.js';
 import { createInviteCode, parseInviteCode, revokeInviteCode } from './invite.js';
 import { folderIdFor, folderIndexPath } from './config.js';
 import { renderSystemdUnit, renderLaunchdPlist, renderWindowsService } from './install.js';
@@ -344,22 +344,36 @@ export async function run(args: ParsedArgs): Promise<void> {
     getOffers: () => listOpenOffers(configPath),
     getFolderHistory: (folderId) => listSyncHistory(configPath, folderId),
     acceptOffer: (offerId, localPath) => {
-      const offer = markOfferAccepted(configPath, offerId);
+      // 先查再落状态:校验失败时不能把邀请标成 accepted,否则目录没建起来、
+      // 卡片却已从「待确认」消失,用户失去重试入口。
+      const offer = findPendingOffer(configPath, offerId);
       if (!offer) throw new Error('offer not found');
       if (offer.kind === 'folder') {
-        if (!localPath || localPath.trim() === '') {
+        // 本机已存在同 id 的目录(典型场景:对方把本机早就共享过的目录反向邀请回来):
+        // 直接复用该映射,把对端并入其设备列表,不再要求重复填本地路径。
+        // 路径是本机自持的,对方的 path 从不经 wire 传递,所以只能在本机配置里按 id 找。
+        const existing = loadConfig(configPath).sharedFolders.find((f) => folderIdFor(f) === offer.folderId);
+        const target = existing?.path ?? localPath?.trim();
+        if (!target) {
           throw new Error('local path is required to accept a folder invitation');
         }
-        // acceptOffer 是接受对端文件夹邀请的接收映射,标记 remote=true 以启用接收映射间的嵌套约束
-        addSharedFolder(configPath, localPath, [offer.fromDeviceId], offer.folderId, true);
+        // acceptOffer 是接受对端文件夹邀请的接收映射,标记 remote=true 以启用接收映射间的嵌套约束。
+        // 复用时路径已存在 → addSharedFolder 走合并分支,只并 devices,不会新建条目、也不改 remote。
+        addSharedFolder(configPath, target, [offer.fromDeviceId], offer.folderId, true);
+        markOfferAccepted(configPath, offerId);
         manager.sendControlTo(offer.fromDeviceId, {
           kind: 'folder-invitation-ack',
           offerId: offer.id,
           fromDeviceId: identity.deviceId,
           accepted: true,
         });
-        logger.info(`accepted folder invitation ${offer.folderId} from ${offer.fromDeviceId}`);
+        logger.info(
+          existing
+            ? `accepted folder invitation ${offer.folderId} from ${offer.fromDeviceId} (reusing ${target})`
+            : `accepted folder invitation ${offer.folderId} from ${offer.fromDeviceId}`,
+        );
       } else {
+        markOfferAccepted(configPath, offerId);
         addKnownDevice(configPath, offer.fromDeviceId);
         manager.sendControlTo(offer.fromDeviceId, {
           kind: 'pairing-ack',

@@ -938,6 +938,12 @@ tbody tr:last-child td {
   margin-top: 10px;
 }
 
+/* 复用本机已有目录时的提示:路径用正文色 + 可断行,便于核对 */
+.offer-path .offer-reuse-hint .mono {
+  color: var(--text);
+  word-break: break-all;
+}
+
 .offer-card .item-sub {
   margin-top: 2px;
 }

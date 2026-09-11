@@ -228,6 +228,68 @@ describe('Phase 2 remote confirmation (offer channel)', () => {
   );
 
   it(
+    'reuses an existing local folder with the same id when accepting an invitation without a localPath',
+    async () => {
+      const a = await setupDaemon('a');
+      const b = await setupDaemon('b');
+      try {
+        // A 共享 main 并指派 B → 连接建立时向 B 推 folder-invitation。
+        startDaemon(a, {
+          peers: [`ws://127.0.0.1:${b.peerPort}`],
+          sharedFolders: [{ id: 'main', path: a.share, devices: [b.deviceId] }],
+        });
+        await waitForDaemonReady(a);
+        // B 本机已有同 id 目录(main),但未指派 A —— 故 receiveOffer 的 mutual 判断不成立,
+        // 邀请仍会弹出。这正是「对方把本机早就共享过的目录反向邀请回来」的场景。
+        startDaemon(b, {
+          peers: [`ws://127.0.0.1:${a.peerPort}`],
+          sharedFolders: [{ id: 'main', path: b.share, devices: [] }],
+        });
+        await waitForDaemonReady(b);
+
+        const folderOffer = (await waitFor(async () => {
+          const st = (await apiCall(b, 'GET', '/api/status')) as {
+            offers: Array<{ kind: string; fromDeviceId: string; folderId?: string }>;
+          };
+          return st.offers.find((o) => o.kind === 'folder' && o.fromDeviceId === a.deviceId) ?? null;
+        }, 20000)) as { id: string; folderId?: string };
+        expect(folderOffer.folderId).toBe('main');
+
+        // 关键:不带 localPath 直接确认 —— 后端应按 id 复用 B 已有目录,不再要求填路径
+        const accepted = (await apiCall(b, 'POST', `/api/offers/${folderOffer.id}/accept`)) as {
+          ok?: boolean;
+          error?: string;
+        };
+        expect(accepted.error).toBeUndefined();
+        expect(accepted.ok).toBe(true);
+
+        const bFolders = (await waitFor(async () => {
+          const st = (await apiCall(b, 'GET', '/api/status')) as {
+            folders: Array<{ id?: string; path: string; devices: string[] }>;
+          };
+          const f = st.folders.find((x) => (x.id ?? x.path) === 'main');
+          return f && f.devices.includes(a.deviceId) ? st : null;
+        }, 20000)) as { folders: Array<{ id?: string; path: string; devices: string[] }> };
+
+        // 复用而非新建:同 id 目录必须只有一条,且路径仍是 B 原来的 b.share
+        const mains = bFolders.folders.filter((x) => (x.id ?? x.path) === 'main');
+        expect(mains).toHaveLength(1);
+        expect(mains[0].path).toBe(b.share);
+        expect(mains[0].devices).toContain(a.deviceId);
+      } catch (err) {
+        console.log('[offer-flow:reuse] FAILED, dumping daemon logs:');
+        dumpLogs(a, b);
+        throw err;
+      }
+
+      await stopChildren();
+      rmDir(a.dir);
+      rmDir(b.dir);
+    },
+    150000,
+  );
+
+  it(
     'addFolder immediately pushes a folder-invitation to an assigned online peer (no second setup needed)',
     async () => {
       const a = await setupDaemon('a');

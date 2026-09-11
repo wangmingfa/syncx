@@ -329,12 +329,23 @@ async function copy(text: string): Promise<void> {
 // 目录共享邀请需要本机落地路径,按 offer id 暂存输入框内容
 const offerPaths = reactive<Record<string, string>>({});
 
+/**
+ * 邀请的目录 id 在本机已有对应目录时返回其本地路径 → 直接复用,不再要求用户重填。
+ * 典型场景:对方把本机早就共享过的目录反向邀请回来。口径与后端 acceptOffer 一致(按 id 匹配)。
+ */
+function reusedFolderPath(offer: OfferInfo): string | undefined {
+  if (offer.kind !== 'folder' || !offer.folderId) return undefined;
+  return status.value.folders.find((f) => folderKey(f) === offer.folderId)?.path;
+}
+
 async function acceptOffer(offer: OfferInfo): Promise<void> {
   if (busy.value) return;
   busy.value = true;
   try {
-    const localPath = offer.kind === 'folder' ? offerPaths[offer.id]?.trim() : undefined;
-    if (offer.kind === 'folder' && !localPath) {
+    // 可复用本机已有目录时不传 localPath,由后端按 id 复用该映射(两侧口径必须一致)
+    const reuse = reusedFolderPath(offer);
+    const localPath = offer.kind === 'folder' && !reuse ? offerPaths[offer.id]?.trim() : undefined;
+    if (offer.kind === 'folder' && !reuse && !localPath) {
       showToast('请填写本机目录路径');
       busy.value = false;
       return;
@@ -688,8 +699,13 @@ async function logout(): Promise<void> {
         </div>
         <div class="item-sub">来自 <span class="mono">{{ o.fromDeviceId }}</span><span v-if="o.fromIp || o.fromHostname" class="muted"> · <template v-if="o.fromIp">{{ o.fromIp }}</template><template v-if="o.fromHostname">{{ o.fromIp ? ' · ' : '' }}{{ o.fromHostname }}</template></span></div>
         <div v-if="o.kind === 'folder'" class="offer-path">
-          <n-input v-model:value="offerPaths[o.id]" placeholder="本机目录绝对路径,如 /home/me/Documents" />
-          <p class="form-hint">目录不存在时会自动创建</p>
+          <template v-if="reusedFolderPath(o)">
+            <p class="form-hint offer-reuse-hint">本机已有同 ID 目录,确认后直接复用它:<span class="mono">{{ reusedFolderPath(o) }}</span></p>
+          </template>
+          <template v-else>
+            <n-input v-model:value="offerPaths[o.id]" placeholder="本机目录绝对路径,如 /home/me/Documents" />
+            <p class="form-hint">目录不存在时会自动创建</p>
+          </template>
         </div>
         <div class="actions">
           <n-button size="small" type="primary" :disabled="busy" @click="acceptOffer(o)">确认</n-button>

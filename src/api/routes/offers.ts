@@ -18,7 +18,8 @@ export async function tryOfferRoutes(
   }
 
   // POST /api/offers/:id/accept : 确认一个待确认项
-  // 目录共享邀请需 body 带 localPath(本机落地路径);配对邀请无需路径
+  // 目录共享邀请:本机若已有同 id 目录则无需 localPath(由后端复用该映射);
+  // 否则 body 必须带 localPath(本机落地路径)。配对邀请无需路径。
   // 注意必须校验 /accept 后缀:否则会截胡同前缀的 /decline 请求,
   // 用 ".../decline" 结尾的错误 id 去查 offer → 报 offer not found。
   if (req.method === 'POST' && path.startsWith('/api/offers/') && path.endsWith('/accept') && acceptOffer) {
