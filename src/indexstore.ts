@@ -34,6 +34,14 @@ function rowToEntry(row: Record<string, unknown>): IndexEntry {
 export function openIndexStore(dbPath: string): IndexStore {
   const db = new DatabaseSync(dbPath);
   try {
+    // 忙等超时:同一个索引库会被多个连接同时打开 —— daemon 持有它做同步,
+    // `syncx status` 在 daemon 运行时读取它统计条目,测试也会在 daemon 存活时
+    // 读取它做断言。下方 CREATE TABLE / ALTER 都是写操作,拿写锁前若对方正在
+    // 提交,SQLite 默认(busy_timeout=0)会立刻返回 SQLITE_BUSY —— 表现为
+    // 「database is locked」的随机失败。设上限后等锁释放自动重试而不是直接抛。
+    // 注意 DatabaseSync 是同步 API,该上限也是事件循环最长阻塞时间:daemon 单条
+    // 语句的写窗口是亚毫秒级,5s 足够覆盖,又不会在真死锁时无限挂起。
+    db.exec('PRAGMA busy_timeout = 5000');
     db.exec(`
     CREATE TABLE IF NOT EXISTS entries (
       path TEXT PRIMARY KEY,
