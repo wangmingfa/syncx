@@ -1,9 +1,9 @@
 import { describe, expect, it } from 'vitest';
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, statSync, writeFileSync } from 'node:fs';
 import { rmDir } from './helpers.js';
-import { tmpdir } from 'node:os';
+import { tmpdir, homedir } from 'node:os';
 import { join, resolve } from 'node:path';
-import { addSharedFolder, removeSharedFolder, isPeerAllowed, addPeer, removePeer } from '../src/devices.js';
+import { addSharedFolder, removeSharedFolder, isPeerAllowed, addPeer, removePeer, acceptFolderInvitation } from '../src/devices.js';
 import type { SharedFolderConfig } from '../src/config.js';
 
 function tempDir(): string {
@@ -122,25 +122,49 @@ describe('shared folder configuration', () => {
     rmDir(dir);
   });
 
-  it.skipIf(process.platform === 'win32')('rejects system and privacy-sensitive paths', () => {
+  it('rejects system and privacy-sensitive paths (platform-aware)', () => {
     const dir = tempDir();
     const configPath = join(dir, 'config.json');
+    const forbidden =
+      process.platform === 'win32'
+        ? [
+            join(homedir(), '.ssh'),
+            join(homedir(), 'AppData', 'Roaming', '.ssh'),
+            join(homedir(), 'AppData', 'Roaming', '.aws'),
+            join(process.env.SystemRoot ?? 'C:\\Windows'),
+            join(process.env.ProgramData ?? 'C:\\ProgramData'),
+          ]
+        : [
+            '/etc',
+            '/etc/nginx',
+            '/usr/local',
+            '/root/.ssh',
+            '/home/user/.ssh',
+            '/home/user/.gnupg',
+            // .ssh2 等变体名不得绕过黑名单(用 (\/|$) 收尾而非 \b)
+            '/home/user/.ssh2',
+            '/home/user/.ssh2/keys',
+            '/home/user/.aws',
+            '/home/user/.kube',
+            '/home/user/.docker',
+            '/home/user/.local',
+            '/home/user/.cache',
+          ];
+    for (const p of forbidden) {
+      expect(() => addSharedFolder(configPath, p, ['DEV1234567'])).toThrow('not allowed');
+    }
+    rmDir(dir);
+  });
 
-    expect(() => addSharedFolder(configPath, '/etc', ['DEV1234567'])).toThrow('not allowed');
-    expect(() => addSharedFolder(configPath, '/etc/nginx', ['DEV1234567'])).toThrow('not allowed');
-    expect(() => addSharedFolder(configPath, '/usr/local', ['DEV1234567'])).toThrow('not allowed');
-    expect(() => addSharedFolder(configPath, '/root/.ssh', ['DEV1234567'])).toThrow('not allowed');
-    expect(() => addSharedFolder(configPath, '/home/user/.ssh', ['DEV1234567'])).toThrow('not allowed');
-    expect(() => addSharedFolder(configPath, '/home/user/.gnupg', ['DEV1234567'])).toThrow('not allowed');
-    // 变体目录名(如 .ssh2)不得绕过黑名单
-    expect(() => addSharedFolder(configPath, '/home/user/.ssh2', ['DEV1234567'])).toThrow('not allowed');
-    expect(() => addSharedFolder(configPath, '/home/user/.ssh2/keys', ['DEV1234567'])).toThrow('not allowed');
-    expect(() => addSharedFolder(configPath, '/home/user/.aws', ['DEV1234567'])).toThrow('not allowed');
-    expect(() => addSharedFolder(configPath, '/home/user/.kube', ['DEV1234567'])).toThrow('not allowed');
-    expect(() => addSharedFolder(configPath, '/home/user/.docker', ['DEV1234567'])).toThrow('not allowed');
-    expect(() => addSharedFolder(configPath, '/home/user/.local', ['DEV1234567'])).toThrow('not allowed');
-    expect(() => addSharedFolder(configPath, '/home/user/.cache', ['DEV1234567'])).toThrow('not allowed');
-
+  it('rejects two shared folders sharing the same folder id at different paths', () => {
+    const dir = tempDir();
+    const configPath = join(dir, 'config.json');
+    addSharedFolder(configPath, join(dir, 'docs'), ['DEV1234567'], 'fid-1');
+    // 同 id 不同 path:会导致两个索引库文件同名(版本向量交叉写)且 session-manager 按
+    // folderId 建索引后者覆盖前者 → 一条目录静默失效。必须拒绝。
+    expect(() => addSharedFolder(configPath, join(dir, 'photos'), ['DEV1234567'], 'fid-1')).toThrow(
+      /already used by another shared folder/,
+    );
     rmDir(dir);
   });
 });
@@ -319,5 +343,73 @@ describe('manual peer address (addPeer)', () => {
 
       rmDir(dir);
     });
+  });
+});
+
+describe('acceptFolderInvitation', () => {
+  it('reuses an existing local folder with the same id (no localPath needed)', () => {
+    const dir = tempDir();
+    const configPath = join(dir, 'config.json');
+    addSharedFolder(configPath, join(dir, 'docs'), ['DEV1234567'], 'fid-x');
+    acceptFolderInvitation(configPath, 'fid-x', 'PEER2');
+    const raw = JSON.parse(readFileSync(configPath, 'utf8'));
+    expect(raw.sharedFolders).toHaveLength(1);
+    expect(raw.sharedFolders[0].devices).toEqual(expect.arrayContaining(['DEV1234567', 'PEER2']));
+    rmDir(dir);
+  });
+
+  it('aligns a same-path folder to the offered id instead of keeping the wrong id', () => {
+    const dir = tempDir();
+    const configPath = join(dir, 'config.json');
+    const docsPath = join(dir, 'docs');
+    // B 本机已有该目录但 id 不同(各自独立创建):接受邀请时必须把 id 对齐成对方的 folderId,
+    // 否则对端按 folderId 推送会找不到本机目录(旧逻辑静默不同步)。
+    addSharedFolder(configPath, docsPath, ['DEV1234567'], 'local-id');
+    acceptFolderInvitation(configPath, 'remote-id', 'PEER2', docsPath);
+    const raw = JSON.parse(readFileSync(configPath, 'utf8'));
+    expect(raw.sharedFolders).toHaveLength(1);
+    expect(raw.sharedFolders[0].id).toBe('remote-id');
+    expect(raw.sharedFolders[0].path).toBe(resolve(docsPath));
+    expect(raw.sharedFolders[0].devices).toContain('PEER2');
+    expect(raw.sharedFolders[0].remote).toBe(true);
+    rmDir(dir);
+  });
+
+  it('creates a new folder with the offered id when the path is new', () => {
+    const dir = tempDir();
+    const configPath = join(dir, 'config.json');
+    const docsPath = join(dir, 'docs');
+    acceptFolderInvitation(configPath, 'remote-id', 'PEER2', docsPath);
+    const raw = JSON.parse(readFileSync(configPath, 'utf8'));
+    expect(raw.sharedFolders).toHaveLength(1);
+    expect(raw.sharedFolders[0].id).toBe('remote-id');
+    expect(raw.sharedFolders[0].path).toBe(resolve(docsPath));
+    expect(raw.sharedFolders[0].remote).toBe(true);
+    rmDir(dir);
+  });
+
+  it('requires a local path when no matching folder exists', () => {
+    const dir = tempDir();
+    const configPath = join(dir, 'config.json');
+    expect(() => acceptFolderInvitation(configPath, 'remote-id', 'PEER2')).toThrow(/local path is required/);
+    rmDir(dir);
+  });
+
+  it('routes by folder id even when a different local path is supplied (no duplicate id created)', () => {
+    const dir = tempDir();
+    const configPath = join(dir, 'config.json');
+    const docsPath = join(dir, 'docs');
+    const photosPath = join(dir, 'photos');
+    mkdirSync(docsPath, { recursive: true });
+    mkdirSync(photosPath, { recursive: true });
+    addSharedFolder(configPath, docsPath, ['DEV1234567'], 'fid-1');
+    // 用户填了 photosPath,但本机 docs 已是 fid-1 → 应按 id 复用 docs,而非用 photosPath 新建重复条目
+    acceptFolderInvitation(configPath, 'fid-1', 'PEER2', photosPath);
+    const raw = JSON.parse(readFileSync(configPath, 'utf8'));
+    expect(raw.sharedFolders).toHaveLength(1);
+    expect(raw.sharedFolders[0].id).toBe('fid-1');
+    expect(raw.sharedFolders[0].path).toBe(resolve(docsPath));
+    expect(raw.sharedFolders[0].devices).toContain('PEER2');
+    rmDir(dir);
   });
 });
