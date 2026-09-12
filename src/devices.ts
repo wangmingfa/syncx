@@ -1,14 +1,43 @@
 import { existsSync, mkdirSync, statSync } from 'node:fs';
 import { resolve, isAbsolute, sep } from 'node:path';
+import { homedir } from 'node:os';
 import { randomBytes } from 'node:crypto';
-import { loadConfig, saveConfig, normalizePeerUrl, DEFAULT_CONFIG, type SharedFolderConfig, type DeviceConfig } from './config.js';
+import { loadConfig, saveConfig, normalizePeerUrl, DEFAULT_CONFIG, folderIdFor, type SharedFolderConfig, type DeviceConfig } from './config.js';
 
-const FORBIDDEN_PATTERNS = [
-  /^\/(etc|usr|bin|sbin|boot|dev|proc|sys|lib|lib64|var|opt|root)\b/i,
-  // 常见系统/隐私目录:SSH/GPG、配置与缓存、以及云/容器/K8s 凭证所在目录。
-  // \b 边界让 .ssh2 这类变体名绕过,显式列入
-  /^\/home\/[^/]+\/(\.ssh|\.ssh2|\.gnupg|\.config|\.local|\.cache|\.aws|\.kube|\.docker|\.docker\.cfg)\b/i,
-];
+/**
+ * 共享目录黑名单:平台相关。
+ * - Unix:系统根目录与 /home/<user> 下的隐私目录(SSH/GPG/云/K8s 凭证等)。
+ *   早期实现只写了 `/` 开头的 Unix 路径,在 Windows 上 resolve 出来是 `C:\Users\...`,
+ *   正则永不命中 → 隐私目录可被直接加为共享(泄私钥)。这里补上 Windows 专属规则。
+ * - 用 `(\/|$)` / `(\\|$)` 收尾而非 `\b`:`\b` 在 `.ssh` 与 `2` 之间不构成边界,
+ *   会让 `.ssh2` 这类变体名绕过。
+ */
+function buildForbiddenPatterns(): RegExp[] {
+  const patterns: RegExp[] = [
+    /^\/(etc|usr|bin|sbin|boot|dev|proc|sys|lib|lib64|var|opt|root)(\/|$)/i,
+    /^\/home\/[^/]+\/(\.ssh|\.ssh2|\.gnupg|\.config|\.local|\.cache|\.aws|\.kube|\.docker|\.docker\.cfg|AppData)(\/|$)/i,
+  ];
+  if (process.platform === 'win32') {
+    // 只禁具体隐私子目录,不要禁整棵 AppData(否则 AppData\Local\Temp 等良性目录会被误伤)。
+    // 隐私目录既可能直接位于用户主目录,也可能位于 AppData\Roaming|Local|LocalLow 下。
+    const privDirs =
+      '(\\.ssh|\\.ssh2|\\.gnupg|\\.config|\\.local|\\.cache|\\.aws|\\.kube|\\.docker|\\.docker\\.cfg)';
+    patterns.push(
+      // 用户主目录下:C:\Users\<user>\.ssh 等
+      new RegExp(`^[A-Za-z]:\\\\Users\\\\[^\\\\]+\\\\${privDirs}(\\\\|$)`, 'i'),
+      // AppData 三个已知作用域下的隐私目录:C:\Users\<user>\AppData\Roaming\.ssh 等
+      new RegExp(
+        `^[A-Za-z]:\\\\Users\\\\[^\\\\]+\\\\AppData\\\\(Roaming|Local|LocalLow)\\\\${privDirs}(\\\\|$)`,
+        'i',
+      ),
+      // 系统目录(驱动盘符任意)
+      /^[A-Za-z]:\\(Windows|ProgramData|Program Files|Program Files \(x86\)|Boot|Recovery)(\\|$)/i,
+    );
+  }
+  return patterns;
+}
+
+const FORBIDDEN_PATTERNS = buildForbiddenPatterns();
 
 /**
  * 校验共享目录路径:必须是绝对路径,不得指向系统敏感目录或用户隐私目录。
@@ -81,12 +110,83 @@ export function addSharedFolder(configPath: string, path: string, devices: strin
   // 用归一化后的路径做去重(对已有条目也先 resolve 比对),等价写法(/a/b、/a/b/、/A/b)都落到同一条目
   const existing = config.sharedFolders.find((f) => resolve(f.path) === resolved);
   if (existing) {
+    // 路径相同:合并设备列表。但若调用方显式传入的 id 与既有目录 id 不一致,说明意图是
+    // 「同路径、不同目录 id」——这是矛盾:会让 wire 按 id 路由错乱、或两条同 id 目录共享索引库
+    // (版本向量交叉写、session-manager 按 folderId 建索引后者覆盖前者 → 一条目录静默失效)。
+    // 直接拒绝,让调用方改用既有 id 或另选路径。
+    if (id !== undefined && folderIdFor(existing) !== id) {
+      throw new Error(
+        `path ${resolved} is already shared under folder id ${folderIdFor(existing)}; ` +
+          `cannot accept a different folder id ${id} at the same path`,
+      );
+    }
     existing.devices = [...new Set([...existing.devices, ...devices])];
-  } else {
-    config.sharedFolders.push({ path: resolved, devices, id: id ?? generateFolderId(), remote });
+    saveConfig(configPath, config);
+    return created;
   }
+  // 新目录:folderId(= 显式 id 或自动生成)在本机必须唯一。否则两个不同 path 共享同一 folderId
+  // 会打开同一个索引库文件(索引按 folderId 哈希命名),版本向量互相污染;且 session-manager 按
+  // folderId 建 Map 时后者覆盖前者,导致其中一条目录静默不参与同步且无任何报错。
+  const finalId = id ?? generateFolderId();
+  if (config.sharedFolders.some((f) => folderIdFor(f) === finalId)) {
+    throw new Error(`folder id ${finalId} is already used by another shared folder`);
+  }
+  config.sharedFolders.push({ path: resolved, devices, id: finalId, remote });
   saveConfig(configPath, config);
   return created;
+}
+
+/**
+ * 接受目录共享邀请:把对端的 folderId 落到本机某个共享目录。
+ *
+ * 三种情况:
+ * 1. 本机已有同 folderId 的目录 → 直接复用,把对端并入其设备列表(id 天然一致)。
+ * 2. 本机无同 id 目录、但用户填的路径已是一个(不同 id 的)共享目录 → 把该目录的 id
+ *    对齐成对方的 folderId(否则对端按 folderId 推送会找不到本机目录,静默不同步)。
+ *    前置:该 folderId 不能被另一条「不同路径」的目录占用,否则拒绝。
+ * 3. 全新路径 → 创建新目录,id 取对方的 folderId(走 addSharedFolder 的统一校验)。
+ *
+ * 之所以不简单地用 addSharedFolder(path, [peer], folderId) 复用其「按 path 合并」分支,
+ * 是因为那个分支会保留既有目录的旧 id,导致 wire 路由的 folderId 与实际存储 id 不一致
+ * (#3:静默不同步)。这里显式对齐 id,保证接受邀请后一定能按对端 folderId 收到推送。
+ */
+export function acceptFolderInvitation(
+  configPath: string,
+  folderId: string,
+  deviceId: string,
+  localPath?: string,
+): void {
+  const config = loadConfig(configPath);
+  // 1) 同 folderId 复用
+  const byId = config.sharedFolders.find((f) => folderIdFor(f) === folderId);
+  if (byId) {
+    byId.devices = [...new Set([...byId.devices, deviceId])];
+    saveConfig(configPath, config);
+    return;
+  }
+  const target = localPath?.trim();
+  if (!target) {
+    throw new Error('local path is required to accept a folder invitation');
+  }
+  if (!isAbsolute(target)) {
+    throw new Error(`folder path must be absolute: ${target}`);
+  }
+  const resolved = resolve(target);
+  validateFolderPath(resolved);
+  // 2) 同路径、不同 id → 对齐 id
+  const byPath = config.sharedFolders.find((f) => resolve(f.path) === resolved);
+  if (byPath) {
+    if (config.sharedFolders.some((f) => f !== byPath && folderIdFor(f) === folderId)) {
+      throw new Error(`folder id ${folderId} is already used by another shared folder`);
+    }
+    byPath.id = folderId;
+    byPath.devices = [...new Set([...byPath.devices, deviceId])];
+    byPath.remote = true;
+    saveConfig(configPath, config);
+    return;
+  }
+  // 3) 全新路径:交给 addSharedFolder 统一校验(嵌套 / folderId 唯一 / 创建)
+  addSharedFolder(configPath, resolved, [deviceId], folderId, true);
 }
 
 /** 精确设置某目录的设备列表(用于按目录多选设备的提交)。 */
