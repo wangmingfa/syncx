@@ -414,6 +414,29 @@ describe('control api hardening', () => {
     server.close();
   });
 
+  it('returns 500 (not 413) when a route handler throws a real error', async () => {
+    // 回归 #8:旧实现把顶层 catch 收到的所有异常(含业务路由里真实抛出的错误)一律
+    // 当 413 处理,会把后端报错掩盖成「请求体过大」,极难排障。这里让一个未包 try/catch
+    // 的路由处理器直接抛错(异常冒泡到顶层 catch),断言现在返回 500 而非 413。
+    const server = createControlServer({
+      token: 'secret',
+      getStatus: () => ({ ok: true }),
+      getFolderHistory: () => {
+        throw new Error('index store unavailable');
+      },
+    });
+    server.listen(0, '127.0.0.1');
+    await once(server, 'listening');
+    const port = (server.address() as AddressInfo).port;
+
+    const res = await fetchJson(port, '/api/folders/history?folderId=abc', 'secret');
+
+    expect(res.status).toBe(500);
+    expect(res.body).toMatchObject({ error: 'internal server error' });
+
+    server.close();
+  });
+
   it('sets an HttpOnly, Path=/ session cookie on successful login', async () => {
     // 会话 cookie 存的是**签名串**,不再是把 token 原文塞进去:
     // 原文含分号/空格/非 ASCII 时会破坏 cookie 语法(后者还会让 writeHead 抛错)。

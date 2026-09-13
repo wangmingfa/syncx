@@ -1,9 +1,9 @@
 import { describe, expect, it } from 'vitest';
-import { mkdtempSync, readFileSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdtempSync, readFileSync, utimesSync, writeFileSync } from 'node:fs';
 import { rmDir } from './helpers.js';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { loadConfig, saveConfig } from '../src/config.js';
+import { loadConfig, mutateConfig, saveConfig } from '../src/config.js';
 
 function tempDir(): string {
   return mkdtempSync(join(tmpdir(), 'syncx-config-'));
@@ -105,6 +105,72 @@ describe('config store', () => {
 
     expect(loadConfig(path).peers).toEqual(['ws://10.0.0.2:22000', 'not-a-url']);
 
+    rmDir(dir);
+  });
+});
+
+describe('mutateConfig (config lock + atomic save)', () => {
+  it('applies the mutator and persists the change', () => {
+    const dir = tempDir();
+    const path = join(dir, 'config.json');
+    saveConfig(path, { sharedFolders: [] });
+
+    mutateConfig(path, (config) => {
+      config.sharedFolders.push({ path: '/data/docs', devices: ['DEV1234567'] });
+    });
+
+    expect(loadConfig(path).sharedFolders).toEqual([{ path: '/data/docs', devices: ['DEV1234567'] }]);
+    rmDir(dir);
+  });
+
+  it('skips persisting when the mutator returns false (no-op / dedup path)', () => {
+    const dir = tempDir();
+    const path = join(dir, 'config.json');
+    saveConfig(path, { sharedFolders: [{ path: '/data/docs', devices: ['DEV1234567'] }] });
+    const before = readFileSync(path, 'utf8');
+
+    mutateConfig(path, (config) => {
+      config.sharedFolders.push({ path: '/tmp/extra', devices: [] }); // 内存改动
+      return false; // 但声明无改动,不应落盘
+    });
+
+    // 磁盘内容保持不变(未重写)
+    expect(readFileSync(path, 'utf8')).toBe(before);
+    expect(loadConfig(path).sharedFolders).toEqual([{ path: '/data/docs', devices: ['DEV1234567'] }]);
+    rmDir(dir);
+  });
+
+  it('releases the lock file after a successful mutateConfig (no leak)', () => {
+    const dir = tempDir();
+    const path = join(dir, 'config.json');
+    saveConfig(path, { sharedFolders: [] });
+
+    mutateConfig(path, (config) => {
+      config.peers.push('ws://10.0.0.2:22000');
+    });
+
+    expect(existsSync(`${path}.lock`)).toBe(false);
+    expect(loadConfig(path).peers).toEqual(['ws://10.0.0.2:22000']);
+    rmDir(dir);
+  });
+
+  it('reaps a stale lock left by a crashed process and proceeds', () => {
+    const dir = tempDir();
+    const path = join(dir, 'config.json');
+    saveConfig(path, { sharedFolders: [] });
+
+    // 模拟崩溃遗留的陈旧锁(>30s)
+    const lockPath = `${path}.lock`;
+    writeFileSync(lockPath, '');
+    utimesSync(lockPath, new Date(), new Date(Date.now() - 60_000));
+
+    // 陈旧锁应被回收,mutateConfig 正常完成而非永久阻塞
+    mutateConfig(path, (config) => {
+      config.sharedFolders.push({ path: '/recovered', devices: [] });
+    });
+
+    expect(loadConfig(path).sharedFolders).toEqual([{ path: '/recovered', devices: [] }]);
+    expect(existsSync(lockPath)).toBe(false);
     rmDir(dir);
   });
 });
