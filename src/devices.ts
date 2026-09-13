@@ -2,7 +2,7 @@ import { existsSync, mkdirSync, statSync } from 'node:fs';
 import { resolve, isAbsolute, sep } from 'node:path';
 import { homedir } from 'node:os';
 import { randomBytes } from 'node:crypto';
-import { loadConfig, saveConfig, normalizePeerUrl, DEFAULT_CONFIG, folderIdFor, type SharedFolderConfig, type DeviceConfig } from './config.js';
+import { loadConfig, saveConfig, mutateConfig, normalizePeerUrl, DEFAULT_CONFIG, folderIdFor, type Config, type SharedFolderConfig, type DeviceConfig } from './config.js';
 
 /**
  * 共享目录黑名单:平台相关。
@@ -75,26 +75,18 @@ export function generateFolderId(): string {
  * 路径已存在但不是目录(文件/符号链接指向文件)则报错。
  * 返回是否执行了自动创建(供 API 提示用户)。
  */
-export function addSharedFolder(configPath: string, path: string, devices: string[], id?: string, remote?: boolean): boolean {
-  // 归一化前先拒绝相对路径:resolve 会把相对路径拼到 cwd 变成绝对路径,绕过 isAbsolute 校验,
-  // 导致此前「rejects a relative path」的语义失效。必须在 resolve 之前判定。
-  if (!isAbsolute(path)) {
-    throw new Error(`folder path must be absolute: ${path}`);
-  }
-  // 归一化:尾斜杠、大小写(Windows)、./ 段等写法差异都收敛为同一个绝对路径,
-  // 避免同一物理目录因输入字符串不同而被登记成两个共享条目(导致双扫双同步、设备去重失效)。
-  const resolved = resolve(path);
-  validateFolderPath(resolved);
-  let created = false;
-  if (existsSync(resolved)) {
-    if (!statSync(resolved).isDirectory()) {
-      throw new Error(`path exists and is not a directory: ${resolved}`);
-    }
-  } else {
-    mkdirSync(resolved, { recursive: true });
-    created = true;
-  }
-  const config = loadConfig(configPath);
+/**
+ * 在已加载的 config 上追加/合并一个共享目录(被 addSharedFolder 与 acceptFolderInvitation 复用)。
+ * 不做磁盘 IO,只在内存 config 上原地修改;由调用方负责持锁与落盘。
+ * 返回是否新建了共享条目(区分「目录已存在仅合并设备」与「新增条目」)。
+ */
+function addSharedFolderTo(
+  config: Config,
+  resolved: string,
+  devices: string[],
+  id: string | undefined,
+  remote: boolean,
+): boolean {
   // 任意两个共享目录之间都不允许物理嵌套(本机自有 / 接收映射同等对待):
   // 嵌套会让同一批文件同时参与两份独立的索引与版本向量,产生重复订阅(fan-in)与同步歧义;
   // 共享是双向的,本机侧嵌套在对方设备上即表现为接收映射嵌套,故统一禁止,不区分来源。
@@ -121,8 +113,7 @@ export function addSharedFolder(configPath: string, path: string, devices: strin
       );
     }
     existing.devices = [...new Set([...existing.devices, ...devices])];
-    saveConfig(configPath, config);
-    return created;
+    return false;
   }
   // 新目录:folderId(= 显式 id 或自动生成)在本机必须唯一。否则两个不同 path 共享同一 folderId
   // 会打开同一个索引库文件(索引按 folderId 哈希命名),版本向量互相污染;且 session-manager 按
@@ -132,7 +123,46 @@ export function addSharedFolder(configPath: string, path: string, devices: strin
     throw new Error(`folder id ${finalId} is already used by another shared folder`);
   }
   config.sharedFolders.push({ path: resolved, devices, id: finalId, remote });
-  saveConfig(configPath, config);
+  return true;
+}
+
+/**
+ * 添加一个共享目录;目录已存在则合并其设备列表。
+ * id 缺省时自动生成;跨设备同步场景下可显式传入对方机器的同一目录 id。
+ * 目录不存在时自动创建(mkdir -p 语义,Web UI 里填「打算新建」的路径是合法用法);
+ * 路径已存在但不是目录(文件/符号链接指向文件)则报错。
+ * 返回是否执行了目录自动创建(供 API 提示用户)。
+ */
+export function addSharedFolder(
+  configPath: string,
+  path: string,
+  devices: string[],
+  id?: string,
+  remote?: boolean,
+): boolean {
+  // 归一化前先拒绝相对路径:resolve 会把相对路径拼到 cwd 变成绝对路径,绕过 isAbsolute 校验,
+  // 导致此前「rejects a relative path」的语义失效。必须在 resolve 之前判定。
+  if (!isAbsolute(path)) {
+    throw new Error(`folder path must be absolute: ${path}`);
+  }
+  // 归一化:尾斜杠、大小写(Windows)、./ 段等写法差异都收敛为同一个绝对路径,
+  // 避免同一物理目录因输入字符串不同而被登记成两个共享条目(导致双扫双同步、设备去重失效)。
+  const resolved = resolve(path);
+  validateFolderPath(resolved);
+  let created = false;
+  if (existsSync(resolved)) {
+    if (!statSync(resolved).isDirectory()) {
+      throw new Error(`path exists and is not a directory: ${resolved}`);
+    }
+  } else {
+    mkdirSync(resolved, { recursive: true });
+    created = true;
+  }
+  // 目录落盘与校验在锁外完成;共享条目登记放进 mutateConfig 临界区,保证
+  // load→改→save 原子,避免 daemon 与 CLI 并发改配置时后写覆盖前写。
+  mutateConfig(configPath, (config) => {
+    addSharedFolderTo(config, resolved, devices, id, remote ?? false);
+  });
   return created;
 }
 
@@ -156,62 +186,61 @@ export function acceptFolderInvitation(
   deviceId: string,
   localPath?: string,
 ): void {
-  const config = loadConfig(configPath);
-  // 1) 同 folderId 复用
-  const byId = config.sharedFolders.find((f) => folderIdFor(f) === folderId);
-  if (byId) {
-    byId.devices = [...new Set([...byId.devices, deviceId])];
-    saveConfig(configPath, config);
-    return;
-  }
-  const target = localPath?.trim();
-  if (!target) {
-    throw new Error('local path is required to accept a folder invitation');
-  }
-  if (!isAbsolute(target)) {
-    throw new Error(`folder path must be absolute: ${target}`);
-  }
-  const resolved = resolve(target);
-  validateFolderPath(resolved);
-  // 2) 同路径、不同 id → 对齐 id
-  const byPath = config.sharedFolders.find((f) => resolve(f.path) === resolved);
-  if (byPath) {
-    if (config.sharedFolders.some((f) => f !== byPath && folderIdFor(f) === folderId)) {
-      throw new Error(`folder id ${folderId} is already used by another shared folder`);
+  mutateConfig(configPath, (config) => {
+    // 1) 同 folderId 复用
+    const byId = config.sharedFolders.find((f) => folderIdFor(f) === folderId);
+    if (byId) {
+      byId.devices = [...new Set([...byId.devices, deviceId])];
+      return;
     }
-    byPath.id = folderId;
-    byPath.devices = [...new Set([...byPath.devices, deviceId])];
-    byPath.remote = true;
-    saveConfig(configPath, config);
-    return;
-  }
-  // 3) 全新路径:交给 addSharedFolder 统一校验(嵌套 / folderId 唯一 / 创建)
-  addSharedFolder(configPath, resolved, [deviceId], folderId, true);
+    const target = localPath?.trim();
+    if (!target) {
+      throw new Error('local path is required to accept a folder invitation');
+    }
+    if (!isAbsolute(target)) {
+      throw new Error(`folder path must be absolute: ${target}`);
+    }
+    const resolved = resolve(target);
+    validateFolderPath(resolved);
+    // 2) 同路径、不同 id → 对齐 id
+    const byPath = config.sharedFolders.find((f) => resolve(f.path) === resolved);
+    if (byPath) {
+      if (config.sharedFolders.some((f) => f !== byPath && folderIdFor(f) === folderId)) {
+        throw new Error(`folder id ${folderId} is already used by another shared folder`);
+      }
+      byPath.id = folderId;
+      byPath.devices = [...new Set([...byPath.devices, deviceId])];
+      byPath.remote = true;
+      return;
+    }
+    // 3) 全新路径:复用 addSharedFolderTo 统一校验(嵌套 / folderId 唯一 / 创建)
+    addSharedFolderTo(config, resolved, [deviceId], folderId, true);
+  });
 }
 
 /** 精确设置某目录的设备列表(用于按目录多选设备的提交)。 */
 export function setFolderDevices(configPath: string, path: string, devices: string[]): void {
-  const config = loadConfig(configPath);
-  const existing = config.sharedFolders.find((f) => resolve(f.path) === resolve(path));
-  if (!existing) throw new Error(`folder not configured: ${path}`);
-  existing.devices = [...new Set(devices)];
-  saveConfig(configPath, config);
+  mutateConfig(configPath, (config) => {
+    const existing = config.sharedFolders.find((f) => resolve(f.path) === resolve(path));
+    if (!existing) throw new Error(`folder not configured: ${path}`);
+    existing.devices = [...new Set(devices)];
+  });
 }
 
 /** 设置某目录是否遵循 .gitignore 忽略规则(目录卡片上的开关;缺省 true)。 */
 export function setFolderGitignore(configPath: string, path: string, enabled: boolean): void {
-  const config = loadConfig(configPath);
-  const existing = config.sharedFolders.find((f) => resolve(f.path) === resolve(path));
-  if (!existing) throw new Error(`folder not configured: ${path}`);
-  existing.useGitignore = enabled;
-  saveConfig(configPath, config);
+  mutateConfig(configPath, (config) => {
+    const existing = config.sharedFolders.find((f) => resolve(f.path) === resolve(path));
+    if (!existing) throw new Error(`folder not configured: ${path}`);
+    existing.useGitignore = enabled;
+  });
 }
 
 /** 按路径移除一个共享目录。 */
 export function removeSharedFolder(configPath: string, path: string): void {
-  const config = loadConfig(configPath);
-  config.sharedFolders = config.sharedFolders.filter((f) => resolve(f.path) !== resolve(path));
-  saveConfig(configPath, config);
+  mutateConfig(configPath, (config) => {
+    config.sharedFolders = config.sharedFolders.filter((f) => resolve(f.path) !== resolve(path));
+  });
 }
 
 /** 列出已知设备(按 ID 引入,未必已指派到目录)。 */
@@ -222,11 +251,10 @@ export function listKnownDevices(configPath: string): DeviceConfig[] {
 /** 添加一个已知设备 ID(已存在则幂等)。 */
 export function addKnownDevice(configPath: string, deviceId: string): void {
   if (!deviceId) throw new Error('device id is required');
-  const config = loadConfig(configPath);
-  if (!config.knownDevices.some((d) => d.id === deviceId)) {
+  if (listKnownDevices(configPath).some((d) => d.id === deviceId)) return; // 幂等
+  mutateConfig(configPath, (config) => {
     config.knownDevices.push({ id: deviceId });
-    saveConfig(configPath, config);
-  }
+  });
 }
 
 /** 添加一个手动配置的对端地址(已存在则幂等)。仅接受 ws:// 开头的地址;
@@ -235,32 +263,28 @@ export function addPeer(configPath: string, address: string): void {
   if (!/^ws:\/\//i.test(address)) {
     throw new Error('peer address must start with ws://');
   }
-  const config = loadConfig(configPath);
   const normalized = normalizePeerUrl(address);
-  if (!config.peers.includes(normalized)) {
+  if (loadConfig(configPath).peers.includes(normalized)) return; // 幂等
+  mutateConfig(configPath, (config) => {
     config.peers.push(normalized);
-    saveConfig(configPath, config);
-  }
+  });
 }
 
 /** 移除一个手动或反向发现学到的对端地址(按完整 URL 精确匹配,幂等)。 */
 export function removePeer(configPath: string, address: string): void {
-  const config = loadConfig(configPath);
-  const before = config.peers.length;
-  config.peers = config.peers.filter((p) => p !== address);
-  if (config.peers.length !== before) {
-    saveConfig(configPath, config);
-  }
+  mutateConfig(configPath, (config) => {
+    config.peers = config.peers.filter((p) => p !== address);
+  });
 }
 
 /** 移除已知设备:同时从各目录的 devices 列表里摘除该设备。 */
 export function removeKnownDevice(configPath: string, deviceId: string): void {
-  const config = loadConfig(configPath);
-  config.knownDevices = config.knownDevices.filter((d) => d.id !== deviceId);
-  for (const f of config.sharedFolders) {
-    f.devices = f.devices.filter((d) => d !== deviceId);
-  }
-  saveConfig(configPath, config);
+  mutateConfig(configPath, (config) => {
+    config.knownDevices = config.knownDevices.filter((d) => d.id !== deviceId);
+    for (const f of config.sharedFolders) {
+      f.devices = f.devices.filter((d) => d !== deviceId);
+    }
+  });
 }
 
 export function ensureConfigFile(configPath: string): void {

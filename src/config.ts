@@ -1,4 +1,4 @@
-import { existsSync, readFileSync, writeFileSync } from 'node:fs';
+import { existsSync, readFileSync, writeFileSync, renameSync, openSync, closeSync, unlinkSync, statSync } from 'node:fs';
 import { join } from 'node:path';
 import { createHash } from 'node:crypto';
 
@@ -138,6 +138,91 @@ export function loadConfig(configPath: string): Config {
   };
 }
 
+/**
+ * 原子写配置:先写临时文件再 rename(同目录内 rename 是原子操作),避免并发读
+ * (如 `syncx status` / daemon 读取)读到半截 JSON 导致 JSON.parse 抛错。
+ */
 export function saveConfig(configPath: string, config: Config): void {
-  writeFileSync(configPath, JSON.stringify(config, null, 2));
+  const tmp = `${configPath}.tmp`;
+  writeFileSync(tmp, JSON.stringify(config, null, 2));
+  renameSync(tmp, configPath);
+}
+
+/**
+ * 跨进程配置锁:daemon 与 CLI 都可能对配置做 load→改→save,用锁文件串行化临界区,
+ * 防止并发写互相覆盖(后写覆盖前写,丢失一方改动)。锁文件以 `wx` 排他创建,
+ * 已存在则视为被占用;持有者崩溃遗留的陈旧锁(>30s)会被回收。临界区极短
+ * (load+mutate+save 微秒级),争用罕见。
+ * 同时维护本进程重入深度:同一进程内的嵌套 mutateConfig 不会自我死锁。
+ */
+const configLockDepth = new Map<string, number>();
+
+function microSleep(ms: number): void {
+  // 主线程可用的亚毫秒级同步休眠;SharedArrayBuffer + Atomics.wait 不可用则退化为极短自旋
+  try {
+    const view = new Int32Array(new SharedArrayBuffer(4));
+    Atomics.wait(view, 0, 0, ms);
+  } catch {
+    const end = Date.now() + ms;
+    while (Date.now() < end) { /* spin */ }
+  }
+}
+
+function acquireConfigLock(configPath: string): void {
+  const depth = configLockDepth.get(configPath) ?? 0;
+  if (depth > 0) {
+    configLockDepth.set(configPath, depth + 1);
+    return; // 本进程已持锁,重入直接放行
+  }
+  const lockPath = `${configPath}.lock`;
+  const deadline = Date.now() + 5000;
+  for (;;) {
+    try {
+      const fd = openSync(lockPath, 'wx'); // 排他创建,已存在则抛 EEXIST
+      closeSync(fd);
+      configLockDepth.set(configPath, 1);
+      return;
+    } catch {
+      // 陈旧锁回收:持有者崩溃未释放且超过 30s,直接删除后重试
+      try {
+        if (existsSync(lockPath) && Date.now() - statSync(lockPath).mtimeMs > 30000) {
+          unlinkSync(lockPath);
+        }
+      } catch { /* 忽略,进入重试 */ }
+      if (Date.now() > deadline) {
+        throw new Error(`acquire config lock timeout: ${configPath}`);
+      }
+      microSleep(2);
+    }
+  }
+}
+
+function releaseConfigLock(configPath: string): void {
+  const depth = configLockDepth.get(configPath) ?? 0;
+  if (depth <= 1) {
+    try { unlinkSync(`${configPath}.lock`); } catch { /* 已不存在则忽略 */ }
+    configLockDepth.delete(configPath);
+  } else {
+    configLockDepth.set(configPath, depth - 1);
+  }
+}
+
+/**
+ * 串行化「加载 → 修改 → 保存」为一个临界区:持锁期间独占配置读写,避免 daemon 与
+ * CLI 并发改配置时后写覆盖前写。mutator 在内存 config 上原地修改即可,无需自行 load/save。
+ * - mutator 返回 `false` → 视为无改动,跳过落盘(用于去重命中 / echo 等 no-op 路径,
+ *   避免对端频繁 hello 反复重写 config.json);返回 `true` 或 `void` → 照常保存。
+ * - mutator 抛错会向上传播,且在锁释放后(finally)才抛出,不会留下持锁状态。
+ */
+export function mutateConfig(configPath: string, mutator: (config: Config) => boolean | void): void {
+  acquireConfigLock(configPath);
+  try {
+    const config = loadConfig(configPath);
+    const changed = mutator(config);
+    if (changed !== false) {
+      saveConfig(configPath, config);
+    }
+  } finally {
+    releaseConfigLock(configPath);
+  }
 }

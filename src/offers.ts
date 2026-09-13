@@ -1,5 +1,5 @@
 import { randomBytes } from 'node:crypto';
-import { loadConfig, saveConfig, folderIdFor, type PendingOffer } from './config.js';
+import { loadConfig, mutateConfig, folderIdFor, type PendingOffer } from './config.js';
 
 /** 接收方视角:一个待确认项的去重键(同一对方 + 同类 + 同一目录)。 */
 function dedupeKey(offer: Pick<PendingOffer, 'fromDeviceId' | 'kind' | 'folderId'>): string {
@@ -42,84 +42,109 @@ export function receiveOffer(
     fromHostname?: string;
   },
 ): PendingOffer | null {
-  const config = loadConfig(configPath);
-
-  const key = dedupeKey(offer);
-  const existing = config.pendingOffers.find((o) => dedupeKey(o) === key);
-  if (existing) {
-    // 命中去重即不再新建(避免重连重推刷屏),但来源信息要顺带回填:
-    // 该记录可能创建于 fromIp / fromHostname 字段引入之前,或对端当时版本较旧
-    // 没带 hostname —— 老卡片否则永远只有「来自 <id>」,对方重推也补不上。
-    // 仅补空值,不覆盖已有信息(IP 可能因换网段而变化,以首次记录为准)。
-    let dirty = false;
-    if (!existing.fromIp && offer.fromIp) {
-      existing.fromIp = offer.fromIp;
-      dirty = true;
+  let result: PendingOffer | null = null;
+  mutateConfig(configPath, (config) => {
+    const key = dedupeKey(offer);
+    const existing = config.pendingOffers.find((o) => dedupeKey(o) === key);
+    if (existing) {
+      // 命中去重即不再新建(避免重连重推刷屏),但来源信息要顺带回填:
+      // 该记录可能创建于 fromIp / fromHostname 字段引入之前,或对端当时版本较旧
+      // 没带 hostname —— 老卡片否则永远只有「来自 <id>」,对方重推也补不上。
+      // 仅补空值,不覆盖已有信息(IP 可能因换网段而变化,以首次记录为准)。
+      // 仅当确实回填了来源信息才落盘,去重命中本身不重写配置。
+      let dirty = false;
+      if (!existing.fromIp && offer.fromIp) {
+        existing.fromIp = offer.fromIp;
+        dirty = true;
+      }
+      if (!existing.fromHostname && offer.fromHostname) {
+        existing.fromHostname = offer.fromHostname;
+        dirty = true;
+      }
+      result = null;
+      return dirty;
     }
-    if (!existing.fromHostname && offer.fromHostname) {
-      existing.fromHostname = offer.fromHostname;
-      dirty = true;
+
+    // 已 mutual:目录已与对方互相同步 → 这是连接建立时的重发 echo,不弹确认
+    if (offer.kind === 'folder' && offer.folderId) {
+      const mutual = config.sharedFolders.some(
+        (f) => folderIdFor(f) === offer.folderId && (f.devices ?? []).includes(offer.fromDeviceId),
+      );
+      if (mutual) {
+        result = null;
+        return false;
+      }
     }
-    if (dirty) saveConfig(configPath, config);
-    return null;
-  }
+    // 已 mutual:对方已在已知设备 → pairing 请求是 echo
+    if (offer.kind === 'pairing' && config.knownDevices.some((d) => d.id === offer.fromDeviceId)) {
+      result = null;
+      return false;
+    }
 
-  // 已 mutual:目录已与对方互相同步 → 这是连接建立时的重发 echo,不弹确认
-  if (offer.kind === 'folder' && offer.folderId) {
-    const mutual = config.sharedFolders.some(
-      (f) => folderIdFor(f) === offer.folderId && (f.devices ?? []).includes(offer.fromDeviceId),
-    );
-    if (mutual) return null;
-  }
-  // 已 mutual:对方已在已知设备 → pairing 请求是 echo
-  if (offer.kind === 'pairing' && config.knownDevices.some((d) => d.id === offer.fromDeviceId)) {
-    return null;
-  }
-
-  const full: PendingOffer = {
-    id: offer.id,
-    kind: offer.kind,
-    fromDeviceId: offer.fromDeviceId,
-    folderId: offer.folderId,
-    folderName: offer.folderName ?? offer.folderId,
-    fromIp: offer.fromIp,
-    fromHostname: offer.fromHostname,
-    status: 'pending',
-    createdAt: Date.now(),
-  };
-  config.pendingOffers.push(full);
-  saveConfig(configPath, config);
-  return full;
+    const full: PendingOffer = {
+      id: offer.id,
+      kind: offer.kind,
+      fromDeviceId: offer.fromDeviceId,
+      folderId: offer.folderId,
+      folderName: offer.folderName ?? offer.folderId,
+      fromIp: offer.fromIp,
+      fromHostname: offer.fromHostname,
+      status: 'pending',
+      createdAt: Date.now(),
+    };
+    config.pendingOffers.push(full);
+    result = full;
+    return true;
+  });
+  return result;
 }
 
 /** 确认一个待确认项(校验存在,置为 accepted 并返回,持久化由调用方完成实际配置变更)。 */
 export function markOfferAccepted(configPath: string, id: string): PendingOffer | undefined {
-  const config = loadConfig(configPath);
-  const offer = config.pendingOffers.find((o) => o.id === id);
-  if (!offer) return undefined;
-  offer.status = 'accepted';
-  saveConfig(configPath, config);
-  return offer;
+  let result: PendingOffer | undefined;
+  mutateConfig(configPath, (config) => {
+    const offer = config.pendingOffers.find((o) => o.id === id);
+    if (!offer) {
+      result = undefined;
+      return false;
+    }
+    offer.status = 'accepted';
+    result = offer;
+    return true;
+  });
+  return result;
 }
 
 /** 忽略一个待确认项(置为 declined)。 */
 export function markOfferDeclined(configPath: string, id: string): PendingOffer | undefined {
-  const config = loadConfig(configPath);
-  const offer = config.pendingOffers.find((o) => o.id === id);
-  if (!offer) return undefined;
-  offer.status = 'declined';
-  saveConfig(configPath, config);
-  return offer;
+  let result: PendingOffer | undefined;
+  mutateConfig(configPath, (config) => {
+    const offer = config.pendingOffers.find((o) => o.id === id);
+    if (!offer) {
+      result = undefined;
+      return false;
+    }
+    offer.status = 'declined';
+    result = offer;
+    return true;
+  });
+  return result;
 }
 
 /** 恢复一个已忽略的待确认项(置回 pending);仅 declined 可恢复,其余返回 undefined。 */
 export function restoreDeclinedOffer(configPath: string, id: string): PendingOffer | undefined {
-  const config = loadConfig(configPath);
-  const offer = config.pendingOffers.find((o) => o.id === id);
-  if (!offer || offer.status !== 'declined') return undefined;
-  offer.status = 'pending';
-  saveConfig(configPath, config);
-  return offer;
+  let result: PendingOffer | undefined;
+  mutateConfig(configPath, (config) => {
+    const offer = config.pendingOffers.find((o) => o.id === id);
+    if (!offer || offer.status !== 'declined') {
+      result = undefined;
+      return false;
+    }
+    offer.status = 'pending';
+    result = offer;
+    return true;
+  });
+  return result;
 }
 
 /**
@@ -135,21 +160,23 @@ export function restoreDeclinedOffer(configPath: string, id: string): PendingOff
  * - 返回被清理的条数
  */
 export function pruneRevokedOffers(configPath: string, fromDeviceId: string, folderIds: string[]): number {
-  const config = loadConfig(configPath);
-  const keep = new Set(folderIds);
-  const before = config.pendingOffers.length;
-  config.pendingOffers = config.pendingOffers.filter(
-    (o) =>
-      !(
-        o.kind === 'folder' &&
-        o.status === 'pending' &&
-        o.fromDeviceId === fromDeviceId &&
-        o.folderId !== undefined &&
-        !keep.has(o.folderId)
-      ),
-  );
-  const removed = before - config.pendingOffers.length;
-  if (removed > 0) saveConfig(configPath, config);
+  let removed = 0;
+  mutateConfig(configPath, (config) => {
+    const keep = new Set(folderIds);
+    const before = config.pendingOffers.length;
+    config.pendingOffers = config.pendingOffers.filter(
+      (o) =>
+        !(
+          o.kind === 'folder' &&
+          o.status === 'pending' &&
+          o.fromDeviceId === fromDeviceId &&
+          o.folderId !== undefined &&
+          !keep.has(o.folderId)
+        ),
+    );
+    removed = before - config.pendingOffers.length;
+    return removed > 0;
+  });
   return removed;
 }
 

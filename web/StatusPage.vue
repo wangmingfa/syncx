@@ -3,6 +3,7 @@ import { ref, computed, onMounted, onUnmounted, reactive } from 'vue';
 import { NButton, NInput, NCheckbox, NCheckboxGroup, NTooltip } from 'naive-ui';
 import type { ConfirmState, DeviceInfo, FolderErrorItem, FolderInfo, OfferInfo, StatusData, SyncProgressItem } from './types';
 import { useToast } from './composables/useToast';
+import { apiJson, errText } from './utils/api';
 import UpdateBanner from './components/UpdateBanner.vue';
 import GuideModal from './components/GuideModal.vue';
 import HistoryModal from './components/HistoryModal.vue';
@@ -48,16 +49,15 @@ async function post(action: string, body?: Record<string, string>): Promise<void
   if (busy.value) return;
   busy.value = true;
   try {
-    const res = await fetch(action, {
+    await apiJson(action, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: body ? JSON.stringify(body) : undefined,
     });
-    if (!res.ok) throw new Error(`${action} ${res.status}`);
     showToast('操作已触发');
     await refreshStatus();
-  } catch {
-    showToast('操作失败,请重试');
+  } catch (e) {
+    showToast(errText(e, '操作失败,请重试'), 'alert');
   } finally {
     busy.value = false;
   }
@@ -91,10 +91,7 @@ function askRemoveFolder(path: string): void {
 }
 
 async function doRemoveFolder(path: string): Promise<void> {
-  const res = await fetch(`/api/folders?path=${encodeURIComponent(path)}`, {
-    method: 'DELETE',
-  });
-  if (!res.ok) throw new Error(`delete ${res.status}`);
+  await apiJson(`/api/folders?path=${encodeURIComponent(path)}`, { method: 'DELETE' });
   showToast('已移除共享目录');
   await refreshStatus();
 }
@@ -140,20 +137,19 @@ async function addDevice(): Promise<void> {
   }
   busy.value = true;
   try {
-    const res = await fetch('/api/devices', {
+    await apiJson('/api/devices', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ deviceId: id, address }),
     });
-    if (!res.ok) throw new Error(`add device ${res.status}`);
     showToast(address ? '已添加设备并发起直连' : '已添加设备');
     newDeviceId.value = '';
     newDeviceHost.value = '';
     newDevicePort.value = '22000';
     addDeviceOpen.value = false;
     await refreshStatus();
-  } catch {
-    showToast('添加失败,请重试');
+  } catch (e) {
+    showToast(errText(e, '添加失败,请重试'), 'alert');
   } finally {
     busy.value = false;
   }
@@ -179,10 +175,7 @@ function askRemoveDevice(deviceId: string): void {
 }
 
 async function doRemoveDevice(deviceId: string): Promise<void> {
-  const res = await fetch(`/api/devices?deviceId=${encodeURIComponent(deviceId)}`, {
-    method: 'DELETE',
-  });
-  if (!res.ok) throw new Error(`remove device ${res.status}`);
+  await apiJson(`/api/devices?deviceId=${encodeURIComponent(deviceId)}`, { method: 'DELETE' });
   showToast('已移除设备');
   await refreshStatus();
 }
@@ -201,13 +194,12 @@ function askUpgrade(p: DeviceInfo): void {
 }
 
 async function upgradeDevice(deviceId: string): Promise<void> {
-  const res = await fetch('/api/devices/upgrade', {
+  const data = await apiJson<{ ok?: boolean; version?: string; error?: string }>('/api/devices/upgrade', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ deviceId }),
   });
-  const data = (await res.json().catch(() => ({}))) as { ok?: boolean; version?: string; error?: string };
-  if (!res.ok || !data.ok) throw new Error(data.error ?? `升级失败 (${res.status})`);
+  if (!data.ok) throw new Error(data.error ?? '升级失败');
   showToast(`已更新到 ${data.version},daemon 重启中…`, 'alert');
   // daemon 即将重启:稍等片刻再刷新,让状态先落回「离线/重启中」
   await new Promise((resolve) => setTimeout(resolve, 1200));
@@ -239,16 +231,15 @@ async function commitFolderDevices(path: string, devices: string[]): Promise<voi
   if (busy.value) return;
   busy.value = true;
   try {
-    const res = await fetch('/api/folders/devices', {
+    await apiJson('/api/folders/devices', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ path, devices }),
     });
-    if (!res.ok) throw new Error(`update folder devices ${res.status}`);
     showToast('已更新目录设备');
     await refreshStatus();
-  } catch {
-    showToast('更新失败,请重试');
+  } catch (e) {
+    showToast(errText(e, '更新失败,请重试'), 'alert');
   } finally {
     busy.value = false;
   }
@@ -258,18 +249,18 @@ async function commitFolderDevices(path: string, devices: string[]): Promise<voi
 
 /** 勾选 = 忽略 .gitignore 中的文件(不参与同步);取消勾选 = .gitignore 内文件也同步。 */
 async function toggleFolderGitignore(f: FolderInfo, enabled: boolean): Promise<void> {
-  const res = await fetch('/api/folders/gitignore', {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ path: f.path, enabled }),
-  });
-  if (!res.ok) {
-    showToast(`更新失败 (${res.status})`);
+  try {
+    await apiJson('/api/folders/gitignore', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ path: f.path, enabled }),
+    });
+    f.useGitignore = enabled;
+    showToast(enabled ? '已开启:.gitignore 中的文件将不再同步' : '已关闭:.gitignore 中的文件也会同步');
+  } catch (e) {
+    showToast(errText(e, '更新失败,请重试'), 'alert');
     await refreshStatus(); // 回读后端真实状态,避免勾选框与配置不一致
-    return;
   }
-  f.useGitignore = enabled;
-  showToast(enabled ? '已开启:.gitignore 中的文件将不再同步' : '已关闭:.gitignore 中的文件也会同步');
 }
 
 // ---- 添加共享目录(默认收起,点按钮展开表单) ----
@@ -291,7 +282,7 @@ async function addFolder(): Promise<void> {
   if (busy.value) return;
   busy.value = true;
   try {
-    const res = await fetch('/api/folders', {
+    const data = await apiJson<{ created?: boolean }>('/api/folders', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
@@ -300,16 +291,14 @@ async function addFolder(): Promise<void> {
         id: newFolderId.value.trim() || undefined,
       }),
     });
-    if (!res.ok) throw new Error(`add folder ${res.status}`);
-    const data = (await res.json()) as { created?: boolean };
     showToast(data.created ? '已添加共享目录(原路径不存在,已自动创建)' : '已添加共享目录');
     newPath.value = '';
     newFolderId.value = '';
     newFolderDevices.value = [];
     addFolderOpen.value = false;
     await refreshStatus();
-  } catch {
-    showToast('添加失败,请重试');
+  } catch (e) {
+    showToast(errText(e, '添加失败,请重试'), 'alert');
   } finally {
     busy.value = false;
   }
@@ -350,16 +339,15 @@ async function acceptOffer(offer: OfferInfo): Promise<void> {
       busy.value = false;
       return;
     }
-    const res = await fetch(`/api/offers/${encodeURIComponent(offer.id)}/accept`, {
+    await apiJson(`/api/offers/${encodeURIComponent(offer.id)}/accept`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ localPath }),
     });
-    if (!res.ok) throw new Error(`accept ${res.status}`);
     showToast(offer.kind === 'folder' ? '已接受目录共享,开始同步' : '已接受配对', 'alert');
     await refreshStatus();
-  } catch {
-    showToast('确认失败,请重试');
+  } catch (e) {
+    showToast(errText(e, '确认失败,请重试'), 'alert');
   } finally {
     busy.value = false;
   }
@@ -369,14 +357,13 @@ async function declineOffer(offer: OfferInfo): Promise<void> {
   if (busy.value) return;
   busy.value = true;
   try {
-    const res = await fetch(`/api/offers/${encodeURIComponent(offer.id)}/decline`, {
+    await apiJson(`/api/offers/${encodeURIComponent(offer.id)}/decline`, {
       method: 'POST',
     });
-    if (!res.ok) throw new Error(`decline ${res.status}`);
     showToast('已忽略该请求(可在下方「已忽略」中恢复)');
     await refreshStatus();
-  } catch {
-    showToast('操作失败,请重试');
+  } catch (e) {
+    showToast(errText(e, '操作失败,请重试'), 'alert');
   } finally {
     busy.value = false;
   }
@@ -387,14 +374,13 @@ async function restoreOffer(offer: OfferInfo): Promise<void> {
   if (busy.value) return;
   busy.value = true;
   try {
-    const res = await fetch(`/api/offers/${encodeURIComponent(offer.id)}/restore`, {
+    await apiJson(`/api/offers/${encodeURIComponent(offer.id)}/restore`, {
       method: 'POST',
     });
-    if (!res.ok) throw new Error(`restore ${res.status}`);
     showToast('已恢复,请重新确认');
     await refreshStatus();
-  } catch {
-    showToast('恢复失败,请重试');
+  } catch (e) {
+    showToast(errText(e, '恢复失败,请重试'), 'alert');
   } finally {
     busy.value = false;
   }
@@ -539,9 +525,8 @@ function askSelfUpdate(u: { latest: string; current: string }): void {
 
 async function doSelfUpdate(latest: string): Promise<void> {
   upgrading.value = true;
-  const res = await fetch('/api/self-update', { method: 'POST' });
-  const body = (await res.json().catch(() => ({}))) as { ok?: boolean; error?: string };
-  if (!res.ok || !body.ok) throw new Error(body.error ?? `self-update ${res.status}`);
+  const body = await apiJson<{ ok?: boolean; error?: string }>('/api/self-update', { method: 'POST' });
+  if (!body.ok) throw new Error(body.error ?? '升级失败');
   showToast(`已开始升级到 ${latest},服务重启中,请稍候…`, 'alert');
   await waitForRestart();
   // 新 daemon 已在同一端口就绪:整页刷新加载新版本前端
@@ -564,18 +549,21 @@ async function waitForRestart(): Promise<void> {
 
 /** 顶栏「检查更新」:立即查一次 registry 并刷新状态。 */
 async function checkForUpdate(): Promise<void> {
-  const res = await fetch('/api/self-update/check', { method: 'POST' });
-  const body = (await res.json().catch(() => ({}))) as {
-    ok?: boolean;
-    error?: string;
-    update?: { latest: string } | null;
-  };
-  if (!res.ok || !body.ok) throw new Error(body.error ?? `check ${res.status}`);
-  await refreshStatus();
-  showToast(
-    body.update ? `发现新版本 ${body.update.latest}` : `已是最新版本 ${status.value.version ?? ''}`,
-    body.update ? 'alert' : 'info',
-  );
+  try {
+    const body = await apiJson<{
+      ok?: boolean;
+      error?: string;
+      update?: { latest: string } | null;
+    }>('/api/self-update/check', { method: 'POST' });
+    if (!body.ok) throw new Error(body.error ?? '检查更新失败');
+    await refreshStatus();
+    showToast(
+      body.update ? `发现新版本 ${body.update.latest}` : `已是最新版本 ${status.value.version ?? ''}`,
+      body.update ? 'alert' : 'info',
+    );
+  } catch (e) {
+    showToast(errText(e, '检查更新失败,请重试'), 'alert');
+  }
 }
 
 // ---- 登录密码弹窗(设置/修改/清除逻辑在 AuthPasswordModal 内) ----

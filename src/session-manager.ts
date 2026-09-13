@@ -138,6 +138,16 @@ export class SyncSessionManager {
   // 按对端 deviceId 索引的存活会话:用于向已连接对端推送 control 控制面消息
   // (配对请求 / 目录共享邀请 / 确认回执)。离线对端查不到即跳过(连接建立时会自动补发)。
   private readonly peerSessions = new Map<string, ActiveSession>();
+  /**
+   * 心跳存活探测:每个 peer socket 自最近一次 ping 起是否收到过 pong。
+   * 网络分区 / 对端静默掉线时,本端 socket 仍停留在 OPEN 状态,sessionAlive 据此
+   * 误判为「在线」→ 设备卡常显在线、却永远收不到数据(孤儿 peer)。靠应用层
+   * ping/pong 探活,连续未回 pong 的 socket 由心跳强制 terminate,触发 close 清理
+   * 并排定重连,杜绝僵尸在线。
+   */
+  private readonly peerLiveness = new Map<WebSocket, boolean>();
+  /** 心跳定时器句柄;close() 时清除,避免阻止 daemon 退出。 */
+  private heartbeatTimer: ReturnType<typeof setInterval> | undefined;
   /** 等待对端 self-binary-response 的挂起请求(requestId → resolver)。 */
   private readonly pendingBinary = new Map<string, (resp: Extract<ControlMessage, { kind: 'self-binary-response' }>) => void>();
   /** 扫描重入保护(见 runScan)。 */
@@ -150,6 +160,41 @@ export class SyncSessionManager {
     this.peerPort = deps.peerPort;
     this.logger = deps.logger;
     this.folderStates = initialFolders.map((f) => this.createFolderState(f));
+    this.startHeartbeat();
+  }
+
+  /**
+   * 启动应用层心跳:周期性向每个 peer socket 发 ping,并依据最近一次 pong 判定存活。
+   * 收到 pong(由 ws 库在收到 ping 后自动回发)则标记存活;连续一轮 ping 后未回 pong,
+   * 视为已死并强制 terminate → close 回调清理会话、排定重连。
+   * 间隔取 20s,留给 TCP 重传与瞬时抖动余量,避免误杀健康但短暂卡顿的连接。
+   */
+  private startHeartbeat(): void {
+    const INTERVAL_MS = 20000;
+    this.heartbeatTimer = setInterval(() => {
+      for (const socket of this.peerSockets) {
+        const alive = this.peerLiveness.get(socket);
+        if (alive === false) {
+          // 上一轮 ping 后始终没收到 pong:探活失败,强制断开(close 会清理 + 重连)
+          this.logger.info('peer socket failed liveness probe (no pong); terminating');
+          try {
+            socket.terminate();
+          } catch {
+            // socket 已关闭,close 回调会做清理
+          }
+          continue;
+        }
+        // 标记待探测,随后发 ping;本端 OPEN 但实际已死的对端不会回 pong,下轮即被收割
+        this.peerLiveness.set(socket, false);
+        try {
+          socket.ping();
+        } catch {
+          // 已关闭,close 回调会做清理
+        }
+      }
+    }, INTERVAL_MS);
+    // 心跳定时器不应阻止 daemon 在 SIGTERM 时退出
+    if (typeof this.heartbeatTimer.unref === 'function') this.heartbeatTimer.unref();
   }
 
   /* ==================== 目录运行期状态与错误采集 ==================== */
@@ -680,6 +725,12 @@ export class SyncSessionManager {
   private startSyncSession(socket: WebSocket, remoteDeviceId: string, key: Buffer, url?: string): void {
     this.registerPeer(remoteDeviceId, url);
     this.peerSockets.add(socket);
+    // 心跳探活:初始视为存活,收到 pong 刷新为存活;心跳 tick 会先置 false 再 ping,
+    // 若此后无 pong 则在下一轮被 terminate(见 startHeartbeat)。
+    this.peerLiveness.set(socket, true);
+    socket.on('pong', () => {
+      this.peerLiveness.set(socket, true);
+    });
     const session: ActiveSession = {
       socket,
       key,
@@ -752,6 +803,7 @@ export class SyncSessionManager {
     socket.on('close', (code, reason) => {
       this.logger.debug(`socket closed for peer ${remoteDeviceId}, code=${code}, reason=${reason?.toString('utf8') ?? '(empty)'}`);
       this.peerSockets.delete(socket);
+      this.peerLiveness.delete(socket);
       const sessionIdx = this.activeSessions.indexOf(session);
       if (sessionIdx >= 0) this.activeSessions.splice(sessionIdx, 1);
       for (const { folder, transport } of session.transports) {
@@ -964,10 +1016,15 @@ export class SyncSessionManager {
     }
   }
 
-  /** daemon 优雅关闭:清重连定时器、断开所有 peer socket、关闭索引库。 */
+  /** daemon 优雅关闭:清重连定时器、停心跳、断开所有 peer socket、关闭索引库。 */
   close(): void {
     for (const timer of this.reconnectTimers.values()) clearTimeout(timer);
     this.reconnectTimers.clear();
+    if (this.heartbeatTimer) {
+      clearInterval(this.heartbeatTimer);
+      this.heartbeatTimer = undefined;
+    }
+    this.peerLiveness.clear();
     // 关闭所有 peer socket(入站 + 出站),否则客户端 socket 保持事件循环活跃
     // 导致进程收到 SIGTERM 后无法退出。用 terminate() 强制断开 TCP 连接,
     // 避免 close 握手在对端同时关闭时挂起。

@@ -2,6 +2,7 @@
 import { ref, watch } from 'vue';
 import { NButton } from 'naive-ui';
 import type { SyncEventItem } from '../types';
+import { apiJson, errText } from '../utils/api';
 
 const props = defineProps<{
   /** 非空 = 打开该目录的记录弹窗并拉取历史。 */
@@ -24,12 +25,12 @@ watch(
     loading.value = true;
     try {
       const id = f.id ?? f.path;
-      const res = await fetch(`/api/folders/history?folderId=${encodeURIComponent(id)}`);
-      if (!res.ok) throw new Error(`history ${res.status}`);
-      const data = (await res.json()) as { events: SyncEventItem[] };
+      const data = await apiJson<{ events: SyncEventItem[] }>(
+        `/api/folders/history?folderId=${encodeURIComponent(id)}`,
+      );
       events.value = data.events ?? [];
-    } catch {
-      props.notify('读取同步记录失败');
+    } catch (e) {
+      props.notify(errText(e, '读取同步记录失败'));
     } finally {
       loading.value = false;
     }

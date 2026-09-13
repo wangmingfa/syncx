@@ -1,7 +1,7 @@
 import { createServer, type Server } from 'node:http';
 import { type ControlServerDeps } from './api/deps.js';
 import { createSessionAuth } from './api/session.js';
-import { isControlRoute, devViteTarget, pathname, readToken, redirect, sendJson } from './api/helpers.js';
+import { isControlRoute, devViteTarget, pathname, readToken, redirect, sendJson, RequestBodyTooLargeError } from './api/helpers.js';
 import { tryPreAuthRoutes } from './api/routes/public.js';
 import { tryPublicAuthRoutes, tryAccountRoutes } from './api/routes/auth.js';
 import { trySystemRoutes } from './api/routes/system.js';
@@ -65,11 +65,21 @@ export function createControlServer(deps: ControlServerDeps): Server {
         if (await tryOfferRoutes(req, res, deps)) return;
 
         sendJson(res, 404, { error: 'not found' });
-      } catch {
-        // 读取请求体失败(如超出大小上限):尚未响应时返回 413,避免连接挂起
+      } catch (err) {
+        if (err instanceof RequestBodyTooLargeError) {
+          // 请求体超过大小上限:返回 413,避免连接挂起
+          if (!res.headersSent) {
+            res.writeHead(413, { 'Content-Type': 'application/json' });
+            res.end(JSON.stringify({ error: 'request body too large' }));
+          }
+          return;
+        }
+        // 其它未捕获异常(路由逻辑错、DB/索引异常、JSON 解析错等):记录日志并返回 500,
+        // 不再误诊为「请求体过大」,便于排障。避免把真实错误掩盖成 413。
+        console.error('[control-api] unhandled error:', err instanceof Error ? (err.stack ?? err.message) : err);
         if (!res.headersSent) {
-          res.writeHead(413, { 'Content-Type': 'application/json' });
-          res.end(JSON.stringify({ error: 'request body too large' }));
+          res.writeHead(500, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify({ error: 'internal server error' }));
         }
       }
     })();

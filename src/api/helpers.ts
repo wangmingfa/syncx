@@ -132,6 +132,14 @@ export function noteSuccess(req: IncomingMessage): void {
   loginFails.delete(clientIp(req));
 }
 
+/** 请求体超出 maxBytes 时抛出的专用错误,便于顶层 catch-all 区分「体过大」与「其它异常」。 */
+export class RequestBodyTooLargeError extends Error {
+  constructor() {
+    super('request body too large');
+    this.name = 'RequestBodyTooLargeError';
+  }
+}
+
 /** 读取请求体,超过 maxBytes 直接拒绝,防止大请求体耗尽内存。 */
 export function readBody(req: IncomingMessage, maxBytes = 1_000_000): Promise<string> {
   return new Promise((resolve, reject) => {
@@ -149,7 +157,7 @@ export function readBody(req: IncomingMessage, maxBytes = 1_000_000): Promise<st
       size += chunk.length;
       if (size > maxBytes) {
         cleanup();
-        reject(new Error('request body too large'));
+        reject(new RequestBodyTooLargeError());
       }
     };
     const onEnd = (): void => {

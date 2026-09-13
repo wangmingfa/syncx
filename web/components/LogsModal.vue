@@ -1,6 +1,7 @@
 <script setup lang="ts">
 import { ref, watch } from 'vue';
 import { NButton } from 'naive-ui';
+import { apiJson, errText } from '../utils/api';
 
 const props = defineProps<{ open: boolean }>();
 const emit = defineEmits<{ close: [] }>();
@@ -16,9 +17,13 @@ async function fetchLogs(): Promise<void> {
   loading.value = true;
   error.value = '';
   try {
-    const res = await fetch('/api/logs?lines=800');
-    if (!res.ok) throw new Error(`logs ${res.status}`);
-    const data = (await res.json()) as { ok: boolean; error?: string; file?: string; truncated?: number; lines?: string[] };
+    const data = await apiJson<{
+      ok: boolean;
+      error?: string;
+      file?: string;
+      truncated?: number;
+      lines?: string[];
+    }>('/api/logs?lines=800');
     if (!data.ok) {
       // 未设置 --log-file 或读取失败:展示原因,引导用户补启动参数
       error.value = data.error ?? '读取日志失败';
@@ -33,8 +38,8 @@ async function fetchLogs(): Promise<void> {
       const el = view.value;
       if (el) el.scrollTop = el.scrollHeight;
     });
-  } catch {
-    error.value = '读取日志失败,请重试';
+  } catch (e) {
+    error.value = errText(e, '读取日志失败,请重试');
   } finally {
     loading.value = false;
   }
