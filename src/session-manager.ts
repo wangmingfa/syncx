@@ -549,12 +549,20 @@ export class SyncSessionManager {
     const session = this.peerSessions.get(deviceId);
     if (!session) return false;
     try {
-      sendControlMessage(session.socket, session.key, message);
+      // 每条控制消息都携带本机版本 / 主机名:即便一次性 hello 在双连接 / 重连抖动中
+      // 丢失,只要任意一条控制消息(pairing / invitation / folder-sync-list 等)到达,
+      // 对端即可学到本机版本,设备卡不再偶发「版本未知」。
+      sendControlMessage(session.socket, session.key, this.withSelfInfo(message));
       return true;
     } catch (error) {
       this.logger.warn(`failed to send control to ${deviceId}: ${error instanceof Error ? error.message : String(error)}`);
       return false;
     }
+  }
+
+  /** 给一条出站控制消息注入本机运行版本与主机名(供对端设备卡展示来源 / 计算可否升级)。 */
+  private withSelfInfo(message: ControlMessage): ControlMessage {
+    return { ...message, version: runtimeVersion(), hostname: osHostname() };
   }
 
   /** 收到对端 control 消息:把配对 / 目录共享邀请落成待确认项;确认回执触发会话对账。 */
@@ -775,11 +783,23 @@ export class SyncSessionManager {
     //   (否则删掉唯一一个共享目录后,allowed 变 false,清单永远不发,对方的卡片不会消失)
     this.pushFolderSyncList(remoteDeviceId);
     attachPeerMessages(session.peers, socket, key, (message) => {
-      if (message.kind === 'hello') {
-        this.peerInfo.set(remoteDeviceId, { version: message.version, hostname: message.hostname });
-        this.logger.info(`peer ${remoteDeviceId} runs syncx ${message.version}${message.hostname ? ` (host ${message.hostname})` : ''}`);
-        return;
+      // 版本 / 主机名随每条控制消息携带(hello 必然带,其余控制消息也在发送侧注入)。
+      // 即便一次性 hello 在双连接 / 重连抖动中丢失,只要任意一条控制消息到达,
+      // 对端版本即可被学到 —— 设备卡不再偶发「版本未知」。用消息里的 fromDeviceId
+      // 而非会话 remoteDeviceId,确保严格按照对端身份缓存(与书签会话解耦)。
+      if (message.version || message.hostname) {
+        const prev = this.peerInfo.get(message.fromDeviceId);
+        this.peerInfo.set(message.fromDeviceId, {
+          version: message.version ?? prev?.version,
+          hostname: message.hostname ?? prev?.hostname,
+        });
+        // 仅当版本首次学到或发生变化时记录,避免每条控制消息都刷日志
+        // (现在 pairing / invitation / folder-sync-list 都带版本)
+        if (message.version && message.version !== prev?.version) {
+          this.logger.info(`peer ${message.fromDeviceId} runs syncx ${message.version}${message.hostname ? ` (host ${message.hostname})` : ''}`);
+        }
       }
+      if (message.kind === 'hello') return;
       if (message.kind === 'self-binary-response') {
         this.pendingBinary.get(message.requestId)?.(message);
         this.pendingBinary.delete(message.requestId);

@@ -18,26 +18,26 @@ export type WireMessage =
  * 由接收方路由到一个全局处理器(而非按 folder 找 SyncPeer)。
  */
 export type ControlMessage =
-  | { kind: 'folder-invitation'; offerId: string; fromDeviceId: string; folderId: string; folderName: string }
-  | { kind: 'folder-invitation-ack'; offerId: string; fromDeviceId: string; accepted: boolean }
-  | { kind: 'pairing-request'; offerId: string; fromDeviceId: string }
-  | { kind: 'pairing-ack'; offerId: string; fromDeviceId: string; accepted: boolean }
+  | { kind: 'folder-invitation'; offerId: string; fromDeviceId: string; folderId: string; folderName: string; version?: string; hostname?: string }
+  | { kind: 'folder-invitation-ack'; offerId: string; fromDeviceId: string; accepted: boolean; version?: string; hostname?: string }
+  | { kind: 'pairing-request'; offerId: string; fromDeviceId: string; version?: string; hostname?: string }
+  | { kind: 'pairing-ack'; offerId: string; fromDeviceId: string; accepted: boolean; version?: string; hostname?: string }
   /** 会话建立与共享关系变更时互发的「本机当前与你在同步的目录清单」,
    *  接收方据此在 UI 上区分设备标签的 同步中 / 已停止共享 状态。
    *  pendingFolderIds:本机仍待确认的、来自对方的目录邀请 id 集合,
    *  对方据此把标签显示为「待对方确认」而非误判「已停止共享」。
    *  旧版本对端不发送该字段(undefined),接收方按未知处理,退回旧逻辑。 */
-  | { kind: 'folder-sync-list'; fromDeviceId: string; folderIds: string[]; pendingFolderIds?: string[] }
+  | { kind: 'folder-sync-list'; fromDeviceId: string; folderIds: string[]; pendingFolderIds?: string[]; version?: string; hostname?: string }
   /** 会话建立时互发的版本宣告。dev 态(src 直跑)version 为 'dev'。
    *  hostname 为本机 node:os 主机名,供对端在设备卡 / 配对 / 共享邀请上展示来源主机,
    *  旧版本对端不发送该字段,接收方按 undefined 处理(不展示主机名)。 */
   | { kind: 'hello'; fromDeviceId: string; version: string; hostname?: string }
   /** 请求对端的自身安装包(tgz,整包),用于「版本低于对方时从对方升级」。
    *  仅经握手签名校验过的会话可发;对端 dev 态时 response.data 为 undefined。 */
-  | { kind: 'self-binary-request'; requestId: string; fromDeviceId: string }
+  | { kind: 'self-binary-request'; requestId: string; fromDeviceId: string; version?: string; hostname?: string }
   /** 对端安装包回传:base64 的整包 tgz(含 package.json 与 dist/syncx.js)+ 内容
    *  sha256 指纹;data 缺省 = 对端无法提供(dev 态或打包失败)。 */
-  | { kind: 'self-binary-response'; requestId: string; fromDeviceId: string; version: string; sha256: string; data?: string };
+  | { kind: 'self-binary-response'; requestId: string; fromDeviceId: string; version: string; sha256: string; data?: string; hostname?: string };
 
 export function encodeWireMessage(message: WireMessage): string {
   return JSON.stringify(message);

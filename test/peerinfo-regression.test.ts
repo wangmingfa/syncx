@@ -94,3 +94,72 @@ describe('peerInfo keyed by deviceId (regression: version survives non-bookmark 
     }
   });
 });
+
+/**
+ * 锁死「hello 丢失但版本仍应可见」回归(本次修复的核心场景)。
+ *
+ * 用户日志实证:某对端(folder invitation / pairing / folder-sync-list 等控制消息都到达了),
+ * 唯独 hello 没到 → 设备卡永久「版本未知」。根因:版本只挂在 hello 这一条「建连时一次性
+ * 发送」的消息上,一旦它在双连接 / 重连抖动中丢失即不可恢复。
+ *
+ * 修复:version / hostname 随每条控制消息发送(发送侧注入),接收侧对「任意带版本的控制
+ * 消息」更新 peerInfo。于是只要任意一条控制消息到达,版本即可被学到,不再依赖那条
+ * 可能被丢的 hello。
+ *
+ * 本测试精确复刻该状态:对端只发一条带版本的 folder-sync-list、绝不发 hello。
+ * 老版本(版本仅从 hello 学)describeDevice(C).version 为 undefined → 失败;
+ * 新版本(从任意控制消息学)返回 '9.9.9' → 通过。
+ */
+describe('peer version learned from non-hello control messages (regression: lost hello)', () => {
+  it('learns the version from a folder-sync-list even when hello was never received', async () => {
+    const aDir = mkdtempSync(join(tmpdir(), 'syncx-peerinfo-b-'));
+    const cDir = mkdtempSync(join(tmpdir(), 'syncx-peerinfo-c2-'));
+    try {
+      const aId = loadOrCreateIdentity(aDir);
+      const cId = loadOrCreateIdentity(cDir);
+      const configPathA = join(aDir, 'config.json');
+      writeFileSync(configPathA, JSON.stringify({ sharedFolders: [], peers: [] }));
+
+      const managerA = new SyncSessionManager(
+        { identity: aId, configPath: configPathA, configDir: aDir, peerPort: 0, logger: createLogger(undefined) },
+        [],
+      );
+
+      const serverA = startPeerServer(
+        aId,
+        {
+          onPeerConnected(socket, remoteDeviceId, key, listenPort) {
+            managerA.onInboundPeer(socket, remoteDeviceId, key, listenPort);
+          },
+          onError() {},
+        },
+        0,
+      );
+
+      const conn = await connectPeer(cId, `ws://127.0.0.1:${serverA.port}`);
+
+      // 刻意不发 hello(精确复刻用户日志:控制消息到了、hello 没到),只发一条带版本的控制消息。
+      // 旧版本里这里版本永远学不到;新版本里这条 folder-sync-list 就足以让设备卡显示版本。
+      sendControlMessage(conn.socket, conn.key, {
+        kind: 'folder-sync-list',
+        fromDeviceId: cId.deviceId,
+        folderIds: ['f1'],
+        version: '9.9.9',
+        hostname: 'hostC',
+      });
+
+      await waitFor(() => managerA.describeDevice(cId.deviceId).version === '9.9.9', 5000);
+
+      const link = managerA.describeDevice(cId.deviceId);
+      expect(link.version).toBe('9.9.9');
+      expect(link.hostname).toBe('hostC');
+      expect(link.online).toBe(true);
+
+      managerA.close();
+      serverA.close();
+    } finally {
+      rmDir(aDir);
+      rmDir(cDir);
+    }
+  });
+});
