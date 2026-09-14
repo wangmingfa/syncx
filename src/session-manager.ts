@@ -73,12 +73,6 @@ export interface ActiveSession {
   /** 对端宣告的「仍待确认的、来自本机的目录邀请 id 集合」(folder-sync-list)。
    *  空/缺失时 UI 退回「已停止共享」的旧判断。 */
   remotePendingFolders?: Set<string>;
-  /** 对端经 hello 宣告的运行版本('dev' = 对端为源码 dev 态)。
-   *  undefined = 对端旧版本未发 hello,UI 显示「未知」且不给升级入口。 */
-  remoteVersion?: string;
-  /** 对端经 hello 宣告的主机名(node:os hostname);用于设备卡 / 配对 / 共享邀请展示来源主机。
-   *  undefined = 对端旧版本未发 hello 主机名。 */
-  remoteHostname?: string;
 }
 
 export interface DeviceLinkInfo {
@@ -138,6 +132,13 @@ export class SyncSessionManager {
   // 按对端 deviceId 索引的存活会话:用于向已连接对端推送 control 控制面消息
   // (配对请求 / 目录共享邀请 / 确认回执)。离线对端查不到即跳过(连接建立时会自动补发)。
   private readonly peerSessions = new Map<string, ActiveSession>();
+  /**
+   * 对端经 hello 宣告的运行版本 / 主机名,按 deviceId 存储,与「书签会话」解耦。
+   * 任意一条与该对端的存活会话收到 hello 都更新此 map,因此设备卡显示的对端版本 /
+   * 主机名不再受「书签会话 ≠ 实际收到 hello 的会话」影响 —— 双连接 / 重连 /
+   * 书签迁移等拓扑抖动下均稳定,不会再偶发「版本未知」。
+   */
+  private readonly peerInfo = new Map<string, { version?: string; hostname?: string }>();
   /**
    * 心跳存活探测:每个 peer socket 自最近一次 ping 起是否收到过 pong。
    * 网络分区 / 对端静默掉线时,本端 socket 仍停留在 OPEN 状态,sessionAlive 据此
@@ -467,6 +468,7 @@ export class SyncSessionManager {
   /** 忘记某对端的地址并断开其所有会话;返回关闭的会话数。 */
   forgetAndCloseSessions(deviceId: string): number {
     this.outboundPeerUrls.delete(deviceId);
+    this.peerInfo.delete(deviceId); // 忘记对端时一并清除其版本 / 主机名缓存
     // 断开与该设备的所有会话连接(遍历 activeSessions 而非只取 peerSessions 里的
     // 当前一条)。close 回调会拆掉目录 peer;当前会话的 close 会清书签并尝试排定
     // 重连,但此时 outboundPeerUrls 已清空,scheduleReconnect 直接返回,不会重连。
@@ -561,7 +563,7 @@ export class SyncSessionManager {
     // 旧版本对端未发 hello → remoteHostname 为 undefined;非入站(本机主动出站连接)
     // 收到的邀请则 socket 取不到对端源 IP → fromIp 为 undefined。两者缺省都不展示。
     const srcSession = this.peerSessions.get(message.fromDeviceId);
-    const fromHostname = srcSession?.remoteHostname;
+    const fromHostname = this.peerInfo.get(message.fromDeviceId)?.hostname;
     const fromIp = srcSession?.socket ? learnPeerIp(srcSession.socket) : undefined;
     const srcMeta = { fromIp, fromHostname };
     switch (message.kind) {
@@ -630,7 +632,7 @@ export class SyncSessionManager {
   async upgradeFromPeer(deviceId: string): Promise<{ version: string }> {
     const session = this.peerSessions.get(deviceId);
     if (!session || !this.sessionAlive(session)) throw new Error('设备离线,无法升级');
-    const targetVersion = session.remoteVersion;
+    const targetVersion = this.peerInfo.get(deviceId)?.version;
     if (!targetVersion) throw new Error('对方版本未知(对端 syncx 版本过旧),无法升级');
     if (targetVersion === 'dev') throw new Error('对方为 dev 运行态,没有可拉取的产物');
     if (!isBundledRuntime()) throw new Error('本机为 dev 运行态,不支持自更新');
@@ -774,8 +776,7 @@ export class SyncSessionManager {
     this.pushFolderSyncList(remoteDeviceId);
     attachPeerMessages(session.peers, socket, key, (message) => {
       if (message.kind === 'hello') {
-        session.remoteVersion = message.version;
-        session.remoteHostname = message.hostname;
+        this.peerInfo.set(remoteDeviceId, { version: message.version, hostname: message.hostname });
         this.logger.info(`peer ${remoteDeviceId} runs syncx ${message.version}${message.hostname ? ` (host ${message.hostname})` : ''}`);
         return;
       }
@@ -914,8 +915,8 @@ export class SyncSessionManager {
       url: this.outboundPeerUrls.get(deviceId),
       remoteFolders: session?.remoteFolders ? [...session.remoteFolders] : undefined,
       remotePendingFolders: session?.remotePendingFolders ? [...session.remotePendingFolders] : [],
-      version: session?.remoteVersion,
-      hostname: session?.remoteHostname,
+      version: this.peerInfo.get(deviceId)?.version,
+      hostname: this.peerInfo.get(deviceId)?.hostname,
     };
   }
 

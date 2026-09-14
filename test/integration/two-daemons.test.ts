@@ -108,7 +108,7 @@ async function setupDaemon(
   };
 }
 
-function startDaemon(setup: DaemonSetup, peers: string[], peerDeviceIds: string[]): void {
+function startDaemon(setup: DaemonSetup, peers: string[], peerDeviceIds: string[]): ChildProcess {
   writeFileSync(
     setup.configPath,
     JSON.stringify({
@@ -137,6 +137,7 @@ function startDaemon(setup: DaemonSetup, peers: string[], peerDeviceIds: string[
   child.stdout?.pipe(createWriteStream(join(setup.dir, 'daemon.out.log')));
   child.stderr?.pipe(createWriteStream(join(setup.dir, 'daemon.err.log')));
   children.push(child);
+  return child;
 }
 
 /**
@@ -381,3 +382,133 @@ describe('two real daemons sync over peers config', () => {
     45000,
   );
 });
+
+/* ==================== 对端版本可见性回归(peerInfo 解耦书签会话) ==================== */
+
+interface StatusDevice {
+  deviceId: string;
+  online: boolean;
+  version?: string;
+  hostname?: string;
+}
+interface StatusResponse {
+  devices: StatusDevice[];
+}
+
+/** 携带落盘令牌读取 daemon 控制 API 的 /api/status(dev 运行态 version 为 'dev')。 */
+async function getStatus(setup: DaemonSetup): Promise<StatusResponse> {
+  const token = readFileSync(join(setup.dir, 'control.token'), 'utf8').trim();
+  const res = await fetch(`http://127.0.0.1:${setup.controlPort}/api/status`, {
+    headers: { Authorization: `Bearer ${token}` },
+  });
+  if (!res.ok) throw new Error(`GET /api/status returned ${res.status}: ${await res.text()}`);
+  return (await res.json()) as StatusResponse;
+}
+
+function findDevice(status: StatusResponse, deviceId: string): StatusDevice | undefined {
+  return status.devices.find((d) => d.deviceId === deviceId);
+}
+
+/** 等待某 daemon 的 status 中,目标对端既在线又带上了版本(握手 hello 已抵达)。 */
+async function waitForPeerVersionReady(
+  observer: DaemonSetup,
+  peerDeviceId: string,
+  timeoutMs = 45000,
+): Promise<StatusDevice> {
+  const start = Date.now();
+  let last: StatusDevice | undefined;
+  for (;;) {
+    try {
+      const status = await getStatus(observer);
+      last = findDevice(status, peerDeviceId);
+      if (last && last.online && typeof last.version === 'string' && last.version.length > 0) {
+        return last;
+      }
+    } catch {
+      // daemon 尚未就绪 / 临时错误:继续等
+    }
+    if (Date.now() - start > timeoutMs) {
+      throw new Error(
+        `timed out waiting for ${peerDeviceId} version on ${observer.dir}; last=${JSON.stringify(last)}`,
+      );
+    }
+    await new Promise((r) => setTimeout(r, 150));
+  }
+}
+
+describe('peer version visibility under dual connections (peerInfo regression)', () => {
+  it(
+    'shows the peer version on BOTH sides after a mutual (dual) connection',
+    async () => {
+      // A 与 C 互为手动对端(devices 互列):双方各主动拨号对方 → 双连接(每条方向 2 个会话)。
+      // 回归点:对端版本按 deviceId 存于 peerInfo,而非按「书签会话」;双连接 / 重连 /
+      // 书签迁移等拓扑抖动下,设备卡的对端版本不应偶发「未知」。
+      const a = await setupDaemon('a', []);
+      const c = await setupDaemon('c', []);
+
+      startDaemon(a, [`ws://127.0.0.1:${c.peerPort}`], [c.deviceId]);
+      await waitForDaemonReady(a);
+      startDaemon(c, [`ws://127.0.0.1:${a.peerPort}`], [a.deviceId]);
+
+      const aSeesC = await waitForPeerVersionReady(a, c.deviceId);
+      const cSeesA = await waitForPeerVersionReady(c, a.deviceId);
+
+      // 核心不变量:双连接下,两侧都能看到对方的运行版本(不再「版本未知」)
+      expect(typeof aSeesC.version).toBe('string');
+      expect(aSeesC.version!.length).toBeGreaterThan(0);
+      expect(typeof cSeesA.version).toBe('string');
+      expect(cSeesA.version!.length).toBeGreaterThan(0);
+      // 主机名也应随 hello 一起可靠下发
+      expect(typeof aSeesC.hostname).toBe('string');
+
+      await stopChildren();
+      rmDir(a.dir);
+      rmDir(c.dir);
+    },
+    90000,
+  );
+
+  it(
+    'keeps showing the peer version after the peer is restarted (reconnect + bookmark migration)',
+    async () => {
+      // 更贴近用户报告的三设备拓扑:A 同时与 B、C 配对(A 是观察者,老版本里只有它偶发
+      // 「版本未知」)。本用例断言:即便 C 重启导致 A 与 C 之间的书签会话迁移 / 重连,
+      // A 仍能稳定看到 B 与 C 的版本,不再退化成「未知」。
+      const a = await setupDaemon('a', []);
+      const b = await setupDaemon('b', []);
+      const c = await setupDaemon('c', []);
+
+      startDaemon(a, [`ws://127.0.0.1:${b.peerPort}`, `ws://127.0.0.1:${c.peerPort}`], [b.deviceId, c.deviceId]);
+      await waitForDaemonReady(a);
+      startDaemon(b, [`ws://127.0.0.1:${a.peerPort}`], [a.deviceId]);
+      startDaemon(c, [`ws://127.0.0.1:${a.peerPort}`], [a.deviceId]);
+
+      const aSeesB = await waitForPeerVersionReady(a, b.deviceId);
+      const aSeesC = await waitForPeerVersionReady(a, c.deviceId);
+      expect(aSeesB.version!.length).toBeGreaterThan(0);
+      expect(aSeesC.version!.length).toBeGreaterThan(0);
+
+      // 让 C 重启:A 与 C 的会话断开 → 书签迁移 / 出站重连,C 重新上线后 hello 重发。
+      // 重启后 A 仍应稳定看到 C 的版本(peerInfo 按 deviceId 缓存,与书签会话解耦)。
+      const cChild = children[children.length - 1];
+      cChild.kill('SIGTERM');
+      await new Promise((r) => cChild.once('exit', () => r(null)));
+
+      // 重新配置并启动 C(沿用同一身份目录,deviceId 不变)
+      startDaemon(c, [`ws://127.0.0.1:${a.peerPort}`], [a.deviceId]);
+      const aSeesCAgain = await waitForPeerVersionReady(a, c.deviceId);
+      expect(aSeesCAgain.online).toBe(true);
+      expect(aSeesCAgain.version!.length).toBeGreaterThan(0);
+      // B 全程未动,A 看到 B 的版本应始终稳定
+      const aSeesBStill = await getStatus(a);
+      expect(findDevice(aSeesBStill, b.deviceId)?.version?.length).toBeGreaterThan(0);
+
+      await stopChildren();
+      rmDir(a.dir);
+      rmDir(b.dir);
+      rmDir(c.dir);
+    },
+    120000,
+  );
+});
+
