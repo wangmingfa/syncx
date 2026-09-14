@@ -14,7 +14,11 @@ import { loadConfig, saveConfig, mutateConfig, normalizePeerUrl, DEFAULT_CONFIG,
  */
 function buildForbiddenPatterns(): RegExp[] {
   const patterns: RegExp[] = [
-    /^\/(etc|usr|bin|sbin|boot|dev|proc|sys|lib|lib64|var|opt|root)(\/|$)/i,
+    /^\/(etc|usr|bin|sbin|boot|dev|proc|sys|lib|lib64|opt|root)(\/|$)/i,
+    // /var 下禁止共享系统目录,但放行临时目录:macOS 的 os.tmpdir() 就是 /var/folders/...,
+    // POSIX 另有 /var/tmp。否则在 macOS 上用临时目录建出来的路径会被误判为非法(测试全挂)。
+    // 负向先行断言: /var 及 /var/<段> 照禁,仅豁免 folders / tmp 这两个段(及其子树)。
+    /^\/var(?:\/(?!(?:folders|tmp)(?:\/|$))|$)/i,
     /^\/home\/[^/]+\/(\.ssh|\.ssh2|\.gnupg|\.config|\.local|\.cache|\.aws|\.kube|\.docker|\.docker\.cfg|AppData)(\/|$)/i,
   ];
   if (process.platform === 'win32') {

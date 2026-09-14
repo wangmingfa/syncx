@@ -1073,9 +1073,13 @@ if (opts.doSmoke) {
   const cfg2 = track(mkdtempSync(join(tmpdir(), 'syncx-run-')));
   log(`模拟全局安装:npm i -g --prefix <tmp> ${packed}`);
   await npm(['i', '-g', '--prefix', prefix, tgz], { inherit: true });
-  // scoped 包(@scope/name)安装到 node_modules/@scope/name,无 scope 则 node_modules/name;
-  // 用 pkg.name 拆段拼接,scoped / unscoped 都兼容。
-  const installed = join(prefix, 'node_modules', ...pkg.name.split('/'), 'dist', 'syncx.js');
+  // npm 全局安装的模块根目录因平台而异:
+  //   - Windows : <prefix>/node_modules/@scope/name
+  //   - POSIX(Linux/macOS/termux): <prefix>/lib/node_modules/@scope/name
+  // 用 pkg.name 拆段拼接,scoped / unscoped 都兼容。此前错写成固定的 node_modules,
+  // 在 POSIX 上实际装在 lib/node_modules,导致「临时安装后找不到 dist/syncx.js」误报。
+  const globalModRoot = process.platform === 'win32' ? 'node_modules' : join('lib', 'node_modules');
+  const installed = join(prefix, globalModRoot, ...pkg.name.split('/'), 'dist', 'syncx.js');
   if (!existsSync(installed)) fail(`临时安装后找不到 ${installed},请检查 package.json 的 files/bin`);
   log('验证全局安装后的 syncx 命令可运行…');
   const r2 = await exec(process.execPath, [installed, 'status', '--config', join(cfg2, 'config.json')]);

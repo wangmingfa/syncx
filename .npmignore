@@ -1,0 +1,16 @@
+# .npmignore —— 发布打包忽略规则（npm 优先使用本文件，不再回退 .gitignore）
+#
+# 问题背景：.gitignore 中含 "dist/"，若没有 .npmignore，npm pack 会回退用 .gitignore，
+# 把发布产物 dist/syncx.js 排除，导致 release 在「模拟全局安装」校验时报
+# 「临时安装后找不到 dist/syncx.js」（termux 等环境下 npm pack 真实打包与 --dry-run
+# 预览行为不一致：预览按 files 白名单列出 dist/syncx.js 骗过校验，真包却因 .gitignore
+# 的 dist/ 被排除）。
+#
+# 这里用 negation 白名单：默认忽略一切，仅放行构建产物 dist/syncx.js 与必要元数据，
+# 跨 npm 版本 / 平台行为一致，且不依赖 package.json 的 files 字段是否覆盖 .gitignore。
+*
+!dist/
+!dist/syncx.js
+!package.json
+!package-lock.json
+!README*
