@@ -304,14 +304,39 @@ async function addFolder(): Promise<void> {
   }
 }
 
-/** 复制文本到剪贴板,并轻提示。 */
+/** 复制文本到剪贴板,并轻提示。优先现代 Clipboard API,HTTPS 受限时降级到 execCommand。 */
 async function copy(text: string): Promise<void> {
-  try {
-    await navigator.clipboard.writeText(text);
-    showToast('已复制到剪贴板');
-  } catch {
-    showToast('复制失败,请手动选择');
+  // 1. 优先使用现代 Clipboard API
+  if (navigator.clipboard && window.isSecureContext) {
+    try {
+      await navigator.clipboard.writeText(text);
+      showToast('已复制到剪贴板');
+      return;
+    } catch {
+      // 继续降级
+    }
   }
+  // 2. 兼容 HTTP / 老浏览器
+  try {
+    const textarea = document.createElement('textarea');
+    textarea.value = text;
+    textarea.style.position = 'fixed';
+    textarea.style.left = '-9999px';
+    textarea.style.top = '0';
+    textarea.style.opacity = '0';
+    document.body.appendChild(textarea);
+    textarea.focus();
+    textarea.select();
+    const success = document.execCommand('copy');
+    textarea.remove();
+    if (success) {
+      showToast('已复制到剪贴板');
+      return;
+    }
+  } catch {
+    // 降级失败
+  }
+  showToast('复制失败,请手动选择');
 }
 
 // ---- 待确认项(对方推送的配对 / 目录共享邀请) ----
