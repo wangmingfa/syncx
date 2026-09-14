@@ -69,9 +69,12 @@ export default defineConfig(({ mode }: { mode: string }) => {
     // vitest 运行根目录回到仓库根(测试在 test/),与 vite dev/build 的 web/ 根分开。
     // 注意:test.root 是相对「项目根(即本配置所在目录)」解析,不是相对 web/。
     // 写 '..' 会抬到仓库上级(如 D:/code),连带扫描 wmfx 等兄弟仓库的测试;
-    // 仓库根应为 '.'。fileParallelism 保证集成测试串行化。
+    // 仓库根应为 '.'。
     root: '.',
-    fileParallelism: false,
+    // 测试文件默认并行执行(vitest 默认 fileParallelism: true)。集成测试端口已由
+    // test/integration/ports.ts 的 allocatePort() 动态分配(listen(0)),文件间并行
+    // 不会 EADDRINUSE,无需全局串行。实测提速约 38%(本机 28s -> 17s)且无失败。
+    fileParallelism: true,
   },
   // 开发模式:Vite dev server 提供 web/ 的热重载(HMR),
   // 把 /api/*、/login 代理到 control server(127.0.0.1:8384),
