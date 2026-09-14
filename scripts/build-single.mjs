@@ -1,5 +1,5 @@
 import { build, transformSync } from 'esbuild';
-import { readFileSync, renameSync } from 'node:fs';
+import { readFileSync, renameSync, chmodSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 
 const outfile = fileURLToPath(new URL('../dist/syncx.js', import.meta.url));
@@ -70,5 +70,10 @@ try {
     throw err2 instanceof Error ? err2 : new Error(String(err2));
   }
 }
+
+// 单文件要作为可执行 bin 运行(全局安装 / p2p 自升级 / scp 同步都会继承此权限),
+// 必须带执行位。esbuild 写出默认 0644,rename 不改动权限,这里显式补 0755,
+// 否则非 root 用户执行时会因脚本文件无可执行位而 Permission denied。
+chmodSync(outfile, 0o755);
 
 console.log(`built single-file bundle: ${outfile}`);
