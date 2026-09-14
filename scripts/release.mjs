@@ -708,7 +708,7 @@ async function multiSelectPrompt(message, choices, defaultSelected, defaultIndex
         }
         process.stdout.write('\n');
       });
-      process.stdout.write(`${paint.dim('  ↑/↓ 或 k/j 移动，Space 切换，Enter 确认，Ctrl+C 退出')}\n`);
+      process.stdout.write(`${paint.dim('  ↑/↓ 或 k/j 移动，Space 切换，a 全选，i 反选，Enter 确认，Ctrl+C 退出')}\n`);
     };
 
     const done = () => {
@@ -740,6 +740,17 @@ async function multiSelectPrompt(message, choices, defaultSelected, defaultIndex
       } else if (key.name === 'space') {
         if (selected.has(choices[index].value)) selected.delete(choices[index].value);
         else selected.add(choices[index].value);
+        render();
+      } else if (key.name === 'a') {
+        // 全选
+        choices.forEach((c) => selected.add(c.value));
+        render();
+      } else if (key.name === 'i') {
+        // 反选
+        choices.forEach((c) => {
+          if (selected.has(c.value)) selected.delete(c.value);
+          else selected.add(c.value);
+        });
         render();
       } else if (key.name === 'return' || key.name === 'enter') {
         done();
