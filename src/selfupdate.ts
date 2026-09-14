@@ -16,6 +16,7 @@ import {
 import { tmpdir } from 'node:os';
 import { basename, dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { ensureExecutable } from './selfexec.js';
 import { packageVersion } from './usage.js';
 
 /**
@@ -122,10 +123,16 @@ async function tarRun(cwd: string, args: readonly string[]): Promise<void> {
 /**
  * 打包本机安装目录为 tgz(P2P 升级的发送侧载荷)。
  * dev 态返回 undefined(没有可打包的安装目录)。
+ * @param overridePkgDir 测试注入:指定要打包的包目录,代替 selfPackageDir()(生产恒为空)。
  */
-export async function packSelfTgz(): Promise<Buffer | undefined> {
-  const dir = selfPackageDir();
+export async function packSelfTgz(overridePkgDir?: string): Promise<Buffer | undefined> {
+  const dir = overridePkgDir ?? selfPackageDir();
   if (!dir) return undefined;
+  // 打包前确保产物带可执行位:无论本机安装目录里 dist/syncx.js 当前是 0644 还是 0755,
+  // 发出的 tgz 一律 0755,使接收方(即便运行更老版本、其 updater 无 chmod 兜底)换入后也可执行。
+  // 顺带自修复本机已装的产物权限(权限不足时静默跳过,不影响打包)。
+  const bundle = join(dir, 'dist', 'syncx.js');
+  if (existsSync(bundle)) ensureExecutable(bundle);
   const work = mkdtempSync(join(tmpdir(), 'syncx-selfpack-'));
   try {
     await tarRun(work, ['-czf', 'self.tgz', '-C', dirname(dir), basename(dir)]);
@@ -306,6 +313,7 @@ function updaterSource(): string {
     "      try {",
     "        rmSync(job.targetDir, { recursive: true, force: true });",
     "        await swap(backup, job.targetDir);",
+    "        ensureExec(join(job.targetDir, 'dist', 'syncx.js')); // 还原旧包后保证可执行位(老包原本可能 0644)",
     "        const old = spawn(job.execPath, job.restartArgs, { detached: true, stdio: 'ignore', env: { ...process.env, SYNCX_UPDATE_DONE: job.doneFile } });",
     "        old.unref();",
     "        done({ ok: false, rolledBack: true, error: message });",

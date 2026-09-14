@@ -1,6 +1,13 @@
+import { ensureSelfExecutable } from './selfexec.js';
 import { run } from './cli.js';
 import { parseArgs, type ParsedArgs } from './args.js';
 import { helpText, packageVersion, wantsHelp, wantsVersion } from './usage.js';
+
+// 自修复执行位:跨平台升级(尤其 Windows → Linux)后,换入的 bundle 在 Unix 上可能落到 0644
+// (Windows 无 POSIX exec 位,tar 头记录 ~0644)。本段在 bundle 自身启动早期补 0755,
+// 使后续 `syncx` CLI 直接执行可用。逻辑位于新 bundle 的启动代码,故只要对端版本含本修,
+// 老接收方换入后首次被 node 拉起即自修,不依赖接收方旧代码。仅 Unix 需要;dev(.ts)跳过。
+ensureSelfExecutable();
 
 // 捕获未处理异常/拒绝,避免进程静默崩溃导致集成测试中子进程无法响应 SIGTERM
 process.on('uncaughtException', (error) => {
