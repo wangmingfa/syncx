@@ -62,9 +62,13 @@
  *   --yes / -y         跳过发布前的「发布 / 取消」确认。
  *   --registry <url>   发布到指定 registry(默认沿用当前 npm 配置;若当前不是
  *                      registry.npmjs.org 且未指定本项,会拒绝执行以避免误发镜像源)。
- *   --no-check         跳过 typecheck + vitest。
+ *   --no-check         跳过 typecheck + vitest(等价于 --no-typecheck --no-test)。
  *   --no-build         跳过 npm run build(产物 dist/syncx.js 必须已存在)。
  *   --no-smoke         跳过「打包 → 临时 --prefix 全局安装 → syncx status」验证。
+ *   --fast / --skip-checks  跳过全部发布前检查(等价于 --no-check --no-build --no-smoke):
+ *                        typecheck + vitest + 构建 + 模拟全局安装验证 全部跳过,直接发布;
+ *                        适用于非交互/脚本化快速发一版(dist/syncx.js 必须已是当前最新构建)。
+ *                        交互环境下更推荐用下方的「发布前检查项」多选交互:逐项勾选/取消,默认全选。
  *   --no-git           发布成功后不自动 commit 版本变更(默认会自动 commit,不 push)。
  *   --dry-run          只做网络预检/校验/构建/冒烟/打包预览,不发布、不递增版本号、不 commit。
  *   --via=github       打 vX.Y.Z tag 并 push,由 GitHub Actions + npm Trusted Publishing 自动发布(免 OTP/Token)。
@@ -653,6 +657,100 @@ async function selectPrompt(message, choices, defaultIndex = 0) {
   });
 }
 
+/**
+ * 方向键多选提示(空格勾选/取消,Enter 确认)。
+ *   ↑/↓(或 k/j)移动光标,Space 切换当前项 √/□,Enter 确认并折叠为一行结果,Ctrl+C 退出。
+ *   非交互环境无法读按键,直接返回 defaultSelected(默认全选),不阻塞流程。
+ * @param message        提示语
+ * @param choices        [{ value, label, hint }],hint 为右侧说明(可省)
+ * @param defaultSelected 默认勾选项 value 数组(通常为全部,即默认全选)
+ * @param defaultIndex   默认高亮项下标
+ * @returns 选中项的 value 数组
+ */
+async function multiSelectPrompt(message, choices, defaultSelected, defaultIndex = 0) {
+  const selected = new Set(defaultSelected);
+  if (!isInteractive()) return [...selected];
+
+  let index = Math.min(Math.max(defaultIndex, 0), choices.length - 1);
+  // 渲染块高度:提示行 + 每个选项一行 + 末行按键说明
+  const height = choices.length + 2;
+  const pad = Math.max(...choices.map((c) => c.label.length));
+  const width = process.stdout.columns ?? 100;
+  let rendered = false;
+
+  return new Promise((resolve) => {
+    const rl = readline.createInterface({ input: process.stdin, terminal: true });
+    const wasRaw = Boolean(process.stdin.isRaw);
+    if (typeof process.stdin.setRawMode === 'function') process.stdin.setRawMode(true);
+
+    const rewind = () => {
+      readline.moveCursor(process.stdout, 0, -height);
+      readline.cursorTo(process.stdout, 0);
+      readline.clearScreenDown(process.stdout);
+    };
+
+    const render = () => {
+      if (rendered) rewind();
+      rendered = true;
+      process.stdout.write(`${message}\n`);
+      choices.forEach((c, i) => {
+        const active = i === index;
+        const cursor = active ? paint.cyan('❯') : ' ';
+        const box = selected.has(c.value) ? paint.green('☑') : '☐';
+        const gap = ' '.repeat(Math.max(pad - c.label.length, 0));
+        const head = ` ${cursor} ${box} ${(active ? paint.bold(c.label) : c.label)}${gap}`;
+        if (c.hint) {
+          const room = width - head.length - 1;
+          if (room > 8) process.stdout.write(`${head} ${paint.dim(c.hint.slice(0, room))}`);
+          else process.stdout.write(head);
+        } else {
+          process.stdout.write(head);
+        }
+        process.stdout.write('\n');
+      });
+      process.stdout.write(`${paint.dim('  ↑/↓ 或 k/j 移动，Space 切换，Enter 确认，Ctrl+C 退出')}\n`);
+    };
+
+    const done = () => {
+      rl.input.removeListener('keypress', onKey);
+      rl.close();
+      if (typeof process.stdin.setRawMode === 'function' && !wasRaw) process.stdin.setRawMode(false);
+      rewind();
+      const picked = choices.filter((c) => selected.has(c.value));
+      const summary = picked.length ? picked.map((c) => c.label).join('、') : '（全部跳过）';
+      process.stdout.write(`${message} ${paint.green(paint.bold(summary))}\n`);
+      resolve([...selected]);
+    };
+
+    const onKey = (_seq, key) => {
+      if (!key) return;
+      if (key.ctrl && key.name === 'c') {
+        rl.input.removeListener('keypress', onKey);
+        rl.close();
+        if (typeof process.stdin.setRawMode === 'function' && !wasRaw) process.stdin.setRawMode(false);
+        process.stdout.write('\n');
+        process.exit(130);
+      }
+      if (key.name === 'up' || key.sequence === 'k') {
+        index = (index - 1 + choices.length) % choices.length;
+        render();
+      } else if (key.name === 'down' || key.sequence === 'j') {
+        index = (index + 1) % choices.length;
+        render();
+      } else if (key.name === 'space') {
+        if (selected.has(choices[index].value)) selected.delete(choices[index].value);
+        else selected.add(choices[index].value);
+        render();
+      } else if (key.name === 'return' || key.name === 'enter') {
+        done();
+      }
+    };
+
+    rl.input.on('keypress', onKey);
+    render();
+  });
+}
+
 /** 单行文本输入(用于自定义 dist-tag);非交互环境返回默认值。 */
 function textPrompt(question, fallback) {
   if (!isInteractive()) return fallback;
@@ -692,20 +790,23 @@ const opts = {
   tagGiven: false, // 是否显式传了 --tag:显式时不弹交互式通道选择
   bumpGiven: false, // 是否显式传了升级方式
   yes: false, // 跳过发布前的二次确认
-  doCheck: true,
-  doBuild: true,
-  doSmoke: true,
+  doTypecheck: true, // 类型检查(tsc + vue-tsc)
+  doTest: true, // 单测(vitest)
+  doBuild: true, // 构建单文件产物
+  doSmoke: true, // 打包 + 临时全局安装(status 冒烟)
   doGit: true,
   dryRun: false,
+  fast: false, // --fast / --skip-checks:跳过 typecheck/test/build/模拟安装 全套发布前检查
   via: undefined, // 发布方式:github(GitHub Actions + Trusted Publishing 自动发布) | local(本地 npm publish)
   viaGiven: false,
   redeploy: false, // 重发已存在 tag(force 更新该 tag 指向并 force-push,仅 github 通道),不动分支历史
 };
 for (const a of argv) {
-  if (a === '--no-check') opts.doCheck = false;
+  if (a === '--no-check') { opts.doTypecheck = false; opts.doTest = false; }
   else if (a === '--no-build') opts.doBuild = false;
   else if (a === '--no-smoke') opts.doSmoke = false;
   else if (a === '--no-git') opts.doGit = false;
+  else if (a === '--fast' || a === '--skip-checks') opts.fast = true;
   else if (a === '--dry-run') opts.dryRun = true;
   else if (a === '--yes' || a === '-y') opts.yes = true;
   else if (a.startsWith('--otp=')) opts.otp = a.slice('--otp='.length);
@@ -720,6 +821,15 @@ for (const a of argv) {
   else if (a === '--local') { opts.via = 'local'; opts.viaGiven = true; }
   else if (a === '--redeploy') { opts.redeploy = true; }
   else fail(`无法识别的参数:${a}(应为 patch/minor/major/iteration,或如 1.2.3 / 1.2.3-beta.1)`);
+}
+
+/* --fast 汇总:等价于 --no-check --no-build --no-smoke,供非交互/脚本化快速发版。
+ * 交互环境下更推荐用下方的多选交互逐项勾选/取消,粒度更细。 */
+if (opts.fast) {
+  opts.doTypecheck = false;
+  opts.doTest = false;
+  opts.doBuild = false;
+  opts.doSmoke = false;
 }
 
 /* ---------- 0. 预检:一次并行拉全 npm 数据(唯一的前置等待) ---------- */
@@ -987,14 +1097,42 @@ if (needLocalAuth) {
   if (opts.via !== 'github') log(`将发布到 ${publisher} (dist-tag: ${opts.tag})`);
 }
 
+/* ---------- 1.5 交互:发布前检查项多选(默认全选,取消勾选即跳过) ---------- */
+// 交互环境下逐项勾选/取消;非交互或 --fast 直接沿用 flags(默认全开 / 全关)。
+if (isInteractive() && !opts.fast) {
+  const checkChoices = [
+    { value: 'typecheck', label: 'typecheck', hint: 'tsc + vue-tsc 类型检查' },
+    { value: 'test', label: 'test', hint: 'vitest 单元测试' },
+    { value: 'build', label: 'build', hint: 'npm run build 构建单文件产物' },
+    { value: 'smoke', label: '模拟安装验证', hint: '打包 + 临时全局安装 + status 冒烟' },
+  ];
+  const defaultSel = [];
+  if (opts.doTypecheck) defaultSel.push('typecheck');
+  if (opts.doTest) defaultSel.push('test');
+  if (opts.doBuild) defaultSel.push('build');
+  if (opts.doSmoke) defaultSel.push('smoke');
+  const picked = await multiSelectPrompt('发布前检查项(默认全选,取消勾选即跳过):', checkChoices, defaultSel, 0);
+  opts.doTypecheck = picked.includes('typecheck');
+  opts.doTest = picked.includes('test');
+  opts.doBuild = picked.includes('build');
+  opts.doSmoke = picked.includes('smoke');
+} else if (opts.fast) {
+  log('--fast:跳过 typecheck / test / build / 模拟安装验证,直接进入发布(本地冒烟 status 仍保留兜底)');
+}
+
 /* ---------- 2. 发布计划总确认(交互块最后一项,确认后全程无人值守) ---------- */
 if (!opts.dryRun) {
   log('—— 发布计划 ——');
   log(`  ${pkgName}@${target} → ${publisher} (dist-tag: ${opts.tag})`);
   const steps = [];
-  if (opts.doCheck) steps.push('typecheck + vitest');
+  if (opts.doTypecheck || opts.doTest) {
+    const parts = [];
+    if (opts.doTypecheck) parts.push('typecheck');
+    if (opts.doTest) parts.push('test');
+    steps.push(parts.join(' + '));
+  }
   if (opts.doBuild) steps.push('build');
-  steps.push(opts.doSmoke ? '冒烟 + 临时全局安装验证' : '冒烟');
+  steps.push(opts.doSmoke ? '冒烟 + 模拟安装验证' : '冒烟(本地 status)');
   steps.push(`npm version ${target}`);
   if (opts.via === 'github') {
     if (opts.redeploy && needUnpublish) {
@@ -1023,9 +1161,11 @@ if (!opts.dryRun) {
 }
 
 /* ---------- 1. 类型检查 + 测试 ---------- */
-if (opts.doCheck) {
+if (opts.doTypecheck) {
   log('运行 typecheck…');
   await npm(['run', 'typecheck'], { inherit: true });
+}
+if (opts.doTest) {
   log('运行测试(vitest)…');
   await npm(['test'], { inherit: true });
 }
@@ -1035,7 +1175,7 @@ if (opts.doBuild) {
   log('运行 npm run build…');
   await npm(['run', 'build'], { inherit: true });
 }
-if (!existsSync(DIST)) fail(`构建产物不存在:${DIST}(请先 npm run build,或确认 --no-build 用法)`);
+if (!existsSync(DIST)) fail(`构建产物不存在:${DIST}(请先 npm run build,或确认 --no-build / --fast 用法)`);
 
 /* ---------- 3. 本地冒烟:单文件可执行 ---------- */
 {
