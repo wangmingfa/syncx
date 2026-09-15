@@ -603,6 +603,27 @@ tbody tr:last-child td {
   letter-spacing: 0.03em;
 }
 
+/* 目录卡「接收」徽标:接收模式(只拉不推)的视觉标记,蓝底强调其只读同步语义 */
+.ro-badge {
+  flex: 0 0 auto;
+  font-size: 11.5px;
+  font-weight: 600;
+  line-height: 1;
+  padding: 3px 8px;
+  border-radius: 999px;
+  background: rgb(56 132 232 / 0.14);
+  color: #2f6fd0;
+  border: 1px solid rgb(56 132 232 / 0.4);
+  white-space: nowrap;
+}
+
+/* 添加目录表单里的「接收模式」勾选项:与设备复选框组视觉分离 */
+.ro-check {
+  margin-top: 2px;
+  font-size: 12.5px;
+  color: var(--text);
+}
+
 .item-sub {
   color: var(--muted);
   font-size: 12px;
@@ -1384,4 +1405,87 @@ tbody tr:last-child td {
   .guide-leave-to .modal {
     transform: none;
   }
+}
+
+/* ---------- 上传安装包升级弹窗 ---------- */
+
+/* 真正的 file input 隐藏,点击交给下方的虚线投放区 */
+.upload-input {
+  display: none;
+}
+
+.upload-drop {
+  width: 100%;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 4px;
+  padding: 20px 16px;
+  margin-bottom: 12px;
+  border: 1.5px dashed var(--border-strong);
+  border-radius: var(--radius);
+  background: var(--card);
+  color: var(--muted);
+  font-family: inherit;
+  font-size: 13px;
+  cursor: pointer;
+  transition: border-color 0.16s ease, background 0.16s ease, color 0.16s ease;
+}
+
+.upload-drop:hover:not(:disabled) {
+  border-color: var(--accent);
+  background: var(--accent-soft);
+}
+
+.upload-drop:disabled {
+  cursor: not-allowed;
+  opacity: 0.6;
+}
+
+.upload-drop__main {
+  font-size: 14px;
+  font-weight: 600;
+  color: var(--text);
+  max-width: 100%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.upload-drop:hover:not(:disabled) .upload-drop__main {
+  color: var(--accent);
+}
+
+.upload-drop__sub {
+  font-size: 11.5px;
+  color: var(--muted);
+}
+
+/* 预检结论:当前版本 → 将升级到(确认前先看清装的是哪个版本) */
+.upload-verdict {
+  margin-bottom: 12px;
+  padding: 10px 12px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  background: var(--bg-soft);
+}
+
+.upload-verdict__row {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 2px 0;
+  font-size: 13px;
+}
+
+.upload-verdict__label {
+  flex: 0 0 auto;
+  color: var(--muted);
+}
+
+.upload-verdict__to {
+  font-weight: 600;
+  color: var(--accent);
 }

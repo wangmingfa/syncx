@@ -174,3 +174,48 @@ export function readBody(req: IncomingMessage, maxBytes = 1_000_000): Promise<st
     req.on('error', onError);
   });
 }
+
+/**
+ * 二进制请求体上限(64MB):与自更新包上限同阶(ws 控制通道亦为 64MB)。
+ * 自包含 bundle 压缩后约 220KB,留足余量,超界即视为脏数据。
+ */
+export const MAX_BINARY_BODY_BYTES = 64 * 1024 * 1024;
+
+/**
+ * 读取二进制请求体(上传安装包用),返回原始 Buffer。
+ * 与 readBody 分开的原因:后者 toString('utf8') 会把 tgz 的任意字节变成 U+FFFD,
+ * 包必然损坏。超限同样抛 RequestBodyTooLargeError(顶层映射为 413)。
+ */
+export function readBodyBuffer(req: IncomingMessage, maxBytes = MAX_BINARY_BODY_BYTES): Promise<Buffer> {
+  return new Promise((resolve, reject) => {
+    const chunks: Buffer[] = [];
+    let size = 0;
+
+    const cleanup = (): void => {
+      req.removeListener('data', onData);
+      req.removeListener('end', onEnd);
+      req.removeListener('error', onError);
+    };
+
+    const onData = (chunk: Buffer): void => {
+      chunks.push(chunk);
+      size += chunk.length;
+      if (size > maxBytes) {
+        cleanup();
+        reject(new RequestBodyTooLargeError());
+      }
+    };
+    const onEnd = (): void => {
+      cleanup();
+      resolve(Buffer.concat(chunks));
+    };
+    const onError = (error: Error): void => {
+      cleanup();
+      reject(error);
+    };
+
+    req.on('data', onData);
+    req.on('end', onEnd);
+    req.on('error', onError);
+  });
+}

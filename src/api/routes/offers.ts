@@ -32,7 +32,8 @@ export async function tryOfferRoutes(
       const raw = await readBody(req);
       const body = raw === '' ? {} : JSON.parse(raw);
       const localPath = typeof (body as any).localPath === 'string' ? (body as any).localPath : undefined;
-      acceptOffer(id, localPath);
+      const receiveOnly = (body as any).receiveOnly === true;
+      acceptOffer(id, localPath, receiveOnly);
       sendJson(res, 200, { ok: true });
     } catch (e) {
       // 待确认项不存在 / 目录邀请缺少本地路径 / 配置写入失败:透传错误

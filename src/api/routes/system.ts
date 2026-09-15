@@ -1,7 +1,7 @@
 import { readFileSync } from 'node:fs';
 import type { IncomingMessage, ServerResponse } from 'node:http';
 import type { ControlServerDeps } from '../deps.js';
-import { pathname, sendJson } from '../helpers.js';
+import { pathname, readBodyBuffer, sendJson } from '../helpers.js';
 
 /** 系统域:状态查询、日志尾部、优雅关闭、手动扫描与 npm 自更新。 */
 export async function trySystemRoutes(
@@ -9,7 +9,8 @@ export async function trySystemRoutes(
   res: ServerResponse,
   deps: ControlServerDeps,
 ): Promise<boolean> {
-  const { getStatus, logFile, shutdown, rescan, checkForUpdate, selfUpdateNpm } = deps;
+  const { getStatus, logFile, shutdown, rescan, checkForUpdate, selfUpdateNpm, inspectLocalPackage, selfUpdateUpload } =
+    deps;
   const path = req.url ? pathname(req.url) : '/';
 
   // GET /api/status
@@ -83,6 +84,43 @@ export async function trySystemRoutes(
     }
     try {
       const r = await selfUpdateNpm();
+      sendJson(res, 200, { ok: true, version: r.version, restarting: true });
+      setTimeout(() => shutdown?.(), 150);
+    } catch (e) {
+      sendJson(res, 400, { ok: false, error: e instanceof Error ? e.message : String(e) });
+    }
+    return true;
+  }
+
+  // POST /api/self-update/upload/inspect : 上传安装包的只读预检(需认证)。
+  // 请求体即 tgz 原始字节(application/octet-stream,不走 multipart,省掉解析依赖)。
+  // 只校验并读出包内版本,不派发 updater、不改动任何运行期状态 —— 供前端在确认前展示版本对比。
+  if (req.method === 'POST' && path === '/api/self-update/upload/inspect') {
+    if (!inspectLocalPackage) {
+      sendJson(res, 503, { error: 'upload update not available' });
+      return true;
+    }
+    try {
+      const tgz = await readBodyBuffer(req);
+      const info = await inspectLocalPackage(tgz);
+      sendJson(res, 200, { ok: true, version: info.version, name: info.name, current: info.current });
+    } catch (e) {
+      sendJson(res, 400, { ok: false, error: e instanceof Error ? e.message : String(e) });
+    }
+    return true;
+  }
+
+  // POST /api/self-update/upload : 上传本地打好的安装包并升级(需认证)。
+  // 与 npm / P2P 两条来源汇入同一条管线:校验 → updater 接管换入 → 拉起新 daemon(失败回滚)。
+  // 成功时响应后延迟触发优雅关闭,与 POST /api/self-update 保持一致。
+  if (req.method === 'POST' && path === '/api/self-update/upload') {
+    if (!selfUpdateUpload) {
+      sendJson(res, 503, { error: 'upload update not available' });
+      return true;
+    }
+    try {
+      const tgz = await readBodyBuffer(req);
+      const r = await selfUpdateUpload(tgz);
       sendJson(res, 200, { ok: true, version: r.version, restarting: true });
       setTimeout(() => shutdown?.(), 150);
     } catch (e) {

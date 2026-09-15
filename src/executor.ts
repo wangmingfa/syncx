@@ -1,4 +1,4 @@
-import { mkdirSync, renameSync, writeFileSync, rmSync, existsSync, statSync, readFileSync, realpathSync } from 'node:fs';
+import { mkdirSync, renameSync, writeFileSync, rmSync, existsSync, statSync, readFileSync, realpathSync, copyFileSync } from 'node:fs';
 import { dirname, join, relative, isAbsolute, extname, sep } from 'node:path';
 import type { IndexEntry } from './index.js';
 import type { IndexStore } from './indexstore.js';
@@ -86,6 +86,35 @@ export function createLocalExecutor(root: string, index: IndexStore): LocalExecu
     return resolveSharePath(root, relPath);
   }
 
+  /**
+   * 把待删除文件移入共享根目录下的回收站(.syncx-trash,已在默认忽略列表中),
+   * 而非硬删:误删可经回收站找回,避免 2026-09-15 那样的不可逆数据丢失。
+   * 保留原相对路径结构(便于原样还原);同路径短时间内多次删除用自增序号避免覆盖。
+   * 同文件系统走 rename(瞬时、原子);跨文件系统或文件被占用(如 Windows)时退化为
+   * 拷贝后删,仍保留可恢复副本。
+   */
+  function moveToTrash(relPath: string): void {
+    const target = resolvePath(relPath);
+    if (!existsSync(target) || !statSync(target).isFile()) return;
+    const trashDir = join(root, '.syncx-trash');
+    mkdirSync(trashDir, { recursive: true });
+    const stamp = Date.now().toString(36);
+    let dest = join(trashDir, `${relPath}.${stamp}`);
+    let n = 0;
+    while (existsSync(dest)) {
+      n += 1;
+      dest = join(trashDir, `${relPath}.${stamp}.${n}`);
+    }
+    mkdirSync(dirname(dest), { recursive: true });
+    try {
+      renameSync(target, dest);
+    } catch {
+      // 跨文件系统 / 文件被占用:拷贝保留副本后再删原文件,绝不静默丢弃
+      copyFileSync(target, dest);
+      rmSync(target);
+    }
+  }
+
   /** 校验块完整性并原子落地一个条目:写临时文件 + rename,返回落盘后的 mtime。 */
   async function landRemote(entry: IndexEntry, blocks: Buffer[]): Promise<number> {
     if (blocks.length !== entry.blocks.length) {
@@ -117,7 +146,8 @@ export function createLocalExecutor(root: string, index: IndexStore): LocalExecu
     async applyDelete(path: string, tombstone: IndexEntry): Promise<void> {
       const target = resolvePath(path);
       if (existsSync(target) && statSync(target).isFile()) {
-        rmSync(target);
+        // 移入回收站而非硬删:误删可经 .syncx-trash 找回(2026-09-15 事故前删除不可恢复)
+        moveToTrash(path);
       }
       index.saveEntry(tombstone);
     },

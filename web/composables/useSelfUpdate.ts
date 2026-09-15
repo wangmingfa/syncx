@@ -3,19 +3,34 @@ import type { Ref } from 'vue';
 import { useToast } from './useToast';
 import { apiJson, errText } from '../utils/api';
 import type { CoreDeps } from './statusContext';
+import type { UploadPackageInfo } from '../types';
 
-/** npm 自更新(检查/升级流程)与登录态相关(退出登录)。 */
+/** 自更新(npm 定时检查 / 上传本地安装包)与登录态相关(退出登录)。 */
 export function useSelfUpdate(deps: CoreDeps): {
   upgrading: Ref<boolean>;
   askSelfUpdate: (u: { latest: string; current: string }) => void;
   checkForUpdate: () => Promise<void>;
+  uploadOpen: Ref<boolean>;
+  openUpload: () => void;
+  closeUpload: () => void;
+  inspectUpload: (file: File) => Promise<UploadPackageInfo>;
+  applyUpload: (file: File) => Promise<void>;
   logout: () => Promise<void>;
 } {
   const { status, busy, refreshStatus, askConfirm } = deps;
   const { showToast } = useToast();
 
-  /** 升级进行中:隐藏横幅并防止重复触发。 */
+  /** 升级进行中:隐藏横幅、禁用入口并防止重复触发。 */
   const upgrading = ref(false);
+
+  /** 「上传升级」弹窗开关(弹窗自己管选包与确认,这里只控制显隐)。 */
+  const uploadOpen = ref(false);
+  function openUpload(): void {
+    uploadOpen.value = true;
+  }
+  function closeUpload(): void {
+    uploadOpen.value = false;
+  }
 
   /** 横幅「立即升级」:二次确认后走 npm 自升级,服务重启完成自动刷新页面。 */
   function askSelfUpdate(u: { latest: string; current: string }): void {
@@ -29,15 +44,64 @@ export function useSelfUpdate(deps: CoreDeps): {
 
   async function doSelfUpdate(latest: string): Promise<void> {
     upgrading.value = true;
-    const body = await apiJson<{ ok?: boolean; error?: string }>('/api/self-update', { method: 'POST' });
-    if (!body.ok) throw new Error(body.error ?? '升级失败');
-    showToast(`已开始升级到 ${latest},服务重启中,请稍候…`, 'alert');
-    await waitForRestart();
-    // 新 daemon 已在同一端口就绪:整页刷新加载新版本前端
-    window.location.reload();
+    try {
+      const body = await apiJson<{ ok?: boolean; error?: string }>('/api/self-update', { method: 'POST' });
+      if (!body.ok) throw new Error(body.error ?? '升级失败');
+      showToast(`已开始升级到 ${latest},服务重启中,请稍候…`, 'alert');
+      await waitForRestart();
+      // 新 daemon 已在同一端口就绪:整页刷新加载新版本前端
+      window.location.reload();
+    } catch (e) {
+      // 失败(校验不通过 / 服务没起来):解除升级态,别让入口永久卡死
+      upgrading.value = false;
+      throw e;
+    }
   }
 
-  /** 轮询 /health(免认证)直到服务回来;超时抛错由确认弹窗展示。 */
+  /**
+   * 「上传升级」第一步:把安装包原样 POST 给服务端做只读预检,拿回包内版本与当前版本,
+   * 供弹窗展示升级前后对比。不改动服务端任何状态,失败即包本身有问题(原因原样透出)。
+   */
+  async function inspectUpload(file: File): Promise<UploadPackageInfo> {
+    const body = await apiJson<{
+      ok?: boolean;
+      error?: string;
+      version?: string;
+      name?: string;
+      current?: string;
+    }>('/api/self-update/upload/inspect', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/octet-stream' },
+      body: file,
+    });
+    if (!body.ok) throw new Error(body.error ?? '安装包校验失败');
+    return { version: body.version ?? '', name: body.name ?? '', current: body.current ?? '' };
+  }
+
+  /**
+   * 「上传升级」第二步:确认后真升级。服务端走与 npm / P2P 同一条管线
+   * (校验 → updater 整包换入 → 新进程起不来则回滚),响应后优雅关闭;
+   * 这里等 /health 重新可用,再整页刷新加载新版本前端。
+   */
+  async function applyUpload(file: File): Promise<void> {
+    upgrading.value = true;
+    try {
+      const body = await apiJson<{ ok?: boolean; error?: string; version?: string }>('/api/self-update/upload', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/octet-stream' },
+        body: file,
+      });
+      if (!body.ok) throw new Error(body.error ?? '升级失败');
+      showToast(`已开始升级到 ${body.version ?? ''},服务重启中,请稍候…`, 'alert');
+      await waitForRestart();
+      window.location.reload();
+    } catch (e) {
+      upgrading.value = false;
+      throw e;
+    }
+  }
+
+  /** 轮询 /health(免认证)直到服务回来;超时抛错由弹窗展示。 */
   async function waitForRestart(): Promise<void> {
     for (let i = 0; i < 40; i++) {
       await new Promise((r) => setTimeout(r, 1500));
@@ -80,5 +144,15 @@ export function useSelfUpdate(deps: CoreDeps): {
     location.replace('/');
   }
 
-  return { upgrading, askSelfUpdate, checkForUpdate, logout };
+  return {
+    upgrading,
+    askSelfUpdate,
+    checkForUpdate,
+    uploadOpen,
+    openUpload,
+    closeUpload,
+    inspectUpload,
+    applyUpload,
+    logout,
+  };
 }

@@ -17,6 +17,7 @@ export function useFolders(deps: CoreDeps): {
   newPath: Ref<string>;
   newFolderId: Ref<string>;
   newFolderDevices: Ref<string[]>;
+  newFolderReceiveOnly: Ref<boolean>;
   askRemoveFolder: (path: string) => void;
   openEditDevices: (f: FolderInfo) => void;
   openHistory: (f: FolderInfo) => void;
@@ -46,6 +47,8 @@ export function useFolders(deps: CoreDeps): {
   const newPath = ref('');
   const newFolderId = ref('');
   const newFolderDevices = ref<string[]>([]);
+  /** 接收模式(只拉不推):勾选后该目录只从对端拉取变更,绝不把本地变更反灌对端。 */
+  const newFolderReceiveOnly = ref(false);
 
   function toggleAddFolder(): void {
     addFolderOpen.value = !addFolderOpen.value;
@@ -67,12 +70,14 @@ export function useFolders(deps: CoreDeps): {
           path,
           devices: newFolderDevices.value,
           id: newFolderId.value.trim() || undefined,
+          receiveOnly: newFolderReceiveOnly.value,
         }),
       });
       showToast(data.created ? '已添加共享目录(原路径不存在,已自动创建)' : '已添加共享目录');
       newPath.value = '';
       newFolderId.value = '';
       newFolderDevices.value = [];
+      newFolderReceiveOnly.value = false;
       addFolderOpen.value = false;
       await refreshStatus();
     } catch (e) {
@@ -175,6 +180,7 @@ export function useFolders(deps: CoreDeps): {
     newPath,
     newFolderId,
     newFolderDevices,
+    newFolderReceiveOnly,
     askRemoveFolder,
     openEditDevices,
     openHistory,

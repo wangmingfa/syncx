@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { NButton, NInput } from 'naive-ui';
+import { NButton, NInput, NCheckbox } from 'naive-ui';
 import { useStatusContext } from '../composables/statusContext';
 
 const {
@@ -10,6 +10,7 @@ const {
   declinedOpen,
   reusedFolderPath,
   offerPaths,
+  offerReceiveOnly,
   acceptOffer,
   declineOffer,
   restoreOffer,
@@ -46,6 +47,9 @@ const {
         <template v-else>
           <n-input v-model:value="offerPaths[o.id]" placeholder="本机目录绝对路径,如 /home/me/Documents" />
           <p class="form-hint">目录不存在时会自动创建</p>
+          <n-checkbox v-model:checked="offerReceiveOnly[o.id]" class="ro-check">
+            接收模式(只拉不推):只从对方拉取变更,不把本机改动同步出去
+          </n-checkbox>
         </template>
       </div>
       <div class="actions">

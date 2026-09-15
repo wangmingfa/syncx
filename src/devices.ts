@@ -2,7 +2,8 @@ import { existsSync, mkdirSync, statSync } from 'node:fs';
 import { resolve, isAbsolute, sep, dirname } from 'node:path';
 import { homedir } from 'node:os';
 import { randomBytes } from 'node:crypto';
-import { loadConfig, saveConfig, mutateConfig, normalizePeerUrl, DEFAULT_CONFIG, folderIdFor, purgeFolderIndex, type Config, type SharedFolderConfig, type DeviceConfig } from './config.js';
+import { loadConfig, saveConfig, mutateConfig, normalizePeerUrl, DEFAULT_CONFIG, folderIdFor, folderIndexKey, generateFolderInstanceId, purgeFolderIndex, type Config, type SharedFolderConfig, type DeviceConfig } from './config.js';
+import { ensureFolderMarker } from './marker.js';
 
 /**
  * 共享目录黑名单:平台相关。
@@ -90,6 +91,7 @@ function addSharedFolderTo(
   devices: string[],
   id: string | undefined,
   remote: boolean,
+  receiveOnly: boolean,
 ): boolean {
   // 任意两个共享目录之间都不允许物理嵌套(本机自有 / 接收映射同等对待):
   // 嵌套会让同一批文件同时参与两份独立的索引与版本向量,产生重复订阅(fan-in)与同步歧义;
@@ -126,7 +128,19 @@ function addSharedFolderTo(
   if (config.sharedFolders.some((f) => folderIdFor(f) === finalId)) {
     throw new Error(`folder id ${finalId} is already used by another shared folder`);
   }
-  config.sharedFolders.push({ path: resolved, devices, id: finalId, remote });
+  config.sharedFolders.push({
+    path: resolved,
+    devices,
+    id: finalId,
+    remote,
+    receiveOnly: receiveOnly === true,
+    // 新条目 = 新目录实例:索引库按 instanceId 命名,使「索引寿命 = 目录实例寿命」。
+    // 于是「移除后重加」「folderId 兜回来复用」都只会打开全新的空索引,结构上不可能
+    // 继承上一轮的旧条目/旧墓碑(否则会把磁盘上已不存在的旧条目当删除广播出去)。
+    instanceId: generateFolderInstanceId(),
+    // 标记由调用方随目录创建一并写入(此处不做磁盘 IO);缺失即暂停该目录扫描。
+    markerChecked: true,
+  });
   return true;
 }
 
@@ -143,6 +157,7 @@ export function addSharedFolder(
   devices: string[],
   id?: string,
   remote?: boolean,
+  receiveOnly?: boolean,
 ): boolean {
   // 归一化前先拒绝相对路径:resolve 会把相对路径拼到 cwd 变成绝对路径,绕过 isAbsolute 校验,
   // 导致此前「rejects a relative path」的语义失效。必须在 resolve 之前判定。
@@ -162,10 +177,13 @@ export function addSharedFolder(
     mkdirSync(resolved, { recursive: true });
     created = true;
   }
+  // 建立挂载标记(幂等,best-effort):标记存在才允许扫描,缺失会被判为「目录不可信」
+  // 并暂停同步,用于区分「盘没挂/目录被清空」与「用户确实删除了文件」。
+  ensureFolderMarker(resolved);
   // 目录落盘与校验在锁外完成;共享条目登记放进 mutateConfig 临界区,保证
   // load→改→save 原子,避免 daemon 与 CLI 并发改配置时后写覆盖前写。
   mutateConfig(configPath, (config) => {
-    addSharedFolderTo(config, resolved, devices, id, remote ?? false);
+    addSharedFolderTo(config, resolved, devices, id, remote ?? false, receiveOnly === true);
   });
   return created;
 }
@@ -189,12 +207,14 @@ export function acceptFolderInvitation(
   folderId: string,
   deviceId: string,
   localPath?: string,
+  receiveOnly?: boolean,
 ): void {
   mutateConfig(configPath, (config) => {
     // 1) 同 folderId 复用
     const byId = config.sharedFolders.find((f) => folderIdFor(f) === folderId);
     if (byId) {
       byId.devices = [...new Set([...byId.devices, deviceId])];
+      if (receiveOnly) byId.receiveOnly = true;
       return;
     }
     const target = localPath?.trim();
@@ -215,10 +235,19 @@ export function acceptFolderInvitation(
       byPath.id = folderId;
       byPath.devices = [...new Set([...byPath.devices, deviceId])];
       byPath.remote = true;
+      if (receiveOnly) byPath.receiveOnly = true;
       return;
     }
-    // 3) 全新路径:复用 addSharedFolderTo 统一校验(嵌套 / folderId 唯一 / 创建)
-    addSharedFolderTo(config, resolved, [deviceId], folderId, true);
+    // 3) 全新路径:自动创建目录(与 addSharedFolder 的「自动创建」承诺一致)并建标记,
+    //    再复用 addSharedFolderTo 统一校验(嵌套 / folderId 唯一)。
+    //    注意此处只对新实例建标记:新实例索引为空,扫描不会产生任何墓碑,建标记是安全的;
+    //    而 case 1/2 命中的是既有实例(索引非空),若目录处于「未挂载/被清空」的坏状态,
+    //    贸然补标记反而会让下一次扫描把整棵空目录当成大规模删除 —— 交给启动收养(带危险态守卫)。
+    if (!existsSync(resolved)) {
+      mkdirSync(resolved, { recursive: true });
+    }
+    ensureFolderMarker(resolved);
+    addSharedFolderTo(config, resolved, [deviceId], folderId, true, receiveOnly === true);
   });
 }
 
@@ -250,14 +279,15 @@ export function setFolderGitignore(configPath: string, path: string, enabled: bo
  */
 export function removeSharedFolder(configPath: string, path: string, purgeIndex = false): void {
   const configDir = dirname(configPath);
-  let removedId: string | undefined;
+  let removedKey: string | undefined;
   mutateConfig(configPath, (config) => {
     const target = config.sharedFolders.find((f) => resolve(f.path) === resolve(path));
-    removedId = target ? folderIdFor(target) : undefined;
+    // 索引库按「目录实例 key」(instanceId ?? folderId)命名,移除时按同一口径定位
+    removedKey = target ? folderIndexKey(target) : undefined;
     config.sharedFolders = config.sharedFolders.filter((f) => resolve(f.path) !== resolve(path));
   });
-  if (purgeIndex && removedId) {
-    purgeFolderIndex(configDir, removedId);
+  if (purgeIndex && removedKey) {
+    purgeFolderIndex(configDir, removedKey);
   }
 }
 

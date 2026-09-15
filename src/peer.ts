@@ -38,6 +38,12 @@ export interface SyncPeerDeps {
   folderId: string;
   /** 记录一次同步变更(新增/修改/删除/冲突),由上层写入历史存储。 */
   onEvent?: (ev: SyncEventInput) => void;
+  /**
+   * 接收模式(只拉不推):本机只从对端拉取变更、应用对端删除,但**绝不**把本机
+   * 的本地新增/修改/删除反灌给对端。开启后:本地较新/本地墓碑不再外推,冲突
+   * 直接以对端版本覆盖本地。缺省 false = 双向同步。
+   */
+  receiveOnly?: boolean;
 }
 
 export interface SyncPeer {
@@ -75,7 +81,7 @@ const BLOCK_RETRY_LONG_MS = 30_000;
  * complete, then apply it via the executor.
  */
 export function createSyncPeer(deps: SyncPeerDeps): SyncPeer {
-  const { transport, localIndex, executor, readLocalBlock, deviceId, remoteDeviceId, root, onEvent, ignoreLines } = deps;
+  const { transport, localIndex, executor, readLocalBlock, deviceId, remoteDeviceId, root, onEvent, ignoreLines, receiveOnly } = deps;
   const pending = new Map<string, PendingEntry>();
   // 逐块跟踪超时重试:块响应丢失/丢弃时自动重发,避免文件永远收不齐
   const pendingBlocks = new Map<string, PendingBlockRequest>();
@@ -208,6 +214,7 @@ export function createSyncPeer(deps: SyncPeerDeps): SyncPeer {
       pendingBlocks.clear();
       pendingSendCount = 0;
       const remote = new Map(entries.map((e) => [e.path, e]));
+
       const actions = buildPlan(localIndex, remote);
       const sends: IndexEntry[] = [];
       // 本轮索引实际引用的 pending 路径:用于清理上一轮遗留的陈旧条目
@@ -216,16 +223,17 @@ export function createSyncPeer(deps: SyncPeerDeps): SyncPeer {
       for (const action of actions) {
         switch (action.kind) {
           case 'send':
-            sends.push(action.entry);
+            // 接收模式:本地较新的变更绝不外推,仅作为镜像忽略
+            if (!receiveOnly) sends.push(action.entry);
             break;
           case 'delete': {
             const localEntry = localIndex.get(action.path);
             const remoteEntry = remote.get(action.path);
             if (localEntry?.deleted) {
-              // 本地墓碑:传播给对端
-              sends.push(localEntry);
+              // 本地墓碑:接收模式下不外推(避免把完整端误删),双向模式才传播给对端
+              if (!receiveOnly) sends.push(localEntry);
             } else if (remoteEntry?.deleted) {
-              // 对端墓碑:本地删除
+              // 对端墓碑:本地删除。接收模式下同样执行——对端即权威源,删除也跟随
               await executor?.applyDelete(action.path, remoteEntry);
               localIndex.set(action.path, remoteEntry);
               onEvent?.({ ts: Date.now(), path: action.path, action: 'delete', direction: 'remote', deviceId: remoteDeviceId });
@@ -251,6 +259,21 @@ export function createSyncPeer(deps: SyncPeerDeps): SyncPeer {
           case 'conflict': {
             const remoteEntry = remote.get(action.path);
             const localEntry = localIndex.get(action.path);
+            if (receiveOnly) {
+              // 接收模式:本地变更不推送,冲突直接以对端版本覆盖本地(纯镜像语义)
+              if (remoteEntry) {
+                pending.set(remoteEntry.path, {
+                  kind: 'receive',
+                  entry: remoteEntry,
+                  blocks: new Array<Buffer | undefined>(remoteEntry.blocks.length),
+                  received: 0,
+                });
+                livePending.add(remoteEntry.path);
+                requestMissingBlocks(remoteEntry.path, remoteEntry);
+                await completeIfReady(remoteEntry.path);
+              }
+              break;
+            }
             if (remoteEntry && localEntry) {
               pending.set(remoteEntry.path, {
                 kind: 'conflict',

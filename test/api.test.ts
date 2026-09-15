@@ -1074,3 +1074,123 @@ describe('POST /api/self-update/check', () => {
     server.close();
   });
 });
+
+/** 发送原始二进制体:上传安装包走 application/octet-stream,不能经 JSON 序列化。 */
+function postBinary(
+  port: number,
+  path: string,
+  token: string | undefined,
+  body: Buffer,
+): Promise<{ status: number; body: unknown }> {
+  return new Promise((resolve, reject) => {
+    const req = request(
+      {
+        host: '127.0.0.1',
+        port,
+        path,
+        method: 'POST',
+        headers: {
+          ...(token ? { Authorization: `Bearer ${token}` } : {}),
+          'Content-Type': 'application/octet-stream',
+          'Content-Length': String(body.length),
+        },
+      },
+      (res) => {
+        res.setEncoding('utf8');
+        let data = '';
+        res.on('data', (chunk) => {
+          data += chunk;
+        });
+        res.on('end', () =>
+          resolve({ status: res.statusCode ?? 0, body: data === '' ? undefined : JSON.parse(data) }),
+        );
+      },
+    );
+    req.on('error', reject);
+    req.write(body);
+    req.end();
+  });
+}
+
+describe('上传安装包升级', () => {
+  it('inspect 需认证,且把请求体逐字节原样交给 deps', async () => {
+    const seen: Buffer[] = [];
+    const server = createControlServer({
+      token: 'secret',
+      getStatus: () => ({}),
+      inspectLocalPackage: async (tgz) => {
+        seen.push(tgz);
+        return { version: '0.3.0', name: '@wangmingfa/syncx', current: '0.2.14' };
+      },
+    });
+    server.listen(0, '127.0.0.1');
+    await once(server, 'listening');
+    const port = (server.address() as AddressInfo).port;
+
+    // 含 0x80 以上字节:若被当 utf8 解码就会变成 U+FFFD,包必然损坏
+    const payload = Buffer.from([0x1f, 0x8b, 0x00, 0xff, 0xfe, 0x80, 0x01]);
+    const denied = await postBinary(port, '/api/self-update/upload/inspect', undefined, payload);
+    expect(denied.status).toBe(401);
+    expect(seen).toHaveLength(0); // 无凭据时绝不能把包交给 deps
+
+    const ok = await postBinary(port, '/api/self-update/upload/inspect', 'secret', payload);
+    expect(ok.status).toBe(200);
+    expect(ok.body).toMatchObject({ ok: true, version: '0.3.0', current: '0.2.14' });
+    expect(seen[0]?.equals(payload)).toBe(true);
+    server.close();
+  });
+
+  it('inspect 把校验失败原因以 400 透出', async () => {
+    const server = createControlServer({
+      token: 'secret',
+      getStatus: () => ({}),
+      inspectLocalPackage: async () => {
+        throw new Error('更新包缺少 dist/syncx.js,结构异常,已放弃升级');
+      },
+    });
+    server.listen(0, '127.0.0.1');
+    await once(server, 'listening');
+    const port = (server.address() as AddressInfo).port;
+
+    const res = await postBinary(port, '/api/self-update/upload/inspect', 'secret', Buffer.from('x'));
+    expect(res.status).toBe(400);
+    expect(res.body).toMatchObject({ ok: false, error: expect.stringContaining('已放弃升级') });
+    server.close();
+  });
+
+  it('upload 成功后回传版本并触发优雅关闭', async () => {
+    let shutdowns = 0;
+    const server = createControlServer({
+      token: 'secret',
+      getStatus: () => ({}),
+      shutdown: () => {
+        shutdowns += 1;
+      },
+      selfUpdateUpload: async () => ({ version: '0.3.0' }),
+    });
+    server.listen(0, '127.0.0.1');
+    await once(server, 'listening');
+    const port = (server.address() as AddressInfo).port;
+
+    const res = await postBinary(port, '/api/self-update/upload', 'secret', Buffer.from('tgz-bytes'));
+    expect(res.status).toBe(200);
+    expect(res.body).toMatchObject({ ok: true, version: '0.3.0', restarting: true });
+    // 路由在响应后 150ms 才关闭(先让响应冲出内核缓冲)
+    await new Promise((r) => setTimeout(r, 400));
+    expect(shutdowns).toBe(1);
+    server.close();
+  });
+
+  it('upload / inspect 在依赖缺失时返回 503', async () => {
+    const server = createControlServer({ token: 'secret', getStatus: () => ({}) });
+    server.listen(0, '127.0.0.1');
+    await once(server, 'listening');
+    const port = (server.address() as AddressInfo).port;
+
+    const up = await postBinary(port, '/api/self-update/upload', 'secret', Buffer.from('x'));
+    expect(up.status).toBe(503);
+    const ins = await postBinary(port, '/api/self-update/upload/inspect', 'secret', Buffer.from('x'));
+    expect(ins.status).toBe(503);
+    server.close();
+  });
+});

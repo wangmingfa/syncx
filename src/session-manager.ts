@@ -13,13 +13,14 @@
  *  - 本地变更扫描(5s 周期由 cli 的定时器驱动)与配置热重载(reloadConfig)
  *  - P2P 自更新(upgradeFromPeer:请求对端 tgz → sha256 校验 → updater 接管)
  */
-import { readFileSync } from 'node:fs';
+import { existsSync, readFileSync } from 'node:fs';
 import { join, resolve } from 'node:path';
 import { randomBytes } from 'node:crypto';
 import type { Logger } from 'pino';
 import { WebSocket } from 'ws';
 
-import { loadConfig, folderIdFor, folderIndexPath, purgeFolderIndex, type SharedFolderConfig } from './config.js';
+import { loadConfig, folderIdFor, folderIndexKey, folderIndexPath, purgeFolderIndex, type SharedFolderConfig } from './config.js';
+import { FOLDER_MARKER, ensureFolderMarker, hasFolderMarker } from './marker.js';
 import { openIndexStore, type IndexStore } from './indexstore.js';
 import { createLocalExecutor, resolveSharePath, type LocalExecutor } from './executor.js';
 import { filterIndexedEntries, parseIgnoreRules, readFolderIgnoreLines } from './ignore.js';
@@ -44,6 +45,11 @@ import { reconnectDelayMs } from './args.js';
 /** 一个共享目录的运行期状态:索引、执行器与本地索引,随配置热重载增删。 */
 export interface FolderState {
   id: string;
+  /**
+   * 索引库命名 key(instanceId ?? folderId)。与 wire 身份 id 刻意解耦:
+   * wire 用 id 路由,索引按本机实例 key 命名,使「目录实例」与「索引寿命」绑定。
+   */
+  indexKey: string;
   path: string;
   index: IndexStore;
   executor: LocalExecutor;
@@ -109,8 +115,10 @@ export class SyncSessionManager {
   // 记录每个目录最近一次同步失败的错误信息(内存态,不落盘);同一目录再次出错覆盖,
   // 一轮完整扫描无新错误则清除(问题自愈后提示自动消失)。
   private readonly folderErrorsState = new Map<string, { message: string; ts: number }>();
-  // 待清理索引库:removeFolder 带 purgeIndex 时登记 folderId,等配置热重载关闭该目录的
+  // 待清理索引库:removeFolder 时登记「目录实例 key」,等配置热重载关闭该目录的
   // 索引连接后再删文件,规避 Windows 下 unlink 打开中的库报 EBUSY。
+  // 注:这只是「尽早清理」的优化,正确性不依赖它 —— 目录实例化(instanceId)保证新实例
+  // 永远打开新文件名的空库,残留的旧库即便没删掉也不会被复用;启动时的孤儿回收会兜底清掉。
   private readonly pendingIndexPurge = new Set<string>();
 
   // --- 对端连接去重与断线重连 ---
@@ -206,7 +214,9 @@ export class SyncSessionManager {
   /** 为一个共享目录创建运行期状态(索引/执行器/本地索引/忽略规则)。 */
   createFolderState(f: SharedFolderConfig): FolderState {
     const id = folderIdFor(f);
-    const index = openIndexStore(folderIndexPath(this.configDir, id));
+    const indexKey = folderIndexKey(f);
+    // 索引按「目录实例 key」命名:新实例必然打开全新空库,不可能继承上一轮的旧条目/旧墓碑
+    const index = openIndexStore(folderIndexPath(this.configDir, indexKey));
     const executor = this.captureFolderErrors(id, createLocalExecutor(f.path, index));
     // 忽略规则每设备本地:.gitignore(默认并入,可按目录关闭)+ .syncxignore(优先级更高)
     const ignoreLines = readFolderIgnoreLines(f.path, f.useGitignore !== false);
@@ -216,7 +226,7 @@ export class SyncSessionManager {
     // 索引为空 → 首扫是建基线(存量文件不算新增);索引有存量 → 首扫 diff 是
     // daemon 离线期间的真实改动,要写同步记录
     const baselinePending = index.listEntries().length === 0;
-    return { id, path: f.path, index, executor, localIndex, ignoreLines, transports: [], peers: new Map(), config: f, baselinePending };
+    return { id, indexKey, path: f.path, index, executor, localIndex, ignoreLines, transports: [], peers: new Map(), config: f, baselinePending };
   }
 
   /** 目录级错误列表(倒序),供 status 下发到目录卡。 */
@@ -300,6 +310,23 @@ export class SyncSessionManager {
       // 一轮扫描走到这里且后续无错误即视为「干净」:清除该目录上一次的错误提示,
       // 让问题自愈后目录卡上的错误横幅自动消失
       this.clearFolderError(folder.id);
+      // 挂载标记门禁:标记缺失 = 目录未挂载 / 被整体清空 → 跳过本轮扫描、绝不产生墓碑。
+      // 这是「盘不见了」与「用户删光了文件」之间唯一可靠的区分点(参照 Syncthing 的 .stfolder)。
+      // 目录卡上给出原因与恢复方式,而不是静默不同步;同一原因不重复刷日志。
+      if (!hasFolderMarker(folder.path)) {
+        const prev = this.folderErrorsState.get(folder.id);
+        if (!prev || !prev.message.includes('缺少挂载标记')) {
+          this.recordFolderError(
+            folder.id,
+            new Error(
+              `缺少共享目录标记 ${FOLDER_MARKER}(目录未挂载或已被整体清空):已暂停该目录同步以防误删。` +
+                `确认目录内容无误后,在界面移除并重新添加该目录即可恢复`,
+            ),
+            '目录不可信',
+          );
+        }
+        continue;
+      }
       // 每轮扫描重读忽略文件:.gitignore(按目录配置可关)+ .syncxignore,改动即生效
       let diff;
       try {
@@ -360,7 +387,9 @@ export class SyncSessionManager {
           this.recordFolderError(folder.id, error, `同步 ${path} 失败`);
         }
       }
-      if (sends.length > 0) {
+      // 接收模式:本地扫描仍更新本地索引(供对端索引比对与自愈),但绝不把本地
+      // 新增/修改/删除广播出去,从根上防止残缺端把完整端的文件误删/覆盖
+      if (sends.length > 0 && !folder.config.receiveOnly) {
         broadcastFolderUpdates(folder, sends);
       }
       folder.baselinePending = false;
@@ -511,6 +540,9 @@ export class SyncSessionManager {
       folderId: folder.id,
       // 远端推送的变更(新增/修改/删除/冲突)落盘为同步记录
       onEvent: (ev) => recordSyncEvent(this.configPath, { ...ev, folderId: folder.id }),
+      // 接收模式:本机只收不推(对端索引规划时跳过 send / 本地墓碑外推,
+      // 冲突以对端版本覆盖本地)
+      receiveOnly: folder.config.receiveOnly ?? false,
     });
     session.peers.set(folder.id, peer);
     folder.peers.set(session.remoteDeviceId, peer);
@@ -981,6 +1013,8 @@ export class SyncSessionManager {
 
       // 共享目录变更:新增/移除/更新
       const newFolderById = new Map(newConfig.sharedFolders.map((f) => [folderIdFor(f), f]));
+      // 路径 → 新 folderId:用于识别「同一路径被重新指派了 id」(接下邀请时的 id 对齐 / 手改配置)
+      const newIdByPath = new Map(newConfig.sharedFolders.map((f) => [resolve(f.path), folderIdFor(f)]));
       // 移除已删除的目录:关闭索引库,并从所有存活会话的路由表中摘除该目录
       for (const folder of this.folderStates) {
         if (!newFolderById.has(folder.id)) {
@@ -992,10 +1026,25 @@ export class SyncSessionManager {
           folder.peers.clear();
           folder.index.close();
           // 关闭连接后再删索引库:此时文件已无持有者,Windows 下也能安全 unlink。
-          if (this.pendingIndexPurge.has(folder.id)) {
-            this.pendingIndexPurge.delete(folder.id);
-            if (purgeFolderIndex(this.configDir, folder.id)) {
-              this.logger.info(`index purged: ${folderIndexPath(this.configDir, folder.id)}`);
+          // 两种情形都要删掉旧库:
+          //  1) 用户移除目录并勾选「同时删除索引库」→ pendingIndexPurge 已登记;
+          //  2) 同一路径的 folderId 被重新指派(id 对齐 / 手改配置)→ 旧 id 的索引库再无人
+          //     引用,属于不可达垃圾;留着会在 id 兜回来时复用旧条目与旧墓碑,成批误删对端。
+          const rekeyed =
+            newIdByPath.has(resolve(folder.path)) && newIdByPath.get(resolve(folder.path)) !== folder.id;
+          if (this.pendingIndexPurge.has(folder.indexKey) || rekeyed) {
+            const purged = purgeFolderIndex(this.configDir, folder.indexKey);
+            if (purged) {
+              this.pendingIndexPurge.delete(folder.indexKey);
+              this.logger.info(
+                `index purged${rekeyed ? ' (folder re-keyed)' : ''}: ${folderIndexPath(this.configDir, folder.indexKey)}`,
+              );
+            } else if (!existsSync(folderIndexPath(this.configDir, folder.indexKey))) {
+              // 文件本就不存在(此前已删):视为清理完成,不再反复重试
+              this.pendingIndexPurge.delete(folder.indexKey);
+            } else {
+              // 仍被占用:保留登记,下次 reload / 重启后重试,避免静默残留
+              this.logger.warn(`index purge failed, will retry: ${folderIndexPath(this.configDir, folder.indexKey)}`);
             }
           }
         }
@@ -1015,17 +1064,60 @@ export class SyncSessionManager {
             this.recordFolderError(folderIdFor(f), error, '加载目录失败');
             continue;
           }
+          // 新目录实例的索引必然为空 → 扫描只可能「发送」、绝不可能产生墓碑(墓碑只来自
+          // 索引里已有的条目),此时补挂载标记是安全的。覆盖「手改 config.json 热重载新增
+          // 目录」这条不经 addSharedFolder 的路径,否则新目录会因缺标记被暂停并报错。
+          if (!hasFolderMarker(f.path) && folder.index.listEntries().length === 0) {
+            if (ensureFolderMarker(f.path)) this.logger.info(`mount marker established: ${f.path}`);
+          }
           this.folderStates.push(folder);
         } else {
+          const nextIndexKey = folderIndexKey(f);
+          if (existing.indexKey !== nextIndexKey) {
+            // 目录实例变化(同 id 移除后重加 / 接受邀请重新指派):必须换用新实例的索引库。
+            // 若继续沿用旧库,「目录实例化」就形同虚设 —— 旧条目/旧墓碑仍会参与对账,
+            // 把磁盘上已不存在的旧条目当「本地删除」广播出去,成批删掉对端文件。
+            // 先建新状态(失败则保留旧状态继续运行),再关旧库并替换,避免中途失败留下空档。
+            let replacement: FolderState;
+            try {
+              replacement = this.createFolderState(f);
+            } catch (error) {
+              this.recordFolderError(id, error, '加载目录失败');
+              continue;
+            }
+            this.logger.info(`config updated: folder instance changed, reloading ${f.path}`);
+            for (const session of this.activeSessions) {
+              if (session.peers.has(id)) this.detachFolderFromSession(session, existing);
+            }
+            existing.peers.clear();
+            existing.index.close();
+            if (purgeFolderIndex(this.configDir, existing.indexKey)) {
+              this.logger.info(
+                `index purged (folder instance changed): ${folderIndexPath(this.configDir, existing.indexKey)}`,
+              );
+            }
+            const idx = this.folderStates.indexOf(existing);
+            if (idx !== -1) this.folderStates[idx] = replacement;
+            // 新实例的同步通道由下方 reconcile 统一挂到所有存活会话上
+            continue;
+          }
           if (existing.path !== f.path) {
-            // 路径变更:以新路径重建执行器与本地索引(索引库按 id 复用)
+            // 路径变更:以新路径重建执行器与本地索引(索引库按目录实例 key 复用)
             existing.path = f.path;
             existing.executor = createLocalExecutor(f.path, existing.index);
             existing.localIndex = new Map(
               filterIndexedEntries(parseIgnoreRules(existing.ignoreLines), existing.index.listEntries()).map((e) => [e.path, e]),
             );
           }
+          // 接收模式变更:旧 peer 仍以旧模式运行,需从所有会话摘除后由下方 reconcile 重建
+          const prevReceiveOnly = existing.config.receiveOnly ?? false;
+          const nextReceiveOnly = f.receiveOnly ?? false;
           existing.config = f;
+          if (prevReceiveOnly !== nextReceiveOnly) {
+            for (const session of this.activeSessions) {
+              if (session.peers.has(id)) this.detachFolderFromSession(session, existing);
+            }
+          }
         }
       }
 
@@ -1047,9 +1139,12 @@ export class SyncSessionManager {
     }
   }
 
-  /** 标记某目录的索引库需在下次热重载关闭连接后删除(跨平台安全清理,规避 Windows EBUSY)。 */
-  markIndexForPurge(folderId: string): void {
-    this.pendingIndexPurge.add(folderId);
+  /**
+   * 标记某目录的索引库需在下次热重载关闭连接后删除(跨平台安全清理,规避 Windows EBUSY)。
+   * @param indexKey 目录实例 key(instanceId ?? folderId),与索引库文件命名口径一致。
+   */
+  markIndexForPurge(indexKey: string): void {
+    this.pendingIndexPurge.add(indexKey);
   }
 
   /** daemon 优雅关闭:清重连定时器、停心跳、断开所有 peer socket、关闭索引库。 */

@@ -159,16 +159,20 @@ export interface ExtractOptions {
 
 /**
  * 解压 tgz 到临时目录并做四道校验:大小 → 包结构(package.json + dist/syncx.js)
- * → 包名/版本与宣告一致 → 实跑 `node dist/syncx.js -v`,输出必须等于宣告版本
+ * → 包名/版本合法 → 实跑 `node dist/syncx.js -v`,输出必须等于包内版本
  * (temp 里产物旁边就是新 package.json,-v 输出的就是新包自己的版本)。
  *
- * @returns root:staging 目录(解压出的包根);workDir:本次更新的临时工作目录。
+ * @param expectedVersion 来源「宣告」的目标版本(npm registry / P2P 对端);传入时必须与
+ *   包内版本一致。**上传来源没有宣告**——本地打包出来的包,版本只能由包自己说了算,
+ *   此时传 undefined,以包内 package.json 的 version 为权威。
+ * @returns root:staging 目录(解压出的包根);workDir:本次更新的临时工作目录;
+ *   version:包内 package.json 的版本号(已校验格式)。
  */
 export async function extractAndValidate(
   tgz: Buffer,
-  expectedVersion: string,
+  expectedVersion: string | undefined,
   opts: ExtractOptions = {},
-): Promise<{ root: string; workDir: string }> {
+): Promise<{ root: string; workDir: string; version: string }> {
   const minBytes = opts.minBytes ?? MIN_PACKAGE_BYTES;
   if (tgz.length < minBytes) throw new Error(`更新包仅 ${tgz.length} 字节,疑似损坏,已放弃升级`);
   if (tgz.length > MAX_PACKAGE_BYTES) throw new Error(`更新包 ${tgz.length} 字节超出上限,疑似损坏,已放弃升级`);
@@ -208,8 +212,15 @@ export async function extractAndValidate(
   if (pkg.name !== '@wangmingfa/syncx' && pkg.name !== 'syncx') {
     throw fail(`更新包包名异常(${String(pkg.name)}),已放弃升级`);
   }
-  if (pkg.version !== expectedVersion) {
-    throw fail(`更新包版本(${String(pkg.version)})与宣告(${expectedVersion})不一致,已放弃升级`);
+  // 包内版本是权威值:上传来源没有「宣告版本」,只能由包自己说了算;
+  // 其余来源用它来比对宣告,防止传输错位把别的包塞进来。
+  const version = typeof pkg.version === 'string' ? pkg.version.trim() : '';
+  // 允许 semver 预发布后缀与构建元数据:本地测试包常用 `0.2.14-local.1` 区分多次构建
+  if (!/^\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?(?:\+[0-9A-Za-z.-]+)?$/.test(version)) {
+    throw fail(`更新包版本号异常(${version || '(缺失)'}),已放弃升级`);
+  }
+  if (expectedVersion !== undefined && version !== expectedVersion) {
+    throw fail(`更新包版本(${version})与宣告(${expectedVersion})不一致,已放弃升级`);
   }
   const bundle = join(root, 'dist', 'syncx.js');
   if (!existsSync(bundle)) throw fail('更新包缺少 dist/syncx.js,结构异常,已放弃升级');
@@ -220,14 +231,48 @@ export async function extractAndValidate(
   if (opts.verify !== false) {
     // 实跑校验:temp 中产物旁边就是新 package.json,-v 输出的就是新包自己的版本
     const printed = await printVersion(opts.nodeExe ?? process.execPath, bundle, opts.verifyTimeoutMs ?? 15_000);
-    if (printed !== expectedVersion) {
+    if (printed !== version) {
       rmSync(work, { recursive: true, force: true });
-      throw new Error(
-        `更新包自校验失败:期望版本 ${expectedVersion},实际输出 ${printed || '(无输出)'},已放弃升级`,
-      );
+      throw new Error(`更新包自校验失败:期望版本 ${version},实际输出 ${printed || '(无输出)'},已放弃升级`);
     }
   }
-  return { root, workDir: work };
+  return { root, workDir: work, version };
+}
+
+/**
+ * 只读预检上传的安装包:走完整套解压与校验(结构 / 包名 / 版本格式 / 实跑 `-v`),
+ * 读出包内版本与包名后立即清理临时目录,不派发 updater、不改动任何运行期状态。
+ * 供 Web UI「上传安装包」在用户按下确认之前,先把「将安装哪个版本」摆出来。
+ */
+export async function inspectPackage(
+  tgz: Buffer,
+  opts: ExtractOptions = {},
+): Promise<{ version: string; name: string }> {
+  // 上传来源没有宣告版本,以包内 package.json 的 version 为准
+  const { root, workDir, version } = await extractAndValidate(tgz, undefined, opts);
+  try {
+    let name = '';
+    try {
+      name = String((JSON.parse(readFileSync(join(root, 'package.json'), 'utf8')) as { name?: unknown }).name ?? '');
+    } catch {
+      // 结构校验已保证 package.json 可解析,这里读不到只影响展示名,不影响升级
+    }
+    return { version, name };
+  } finally {
+    rmSync(workDir, { recursive: true, force: true });
+  }
+}
+
+/**
+ * 目标目录是否像「源码仓库」而不是「安装目录」。
+ * 判据:含 .git 目录或 src/main.ts(本项目源码入口)。
+ *
+ * 整包替换是「目录级换入」,而新包只含 package.json + dist/syncx.js —— 若目标目录是仓库根
+ * (直接 `node dist/syncx.js` 从仓库里跑就是这个情况),换入会把 src/、web/、test/ 一并删掉。
+ * npm / P2P 来源同样有这个隐患,故在自更新入口统一拦截。
+ */
+function looksLikeSourceCheckout(dir: string): boolean {
+  return existsSync(join(dir, '.git')) || existsSync(join(dir, 'src', 'main.ts'));
 }
 
 /** 用 node 执行 `<file> -v`,返回 stdout(空串 = 启动失败/超时)。 */
@@ -349,6 +394,8 @@ export interface SelfUpdateRunOptions {
   verify?: boolean;
   /** tgz 大小下界(测试注入)。 */
   minBytes?: number;
+  /** 跳过「目标目录疑似源码仓库」护栏(仅供测试构造极端目录时使用,生产恒不传)。 */
+  allowUnsafeTargetDir?: boolean;
 }
 
 /**
@@ -356,17 +403,27 @@ export interface SelfUpdateRunOptions {
  * 调用方(API 路由)响应完 HTTP 后触发优雅关闭;updater 检测到旧进程
  * 退出后完成换入与新 daemon 拉起。不阻塞当前请求,也不自行退出。
  *
- * @returns version:目标版本;doneFile:updater 结果文件路径(升级完成后写入
- *   {ok, version|rolledBack, error}),供测试轮询与新 daemon 启动后上报。
+ * @param expectedVersion 来源宣告的目标版本;上传来源传 undefined,以包内版本为准。
+ * @returns version:实际将被安装的版本(= 包内版本);doneFile:updater 结果文件路径
+ *   (升级完成后写入 {ok, version|rolledBack, error}),供测试轮询与新 daemon 启动后上报。
  */
 export async function runSelfUpdate(
   tgz: Buffer,
-  expectedVersion: string,
+  expectedVersion: string | undefined,
   opts: SelfUpdateRunOptions = {},
 ): Promise<{ version: string; doneFile: string }> {
-  const { root: staging, workDir } = await extractAndValidate(tgz, expectedVersion, opts);
+  const { root: staging, workDir, version } = await extractAndValidate(tgz, expectedVersion, opts);
   const targetDir = opts.targetDir ?? selfPackageDir();
   if (!targetDir) throw new Error('无法定位当前安装目录,已放弃升级');
+  // 护栏:目标是源码仓库时,整包替换会把 src/ 等源码一起删掉,直接拒绝。
+  // 触发场景:直接 `node dist/syncx.js start` 从仓库里跑 —— 此时安装目录就是仓库根。
+  if (!opts.allowUnsafeTargetDir && looksLikeSourceCheckout(targetDir)) {
+    rmSync(workDir, { recursive: true, force: true });
+    throw new Error(
+      `当前运行目录是源码仓库(${targetDir}),整包替换会删除源码,已拒绝升级。` +
+        '请在独立安装目录运行后再升级(如 npm i -g --prefix <目录> <tgz>,或先把产物拷到独立目录)。',
+    );
+  }
 
   const doneFile = join(workDir, 'update-done.json');
   const updaterFile = join(workDir, 'updater.mjs');
@@ -380,7 +437,7 @@ export async function runSelfUpdate(
     doneFile,
     waitMs: opts.waitMs ?? OLD_EXIT_WAIT_MS,
     verifyMs: opts.verifyMs ?? NEW_ALIVE_VERIFY_MS,
-    version: expectedVersion,
+    version,
     workDir,
   };
   writeFileSync(jobFile, JSON.stringify(job));
@@ -388,7 +445,7 @@ export async function runSelfUpdate(
 
   const child = spawn(job.execPath, [updaterFile, jobFile], { detached: true, stdio: 'ignore' });
   child.unref();
-  return { version: expectedVersion, doneFile };
+  return { version, doneFile };
 }
 
 /** 新 daemon 启动数秒后读取 updater 写下的结果文件并记日志(用后即删)。

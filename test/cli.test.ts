@@ -299,8 +299,8 @@ describe('readFolderIgnoreLines', () => {
       writeFileSync(join(dir, '.gitignore'), 'node_modules/\n*.log\n!keep.log\n');
       writeFileSync(join(dir, '.syncxignore'), 'secret.txt\n!*.log\n');
       const lines = readFolderIgnoreLines(dir, true).map((l) => l.trim()).filter((l) => l !== '');
-      // .gitignore 在前,.syncxignore 在后(优先级更高,负向规则可覆盖)
-      expect(lines).toEqual(['node_modules/', '*.log', '!keep.log', 'secret.txt', '!*.log']);
+      // 内置默认忽略(.git/.hg/.svn/.syncx-trash/.syncx-folder)在前,其次 .gitignore,最后 .syncxignore(优先级最高)
+      expect(lines).toEqual(['.git', '.hg', '.svn', '.syncx-trash', '.syncx-folder', 'node_modules/', '*.log', '!keep.log', 'secret.txt', '!*.log']);
 
       const rules = parseIgnoreRules(readFolderIgnoreLines(dir, true));
       expect(isIgnored(rules, 'node_modules', true)).toBe(true);
@@ -319,8 +319,34 @@ describe('readFolderIgnoreLines', () => {
       const rules = parseIgnoreRules(readFolderIgnoreLines(dir, false));
       expect(isIgnored(rules, 'node_modules/x.js', false)).toBe(false); // .gitignore 未并入
       expect(isIgnored(rules, 'secret.txt', false)).toBe(true);
-      // 无任何忽略文件时不抛错,返回空规则
-      expect(readFolderIgnoreLines(mkdtempSync(join(tmpdir(), 'syncx-ignore-empty')), true)).toEqual([]);
+      // 无任何忽略文件时不抛错,仅返回内置默认忽略(避免把 .git 等当普通目录同步)
+      expect(readFolderIgnoreLines(mkdtempSync(join(tmpdir(), 'syncx-ignore-empty')), true)).toEqual([
+        '.git',
+        '.hg',
+        '.svn',
+        '.syncx-trash',
+        '.syncx-folder',
+      ]);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it('ignores VCS directories (.git/.hg/.svn) by default and is overridable via .syncxignore', () => {
+    const dir = mkdtempSync(join(tmpdir(), 'syncx-ignore-builtin'));
+    try {
+      const rules = parseIgnoreRules(readFolderIgnoreLines(dir, true));
+      expect(isIgnored(rules, '.git/config', false)).toBe(true);
+      expect(isIgnored(rules, '.hg/store/foo', false)).toBe(true);
+      // 挂载标记是 syncx 自身元数据,必须忽略:否则标记文件本身会被同步/生成墓碑,
+      // 破坏「标记存在 = 目录可信」的判定
+      expect(isIgnored(rules, '.syncx-folder', false)).toBe(true);
+      expect(isIgnored(rules, 'src/app.ts', false)).toBe(false); // 普通文件不受内置忽略影响
+
+      // 用户用 .syncxignore 负向规则显式覆盖,可重新同步 .git
+      writeFileSync(join(dir, '.syncxignore'), '!.git\n');
+      const overridden = parseIgnoreRules(readFolderIgnoreLines(dir, true));
+      expect(isIgnored(overridden, '.git/config', false)).toBe(false);
     } finally {
       rmSync(dir, { recursive: true, force: true });
     }

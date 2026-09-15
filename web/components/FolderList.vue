@@ -11,6 +11,7 @@ const {
   newPath,
   newFolderId,
   newFolderDevices,
+  newFolderReceiveOnly,
   addFolder,
   askRemoveFolder,
   openEditDevices,
@@ -56,6 +57,9 @@ const {
         </div>
         <p v-else class="confirm-note-extra confirm-note-extra--flush">还没有已配对的设备,可先添加目录,稍后在卡片上指派。</p>
       </n-checkbox-group>
+      <n-checkbox v-model:checked="newFolderReceiveOnly" class="ro-check">
+        接收模式(只拉不推):只从对端拉取变更,不把本地改动同步出去
+      </n-checkbox>
       <div class="add-form-actions">
         <n-button quaternary :disabled="busy" @click="toggleAddFolder">取消</n-button>
         <n-button type="primary" attr-type="submit" :disabled="busy">添加</n-button>
@@ -78,6 +82,7 @@ const {
           </svg>
         </span>
         <span class="item-title">{{ f.path }}</span>
+        <span v-if="f.receiveOnly" class="ro-badge" title="接收模式:只拉不推,本机改动不会同步出去">接收</span>
         <n-button size="small" tertiary :disabled="busy" @click="openHistory(f)">记录</n-button>
         <n-button
           size="small"

@@ -13,6 +13,8 @@ export interface FolderInfo {
   devices: string[];
   /** 是否遵循 .gitignore 忽略规则;后端缺省 true(未显式关闭都视为开启)。 */
   useGitignore?: boolean;
+  /** 接收模式(只拉不推):本机只从对端拉取变更、应用对端删除,绝不把本地变更反灌对端。 */
+  receiveOnly?: boolean;
 }
 
 export interface DeviceInfo {
@@ -66,6 +68,16 @@ export interface StatusData {
   folderErrors?: FolderErrorItem[];
   /** npm 检查到的可用更新(打包态且发现更高版本时才有值)。 */
   updateAvailable?: { latest: string; current: string } | null;
+}
+
+/** 上传安装包的服务端只读预检结果(不改动任何状态,仅用于确认前展示)。 */
+export interface UploadPackageInfo {
+  /** 包内 package.json 的版本号 —— 即安装后将要运行的版本。 */
+  version: string;
+  /** 包名(应为 @wangmingfa/syncx / syncx)。 */
+  name: string;
+  /** 本机当前运行版本,用于对比展示。 */
+  current: string;
 }
 
 /** 一条同步记录(history 弹窗)。 */

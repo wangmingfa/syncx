@@ -8,6 +8,7 @@ import type {
   OfferInfo,
   StatusData,
   SyncProgressItem,
+  UploadPackageInfo,
 } from '../types';
 import type { ToastKind } from './useToast';
 
@@ -49,6 +50,7 @@ export interface StatusContext {
   newPath: Ref<string>;
   newFolderId: Ref<string>;
   newFolderDevices: Ref<string[]>;
+  newFolderReceiveOnly: Ref<boolean>;
   askRemoveFolder: (path: string) => void;
   openEditDevices: (f: FolderInfo) => void;
   openHistory: (f: FolderInfo) => void;
@@ -59,6 +61,7 @@ export interface StatusContext {
 
   // 邀请
   offerPaths: Record<string, string>;
+  offerReceiveOnly: Record<string, boolean>;
   reusedFolderPath: (offer: OfferInfo) => string | undefined;
   acceptOffer: (offer: OfferInfo) => Promise<void>;
   declineOffer: (offer: OfferInfo) => Promise<void>;
@@ -71,6 +74,12 @@ export interface StatusContext {
   upgrading: Ref<boolean>;
   askSelfUpdate: (u: { latest: string; current: string }) => void;
   checkForUpdate: () => Promise<void>;
+  /** 上传本地安装包升级:弹窗由 StatusPage 挂载,入口在顶栏。 */
+  uploadOpen: Ref<boolean>;
+  openUpload: () => void;
+  closeUpload: () => void;
+  inspectUpload: (file: File) => Promise<UploadPackageInfo>;
+  applyUpload: (file: File) => Promise<void>;
   authOpen: Ref<boolean>;
   logout: () => Promise<void>;
 

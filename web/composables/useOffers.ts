@@ -9,6 +9,7 @@ import type { OfferInfo } from '../types';
 /** 待确认项:对方推送的配对 / 目录共享邀请(accept/decline/restore + pending/declined 分组)。 */
 export function useOffers(deps: CoreDeps): {
   offerPaths: Record<string, string>;
+  offerReceiveOnly: Record<string, boolean>;
   reusedFolderPath: (offer: OfferInfo) => string | undefined;
   acceptOffer: (offer: OfferInfo) => Promise<void>;
   declineOffer: (offer: OfferInfo) => Promise<void>;
@@ -22,6 +23,8 @@ export function useOffers(deps: CoreDeps): {
 
   // 目录共享邀请需要本机落地路径,按 offer id 暂存输入框内容
   const offerPaths = reactive<Record<string, string>>({});
+  /** 接受目录邀请时是否设为接收模式(只拉不推),按 offer id 暂存勾选状态。 */
+  const offerReceiveOnly = reactive<Record<string, boolean>>({});
 
   /**
    * 邀请的目录 id 在本机已有对应目录时返回其本地路径 → 直接复用,不再要求用户重填。
@@ -47,7 +50,10 @@ export function useOffers(deps: CoreDeps): {
       await apiJson(`/api/offers/${encodeURIComponent(offer.id)}/accept`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ localPath }),
+        body: JSON.stringify({
+          localPath,
+          receiveOnly: offer.kind === 'folder' ? offerReceiveOnly[offer.id] === true : undefined,
+        }),
       });
       showToast(offer.kind === 'folder' ? '已接受目录共享,开始同步' : '已接受配对', 'alert');
       await refreshStatus();
@@ -98,6 +104,7 @@ export function useOffers(deps: CoreDeps): {
 
   return {
     offerPaths,
+    offerReceiveOnly,
     reusedFolderPath,
     acceptOffer,
     declineOffer,

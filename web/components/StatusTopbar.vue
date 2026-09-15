@@ -2,7 +2,7 @@
 import { NButton } from 'naive-ui';
 import { useStatusContext } from '../composables/statusContext';
 
-const { status, busy, checkForUpdate, openLogs, openGuide, openAuth, logout } = useStatusContext();
+const { status, busy, checkForUpdate, openUpload, openLogs, openGuide, openAuth, logout } = useStatusContext();
 </script>
 
 <template>
@@ -37,6 +37,17 @@ const { status, busy, checkForUpdate, openLogs, openGuide, openAuth, logout } = 
         </svg>
       </template>
       检查更新
+    </n-button>
+
+    <n-button tertiary :disabled="busy" @click="openUpload">
+      <template #icon>
+        <svg viewBox="0 0 24 24" width="15" height="15" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+          <path d="M12 17V5" />
+          <path d="m7 10 5-5 5 5" />
+          <path d="M4 17v2a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2v-2" />
+        </svg>
+      </template>
+      上传升级
     </n-button>
 
     <n-button tertiary @click="openLogs">

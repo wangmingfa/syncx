@@ -6,6 +6,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import {
   extractAndValidate,
+  inspectPackage,
   packSelfTgz,
   runSelfUpdate,
   sha256Hex,
@@ -185,4 +186,93 @@ describe('runSelfUpdate', () => {
     expect(existsSync(join(targetDir, 'dist', 'syncx.js'))).toBe(true);
     rmSync(work, { recursive: true, force: true });
   }, 30_000);
+});
+
+describe('上传来源:包内自带版本(无宣告)', () => {
+  it('extractAndValidate 传 undefined 时采用包内版本', async () => {
+    const work = mkdtempSync(join(tmpdir(), 'syncx-test-nover-'));
+    const pkgDir = makeFakePackage(work, 'pkg', '1.4.0');
+    const tgz = tgzDir(pkgDir);
+
+    const staged = await extractAndValidate(tgz, undefined, { minBytes: 16, verify: false });
+
+    expect(staged.version).toBe('1.4.0');
+    rmSync(staged.workDir, { recursive: true, force: true });
+    rmSync(work, { recursive: true, force: true });
+  });
+
+  it('inspectPackage 读出包内版本与包名,并清理临时目录', async () => {
+    const work = mkdtempSync(join(tmpdir(), 'syncx-test-inspect-'));
+    const pkgDir = makeFakePackage(work, 'pkg', '0.3.1');
+    const tgz = tgzDir(pkgDir);
+
+    const info = await inspectPackage(tgz, { minBytes: 16, verify: false });
+
+    expect(info.version).toBe('0.3.1');
+    expect(info.name).toBe('@wangmingfa/syncx');
+    rmSync(work, { recursive: true, force: true });
+  });
+
+  it('inspectPackage 拒绝版本号非法的包', async () => {
+    const work = mkdtempSync(join(tmpdir(), 'syncx-test-inspect-bad-'));
+    const root = join(work, 'pkg');
+    mkdirSync(join(root, 'dist'), { recursive: true });
+    writeFileSync(join(root, 'package.json'), JSON.stringify({ name: 'syncx', version: 'not-a-version' }));
+    writeFileSync(join(root, 'dist', 'syncx.js'), '#!/usr/bin/env node\nprocess.exit(0);\n');
+    const tgz = tgzDir(root);
+
+    await expect(inspectPackage(tgz, { minBytes: 16, verify: false })).rejects.toThrow('版本号异常');
+    rmSync(work, { recursive: true, force: true });
+  });
+
+  it('上传包整包替换后按包内版本落地', async () => {
+    const work = mkdtempSync(join(tmpdir(), 'syncx-test-upload-'));
+    const install = join(work, 'install');
+    mkdirSync(install, { recursive: true });
+    makeFakePackage(install, 'syncx', '0.1.0');
+    const targetDir = join(install, 'syncx');
+    const stagingSrc = makeFakePackage(work, 'newpkg', '0.5.0');
+    const tgz = tgzDir(stagingSrc);
+    const dead = spawn(process.execPath, ['-e', 'process.exit(0)']);
+    const deadPid = dead.pid as number;
+    await new Promise<void>((resolve) => dead.on('exit', resolve));
+
+    const { doneFile, version } = await runSelfUpdate(tgz, undefined, {
+      targetDir,
+      minBytes: 16,
+      verify: false,
+      oldPid: deadPid,
+      waitMs: 10_000,
+      verifyMs: 400,
+      restartArgs: ['-e', 'setTimeout(() => {}, 1200)'],
+    });
+
+    expect(version).toBe('0.5.0');
+    await waitForFile(doneFile);
+    const result = JSON.parse(readFileSync(doneFile, 'utf8')) as { ok?: boolean; version?: string };
+    expect(result.ok).toBe(true);
+    expect(result.version).toBe('0.5.0');
+    expect(readFileSync(join(targetDir, 'package.json'), 'utf8')).toContain('0.5.0');
+    rmSync(work, { recursive: true, force: true });
+  }, 30_000);
+});
+
+describe('源码仓库护栏', () => {
+  it('目标目录疑似源码仓库时拒绝整包替换,源码原样保留', async () => {
+    const work = mkdtempSync(join(tmpdir(), 'syncx-test-guard-'));
+    // 造一个「仓库根」:含 src/main.ts,整包替换会把它删掉
+    const repo = join(work, 'repo');
+    mkdirSync(join(repo, 'src'), { recursive: true });
+    writeFileSync(join(repo, 'src', 'main.ts'), '// source entry\n');
+    makeFakePackage(work, 'newpkg', '0.2.0');
+    const tgz = tgzDir(join(work, 'newpkg'));
+
+    await expect(
+      runSelfUpdate(tgz, '0.2.0', { targetDir: repo, minBytes: 16, verify: false }),
+    ).rejects.toThrow('源码仓库');
+
+    // 关键:拒绝必须是「什么都没动」,源码原样保留
+    expect(existsSync(join(repo, 'src', 'main.ts'))).toBe(true);
+    rmSync(work, { recursive: true, force: true });
+  });
 });

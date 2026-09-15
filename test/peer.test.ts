@@ -614,3 +614,135 @@ describe('sync peer session', () => {
     rmDir(dir);
   });
 });
+
+describe('receive-only mode (只拉不推)', () => {
+  function fakeTransport() {
+    const sentEntries: ReturnType<typeof entry>[] = [];
+    const requests: Array<Record<string, unknown>> = [];
+    const responses: Array<Record<string, unknown>> = [];
+    return {
+      transport: {
+        sendEntries(entries: ReturnType<typeof entry>[]): void {
+          sentEntries.push(...entries);
+        },
+        sendBlockRequest(request: Record<string, unknown>): void {
+          requests.push(request);
+        },
+        sendBlockResponse(response: Record<string, unknown>): void {
+          responses.push(response);
+        },
+      } satisfies PeerTransport,
+      sentEntries,
+      requests,
+      responses,
+    };
+  }
+
+  it('does not push local-newer entries to the peer', async () => {
+    const { transport, sentEntries, requests } = fakeTransport();
+    const local = new Map([['local.txt', entry('local.txt', [['dev-a', 2]], ['l1'])]]);
+    const peer = createSyncPeer({
+      transport,
+      localIndex: local,
+      executor: null as never,
+      readLocalBlock: () => Buffer.from(''),
+      deviceId: 'DEV-A',
+      receiveOnly: true,
+    });
+
+    const remote = [
+      entry('local.txt', [['dev-a', 1]], ['l0']),
+      entry('remote.txt', [['dev-b', 3]], ['r1', 'r2'], 200),
+    ];
+    await peer.onPeerIndex(remote);
+
+    // 本地较新的 local.txt 不外卖;远端较新的 remote.txt 仍被拉取(发出块请求)
+    expect(sentEntries).toEqual([]);
+    expect(requests).toEqual([
+      { deviceId: 'DEV-A', path: 'remote.txt', blockIndex: 0, hash: 'r1' },
+      { deviceId: 'DEV-A', path: 'remote.txt', blockIndex: 1, hash: 'r2' },
+    ]);
+  });
+
+  it('does not propagate a local tombstone to the peer', async () => {
+    const { transport, sentEntries } = fakeTransport();
+    // 本地已删除(local.txt 为墓碑),对端仍持有该文件
+    const local = new Map([['local.txt', entry('local.txt', [['dev-a', 2]], ['l1'], 100, true)]]);
+    const peer = createSyncPeer({
+      transport,
+      localIndex: local,
+      executor: null as never,
+      readLocalBlock: () => Buffer.from(''),
+      deviceId: 'DEV-A',
+      receiveOnly: true,
+    });
+
+    const remote = [entry('local.txt', [['dev-b', 1]], ['x1'], 100)];
+    await peer.onPeerIndex(remote);
+
+    // 接收模式下本地墓碑不外推:对端不会被通知删除(否则会误删完整端)
+    expect(sentEntries).toEqual([]);
+  });
+
+  it('applies a remote tombstone locally (对端删除仍跟随)', async () => {
+    const { transport, sentEntries } = fakeTransport();
+    const local = new Map([['gone.txt', entry('gone.txt', [['dev-a', 1]], ['g1'])]]);
+    const peer = createSyncPeer({
+      transport,
+      localIndex: local,
+      executor: null as never,
+      readLocalBlock: () => Buffer.from(''),
+      deviceId: 'DEV-A',
+      receiveOnly: true,
+    });
+
+    // 对端删除了 gone.txt:接收模式仍应用该删除(纯镜像语义)
+    await peer.onPeerIndex([entry('gone.txt', [['dev-b', 2]], [], 0, true)]);
+    expect(sentEntries).toEqual([]);
+    expect(local.get('gone.txt')?.deleted).toBe(true);
+  });
+
+  it('resolves a conflict by taking the remote version (no local conflict copy)', async () => {
+    const dir = mkdtempSync(join(tmpdir(), 'syncx-peer-ro-'));
+    const root = join(dir, 'share');
+    mkdirSync(root, { recursive: true });
+    const index = openIndexStore(join(dir, 'index.db'));
+    const executor = createLocalExecutor(root, index);
+    const { transport } = fakeTransport();
+
+    // 本地与对端都改了 shared.txt,版本向量分叉 → 在双向模式里是 conflict
+    const local = new Map([
+      ['shared.txt', entry('shared.txt', [['dev-a', 2]], [hashBlock(Buffer.from('local-side'))], 10)],
+    ]);
+    const peer = createSyncPeer({
+      transport,
+      localIndex: local,
+      executor,
+      readLocalBlock: () => Buffer.from(''),
+      deviceId: 'DEV-A',
+      remoteDeviceId: 'DEV-B',
+      root,
+      receiveOnly: true,
+    });
+
+    const remoteContent = Buffer.from('remote-side');
+    await peer.onPeerIndex([
+      entry('shared.txt', [['dev-b', 2]], [hashBlock(remoteContent)], remoteContent.length),
+    ]);
+    peer.onBlockResponse({
+      deviceId: 'DEV-B',
+      path: 'shared.txt',
+      blockIndex: 0,
+      hash: hashBlock(remoteContent),
+      data: remoteContent,
+    });
+    await new Promise((r) => setTimeout(r, 10));
+
+    // 冲突以对端版本覆盖本地,且不应生成 .sync-conflict- 副本
+    expect(readFileSync(join(root, 'shared.txt'))).toEqual(remoteContent);
+    expect(readdirSync(root).filter((n) => n.includes('.sync-conflict-'))).toHaveLength(0);
+
+    index.close();
+    rmDir(dir);
+  });
+});

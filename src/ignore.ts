@@ -138,13 +138,27 @@ export function filterIndexedEntries(rules: IgnoreRule[], entries: IndexEntry[])
   return entries.filter((entry) => entry.deleted || !isIgnored(rules, entry.path, false));
 }
 /**
+ * 内置默认忽略:版本控制与同步自身元数据目录。优先级最低(在 .gitignore /
+ * .syncxignore 之前并入),用户可用 .syncxignore 的负向规则(如 `!.git`)覆盖。
+ *
+ * 目的:避免把 .git 等 VCS 内部当成普通目录同步——双向同步下,残缺端(目录内容
+ * 不完整的一方)会把缺失的 .git 文件生成墓碑广播给完整端,把完整端的 .git 搅坏/
+ * 删空(2026-09-15 真实事故:A 的 mvm .git 被双向同步删成空目录,git 仓库报废)。
+ * `.syncx-trash` 是删除回收站目录,必须忽略,否则会被当成待同步内容无限循环。
+ * `.syncx-folder` 是共享根的挂载标记(见 marker.ts),同样必须忽略,否则标记文件
+ * 本身会被同步/生成墓碑,反而破坏「标记存在 = 目录可信」的判定。
+ */
+export const BUILTIN_IGNORE_LINES = ['.git', '.hg', '.svn', '.syncx-trash', '.syncx-folder'];
+
+/**
  * 读取一个共享目录的忽略规则行(按优先级从低到高排列,后读的规则可覆盖先读的):
+ * 0. 内置默认忽略(见 BUILTIN_IGNORE_LINES,永不抛错、始终并入)
  * 1. `.gitignore` — 仅当 useGitignore 为 true(目录配置缺省即开启)时并入
- * 2. `.syncxignore` — syncx 自己的忽略文件,优先级更高,可用 `!` 负向规则覆盖 .gitignore
- * 两个文件都不存在或不可读时返回空数组,不抛错(目录可能刚创建)。
+ * 2. `.syncxignore` — syncx 自己的忽略文件,优先级最高,可用 `!` 负向规则覆盖前两者
+ * 两个文件都不存在或不可读时仅返回内置默认忽略,不抛错(目录可能刚创建)。
  */
 export function readFolderIgnoreLines(folderPath: string, useGitignore: boolean): string[] {
-  const lines: string[] = [];
+  const lines: string[] = [...BUILTIN_IGNORE_LINES];
   if (useGitignore) {
     try {
       lines.push(...readFileSync(join(folderPath, '.gitignore'), 'utf8').split('\n'));

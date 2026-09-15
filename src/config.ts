@@ -1,6 +1,6 @@
-import { existsSync, readFileSync, writeFileSync, renameSync, openSync, closeSync, unlinkSync, statSync } from 'node:fs';
-import { join } from 'node:path';
-import { createHash } from 'node:crypto';
+import { existsSync, readdirSync, readFileSync, writeFileSync, renameSync, openSync, closeSync, unlinkSync, statSync } from 'node:fs';
+import { basename, join } from 'node:path';
+import { createHash, randomBytes } from 'node:crypto';
 
 export interface SharedFolderConfig {
   path: string;
@@ -27,6 +27,33 @@ export interface SharedFolderConfig {
    * 旧配置缺省为 undefined,按「本机自有」处理。
    */
   remote?: boolean;
+  /**
+   * 接收模式(只读,只拉不推):本机只从对端拉取变更、应用对端删除,但**绝不**把本机
+   * 的本地新增/修改/删除反灌给对端。用于「完整端 ↔ 残缺端」这类场景,防止把本机
+   * (可能不完整的)状态当「删除」广播出去、误删对端文件。典型用法:在残缺端勾选,
+   * 让它单向镜像完整端。缺省 false = 双向同步。
+   */
+  receiveOnly?: boolean;
+  /**
+   * 本机目录实例 ID(**仅本机使用,不进 wire、不参与跨设备 folderId 对齐**)。
+   *
+   * 每次「新增目录 / 接受邀请新建 / 路径被重新指派 id」都会生成一个新的 instanceId,
+   * 索引库文件按它命名 —— 使「索引寿命 = 目录实例寿命」成为结构不变式:目录被移除后
+   * 重新添加、或 folderId 兜回来复用时,都会打开一个全新的空索引库,**不可能继承上一轮
+   * 的旧条目/旧墓碑**(旧条目在磁盘已消失时会被判定为「本地删除」并广播出去,成批删掉
+   * 对端文件 —— 2026-09-15 事故)。
+   *
+   * 缺省(旧配置)回退为 folderId,沿用既有索引文件名,升级时不触发重扫。
+   */
+  instanceId?: string;
+  /**
+   * 本机是否已为该目录建立 `.syncx-folder` 标记(缺省 = 尚未建立,启动时一次性收养)。
+   * 标记存在于共享根是「目录已正确挂载/内容可信」的信号;标记缺失时扫描会跳过该目录、
+   * 绝不推断删除,用于防「盘未挂载 / 目录被整体清空」被误判成「用户删光了文件」。
+   * 之所以需要这个持久化闸门而不是「缺了就补」:否则「先清空目录、再重启 daemon」
+   * 会在启动时重建标记,随即把空目录当成大规模删除广播出去,保护形同虚设。
+   */
+  markerChecked?: boolean;
 }
 
 /** 目录的 wire 标识:优先 id,缺省用 path。 */
@@ -34,9 +61,22 @@ export function folderIdFor(folder: SharedFolderConfig): string {
   return folder.id ?? folder.path;
 }
 
-/** 每个共享目录独立的索引库文件路径(按 folderId 的哈希命名,避免路径字符问题)。 */
-export function folderIndexPath(configDir: string, folderId: string): string {
-  const hash = createHash('sha1').update(folderId).digest('hex').slice(0, 16);
+/**
+ * 索引库的命名 key:优先本机 instanceId(目录实例化后),缺省回退 folderId(旧配置,
+ * 沿用既有文件名、升级不触发重扫)。与 wire 身份(folderIdFor)刻意解耦。
+ */
+export function folderIndexKey(folder: SharedFolderConfig): string {
+  return folder.instanceId ?? folderIdFor(folder);
+}
+
+/** 生成一个新的目录实例 ID(本机唯一,不影响 wire 身份)。 */
+export function generateFolderInstanceId(): string {
+  return randomBytes(6).toString('hex');
+}
+
+/** 每个共享目录独立的索引库文件路径(按索引 key 的哈希命名,避免路径字符问题)。 */
+export function folderIndexPath(configDir: string, key: string): string {
+  const hash = createHash('sha1').update(key).digest('hex').slice(0, 16);
   return join(configDir, `index-${hash}.db`);
 }
 
@@ -46,8 +86,8 @@ export function folderIndexPath(configDir: string, folderId: string): string {
  * 下 unlink 打开中的文件会 EBUSY/EPERM)也返回 false 且不抛错——daemon 场景交由
  * reloadConfig 在关闭索引连接后再删除,确保跨平台都能清掉。
  */
-export function purgeFolderIndex(configDir: string, folderId: string): boolean {
-  const dbPath = folderIndexPath(configDir, folderId);
+export function purgeFolderIndex(configDir: string, key: string): boolean {
+  const dbPath = folderIndexPath(configDir, key);
   if (!existsSync(dbPath)) return false;
   try {
     unlinkSync(dbPath);
@@ -55,6 +95,52 @@ export function purgeFolderIndex(configDir: string, folderId: string): boolean {
   } catch {
     return false;
   }
+}
+
+/** 索引库主文件及其 SQLite sidecar(journal/wal/shm)的命名形态。 */
+const INDEX_FILE_RE = /^index-([0-9a-f]{16})\.db(?:-(?:journal|wal|shm))?$/;
+
+/**
+ * 启动时回收孤儿索引库:删除 configDir 下所有「不属于当前 config 期望集合」的
+ * `index-*.db`(连同其 sidecar)。期望集合 = 每个配置目录的 folderIndexKey 哈希。
+ *
+ * 为什么需要它(两条此前无解的路径):
+ *  1. 关着 daemon 直接改 config.json 删目录 → 压根不会走 markIndexForPurge;
+ *  2. 进程在「登记清理」与「热重载真正删除」之间重启 → 内存登记丢失,清理意图永久蒸发。
+ * 二者都会留下旧索引;同一索引 key 兜回来复用时,旧条目/旧墓碑会再次参与对账,成批删掉
+ * 对端文件。索引库是可再生缓存(最坏代价只是重扫一次),删除是安全的。
+ *
+ * 必须在 SyncSessionManager 构造**之前**调用:此时没有任何索引句柄被持有,
+ * Windows 下 unlink 也不会遇到 EBUSY。
+ *
+ * @returns 实际删除的文件绝对路径(删除失败如被占用的会跳过,留待下次启动再试)。
+ */
+export function purgeOrphanIndexFiles(configDir: string, config: Config): string[] {
+  if (!existsSync(configDir)) return [];
+  const expected = new Set(
+    config.sharedFolders.map((f) => basename(folderIndexPath(configDir, folderIndexKey(f)))),
+  );
+  let names: string[];
+  try {
+    names = readdirSync(configDir);
+  } catch {
+    return [];
+  }
+  const removed: string[] = [];
+  for (const name of names) {
+    const m = INDEX_FILE_RE.exec(name);
+    if (!m) continue;
+    if (expected.has(`index-${m[1]}.db`)) continue; // 在册目录(含其 sidecar)保留
+    const full = join(configDir, name);
+    try {
+      unlinkSync(full);
+      removed.push(full);
+    } catch {
+      // 仍被占用(daemon 在跑):跳过,下次启动再试。索引残留不会因此变成正确性问题,
+      // 因为目录实例化后新实例永远打开新文件名的空库。
+    }
+  }
+  return removed;
 }
 
 /** 已知对端设备:通过「粘贴设备 ID」引入,未必已指派到任何目录。 */

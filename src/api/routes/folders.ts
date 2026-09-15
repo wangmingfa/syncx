@@ -24,8 +24,9 @@ export async function tryFolderRoutes(
     const p = params.get('path') ?? '';
     const devicesRaw = params.get('devices') ?? '';
     const devices = devicesRaw.split(',').map((s) => s.trim()).filter(Boolean);
+    const receiveOnly = params.get('receiveOnly') === '1' || params.get('receiveOnly') === 'true';
     if (p && addFolder) {
-      addFolder(p, devices);
+      addFolder(p, devices, undefined, receiveOnly);
       redirect(res, '/?msg=shared folder added');
       return true;
     }
@@ -45,7 +46,8 @@ export async function tryFolderRoutes(
       }
       const devices = ((body as any).devices ?? []).filter((d: unknown): d is string => typeof d === 'string');
       const id = typeof (body as any).id === 'string' && (body as any).id !== '' ? (body as any).id : undefined;
-      const created = addFolder((body as any).path, devices, id);
+      const receiveOnly = (body as any).receiveOnly === true;
+      const created = addFolder((body as any).path, devices, id, receiveOnly);
       sendJson(res, 201, { ok: true, created });
     } catch {
       sendJson(res, 400, { error: 'invalid json body' });

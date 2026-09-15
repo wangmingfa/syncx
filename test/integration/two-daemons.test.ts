@@ -375,6 +375,9 @@ describe('two real daemons sync over peers config', () => {
       const idx = openIndexStore(folderIndexPath(a.dir, folderIdFor({ id: 'secondary', path: secondaryId, devices: [] })));
       expect(idx.listEntries()).toEqual([]);
       idx.close();
+      // 手改 config.json 热重载新增的目录也会被建立挂载标记:否则新目录会被「标记缺失」门禁
+      // 暂停同步(新实例索引为空,补标记不可能产生墓碑,是安全的)
+      await waitFor(() => existsSync(join(secondaryId, '.syncx-folder')), 5000);
 
       await stopChildren();
       rmDir(a.dir);

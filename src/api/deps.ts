@@ -20,9 +20,20 @@ export interface ControlServerDeps {
   checkForUpdate?: () => Promise<{ latest: string; current: string } | undefined>;
   /** Web UI 确认后的 npm 自升级:下载官方 tgz → 校验 → updater 接管;抛错返回 400。 */
   selfUpdateNpm?: () => Promise<{ version: string }>;
+  /**
+   * Web UI「上传安装包」第一步:只读预检上传的 tgz —— 校验结构/包名/版本并实跑 -v,
+   * 读出包内版本后清理临时目录,不改动任何运行期状态。current 为当前运行版本。
+   */
+  inspectLocalPackage?: (tgz: Buffer) => Promise<{ version: string; name: string; current: string }>;
+  /**
+   * Web UI「上传安装包」第二步:走与 npm/P2P 同一条自更新管线(校验 → updater 接管换入 →
+   * 拉起新 daemon,失败回滚)。路由响应后优雅关闭,由 updater 完成替换。抛错返回 400。
+   */
+  selfUpdateUpload?: (tgz: Buffer) => Promise<{ version: string }>;
   getStatus: () => unknown;
-  /** 添加共享目录;返回是否自动创建了不存在的目录(供前端提示)。 */
-  addFolder?: (path: string, devices: string[], id?: string) => boolean;
+  /** 添加共享目录;返回是否自动创建了不存在的目录(供前端提示)。
+   *  receiveOnly 为 true 时该目录设为接收模式(只拉不推)。 */
+  addFolder?: (path: string, devices: string[], id?: string, receiveOnly?: boolean) => boolean;
   /** 移除共享目录。opts.purgeIndex 为 true 时一并删除该目录的索引库文件(清掉历史残留)。 */
   removeFolder?: (path: string, opts?: { purgeIndex?: boolean }) => void;
   /** 添加一个已知对端设备 ID(按 ID 配对,不依赖邀请码)。可选 address 直接写入
@@ -45,8 +56,9 @@ export interface ControlServerDeps {
    * 未设置时该端点返回 ok:false,前端提示需以 --log-file 启动才有日志可看。
    */
   logFile?: string;
-  /** 确认一个待确认项;目录共享邀请需附带 localPath(本机落地路径)。 */
-  acceptOffer?: (offerId: string, localPath?: string) => void;
+  /** 确认一个待确认项;目录共享邀请需附带 localPath(本机落地路径)。
+   *  receiveOnly 为 true 时把该目录设为接收模式(只拉不推)。 */
+  acceptOffer?: (offerId: string, localPath?: string, receiveOnly?: boolean) => void;
   /** 忽略一个待确认项。 */
   declineOffer?: (offerId: string) => void;
   /** 恢复一个已忽略的待确认项(置回 pending)。 */

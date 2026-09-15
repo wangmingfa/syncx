@@ -1,12 +1,13 @@
 import type { ParsedArgs } from './args.js';
-import { dirname, join, resolve } from 'node:path';
+import { basename, dirname, join, resolve } from 'node:path';
 import { homedir } from 'node:os';
 import { loadOrCreateIdentity } from './identity.js';
-import { loadConfig, saveConfig } from './config.js';
+import { loadConfig, saveConfig, mutateConfig } from './config.js';
+import { ensureFolderMarker } from './marker.js';
 import { openIndexStore } from './indexstore.js';
 
 import { listSyncHistory, clearSyncHistory } from './history.js';
-import { readFileSync, existsSync, writeFileSync, watch, unlinkSync } from 'node:fs';
+import { readFileSync, readdirSync, existsSync, statSync, writeFileSync, watch, unlinkSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import { startPeerServer } from './net/server.js';
 
@@ -17,15 +18,33 @@ import { buildStatus, type DeviceStatus, type SyncProgress, type FolderErrorStat
 import { addSharedFolder, removeSharedFolder, isPeerAllowed, addKnownDevice, removeKnownDevice, addPeer, removePeer, setFolderDevices, setFolderGitignore, acceptFolderInvitation } from './devices.js';
 import { markOfferAccepted, markOfferDeclined, restoreDeclinedOffer, listOpenOffers, findPendingOffer } from './offers.js';
 import { createInviteCode, parseInviteCode, revokeInviteCode } from './invite.js';
-import { folderIdFor, folderIndexPath } from './config.js';
+import { folderIdFor, folderIndexKey, folderIndexPath, purgeOrphanIndexFiles, type SharedFolderConfig } from './config.js';
 import { renderSystemdUnit, renderLaunchdPlist, renderWindowsService } from './install.js';
 import { createLogger } from './logger.js';
 import { runUpgrade } from './upgrade.js';
 import { compareVersions } from './upgrade.js';
-import { consumeUpdateDoneFile, isBundledRuntime, runSelfUpdate, runtimeVersion } from './selfupdate.js';
+import { consumeUpdateDoneFile, inspectPackage, isBundledRuntime, runSelfUpdate, runtimeVersion } from './selfupdate.js';
 import { createUpdateChecker, downloadTarball } from './update-check.js';
 import { loadOrCreateToken, daemonStatusLines, stopDaemon, listenControl, pidFilePath, type PidRecord } from './daemon.js';
 import { SyncSessionManager } from './session-manager.js';
+
+/**
+ * 目录索引里是否存在「活条目」(非墓碑)。用于启动收养标记前判断该目录是否曾同步过真实文件:
+ * 有活条目 + 目录顶层为空,是「盘未挂载 / 目录被整体清空」的典型形态,此时不能贸然补标记。
+ * 任何读取异常都按 false(无活条目)处理,不因诊断失败阻塞启动。
+ */
+function indexHasLiveEntries(configDir: string, folder: SharedFolderConfig): boolean {
+  try {
+    const store = openIndexStore(folderIndexPath(configDir, folderIndexKey(folder)));
+    try {
+      return store.listEntries().some((e) => !e.deleted);
+    } finally {
+      store.close();
+    }
+  } catch {
+    return false;
+  }
+}
 
 /**
  * Run a command against the daemon's data directory. The lifecycle is kept
@@ -159,6 +178,47 @@ export async function run(args: ParsedArgs): Promise<void> {
   // 绑定失败(EACCES/EADDRINUSE)时进程直接退出,不会出现 fatal 淹没在正常启动日志里的情况。
   const lanAddresses = getLanAddresses();
 
+  // --- 启动自愈(必须在 SyncSessionManager 构造之前,此时没有任何索引句柄被持有)---
+  // 1) 孤儿索引回收:删掉 configDir 下不属于当前 config 期望集合的 index-*.db。索引库是
+  //    可再生缓存(最坏代价只是重扫一次),删除安全。这堵死两条此前无解的残留路径:
+  //      a. 关着 daemon 直接改 config.json 删目录 → 压根不会走 markIndexForPurge;
+  //      b. 进程在「登记清理」与「热重载真正删除」之间重启 → 内存登记丢失、清理意图蒸发。
+  //    残留旧库在索引 key 兜回来时会被复用(旧条目/旧墓碑再次参与对账 → 成批误删对端)。
+  try {
+    for (const p of purgeOrphanIndexFiles(configDir, config)) {
+      logger.info(`orphan index removed (not referenced by config): ${p}`);
+    }
+  } catch (error) {
+    logger.warn(`orphan index sweep failed: ${error instanceof Error ? error.message : String(error)}`);
+  }
+  // 2) 挂载标记收养:为升级前创建的存量目录补建 .syncx-folder 并落盘 markerChecked,使用期
+  //    「标记缺失 → 暂停同步」只对真正的异常生效。只收养一次;目录不存在则留给下次启动。
+  //    危险态(索引里有活条目但目录顶层为空,疑似未挂载/被清空)不自动收养 —— 否则补上标记后
+  //    下一次扫描会把整棵空目录当成「用户删光了」广播出去。
+  try {
+    mutateConfig(configPath, () => {
+      let changed = false;
+      for (const f of config.sharedFolders) {
+        if (f.markerChecked) continue;
+        if (!existsSync(f.path) || !statSync(f.path).isDirectory()) continue;
+        if (indexHasLiveEntries(configDir, f) && readdirSync(f.path).length === 0) {
+          logger.warn(
+            `shared folder looks empty but its index still has entries; refusing to create the ` +
+              `mount marker automatically: ${f.path} (确认目录内容无误后,在界面移除并重新添加该目录)`,
+          );
+          continue;
+        }
+        if (!ensureFolderMarker(f.path)) continue; // 不可写等:不标记,下次启动重试
+        f.markerChecked = true;
+        changed = true;
+        logger.info(`shared folder mount marker established: ${f.path}`);
+      }
+      return changed;
+    });
+  } catch (error) {
+    logger.warn(`mount marker migration failed: ${error instanceof Error ? error.message : String(error)}`);
+  }
+
   // 会话/目录运行期状态管理器:连接、同步通道、扫描、配置热重载、P2P 自更新全部内聚于此
   const manager = new SyncSessionManager(
     { identity, configPath, configDir, peerPort: args.port ?? 22000, logger },
@@ -198,11 +258,28 @@ export async function run(args: ParsedArgs): Promise<void> {
       logger.info(`self-update staged: ${runtimeVersion()} → ${avail.latest} (npm), shutting down for swap`);
       return { version: avail.latest };
     },
+    // Web UI「上传安装包」第一步:只读预检,读出包内版本供前端展示升级前后对比
+    inspectLocalPackage: async (tgz) => {
+      const info = await inspectPackage(tgz);
+      return { version: info.version, name: info.name, current: runtimeVersion() };
+    },
+    // Web UI「上传安装包」第二步:本地打好的包没有「宣告版本」,目标版本以包内 package.json 为准
+    selfUpdateUpload: async (tgz) => {
+      if (!isBundledRuntime()) throw new Error('本机为 dev 运行态,不支持自更新');
+      const { version } = await runSelfUpdate(tgz, undefined);
+      logger.info(`self-update staged: ${runtimeVersion()} → ${version} (uploaded package), shutting down for swap`);
+      return { version };
+    },
     // Web UI「日志」弹窗经 GET /api/logs 读取日志尾部;未设置时端点返回 ok:false
     logFile: args.logFile,
-    addFolder: (path, devices, id) => {
-      const created = addSharedFolder(configPath, path, devices, id);
-      logger.info(`shared folder added: ${path}${created ? ' (auto-created)' : ''}`);
+    addFolder: (path, devices, id, receiveOnly) => {
+      // 参数顺序务必对齐:addSharedFolder(configPath, path, devices, id, remote, receiveOnly)。
+      // 第 5 位是 remote(Web UI 添加的是本机自有目录,恒为 undefined/false),receiveOnly 在第 6 位。
+      // 传错位置的后果是「接收模式」被写成 remote,而真正的 receiveOnly 永远是 false(静默失效)。
+      const created = addSharedFolder(configPath, path, devices, id, undefined, receiveOnly);
+      logger.info(`shared folder added: ${path}${created ? ' (auto-created)' : ''}${receiveOnly ? ' (receive-only)' : ''}`);
+      // 配置已落盘:显式热重载,把新目录的同步通道立即挂载到存活会话,免去手动重启
+      manager.reloadConfig();
       // 新建目录时即指派的对端,若当前在线立即推送共享邀请,免去对方再建一次目录
       const folder = loadConfig(configPath).sharedFolders.find((f) => resolve(f.path) === resolve(path));
       const fid = folder?.id ?? '';
@@ -218,11 +295,25 @@ export async function run(args: ParsedArgs): Promise<void> {
       const affected = new Set(folder?.devices ?? []);
       const purgeIndex = opts?.purgeIndex === true;
       removeSharedFolder(configPath, path, purgeIndex);
-      if (purgeIndex && folder) {
+      // 索引库按「目录实例 key」(instanceId ?? folderId)命名,登记/核对都用同一口径
+      const purgeKey = folder ? folderIndexKey(folder) : undefined;
+      if (purgeIndex && purgeKey) {
         // daemon 仍持有索引连接时(尤其 Windows)直接 unlink 会失败,登记待热重载关闭后再删
-        manager.markIndexForPurge(folder.id ?? path);
+        manager.markIndexForPurge(purgeKey);
       }
-      logger.info(`shared folder removed: ${path}${purgeIndex ? ' (index purged)' : ''}`);
+      // 显式热重载:关闭该目录的索引连接,并在此之后真正 unlink 索引库。
+      // 不能只依赖 fs watcher —— daemon 持有 .db 句柄时即时删除必然失败(Windows EBUSY),
+      // 唯一可靠的删除时机是 reloadConfig 里 close() 之后;少了这一步,索引库就会残留,
+      // 同一 folderId 再次添加时复用旧条目/旧墓碑,把对端文件成批删掉(2026-09-15 事故根因)。
+      manager.reloadConfig();
+      if (purgeIndex && purgeKey) {
+        // 如实汇报清理结果:残留必须能被发现,而不是打印一句「已清理」就了事
+        // (残留本身已不再致命:目录实例化保证新实例打开新文件名的空库,启动孤儿回收兜底清理)
+        const dbPath = folderIndexPath(configDir, purgeKey);
+        if (existsSync(dbPath)) logger.warn(`index purge failed (still exists): ${dbPath}`);
+        else logger.info(`index purged: ${dbPath}`);
+      }
+      logger.info(`shared folder removed: ${path}${purgeIndex ? ' (purge index requested)' : ''}`);
       for (const d of affected) manager.pushFolderSyncList(d);
     },
     getStatus: () => {
@@ -350,7 +441,7 @@ export async function run(args: ParsedArgs): Promise<void> {
     getOffers: () => listOpenOffers(configPath),
     getFolderHistory: (folderId) => listSyncHistory(configPath, folderId),
     clearFolderHistory: (folderId) => clearSyncHistory(configPath, folderId),
-    acceptOffer: (offerId, localPath) => {
+    acceptOffer: (offerId, localPath, receiveOnly) => {
       // 先查再落状态:校验失败时不能把邀请标成 accepted,否则目录没建起来、
       // 卡片却已从「待确认」消失,用户失去重试入口。
       const offer = findPendingOffer(configPath, offerId);
@@ -360,7 +451,7 @@ export async function run(args: ParsedArgs): Promise<void> {
         // acceptFolderInvitation 会按 id 复用 / 按路径对齐 id / 或新建,确保接受后本机目录的
         // folderId 与对端一致,否则对端按 folderId 推送会路由不到(静默不同步)。
         if (!offer.folderId) throw new Error('folder offer missing folder id');
-        acceptFolderInvitation(configPath, offer.folderId, offer.fromDeviceId, localPath);
+        acceptFolderInvitation(configPath, offer.folderId, offer.fromDeviceId, localPath, receiveOnly);
         markOfferAccepted(configPath, offerId);
         manager.sendControlTo(offer.fromDeviceId, {
           kind: 'folder-invitation-ack',
@@ -369,6 +460,8 @@ export async function run(args: ParsedArgs): Promise<void> {
           accepted: true,
         });
         logger.info(`accepted folder invitation ${offer.folderId} from ${offer.fromDeviceId}`);
+        // 接受后目录已写入配置:显式热重载挂载同步通道,免去手动重启
+        manager.reloadConfig();
       } else {
         markOfferAccepted(configPath, offerId);
         addKnownDevice(configPath, offer.fromDeviceId);
@@ -492,11 +585,17 @@ export async function run(args: ParsedArgs): Promise<void> {
     void manager.runScan();
   }, SCAN_INTERVAL_MS);
 
-  // 配置热重载:监听 config.json 变更(目录/设备指派对账、重推清单在 manager 内完成),
-  // 对端列表新增时本机主动连接;无需重启 daemon
+  // 配置热重载:监听配置文件所在目录,过滤文件名命中 config.json 再触发重载。
+  // 注意:**不能**直接 watch(configPath) 本身——saveConfig 用 renameSync 原子写,
+  // 在 Linux 上 fs.watch 跟随的是原 inode,文件被替换后 watcher 失效、热重载不再触发
+  // (这正是「运行时加目录不挂载通道」的根因)。watch 目录后 rename/创建事件会带文件名,
+  // 过滤后即可靠命中。对端列表新增时本机主动连接;无需重启 daemon
   let configWatcher: import('node:fs').FSWatcher | undefined;
+  const configFileName = basename(configPath);
   try {
-    configWatcher = watch(configPath, () => {
+    configWatcher = watch(dirname(configPath), (_event, filename) => {
+    // 只处理目标配置文件自身的变更(同目录下的索引库/日志等变更忽略),避免无谓热重载
+    if (filename !== configFileName) return;
     try {
       const newConfig = manager.reloadConfig();
       if (!newConfig) return;

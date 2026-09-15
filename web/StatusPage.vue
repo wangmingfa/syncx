@@ -27,6 +27,7 @@ import ConfirmModal from './components/ConfirmModal.vue';
 import EditFolderModal from './components/EditFolderModal.vue';
 import AuthPasswordModal from './components/AuthPasswordModal.vue';
 import LogsModal from './components/LogsModal.vue';
+import UploadUpdateModal from './components/UploadUpdateModal.vue';
 import StatusTopbar from './components/StatusTopbar.vue';
 import StatusPills from './components/StatusPills.vue';
 import OffersPanel from './components/OffersPanel.vue';
@@ -52,7 +53,7 @@ const fmt = useFormat(status);
 
 // 需要本页模板双向绑定的模态状态:必须提到顶层,否则 <script setup> 模板不会自动拆包 Ref
 const { historyFolder, editDevicesOpen, editFolder, saveEditDevices } = folders;
-const { upgrading, askSelfUpdate } = selfUpdate;
+const { upgrading, askSelfUpdate, uploadOpen } = selfUpdate;
 const { toast, showToast } = useToast();
 
 // 本页 overlay 模态开关(子组件通过 openXxx 触发)
@@ -74,6 +75,7 @@ function onKeydown(e: KeyboardEvent): void {
   if (e.key !== 'Escape') return;
   if (showGuide.value) showGuide.value = false;
   if (logsOpen.value) logsOpen.value = false;
+  if (uploadOpen.value) uploadOpen.value = false;
 }
 onMounted(() => window.addEventListener('keydown', onKeydown));
 onUnmounted(() => window.removeEventListener('keydown', onKeydown));
@@ -167,5 +169,8 @@ provide(StatusContextKey, {
 
     <!-- 日志弹窗 -->
     <LogsModal :open="logsOpen" @close="logsOpen = false" />
+
+    <!-- 上传本地安装包升级(入口在顶栏「上传升级」) -->
+    <UploadUpdateModal :open="uploadOpen" @close="uploadOpen = false" />
   </div>
 </template>

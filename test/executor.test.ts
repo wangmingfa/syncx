@@ -173,8 +173,40 @@ describe('local executor delete', () => {
     const tombstone = entry('doc.txt', [['dev-a', 2]], [], 0, true);
     await executor.applyDelete('doc.txt', tombstone);
 
-    expect(existsSync(target)).toBe(false);
+    expect(existsSync(target)).toBe(false); // 原路径已不在(被移走)
+    // 删除改进回收站:内容可在 .syncx-trash 找回,而非硬删永久丢失
+    const trashed = readdirSync(join(root, '.syncx-trash'));
+    expect(trashed).toHaveLength(1);
+    expect(trashed[0].startsWith('doc.txt.')).toBe(true);
+    expect(readFileSync(join(root, '.syncx-trash', trashed[0]))).toEqual(Buffer.from('bye'));
     expect(index.getEntry('doc.txt')).toEqual(tombstone);
+
+    index.close();
+    rmDir(dir);
+  });
+
+  it('moves a nested deleted file into the trash preserving its relative path', async () => {
+    const dir = mkdtempSync(join(tmpdir(), 'syncx-exec-'));
+    const root = join(dir, 'share');
+    mkdirSync(root, { recursive: true });
+    const index = openIndexStore(join(dir, 'index.db'));
+
+    const executor = createLocalExecutor(root, index);
+    const target = join(root, 'docs', 'plan.md');
+    mkdirSync(join(root, 'docs'), { recursive: true });
+    writeFileSync(target, 'secret plan');
+    index.saveEntry(entry('docs/plan.md', [['dev-a', 1]], [hashBlock(Buffer.from('secret plan'))], 11));
+
+    const tombstone = entry('docs/plan.md', [['dev-a', 2]], [], 0, true);
+    await executor.applyDelete('docs/plan.md', tombstone);
+
+    expect(existsSync(target)).toBe(false);
+    // 回收站内保留原相对路径结构(docs/plan.md.<stamp>),便于原样还原
+    const trashDocs = readdirSync(join(root, '.syncx-trash', 'docs'));
+    expect(trashDocs).toHaveLength(1);
+    expect(trashDocs[0].startsWith('plan.md.')).toBe(true);
+    expect(readFileSync(join(root, '.syncx-trash', 'docs', trashDocs[0]))).toEqual(Buffer.from('secret plan'));
+    expect(index.getEntry('docs/plan.md')).toEqual(tombstone);
 
     index.close();
     rmDir(dir);

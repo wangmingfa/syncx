@@ -167,6 +167,31 @@ describe('shared folder configuration', () => {
     );
     rmDir(dir);
   });
+
+  it('reads receiveOnly from the 6th argument and leaves remote false for locally-added folders', () => {
+    const dir = tempDir();
+    const configPath = join(dir, 'config.json');
+    // Web UI「添加目录」的调用形态:remote(第 5 位)恒为 undefined,receiveOnly 在第 6 位。
+    // 参数错位会把接收模式写成 remote、receiveOnly 永远 false(静默失效,曾真实发生)。
+    addSharedFolder(configPath, join(dir, 'docs'), ['DEV1234567'], 'fid-ro', undefined, true);
+    const raw = JSON.parse(readFileSync(configPath, 'utf8'));
+    expect(raw.sharedFolders[0].receiveOnly).toBe(true);
+    expect(raw.sharedFolders[0].remote).toBe(false);
+    // 新条目一律实例化:索引库与本实例绑定
+    expect(typeof raw.sharedFolders[0].instanceId).toBe('string');
+    rmDir(dir);
+  });
+
+  it('creates the mount marker and flags it so scans are allowed', () => {
+    const dir = tempDir();
+    const configPath = join(dir, 'config.json');
+    const docs = join(dir, 'docs');
+    addSharedFolder(configPath, docs, ['DEV1234567']);
+    expect(existsSync(join(docs, '.syncx-folder'))).toBe(true);
+    const raw = JSON.parse(readFileSync(configPath, 'utf8'));
+    expect(raw.sharedFolders[0].markerChecked).toBe(true);
+    rmDir(dir);
+  });
 });
 
 describe('isPeerAllowed', () => {
