@@ -151,7 +151,7 @@ describe('control server: 令牌 + 账号密码双通道', () => {
 
   it('/api/auth 未设密码时报告 token 模式', async () => {
     const res = await fetch(`http://127.0.0.1:${s.port}/api/auth`);
-    expect((await res.json()).mode).toBe('token');
+    expect(((await res.json()) as { mode: string }).mode).toBe('token');
   });
 
   it('未认证请求被拒;Bearer 令牌可用', async () => {

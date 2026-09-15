@@ -8,6 +8,7 @@ import {
   type ControlMessage,
 } from '../src/net/wire.js';
 import { encodeIndex } from '../src/messages.js';
+import type { SyncPeer } from '../src/peer.js';
 
 /** 最小 WebSocket mock:记录 send 内容,允许手动 emit 'message'。 */
 class MockSocket {
@@ -25,12 +26,13 @@ class MockSocket {
 }
 
 /** 最小 SyncPeer mock,用于验证 folder 路由不被 control 消息误触发。 */
-function mockPeer() {
+function mockPeer(): SyncPeer {
+  // 只桩掉本组用例会触达的三个入口;getSyncProgress 等与本组无关,故断言跳过
   return {
     onPeerIndex: vi.fn(),
     onBlockRequest: vi.fn(),
     onBlockResponse: vi.fn(),
-  };
+  } as unknown as SyncPeer;
 }
 
 describe('control message wire channel (Phase 2)', () => {
@@ -45,9 +47,9 @@ describe('control message wire channel (Phase 2)', () => {
       folderId: 'main',
       folderName: 'main',
     };
-    sendControlMessage(socket, key, msg);
+    sendControlMessage(socket as never, key, msg);
     expect(socket.sent).toHaveLength(1);
-    const decoded = decryptMessage(key, socket.sent[0]);
+    const decoded = decryptMessage(key, socket.sent[0]!);
     expect(decoded).toEqual({ type: 'control', payload: msg });
   });
 

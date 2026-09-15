@@ -39,7 +39,10 @@ export function resolveSharePath(root: string, relPath: string): string {
     throw new Error(`unsafe path: ${relPath}`);
   }
 
-  const parts = relPath.split(sep).filter(Boolean);
+  // 协议路径一律以 '/' 分隔,但 Windows 本地调用方可能传来 '\'(见 scanner 的历史问题)。
+  // 两种分隔符都要切分:否则在 Windows 上 '\' 路径整条被当成一个 part,中间目录段的
+  // 符号链接越界校验会被静默绕过(安全弱化)。
+  const parts = relPath.split(/[\\/]/).filter(Boolean);
   let ancestor = root;
   for (const part of parts) {
     const candidate = join(ancestor, part);

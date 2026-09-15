@@ -12,6 +12,7 @@ import { rmDir, canCreateSymlinks } from './helpers.js';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { createSyncPeer, type PeerTransport } from '../src/peer.js';
+import type { BlockRequest, BlockResponse } from '../src/messages.js';
 import { createLocalExecutor, type LocalExecutor } from '../src/executor.js';
 import { openIndexStore } from '../src/indexstore.js';
 import { hashBlock, BLOCK_SIZE } from '../src/blockstore.js';
@@ -37,17 +38,17 @@ function entry(
 describe('sync peer session', () => {
   function fakeTransport() {
     const sentEntries: ReturnType<typeof entry>[] = [];
-    const requests: Array<Record<string, unknown>> = [];
-    const responses: Array<Record<string, unknown>> = [];
+    const requests: BlockRequest[] = [];
+    const responses: BlockResponse[] = [];
     return {
       transport: {
         sendEntries(entries: ReturnType<typeof entry>[]): void {
           sentEntries.push(...entries);
         },
-        sendBlockRequest(request: Record<string, unknown>): void {
+        sendBlockRequest(request: BlockRequest): void {
           requests.push(request);
         },
-        sendBlockResponse(response: Record<string, unknown>): void {
+        sendBlockResponse(response: BlockResponse): void {
           responses.push(response);
         },
       } satisfies PeerTransport,
@@ -618,17 +619,17 @@ describe('sync peer session', () => {
 describe('receive-only mode (只拉不推)', () => {
   function fakeTransport() {
     const sentEntries: ReturnType<typeof entry>[] = [];
-    const requests: Array<Record<string, unknown>> = [];
-    const responses: Array<Record<string, unknown>> = [];
+    const requests: BlockRequest[] = [];
+    const responses: BlockResponse[] = [];
     return {
       transport: {
         sendEntries(entries: ReturnType<typeof entry>[]): void {
           sentEntries.push(...entries);
         },
-        sendBlockRequest(request: Record<string, unknown>): void {
+        sendBlockRequest(request: BlockRequest): void {
           requests.push(request);
         },
-        sendBlockResponse(response: Record<string, unknown>): void {
+        sendBlockResponse(response: BlockResponse): void {
           responses.push(response);
         },
       } satisfies PeerTransport,

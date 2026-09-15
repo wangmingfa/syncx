@@ -1,5 +1,5 @@
 import { readdirSync, readFileSync, statSync, existsSync } from 'node:fs';
-import { join, relative, resolve, sep } from 'node:path';
+import { join, resolve, sep } from 'node:path';
 import type { IndexEntry } from './index.js';
 import type { IndexStore } from './indexstore.js';
 import type { IgnoreRule } from './ignore.js';
@@ -66,7 +66,20 @@ export function scanFolder(
   const changed: string[] = [];
   const seen = new Set<string>();
 
-  function walk(dir: string): void {
+  /**
+   * 相对路径一律由父级相对目录 + 文件名以 '/' 拼接,**不使用 path.relative/join 生成**:
+   * 同步协议与索引一律使用 POSIX 分隔符,而 Windows 上 path.relative 返回的是 '\'。
+   * 一旦把 '\' 路径当成索引 key,就会出现「索引里有 utils/x.mbt、扫描却得到 utils\x.mbt」
+   * 的错配:每个子目录文件既进 changed(误报修改)又被判为「索引有、盘上无」→ 生成墓碑
+   * 广播给对端,把对端整棵子目录删掉(2026-09-15 Windows 端 251 个文件被误删的根因;
+   * 顶层文件不含分隔符故不受影响,恰好解释了「只删子目录、不删顶层」的形态)。
+   * 以字符串拼接代替平台 API 后,该问题在结构上不可能再出现。
+   */
+  function relOf(relDir: string, name: string): string {
+    return relDir === '' ? name : `${relDir}/${name}`;
+  }
+
+  function walk(dir: string, relDir: string): void {
     let entries;
     try {
       entries = readdirSync(dir, { withFileTypes: true });
@@ -75,12 +88,12 @@ export function scanFolder(
     }
     for (const dirent of entries) {
       const abs = join(dir, dirent.name);
-      const rel = relative(root, abs);
+      const rel = relOf(relDir, dirent.name);
       if (dirent.isDirectory()) {
         // 嵌套共享根:本目录树(父/外层)不递归进去,其中文件交由那个共享自行同步
         const absNorm = resolve(abs);
         if (nestedRoots.some((nr) => absNorm === resolve(nr))) continue;
-        if (!isIgnored(rules, rel, true)) walk(abs);
+        if (!isIgnored(rules, rel, true)) walk(abs, rel);
         continue;
       }
       if (!dirent.isFile() || rel.endsWith(TMP_SUFFIX)) continue;
@@ -113,7 +126,7 @@ export function scanFolder(
       changed.push(rel);
     }
   }
-  walk(root);
+  walk(root, '');
 
   // 索引中有、本地文件已不存在的非墓碑条目 → 墓碑
   const tombstones: IndexEntry[] = [];

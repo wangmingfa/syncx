@@ -494,6 +494,7 @@ describe('peer version visibility under dual connections (peerInfo regression)',
       // 让 C 重启:A 与 C 的会话断开 → 书签迁移 / 出站重连,C 重新上线后 hello 重发。
       // 重启后 A 仍应稳定看到 C 的版本(peerInfo 按 deviceId 缓存,与书签会话解耦)。
       const cChild = children[children.length - 1];
+      if (!cChild) throw new Error('expected a running C daemon');
       cChild.kill('SIGTERM');
       await new Promise((r) => cChild.once('exit', () => r(null)));
 

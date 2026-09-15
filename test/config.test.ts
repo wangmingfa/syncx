@@ -3,10 +3,19 @@ import { existsSync, mkdtempSync, readFileSync, utimesSync, writeFileSync } from
 import { rmDir } from './helpers.js';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { loadConfig, mutateConfig, saveConfig } from '../src/config.js';
+import { loadConfig, mutateConfig, saveConfig, type Config } from '../src/config.js';
 
 function tempDir(): string {
   return mkdtempSync(join(tmpdir(), 'syncx-config-'));
+}
+
+/**
+ * saveConfig 的契约是完整 Config,但本组用例只关心「写进去什么就读出什么」,
+ * 因此刻意传入省略 peers/knownDevices/pendingOffers 的偏对象——由 loadConfig
+ * 在读取时补默认值。此处用断言表达「有意为之」,而不去放松生产代码的类型。
+ */
+function savePartial(path: string, partial: Partial<Config>): void {
+  saveConfig(path, partial as Config);
 }
 
 describe('config store', () => {
@@ -24,7 +33,7 @@ describe('config store', () => {
     const dir = tempDir();
     const path = join(dir, 'config.json');
 
-    saveConfig(path, {
+    savePartial(path, {
       sharedFolders: [
         {
           path: '/data/docs',
@@ -51,7 +60,7 @@ describe('config store', () => {
   it('defaults missing peers to an empty list', () => {
     const dir = tempDir();
     const path = join(dir, 'config.json');
-    saveConfig(path, { sharedFolders: [] });
+    savePartial(path, { sharedFolders: [] });
 
     expect(loadConfig(path)).toEqual({ sharedFolders: [], peers: [], knownDevices: [], pendingOffers: [] });
 
@@ -113,7 +122,7 @@ describe('mutateConfig (config lock + atomic save)', () => {
   it('applies the mutator and persists the change', () => {
     const dir = tempDir();
     const path = join(dir, 'config.json');
-    saveConfig(path, { sharedFolders: [] });
+    savePartial(path, { sharedFolders: [] });
 
     mutateConfig(path, (config) => {
       config.sharedFolders.push({ path: '/data/docs', devices: ['DEV1234567'] });
@@ -126,7 +135,7 @@ describe('mutateConfig (config lock + atomic save)', () => {
   it('skips persisting when the mutator returns false (no-op / dedup path)', () => {
     const dir = tempDir();
     const path = join(dir, 'config.json');
-    saveConfig(path, { sharedFolders: [{ path: '/data/docs', devices: ['DEV1234567'] }] });
+    savePartial(path, { sharedFolders: [{ path: '/data/docs', devices: ['DEV1234567'] }] });
     const before = readFileSync(path, 'utf8');
 
     mutateConfig(path, (config) => {
@@ -143,7 +152,7 @@ describe('mutateConfig (config lock + atomic save)', () => {
   it('releases the lock file after a successful mutateConfig (no leak)', () => {
     const dir = tempDir();
     const path = join(dir, 'config.json');
-    saveConfig(path, { sharedFolders: [] });
+    savePartial(path, { sharedFolders: [] });
 
     mutateConfig(path, (config) => {
       config.peers.push('ws://10.0.0.2:22000');
@@ -157,7 +166,7 @@ describe('mutateConfig (config lock + atomic save)', () => {
   it('reaps a stale lock left by a crashed process and proceeds', () => {
     const dir = tempDir();
     const path = join(dir, 'config.json');
-    saveConfig(path, { sharedFolders: [] });
+    savePartial(path, { sharedFolders: [] });
 
     // 模拟崩溃遗留的陈旧锁(>30s)
     const lockPath = `${path}.lock`;

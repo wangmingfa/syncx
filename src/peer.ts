@@ -34,8 +34,6 @@ export interface SyncPeerDeps {
   root?: string;
   /** 共享目录的 .syncxignore 行:接收保护据此跳过被忽略的文件。 */
   ignoreLines?: string[];
-  /** 所属共享目录 ID(用于落盘同步记录)。 */
-  folderId: string;
   /** 记录一次同步变更(新增/修改/删除/冲突),由上层写入历史存储。 */
   onEvent?: (ev: SyncEventInput) => void;
   /**

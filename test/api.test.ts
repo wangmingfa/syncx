@@ -178,6 +178,7 @@ describe('control api folder config', () => {
       getStatus: () => ({ ok: true }),
       addFolder: (path, devices) => {
         added.push({ path, devices });
+        return false; // 目录已存在,未自动创建
       },
     });
     server.listen(0, '127.0.0.1');
@@ -201,7 +202,7 @@ describe('control api folder config', () => {
     const server = createControlServer({
       token: 'secret',
       getStatus: () => ({ ok: true }),
-      addFolder: () => {},
+      addFolder: () => false,
     });
     server.listen(0, '127.0.0.1');
     await once(server, 'listening');
@@ -221,7 +222,7 @@ describe('control api folder config', () => {
     const server = createControlServer({
       token: 'secret',
       getStatus: () => ({ ok: true }),
-      addFolder: () => {},
+      addFolder: () => false,
     });
     server.listen(0, '127.0.0.1');
     await once(server, 'listening');
@@ -396,7 +397,7 @@ describe('control api hardening', () => {
     const server = createControlServer({
       token: 'secret',
       getStatus: () => ({ ok: true }),
-      addFolder: () => {},
+      addFolder: () => false,
     });
     server.listen(0, '127.0.0.1');
     await once(server, 'listening');
@@ -729,6 +730,7 @@ describe('routes tolerate query strings', () => {
       getStatus: () => ({ ok: true }),
       addFolder: (path, devices) => {
         added.push({ path, devices });
+        return false; // 目录已存在,未自动创建
       },
     });
     server.listen(0, '127.0.0.1');

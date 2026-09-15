@@ -349,6 +349,18 @@ export class SyncSessionManager {
       // 索引从盘上恢复的目录,首扫 diff 是离线期间的真实改动,要记录
       const recordEvents = !folder.baselinePending;
       for (const tomb of diff.tombstones) {
+        // 防御闸门:同步协议与索引一律使用 '/' 分隔符。若墓碑路径里出现 '\'(Windows 平台
+        // 分隔符),只可能是本地路径构造与本机索引(来自协议)不一致——这正是 2026-09-15
+        // 「整棵子目录被判删除并广播」事故的形态。此处宁可拒绝该条删除并在目录卡报错,
+        // 也绝不执行:索引错配绝不能演变成不可逆的数据丢失。
+        if (tomb.path.includes('\\')) {
+          this.recordFolderError(
+            folder.id,
+            new Error(`拒绝执行可疑删除(路径含平台分隔符 '\\',疑似路径构造与索引不一致): ${tomb.path}`),
+            '可疑删除',
+          );
+          continue;
+        }
         try {
           await folder.executor.applyDelete(tomb.path, tomb);
           folder.localIndex.set(tomb.path, tomb);
@@ -537,8 +549,7 @@ export class SyncSessionManager {
       root: folder.path,
       // .syncxignore 行:接收保护据此跳过被忽略文件,避免反向同步出去
       ignoreLines: folder.ignoreLines,
-      folderId: folder.id,
-      // 远端推送的变更(新增/修改/删除/冲突)落盘为同步记录
+      // 远端推送的变更(新增/修改/删除/冲突)落盘为同步记录(此处补全 folderId)
       onEvent: (ev) => recordSyncEvent(this.configPath, { ...ev, folderId: folder.id }),
       // 接收模式:本机只收不推(对端索引规划时跳过 send / 本地墓碑外推,
       // 冲突以对端版本覆盖本地)

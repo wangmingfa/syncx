@@ -113,7 +113,7 @@ describe('session key exchange', () => {
     const kx = buildKxMessage(session, identity.privateKey);
     // 篡改 X25519 公钥字节(翻转首字节),签名校验应失败
     const der = x25519PublicDer(session.publicKeyPem);
-    der[0] ^= 0xff;
+    der.writeUInt8(der.readUInt8(0) ^ 0xff, 0);
     const tampered = { ...kx, x25519: der.toString('base64') };
     expect(() => verifyKxMessage(tampered, identity.publicKey)).toThrow();
   });
@@ -292,41 +292,44 @@ describe('peer server reverse discovery (listenPort)', () => {
   });
 });
 
+/** learnPeerUrl 接收 ws 的 WebSocket;用例只用到 remoteAddress/_socket,故以最小桩对象代入。 */
+type PeerSocket = Parameters<typeof learnPeerUrl>[0];
+
 describe('learnPeerUrl address normalization', () => {
   it('strips the ::ffff: IPv4-mapped IPv6 prefix (dual-stack peer server)', () => {
-    const sock = { remoteAddress: '::ffff:172.25.48.139' } as unknown as WebSocket;
+    const sock = { remoteAddress: '::ffff:172.25.48.139' } as unknown as PeerSocket;
     expect(learnPeerUrl(sock, 22000)).toBe('ws://172.25.48.139:22000');
   });
 
   it('normalizes a bracketed ::ffff: address to bare IPv4', () => {
-    const sock = { remoteAddress: '[::ffff:172.25.48.139]' } as unknown as WebSocket;
+    const sock = { remoteAddress: '[::ffff:172.25.48.139]' } as unknown as PeerSocket;
     expect(learnPeerUrl(sock, 22000)).toBe('ws://172.25.48.139:22000');
   });
 
   it('keeps a bare IPv4 address unchanged', () => {
-    const sock = { remoteAddress: '10.13.18.36' } as unknown as WebSocket;
+    const sock = { remoteAddress: '10.13.18.36' } as unknown as PeerSocket;
     expect(learnPeerUrl(sock, 22000)).toBe('ws://10.13.18.36:22000');
   });
 
   it('brackets a true IPv6 address', () => {
-    const sock = { remoteAddress: '2001:db8::1' } as unknown as WebSocket;
+    const sock = { remoteAddress: '2001:db8::1' } as unknown as PeerSocket;
     expect(learnPeerUrl(sock, 22000)).toBe('ws://[2001:db8::1]:22000');
   });
 
   it('falls back to the underlying _socket.remoteAddress', () => {
-    const sock = { _socket: { remoteAddress: '::ffff:192.168.1.5' } } as unknown as WebSocket;
+    const sock = { _socket: { remoteAddress: '::ffff:192.168.1.5' } } as unknown as PeerSocket;
     expect(learnPeerUrl(sock, 22000)).toBe('ws://192.168.1.5:22000');
   });
 
   it('returns undefined for an invalid listen port', () => {
-    const sock = { remoteAddress: '::ffff:172.25.48.139' } as unknown as WebSocket;
+    const sock = { remoteAddress: '::ffff:172.25.48.139' } as unknown as PeerSocket;
     expect(learnPeerUrl(sock, 0)).toBeUndefined();
     expect(learnPeerUrl(sock, 70000)).toBeUndefined();
     expect(learnPeerUrl(sock, undefined)).toBeUndefined();
   });
 
   it('returns undefined when no remote address is available', () => {
-    const sock = {} as unknown as WebSocket;
+    const sock = {} as unknown as PeerSocket;
     expect(learnPeerUrl(sock, 22000)).toBeUndefined();
   });
 });

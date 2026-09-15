@@ -10,6 +10,9 @@ describe('status aggregation', () => {
           { path: '/data/docs', devices: ['DEV1234567'] },
           { path: '/data/photos', devices: ['DEV1234567', 'DEVABCDEFG'] },
         ],
+        peers: [],
+        knownDevices: [],
+        pendingOffers: [],
       },
       { entries: 42, tombstones: 3 },
     );

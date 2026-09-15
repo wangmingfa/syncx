@@ -177,8 +177,10 @@ describe('local executor delete', () => {
     // 删除改进回收站:内容可在 .syncx-trash 找回,而非硬删永久丢失
     const trashed = readdirSync(join(root, '.syncx-trash'));
     expect(trashed).toHaveLength(1);
-    expect(trashed[0].startsWith('doc.txt.')).toBe(true);
-    expect(readFileSync(join(root, '.syncx-trash', trashed[0]))).toEqual(Buffer.from('bye'));
+    const trashedName = trashed[0];
+    if (!trashedName) throw new Error('expected the deleted file to be trashed');
+    expect(trashedName.startsWith('doc.txt.')).toBe(true);
+    expect(readFileSync(join(root, '.syncx-trash', trashedName))).toEqual(Buffer.from('bye'));
     expect(index.getEntry('doc.txt')).toEqual(tombstone);
 
     index.close();
@@ -204,8 +206,10 @@ describe('local executor delete', () => {
     // 回收站内保留原相对路径结构(docs/plan.md.<stamp>),便于原样还原
     const trashDocs = readdirSync(join(root, '.syncx-trash', 'docs'));
     expect(trashDocs).toHaveLength(1);
-    expect(trashDocs[0].startsWith('plan.md.')).toBe(true);
-    expect(readFileSync(join(root, '.syncx-trash', 'docs', trashDocs[0]))).toEqual(Buffer.from('secret plan'));
+    const trashedNested = trashDocs[0];
+    if (!trashedNested) throw new Error('expected the nested file to be trashed');
+    expect(trashedNested.startsWith('plan.md.')).toBe(true);
+    expect(readFileSync(join(root, '.syncx-trash', 'docs', trashedNested))).toEqual(Buffer.from('secret plan'));
     expect(index.getEntry('docs/plan.md')).toEqual(tombstone);
 
     index.close();

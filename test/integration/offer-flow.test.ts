@@ -78,7 +78,7 @@ function startDaemon(
 }
 
 async function waitForDaemonReady(setup: DaemonSetup): Promise<void> {
-  await waitFor(() => {
+  await waitFor(async () => {
     try {
       return readFileSync(join(setup.dir, 'daemon.out.log'), 'utf8').includes('syncx daemon started');
     } catch {
@@ -274,8 +274,10 @@ describe('Phase 2 remote confirmation (offer channel)', () => {
         // 复用而非新建:同 id 目录必须只有一条,且路径仍是 B 原来的 b.share
         const mains = bFolders.folders.filter((x) => (x.id ?? x.path) === 'main');
         expect(mains).toHaveLength(1);
-        expect(mains[0].path).toBe(b.share);
-        expect(mains[0].devices).toContain(a.deviceId);
+        const main = mains[0];
+        if (!main) throw new Error('expected a single reused main folder');
+        expect(main.path).toBe(b.share);
+        expect(main.devices).toContain(a.deviceId);
       } catch (err) {
         console.log('[offer-flow:reuse] FAILED, dumping daemon logs:');
         dumpLogs(a, b);

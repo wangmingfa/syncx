@@ -5,7 +5,7 @@ import { join } from 'node:path';
 import pino from 'pino';
 
 import { rmDir } from './helpers.js';
-import { SyncSessionManager } from '../src/session-manager.js';
+import { SyncSessionManager, type FolderState } from '../src/session-manager.js';
 import { loadOrCreateIdentity } from '../src/identity.js';
 import { folderIdFor, folderIndexPath, purgeOrphanIndexFiles, type Config, type SharedFolderConfig } from '../src/config.js';
 import { ensureFolderMarker } from '../src/marker.js';
@@ -22,6 +22,19 @@ import type { IndexEntry } from '../src/index.js';
  * 删除时机是 reloadConfig 里 index.close() 之后。因此「登记待清理 + 显式 reloadConfig」
  * 必须成对出现,缺一不可。
  */
+/**
+ * 取指定序号的目录运行期状态。
+ *
+ * `noUncheckedIndexedAccess` 下 `folderStates[0]` 的类型是 `FolderState | undefined`,
+ * 而用例本身断言该目录必然存在——用显式 guard 把它收敛为 `FolderState`,
+ * 既满足类型检查,也让「断言失败」以清晰的错误信息暴露,而不是靠非空断言掩盖。
+ */
+function folderAt(mgr: SyncSessionManager, index = 0): FolderState {
+  const state = mgr.folderStates[index];
+  if (!state) throw new Error(`folder state #${index} not found (count=${mgr.folderStates.length})`);
+  return state;
+}
+
 function setup(): {
   dir: string;
   configPath: string;
@@ -127,7 +140,7 @@ describe('目录实例化(instanceId):索引寿命 = 目录实例寿命', () => 
       deleted: false,
       blocks: ['h'],
     };
-    mgr.folderStates[0].index.saveEntry(stale);
+    folderAt(mgr).index.saveEntry(stale);
     const oldDb = folderIndexPath(dir, 'inst-old');
     expect(existsSync(oldDb)).toBe(true);
 
@@ -139,9 +152,9 @@ describe('目录实例化(instanceId):索引寿命 = 目录实例寿命', () => 
     const newDb = folderIndexPath(dir, 'inst-new');
     expect(existsSync(newDb)).toBe(true);
     expect(existsSync(oldDb)).toBe(false); // 旧实例的库被废弃清理
-    expect(mgr.folderStates[0].indexKey).toBe('inst-new');
+    expect(folderAt(mgr).indexKey).toBe('inst-new');
     // 关键:新实例索引为空 → 旧条目在结构上不可能被继承(也就不会变成删除广播出去)
-    expect(mgr.folderStates[0].localIndex.size).toBe(0);
+    expect(folderAt(mgr).localIndex.size).toBe(0);
 
     mgr.close();
     rmDir(dir);
@@ -153,7 +166,7 @@ describe('目录实例化(instanceId):索引寿命 = 目录实例寿命', () => 
     writeConfig([legacy]);
     const mgr = createManager([legacy]);
 
-    expect(mgr.folderStates[0].indexKey).toBe('legacy000001');
+    expect(folderAt(mgr).indexKey).toBe('legacy000001');
     expect(existsSync(folderIndexPath(dir, folderIdFor(legacy)))).toBe(true);
     // 未生成 instanceId(既有条目不做实例化,避免升级后索引换名触发全量重扫)
     expect(JSON.parse(readFileSync(join(dir, 'config.json'), 'utf8')).sharedFolders[0].instanceId).toBeUndefined();
@@ -192,6 +205,34 @@ describe('启动孤儿索引回收(purgeOrphanIndexFiles)', () => {
   });
 });
 
+describe('可疑删除防御(墓碑路径含平台分隔符)', () => {
+  it("路径含 '\\' 的墓碑被拒绝执行:索引错配绝不演变成数据丢失", async () => {
+    const { dir, share, writeConfig, createManager } = setup();
+    const folder: SharedFolderConfig = { path: share, devices: [], id: 'sepguard00001' };
+    writeConfig([folder]);
+    ensureFolderMarker(share);
+    const mgr = createManager([folder]);
+    // 模拟「本地路径构造与协议索引不一致」:索引条目用 '\' 分隔,而扫描器按 '/' 生成路径,
+    // 于是这条看起来「盘上已无」→ 会被判成墓碑。这正是 2026-09-15 的事故形态。
+    folderAt(mgr).index.saveEntry({
+      path: 'utils\\version.mbt',
+      version: new Map([['DEV', 1]]),
+      size: 3,
+      deleted: false,
+      blocks: ['h'],
+    });
+
+    await mgr.runScan();
+
+    // 条目保持「活的」(既未删除也未写入墓碑),并给出可见的目录错误
+    expect(folderAt(mgr).index.getEntry('utils\\version.mbt')?.deleted).toBe(false);
+    expect(mgr.getFolderErrors().some((e) => e.message.includes('可疑删除'))).toBe(true);
+
+    mgr.close();
+    rmDir(dir);
+  });
+});
+
 describe('挂载标记门禁(.syncx-folder)', () => {
   it('标记缺失时跳过扫描:目录不可信不会被误判成「文件被删光」', async () => {
     const { dir, share, writeConfig, createManager } = setup();
@@ -199,7 +240,7 @@ describe('挂载标记门禁(.syncx-folder)', () => {
     writeConfig([folder]);
     const mgr = createManager([folder]);
     // 造出「索引里有、磁盘上无」的形态(盘未挂载 / 目录被整体清空的典型样貌)
-    mgr.folderStates[0].index.saveEntry({
+    folderAt(mgr).index.saveEntry({
       path: 'doc.txt',
       version: new Map([['DEV', 1]]),
       size: 3,
@@ -210,13 +251,13 @@ describe('挂载标记门禁(.syncx-folder)', () => {
     await mgr.runScan();
 
     // 无墓碑:索引条目保持「活的」,并给出可见的目录错误与恢复指引
-    expect(mgr.folderStates[0].index.getEntry('doc.txt')?.deleted).toBe(false);
+    expect(folderAt(mgr).index.getEntry('doc.txt')?.deleted).toBe(false);
     expect(mgr.getFolderErrors().some((e) => e.message.includes('缺少共享目录标记'))).toBe(true);
 
     // 建立标记后放行:此时才允许按真实差异推断删除
     ensureFolderMarker(share);
     await mgr.runScan();
-    expect(mgr.folderStates[0].index.getEntry('doc.txt')?.deleted).toBe(true);
+    expect(folderAt(mgr).index.getEntry('doc.txt')?.deleted).toBe(true);
     expect(mgr.getFolderErrors()).toHaveLength(0);
 
     mgr.close();

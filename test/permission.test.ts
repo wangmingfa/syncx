@@ -59,6 +59,7 @@ function untar(tgz: Buffer): string {
   if (r.status !== 0) throw new Error(`tar 解压失败: ${r.stderr}`);
   const entries = readdirSync(work).filter((e: string) => e !== 'self.tgz');
   const top = entries[0];
+  if (!top) throw new Error('tar 解压后目录为空');
   const root = join(work, top);
   return statSync(root).isDirectory() ? root : work;
 }
