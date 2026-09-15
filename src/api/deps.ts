@@ -37,6 +37,8 @@ export interface ControlServerDeps {
   getOffers?: () => unknown;
   /** 读取某共享目录的同步记录(最近变更,倒序)。参数为目录 ID。 */
   getFolderHistory?: (folderId: string) => unknown;
+  /** 清空某共享目录的同步记录(不可逆)。参数为目录 ID。 */
+  clearFolderHistory?: (folderId: string) => unknown;
   /**
    * 日志文件路径(--log-file 启动参数)。设置后 GET /api/logs 可读取日志尾部;
    * 未设置时该端点返回 ok:false,前端提示需以 --log-file 启动才有日志可看。

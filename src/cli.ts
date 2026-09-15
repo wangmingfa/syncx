@@ -5,7 +5,7 @@ import { loadOrCreateIdentity } from './identity.js';
 import { loadConfig, saveConfig } from './config.js';
 import { openIndexStore } from './indexstore.js';
 
-import { listSyncHistory } from './history.js';
+import { listSyncHistory, clearSyncHistory } from './history.js';
 import { readFileSync, existsSync, writeFileSync, watch, unlinkSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import { startPeerServer } from './net/server.js';
@@ -343,6 +343,7 @@ export async function run(args: ParsedArgs): Promise<void> {
     // 待确认区下发 pending + declined:已忽略项灰显供「恢复」,兜住手误忽略
     getOffers: () => listOpenOffers(configPath),
     getFolderHistory: (folderId) => listSyncHistory(configPath, folderId),
+    clearFolderHistory: (folderId) => clearSyncHistory(configPath, folderId),
     acceptOffer: (offerId, localPath) => {
       // 先查再落状态:校验失败时不能把邀请标成 accepted,否则目录没建起来、
       // 卡片却已从「待确认」消失,用户失去重试入口。

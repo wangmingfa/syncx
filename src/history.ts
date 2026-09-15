@@ -135,3 +135,22 @@ export function listSyncHistory(configPath: string, folderId: string, limit = 20
   }
   return state.events.slice(-limit).reverse();
 }
+
+/** 清空某目录的同步记录:移除内存态、取消未落盘的攒批定时器,并截断磁盘文件。 */
+export function clearSyncHistory(configPath: string, folderId: string): void {
+  const file = historyFileFor(configPath, folderId);
+  const state = cache.get(file);
+  if (state?.timer) {
+    // 取消未落盘定时器,否则清空后它仍会把旧事件写回磁盘
+    clearTimeout(state.timer);
+    state.timer = undefined;
+  }
+  cache.delete(file);
+  if (existsSync(file)) {
+    try {
+      writeFileSync(file, '');
+    } catch {
+      // 磁盘不可写:内存态已清,后续任何重读都会得到空记录
+    }
+  }
+}

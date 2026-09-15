@@ -8,7 +8,7 @@ export async function tryFolderRoutes(
   res: ServerResponse,
   deps: ControlServerDeps,
 ): Promise<boolean> {
-  const { addFolder, removeFolder, setFolderDevices, setFolderUseGitignore, getFolderHistory } = deps;
+  const { addFolder, removeFolder, setFolderDevices, setFolderUseGitignore, getFolderHistory, clearFolderHistory } = deps;
   const path = req.url ? pathname(req.url) : '/';
 
   // Form POST /folders : add or (via _method=DELETE) remove a folder
@@ -97,6 +97,24 @@ export async function tryFolderRoutes(
       return true;
     }
     sendJson(res, 200, { events: getFolderHistory(folderId) });
+    return true;
+  }
+
+  // POST /api/folders/history/clear : 清空某目录的同步记录(不可逆,需前端二次确认)
+  if (req.method === 'POST' && path === '/api/folders/history/clear' && clearFolderHistory) {
+    try {
+      const raw = await readBody(req);
+      const body = raw === '' ? {} : JSON.parse(raw);
+      const folderId = (body as { folderId?: unknown }).folderId;
+      if (typeof folderId !== 'string' || folderId === '') {
+        sendJson(res, 400, { error: 'folderId is required' });
+        return true;
+      }
+      clearFolderHistory(folderId);
+      sendJson(res, 200, { ok: true });
+    } catch {
+      sendJson(res, 400, { error: 'invalid json body' });
+    }
     return true;
   }
 

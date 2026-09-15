@@ -4,6 +4,7 @@ import { NButton } from 'naive-ui';
 import type { SyncEventItem } from '../types';
 import { apiJson, errText } from '../utils/api';
 import { copyText } from '../utils/clipboard';
+import { useStatusContext } from '../composables/statusContext';
 
 const props = defineProps<{
   /** 非空 = 打开该目录的记录弹窗并拉取历史。 */
@@ -12,6 +13,7 @@ const props = defineProps<{
   notify: (msg: string, kind?: 'info' | 'alert') => void;
 }>();
 const emit = defineEmits<{ close: [] }>();
+const { askConfirm } = useStatusContext();
 
 const events = ref<SyncEventItem[]>([]);
 const loading = ref(false);
@@ -68,6 +70,33 @@ async function copyHistory(): Promise<void> {
     props.notify('复制失败，请手动选择记录复制', 'alert');
   }
 }
+
+// 清空当前目录的全部同步记录(不可逆,需二次确认)
+async function clearHistory(): Promise<void> {
+  const f = props.folder;
+  if (!f) return;
+  const id = f.id ?? f.path;
+  await apiJson('/api/folders/history/clear', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ folderId: id }),
+  });
+  events.value = [];
+}
+
+// 触发二次确认弹窗(复用全局 ConfirmModal,防误删)
+function askClearHistory(): void {
+  const f = props.folder;
+  if (!f) return;
+  askConfirm({
+    title: '清空同步记录',
+    message: '将删除该目录的全部同步记录,此操作不可恢复。',
+    detail: f.path,
+    confirmText: '清空',
+    note: '清空后仅移除历史条目,之后的新同步仍会正常记录。',
+    action: clearHistory,
+  });
+}
 </script>
 
 <template>
@@ -93,6 +122,7 @@ async function copyHistory(): Promise<void> {
 
         <div class="modal-actions">
           <n-button :disabled="events.length === 0" @click="copyHistory">复制记录</n-button>
+          <n-button :disabled="events.length === 0" @click="askClearHistory">清空记录</n-button>
           <n-button type="primary" @click="emit('close')">关闭</n-button>
         </div>
       </div>
