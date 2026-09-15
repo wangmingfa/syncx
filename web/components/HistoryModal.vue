@@ -3,6 +3,7 @@ import { ref, watch } from 'vue';
 import { NButton } from 'naive-ui';
 import type { SyncEventItem } from '../types';
 import { apiJson, errText } from '../utils/api';
+import { copyText } from '../utils/clipboard';
 
 const props = defineProps<{
   /** 非空 = 打开该目录的记录弹窗并拉取历史。 */
@@ -48,6 +49,25 @@ function directionLabel(d: string): string {
 function fmtTime(ts: number): string {
   return new Date(ts).toLocaleString();
 }
+
+// 复制当前展示的全部同步记录到剪贴板
+async function copyHistory(): Promise<void> {
+  if (events.value.length === 0) return;
+  const text = events.value
+    .map((ev) => {
+      const dir =
+        directionLabel(ev.direction) +
+        (ev.direction !== 'local' && ev.deviceId ? `：${ev.deviceId}` : '');
+      return `${fmtTime(ev.ts)}\t${actionLabel(ev.action)}\t${dir}\t${ev.path}`;
+    })
+    .join('\n');
+  const ok = await copyText(text);
+  if (ok) {
+    props.notify('已复制全部同步记录到剪贴板', 'info');
+  } else {
+    props.notify('复制失败，请手动选择记录复制', 'alert');
+  }
+}
 </script>
 
 <template>
@@ -70,6 +90,11 @@ function fmtTime(ts: number): string {
             <span class="history-path mono break">{{ ev.path }}</span>
           </li>
         </ul>
+
+        <div class="modal-actions">
+          <n-button :disabled="events.length === 0" @click="copyHistory">复制记录</n-button>
+          <n-button type="primary" @click="emit('close')">关闭</n-button>
+        </div>
       </div>
     </div>
   </Transition>

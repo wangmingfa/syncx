@@ -2,9 +2,12 @@
 import { ref, watch } from 'vue';
 import { NButton } from 'naive-ui';
 import { apiJson, errText } from '../utils/api';
+import { useToast } from '../composables/useToast';
+import { copyText } from '../utils/clipboard';
 
 const props = defineProps<{ open: boolean }>();
 const emit = defineEmits<{ close: [] }>();
+const { showToast } = useToast();
 
 const loading = ref(false);
 const lines = ref<string[]>([]);
@@ -55,6 +58,17 @@ watch(
     await fetchLogs();
   },
 );
+
+// 复制当前展示的全部日志到剪贴板
+async function copyLogs(): Promise<void> {
+  if (lines.value.length === 0) return;
+  const ok = await copyText(lines.value.join('\n'));
+  if (ok) {
+    showToast('已复制全部日志到剪贴板', 'info');
+  } else {
+    showToast('复制失败，请手动选择日志复制', 'alert');
+  }
+}
 </script>
 
 <template>
@@ -78,6 +92,7 @@ watch(
         <pre v-else ref="view" class="logs-view mono">{{ lines.join('\n') }}</pre>
 
         <div class="modal-actions">
+          <n-button :disabled="lines.length === 0" @click="copyLogs">复制日志</n-button>
           <n-button :loading="loading" @click="fetchLogs">刷新</n-button>
           <n-button type="primary" @click="emit('close')">关闭</n-button>
         </div>

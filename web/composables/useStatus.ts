@@ -1,6 +1,7 @@
 import { ref, onMounted, onUnmounted, type Ref } from 'vue';
 import { useToast } from './useToast';
 import { apiJson, errText } from '../utils/api';
+import { copyText } from '../utils/clipboard';
 import type { StatusData } from '../types';
 
 export interface StatusProps {
@@ -59,39 +60,10 @@ export function useStatus(props: StatusProps): {
     }
   }
 
-  /** 复制文本到剪贴板,并轻提示。优先现代 Clipboard API,HTTPS 受限时降级到 execCommand。 */
+  /** 复制文本到剪贴板,并轻提示。底层复用公共 clipboard 工具,兼容非安全上下文。 */
   async function copy(text: string): Promise<void> {
-    // 1. 优先使用现代 Clipboard API
-    if (navigator.clipboard && window.isSecureContext) {
-      try {
-        await navigator.clipboard.writeText(text);
-        showToast('已复制到剪贴板');
-        return;
-      } catch {
-        // 继续降级
-      }
-    }
-    // 2. 兼容 HTTP / 老浏览器
-    try {
-      const textarea = document.createElement('textarea');
-      textarea.value = text;
-      textarea.style.position = 'fixed';
-      textarea.style.left = '-9999px';
-      textarea.style.top = '0';
-      textarea.style.opacity = '0';
-      document.body.appendChild(textarea);
-      textarea.focus();
-      textarea.select();
-      const success = document.execCommand('copy');
-      textarea.remove();
-      if (success) {
-        showToast('已复制到剪贴板');
-        return;
-      }
-    } catch {
-      // 降级失败
-    }
-    showToast('复制失败,请手动选择');
+    const ok = await copyText(text);
+    showToast(ok ? '已复制到剪贴板' : '复制失败,请手动选择');
   }
 
   // 挂载后立即刷新一次 + 周期轮询(让对方推送的待确认项及时弹出);卸载清理定时器

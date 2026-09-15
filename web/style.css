@@ -24,6 +24,9 @@
   --shadow: 0 1px 2px rgba(22, 32, 52, 0.04), 0 12px 30px -20px rgba(22, 32, 52, 0.28);
   --radius: 12px;
   --mono: ui-monospace, SFMono-Regular, Menlo, Consolas, "Liberation Mono", monospace;
+  /* 层叠顺序(z 轴):数值越大越靠上。集中管理,新增浮层在此声明,避免相互遮挡 */
+  --z-overlay: 100;   /* 模态遮罩 + 弹窗 */
+  --z-toast: 2000;    /* 轻提示:必须高于所有弹窗,弹窗内触发的提示才不会被遮住 */
 }
 
 * {
@@ -269,7 +272,7 @@ tbody tr:last-child td {
   font-size: 13px;
   color: var(--text);
   box-shadow: var(--shadow);
-  z-index: 50;
+  z-index: var(--z-toast);
 }
 
 /* 重要通知(配对确认 / 升级等):顶部居中、品牌渐变实色、白字加粗、下滑入场,与普通反馈一眼区分 */
@@ -983,7 +986,7 @@ tbody tr:last-child td {
   align-items: center;
   justify-content: center;
   padding: 20px;
-  z-index: 100;
+  z-index: var(--z-overlay);
 }
 
 .modal {
