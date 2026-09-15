@@ -23,7 +23,8 @@ export interface ControlServerDeps {
   getStatus: () => unknown;
   /** 添加共享目录;返回是否自动创建了不存在的目录(供前端提示)。 */
   addFolder?: (path: string, devices: string[], id?: string) => boolean;
-  removeFolder?: (path: string) => void;
+  /** 移除共享目录。opts.purgeIndex 为 true 时一并删除该目录的索引库文件(清掉历史残留)。 */
+  removeFolder?: (path: string, opts?: { purgeIndex?: boolean }) => void;
   /** 添加一个已知对端设备 ID(按 ID 配对,不依赖邀请码)。可选 address 直接写入
    *  config.peers 并立即直连,用于跨网段/无 mDNS 时手动指定对方 ws:// 地址。 */
   addDevice?: (deviceId: string, address?: string) => void;

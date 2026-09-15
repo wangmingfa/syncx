@@ -19,7 +19,7 @@ import { randomBytes } from 'node:crypto';
 import type { Logger } from 'pino';
 import { WebSocket } from 'ws';
 
-import { loadConfig, folderIdFor, folderIndexPath, type SharedFolderConfig } from './config.js';
+import { loadConfig, folderIdFor, folderIndexPath, purgeFolderIndex, type SharedFolderConfig } from './config.js';
 import { openIndexStore, type IndexStore } from './indexstore.js';
 import { createLocalExecutor, resolveSharePath, type LocalExecutor } from './executor.js';
 import { filterIndexedEntries, parseIgnoreRules, readFolderIgnoreLines } from './ignore.js';
@@ -109,6 +109,9 @@ export class SyncSessionManager {
   // 记录每个目录最近一次同步失败的错误信息(内存态,不落盘);同一目录再次出错覆盖,
   // 一轮完整扫描无新错误则清除(问题自愈后提示自动消失)。
   private readonly folderErrorsState = new Map<string, { message: string; ts: number }>();
+  // 待清理索引库:removeFolder 带 purgeIndex 时登记 folderId,等配置热重载关闭该目录的
+  // 索引连接后再删文件,规避 Windows 下 unlink 打开中的库报 EBUSY。
+  private readonly pendingIndexPurge = new Set<string>();
 
   // --- 对端连接去重与断线重连 ---
   // mDNS 重播 + config.peers 主动连接 + 双向同时拨号会在同一对端上产生重复连接。
@@ -988,6 +991,13 @@ export class SyncSessionManager {
           }
           folder.peers.clear();
           folder.index.close();
+          // 关闭连接后再删索引库:此时文件已无持有者,Windows 下也能安全 unlink。
+          if (this.pendingIndexPurge.has(folder.id)) {
+            this.pendingIndexPurge.delete(folder.id);
+            if (purgeFolderIndex(this.configDir, folder.id)) {
+              this.logger.info(`index purged: ${folderIndexPath(this.configDir, folder.id)}`);
+            }
+          }
         }
       }
       this.folderStates = this.folderStates.filter((f) => newFolderById.has(f.id));
@@ -1035,6 +1045,11 @@ export class SyncSessionManager {
       this.logger.error(`config reload failed: ${error instanceof Error ? error.message : String(error)}`);
       return undefined;
     }
+  }
+
+  /** 标记某目录的索引库需在下次热重载关闭连接后删除(跨平台安全清理,规避 Windows EBUSY)。 */
+  markIndexForPurge(folderId: string): void {
+    this.pendingIndexPurge.add(folderId);
   }
 
   /** daemon 优雅关闭:清重连定时器、停心跳、断开所有 peer socket、关闭索引库。 */

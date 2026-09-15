@@ -40,6 +40,23 @@ export function folderIndexPath(configDir: string, folderId: string): string {
   return join(configDir, `index-${hash}.db`);
 }
 
+/**
+ * 删除某共享目录的索引库文件(按 folderId 哈希定位的 index-<hash>.db)。
+ * best-effort:文件不存在时返回 false;被运行中的 daemon 持有连接时(尤其 Windows
+ * 下 unlink 打开中的文件会 EBUSY/EPERM)也返回 false 且不抛错——daemon 场景交由
+ * reloadConfig 在关闭索引连接后再删除,确保跨平台都能清掉。
+ */
+export function purgeFolderIndex(configDir: string, folderId: string): boolean {
+  const dbPath = folderIndexPath(configDir, folderId);
+  if (!existsSync(dbPath)) return false;
+  try {
+    unlinkSync(dbPath);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
 /** 已知对端设备:通过「粘贴设备 ID」引入,未必已指派到任何目录。 */
 export interface DeviceConfig {
   id: string;

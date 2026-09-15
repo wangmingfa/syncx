@@ -89,13 +89,16 @@ export function useFolders(deps: CoreDeps): {
       message: '移除后本机不再同步该目录,对端也会停止同步它。磁盘上的文件不会被删除。',
       detail: path,
       confirmText: '确认移除',
-      action: () => doRemoveFolder(path),
+      // 默认勾选:一并删掉索引库,避免同目录重加时复用旧索引(旧墓碑会再次参与对账,造成误删)
+      checkbox: { label: '同时删除索引库（清掉历史残留，防止重加时旧记录复用）', checked: true },
+      action: (purgeIndex) => doRemoveFolder(path, purgeIndex),
     });
   }
 
-  async function doRemoveFolder(path: string): Promise<void> {
-    await apiJson(`/api/folders?path=${encodeURIComponent(path)}`, { method: 'DELETE' });
-    showToast('已移除共享目录');
+  async function doRemoveFolder(path: string, purgeIndex = false): Promise<void> {
+    const qs = purgeIndex ? `?path=${encodeURIComponent(path)}&purgeIndex=1` : `?path=${encodeURIComponent(path)}`;
+    await apiJson(`/api/folders${qs}`, { method: 'DELETE' });
+    showToast(purgeIndex ? '已移除共享目录（含索引库）' : '已移除共享目录');
     await refreshStatus();
   }
 

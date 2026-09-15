@@ -1306,6 +1306,32 @@ tbody tr:last-child td {
   margin-top: 0;
 }
 
+/* 二次确认弹窗内的可选勾选项(如「同时删除索引库」) */
+.confirm-checkbox {
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
+  margin-top: 12px;
+  padding: 10px 12px;
+  border: 1px solid var(--border, #e3e6ea);
+  border-radius: 8px;
+  background: var(--surface-2, #f7f8fa);
+  font-size: 13px;
+  line-height: 1.5;
+  color: var(--text, #1f2329);
+  cursor: pointer;
+  user-select: none;
+}
+
+.confirm-checkbox input[type='checkbox'] {
+  margin-top: 2px;
+  width: 15px;
+  height: 15px;
+  flex: 0 0 auto;
+  accent-color: var(--brand, #2f6fed);
+  cursor: pointer;
+}
+
 /* 弹窗内的表单字段(登录密码等)。与登录页同款标签排版,故提到全局。
    登录页 <style scoped> 里的同名规则优先,视觉一致。 */
 .field {

@@ -17,7 +17,7 @@ export async function tryFolderRoutes(
     const method = params.get('_method');
     if (method === 'DELETE' && removeFolder) {
       const p = params.get('path');
-      if (p) removeFolder(p);
+      if (p) removeFolder(p, { purgeIndex: params.get('purgeIndex') === '1' });
       redirect(res, '/');
       return true;
     }
@@ -126,7 +126,7 @@ export async function tryFolderRoutes(
       sendJson(res, 400, { error: 'path is required' });
       return true;
     }
-    removeFolder(p);
+    removeFolder(p, { purgeIndex: url.searchParams.get('purgeIndex') === '1' });
     sendJson(res, 200, { ok: true });
     return true;
   }

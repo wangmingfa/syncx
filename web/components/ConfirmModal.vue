@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { ref } from 'vue';
+import { ref, watch } from 'vue';
 import { NButton } from 'naive-ui';
 import type { ConfirmState } from '../types';
 
@@ -9,17 +9,24 @@ const props = defineProps<{
   /** 轻提示(父级 useToast 提供),失败原因原样展示。 */
   notify: (msg: string, kind?: 'info' | 'alert') => void;
 }>();
+
+// 弹窗内容(state)变化时同步 checkbox 初值:每次弹出都用 state.checkbox.checked 复位
+watch(() => props.state, (s) => {
+  if (s?.checkbox) checked.value = s.checkbox.checked;
+});
 /** 成功时通知父级清空确认状态;失败保留弹窗便于取消或重试。 */
 const emit = defineEmits<{ closed: [] }>();
 
 const busy = ref(false);
+/** checkbox 勾选态:仅在 state.checkbox 存在时使用,初始取 state.checkbox.checked。 */
+const checked = ref(false);
 
 async function runConfirm(): Promise<void> {
   const state = props.state;
   if (!state || busy.value) return;
   busy.value = true;
   try {
-    await state.action();
+    await state.action(checked.value);
     emit('closed');
   } catch (error) {
     // 失败时保留弹窗,便于取消或重试,不做任何数据假设;后端给的原因(如有)优先展示
@@ -55,6 +62,10 @@ async function runConfirm(): Promise<void> {
         </template>
 
         <p v-if="state.note" class="confirm-note-extra">{{ state.note }}</p>
+        <label v-if="state.checkbox" class="confirm-checkbox">
+          <input type="checkbox" v-model="checked" />
+          <span>{{ state.checkbox.label }}</span>
+        </label>
         <div class="modal-actions">
           <n-button class="modal-cancel" :disabled="busy" @click="emit('closed')">取消</n-button>
           <n-button type="error" class="modal-danger" :loading="busy" @click="runConfirm">

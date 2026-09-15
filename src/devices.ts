@@ -1,8 +1,8 @@
 import { existsSync, mkdirSync, statSync } from 'node:fs';
-import { resolve, isAbsolute, sep } from 'node:path';
+import { resolve, isAbsolute, sep, dirname } from 'node:path';
 import { homedir } from 'node:os';
 import { randomBytes } from 'node:crypto';
-import { loadConfig, saveConfig, mutateConfig, normalizePeerUrl, DEFAULT_CONFIG, folderIdFor, type Config, type SharedFolderConfig, type DeviceConfig } from './config.js';
+import { loadConfig, saveConfig, mutateConfig, normalizePeerUrl, DEFAULT_CONFIG, folderIdFor, purgeFolderIndex, type Config, type SharedFolderConfig, type DeviceConfig } from './config.js';
 
 /**
  * 共享目录黑名单:平台相关。
@@ -241,10 +241,24 @@ export function setFolderGitignore(configPath: string, path: string, enabled: bo
 }
 
 /** 按路径移除一个共享目录。 */
-export function removeSharedFolder(configPath: string, path: string): void {
+/**
+ * 移除一个共享目录(从 config.sharedFolders 滤除)。
+ * @param purgeIndex 为 true 时一并删除该目录的索引库文件(~/.syncx/index-<hash>.db),
+ *   清掉历史残留,避免同目录重加时复用旧索引(旧墓碑/条目会再次参与对账,导致误删/误改)。
+ *   删除为 best-effort:daemon 仍持有该库连接时(尤其 Windows)会失败,交由 reloadConfig
+ *   在关闭索引连接后再删,确保跨平台可用。
+ */
+export function removeSharedFolder(configPath: string, path: string, purgeIndex = false): void {
+  const configDir = dirname(configPath);
+  let removedId: string | undefined;
   mutateConfig(configPath, (config) => {
+    const target = config.sharedFolders.find((f) => resolve(f.path) === resolve(path));
+    removedId = target ? folderIdFor(target) : undefined;
     config.sharedFolders = config.sharedFolders.filter((f) => resolve(f.path) !== resolve(path));
   });
+  if (purgeIndex && removedId) {
+    purgeFolderIndex(configDir, removedId);
+  }
 }
 
 /** 列出已知设备(按 ID 引入,未必已指派到目录)。 */

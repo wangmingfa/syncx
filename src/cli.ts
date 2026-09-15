@@ -212,11 +212,17 @@ export async function run(args: ParsedArgs): Promise<void> {
       }
       return created;
     },
-    removeFolder: (path) => {
+    removeFolder: (path, opts) => {
       // 移除前先记下原指派设备:移除后要向它们重推目录清单(它们 UI 上应显示「已停止共享」)
-      const affected = new Set(loadConfig(configPath).sharedFolders.find((f) => resolve(f.path) === resolve(path))?.devices ?? []);
-      removeSharedFolder(configPath, path);
-      logger.info(`shared folder removed: ${path}`);
+      const folder = loadConfig(configPath).sharedFolders.find((f) => resolve(f.path) === resolve(path));
+      const affected = new Set(folder?.devices ?? []);
+      const purgeIndex = opts?.purgeIndex === true;
+      removeSharedFolder(configPath, path, purgeIndex);
+      if (purgeIndex && folder) {
+        // daemon 仍持有索引连接时(尤其 Windows)直接 unlink 会失败,登记待热重载关闭后再删
+        manager.markIndexForPurge(folder.id ?? path);
+      }
+      logger.info(`shared folder removed: ${path}${purgeIndex ? ' (index purged)' : ''}`);
       for (const d of affected) manager.pushFolderSyncList(d);
     },
     getStatus: () => {

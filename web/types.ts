@@ -88,6 +88,9 @@ export interface ConfirmState {
   folders?: Array<{ path: string; others: number }>;
   /** 补充提醒(如「对方仍需自行移除一次」)。 */
   note?: string;
+  /** 可选勾选项(如「同时删除索引库」);勾选状态随 action 的 checked 参数回传。 */
+  checkbox?: { label: string; checked: boolean };
   confirmText: string;
-  action: () => Promise<void>;
+  /** checked = 用户勾选项的最终状态(无 checkbox 时为 false)。 */
+  action: (checked: boolean) => Promise<void>;
 }
