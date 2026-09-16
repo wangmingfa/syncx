@@ -205,6 +205,63 @@ describe('启动孤儿索引回收(purgeOrphanIndexFiles)', () => {
   });
 });
 
+describe('硬忽略断根(.git 等历史条目在启动时被清出索引库)', () => {
+  /**
+   * 2026-09-15 事故留给旧库的「种子」:旧版本把 .git 当普通内容索引过,库里留着活条目
+   * 与墓碑。过滤能挡住它们参与同步(filterIndexedEntries),但它们在库里既污染条目统计、
+   * 又会在排查时误导判断,所以创建目录状态时顺手删掉。这是纯优化:即使不删也不会同步。
+   */
+  it('清掉 .git 等遗留条目,普通条目不受影响', () => {
+    const { dir, share, writeConfig, createManager } = setup();
+    const folder: SharedFolderConfig = {
+      path: share,
+      devices: [],
+      id: 'hardign000001',
+      instanceId: 'inst-hard',
+    };
+    writeConfig([folder]);
+    const mgr = createManager([folder]);
+
+    const index = folderAt(mgr).index;
+    index.saveEntry({
+      path: '.git/config',
+      version: new Map([['DEV', 1]]),
+      size: 7,
+      deleted: false,
+      blocks: ['h'],
+    });
+    index.saveEntry({
+      path: '.git/HEAD',
+      version: new Map([['DEV', 2]]),
+      size: 0,
+      deleted: true,
+      blocks: [],
+    });
+    index.saveEntry({
+      path: 'utils/version.mbt',
+      version: new Map([['DEV', 1]]),
+      size: 3,
+      deleted: false,
+      blocks: ['h'],
+    });
+    mgr.close();
+
+    // 重启:重新打开同一个索引库(daemon 每次启动都会走 createFolderState)
+    const mgr2 = createManager([folder]);
+    const reopened = folderAt(mgr2).index;
+
+    expect(reopened.getEntry('.git/config')).toBeUndefined();
+    expect(reopened.getEntry('.git/HEAD')).toBeUndefined();
+    expect(reopened.getEntry('utils/version.mbt')).toBeDefined();
+    // 本地索引(与对端交换的那一份)同样不含它们
+    expect(folderAt(mgr2).localIndex.has('.git/config')).toBe(false);
+    expect(folderAt(mgr2).localIndex.has('utils/version.mbt')).toBe(true);
+
+    mgr2.close();
+    rmDir(dir);
+  });
+});
+
 describe('可疑删除防御(墓碑路径含平台分隔符)', () => {
   it("路径含 '\\' 的墓碑被拒绝执行:索引错配绝不演变成数据丢失", async () => {
     const { dir, share, writeConfig, createManager } = setup();

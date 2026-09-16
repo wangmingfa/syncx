@@ -616,6 +616,102 @@ describe('sync peer session', () => {
   });
 });
 
+/**
+ * 硬忽略闸门(见 docs/adr/0008):对端推来的 .git 一类条目一条都不收,本机也一条都不发。
+ * 这组用例针对的正是「本机规则管不住对端规则」的实际场景——对端版本旧、或对端把忽略
+ * 规则负向覆盖了,都会把 .git 条目推过来,若不拦,本机真实的 .git 会被覆盖或被移进回收站。
+ */
+describe('hard ignore (VCS 元数据不收不发)', () => {
+  function fakeTransport() {
+    const sentEntries: ReturnType<typeof entry>[] = [];
+    const requests: BlockRequest[] = [];
+    const responses: BlockResponse[] = [];
+    return {
+      transport: {
+        sendEntries(entries: ReturnType<typeof entry>[]): void {
+          sentEntries.push(...entries);
+        },
+        sendBlockRequest(request: BlockRequest): void {
+          requests.push(request);
+        },
+        sendBlockResponse(response: BlockResponse): void {
+          responses.push(response);
+        },
+      } satisfies PeerTransport,
+      sentEntries,
+      requests,
+      responses,
+    };
+  }
+
+  it('drops hard-ignored entries from the peer index: nothing written, nothing deleted, nothing echoed', async () => {
+    const dir = mkdtempSync(join(tmpdir(), 'syncx-peer-hardignore-'));
+    const root = join(dir, 'share');
+    mkdirSync(join(root, '.git'), { recursive: true });
+    writeFileSync(join(root, '.git', 'config'), 'local git config');
+    const index = openIndexStore(join(dir, 'index.db'));
+    const executor = createLocalExecutor(root, index);
+    const { transport, sentEntries, requests } = fakeTransport();
+    const dropped: string[][] = [];
+    const localIndex = new Map<string, ReturnType<typeof entry>>();
+
+    // 冷设备形态:本机索引为空,对端「热」。若不拦,.git/config 会先被冷启动保护
+    // 当成新文件、再被对端版本覆盖;.git/HEAD 的墓碑会把本机文件移进回收站。
+    const peer = createSyncPeer({
+      transport,
+      localIndex,
+      executor,
+      readLocalBlock: () => Buffer.from(''),
+      deviceId: 'DEV-A',
+      remoteDeviceId: 'DEV-B',
+      root,
+      ignoreLines: [],
+      onHardIgnoredDropped: (paths) => dropped.push(paths),
+    });
+
+    const peerGit = Buffer.from('peer git config');
+    const peerNotes = Buffer.from('hi');
+    await peer.onPeerIndex([
+      entry('.git/config', [['dev-b', 1]], [hashBlock(peerGit)], peerGit.length),
+      entry('.git/HEAD', [['dev-b', 1]], [], 0, true),
+      entry('.syncx-trash/old.txt.1ab', [['dev-b', 1]], [], 0, true),
+      entry('notes.txt', [['dev-b', 1]], [hashBlock(peerNotes)], peerNotes.length),
+    ]);
+
+    // 本机 .git 既没被写也没被删
+    expect(readFileSync(join(root, '.git', 'config'), 'utf8')).toBe('local git config');
+    expect(existsSync(join(root, '.git', 'HEAD'))).toBe(false);
+    // 被丢弃的条目不进本地索引,也不为其请求块
+    expect(localIndex.has('.git/config')).toBe(false);
+    expect(requests.map((r) => r.path)).toEqual(['notes.txt']);
+    // 也不回推
+    expect(sentEntries).toEqual([]);
+    // 丢弃事件原样上报,便于在日志里发现「对端在推 .git」(通常是版本旧)
+    expect(dropped.flat()).toEqual(['.git/config', '.git/HEAD', '.syncx-trash/old.txt.1ab']);
+
+    index.close();
+    rmDir(dir);
+  });
+
+  it('never sends a hard-ignored entry even if one somehow reaches the local index', async () => {
+    const { transport, sentEntries } = fakeTransport();
+    // 正常路径下 localIndex 不可能含硬忽略路径(createFolderState 会过滤掉),
+    // 这里刻意构造,验证出向闸门是独立生效的最后一道,而不是依赖上游记得过滤
+    const local = new Map([['.git/config', entry('.git/config', [['dev-a', 2]], ['l1'], 100)]]);
+    const peer = createSyncPeer({
+      transport,
+      localIndex: local,
+      executor: null as never,
+      readLocalBlock: () => Buffer.from(''),
+      deviceId: 'DEV-A',
+    });
+
+    await peer.onPeerIndex([entry('.git/config', [['dev-a', 1]], ['l0'], 100)]);
+
+    expect(sentEntries).toEqual([]);
+  });
+});
+
 describe('receive-only mode (只拉不推)', () => {
   function fakeTransport() {
     const sentEntries: ReturnType<typeof entry>[] = [];

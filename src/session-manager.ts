@@ -23,7 +23,7 @@ import { loadConfig, folderIdFor, folderIndexKey, folderIndexPath, purgeFolderIn
 import { FOLDER_MARKER, ensureFolderMarker, hasFolderMarker } from './marker.js';
 import { openIndexStore, type IndexStore } from './indexstore.js';
 import { createLocalExecutor, resolveSharePath, type LocalExecutor } from './executor.js';
-import { filterIndexedEntries, parseIgnoreRules, readFolderIgnoreLines } from './ignore.js';
+import { filterIndexedEntries, HARD_IGNORE_NAMES, isHardIgnored, parseIgnoreRules, readFolderIgnoreLines } from './ignore.js';
 import { createSyncPeer, type PeerTransport, type SyncPeer } from './peer.js';
 import { scanFolder } from './scanner.js';
 import type { IndexEntry } from './index.js';
@@ -218,14 +218,32 @@ export class SyncSessionManager {
     // 索引按「目录实例 key」命名:新实例必然打开全新空库,不可能继承上一轮的旧条目/旧墓碑
     const index = openIndexStore(folderIndexPath(this.configDir, indexKey));
     const executor = this.captureFolderErrors(id, createLocalExecutor(f.path, index));
+    // 索引快照只取一次:下面三处(硬忽略断根 / 本地索引 / 基线判定)都要用,
+    // 而 listEntries 是全表扫描,启动时对每个目录重复调用不划算。
+    const stored = index.listEntries();
+    // 断根:硬忽略路径(见 HARD_IGNORE_NAMES)的历史条目直接从库里删掉。旧版本曾把
+    // .git 当普通内容索引(2026-09-15 事故),这些遗留条目是删除传播的种子——把它们
+    // 从库里清掉,配合 filterIndexedEntries 的过滤,本机再不可能就 .git 外推任何东西。
+    const purgeable = stored.filter((entry) => isHardIgnored(entry.path));
+    for (const entry of purgeable) {
+      index.removeEntry(entry.path);
+    }
+    if (purgeable.length > 0) {
+      this.logger.info(
+        `folder ${f.path}: removed ${purgeable.length} legacy hard-ignored entr${purgeable.length === 1 ? 'y' : 'ies'} from the index (${HARD_IGNORE_NAMES.join('/')} are never synced)`,
+      );
+    }
+    // 剔除后的条目才是这个目录真正的索引内容;基线判定也基于它:库里若只剩硬忽略条目,
+    // 清完即视为空索引建基线,而不是把首扫的存量文件当成「新增」刷一屏同步记录。
+    const usable = purgeable.length === 0 ? stored : stored.filter((entry) => !isHardIgnored(entry.path));
     // 忽略规则每设备本地:.gitignore(默认并入,可按目录关闭)+ .syncxignore(优先级更高)
     const ignoreLines = readFolderIgnoreLines(f.path, f.useGitignore !== false);
     const localIndex = new Map(
-      filterIndexedEntries(parseIgnoreRules(ignoreLines), index.listEntries()).map((e) => [e.path, e]),
+      filterIndexedEntries(parseIgnoreRules(ignoreLines), usable).map((e) => [e.path, e]),
     );
     // 索引为空 → 首扫是建基线(存量文件不算新增);索引有存量 → 首扫 diff 是
     // daemon 离线期间的真实改动,要写同步记录
-    const baselinePending = index.listEntries().length === 0;
+    const baselinePending = usable.length === 0;
     return { id, indexKey, path: f.path, index, executor, localIndex, ignoreLines, transports: [], peers: new Map(), config: f, baselinePending };
   }
 
@@ -549,6 +567,12 @@ export class SyncSessionManager {
       root: folder.path,
       // .syncxignore 行:接收保护据此跳过被忽略文件,避免反向同步出去
       ignoreLines: folder.ignoreLines,
+      // 对端推来 .git 之类硬忽略内容时留痕:这是保护在生效,不是错误,所以只记 info。
+      // 触发通常意味着对端版本旧(内置忽略早于本次改动)或对端把忽略规则负向覆盖了
+      onHardIgnoredDropped: (paths, remoteDeviceId) =>
+        this.logger.info(
+          `folder ${folder.id}: dropped ${paths.length} hard-ignored entr${paths.length === 1 ? 'y' : 'ies'} from ${remoteDeviceId || 'peer'} (e.g. ${paths[0]})`,
+        ),
       // 远端推送的变更(新增/修改/删除/冲突)落盘为同步记录(此处补全 folderId)
       onEvent: (ev) => recordSyncEvent(this.configPath, { ...ev, folderId: folder.id }),
       // 接收模式:本机只收不推(对端索引规划时跳过 send / 本地墓碑外推,

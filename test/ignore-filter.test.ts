@@ -45,4 +45,33 @@ describe('ignore rules integration', () => {
 
     expect(filtered.map((e) => e.path)).toEqual(['old.log']);
   });
+
+  /**
+   * 硬忽略路径是上面那条语义的**唯一例外**:墓碑必须一起丢。墓碑是删除的载体,
+   * 让 `.git/**` 的墓碑外推,等于命令对端把它的 `.git` 移进回收站——旧库里残留的
+   * 一条墓碑就会在每次重连时重演一次(2026-09-15 事故中 A 的 .git 被删空即此形态)。
+   */
+  it('drops hard-ignored entries together with their tombstones', () => {
+    const filtered = filterIndexedEntries([], [
+      entry('.git/config'),
+      entry('.git/config', true),
+      entry('src/.git/HEAD', true),
+      entry('.syncx-trash/notes.txt.1abc'),
+      entry('.syncx-folder'),
+      entry('src/main.ts'),
+    ]);
+
+    expect(filtered.map((e) => e.path)).toEqual(['src/main.ts']);
+  });
+
+  it('drops hard-ignored entries even when a negation rule un-ignores them', () => {
+    const rules = [
+      { pattern: '.git', negated: true },
+      { pattern: '.git/', negated: true },
+    ];
+
+    const filtered = filterIndexedEntries(rules, [entry('.git/config'), entry('.github/ci.yml')]);
+
+    expect(filtered.map((e) => e.path)).toEqual(['.github/ci.yml']);
+  });
 });

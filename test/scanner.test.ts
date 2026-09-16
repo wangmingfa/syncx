@@ -70,8 +70,9 @@ describe('scanFolder', () => {
 
     const { changed } = scanFolder(root, index, [], 'DEV-A');
 
-    // scanner 返回 OS 原生分隔符(Windows 为反斜杠),断言需与平台一致
-    expect(changed).toEqual([join('sub', 'deep', 'nested.txt')]);
+    // scanner 返回的始终是 POSIX 分隔符(协议与索引一律用 '/'),与运行平台无关;
+    // 此前这里写的是 join(...) 期望 OS 原生分隔符,在 Windows 上必然失败(commit 6213456)
+    expect(changed).toEqual(['sub/deep/nested.txt']);
     index.close();
     rmDir(dir);
   });
@@ -87,6 +88,37 @@ describe('scanFolder', () => {
     const { changed, tombstones } = scanFolder(root, index, rules, 'DEV-A');
 
     expect(changed).toEqual([]);
+    expect(tombstones).toEqual([]);
+    index.close();
+    rmDir(dir);
+  });
+
+  /**
+   * 硬忽略闸门(见 docs/adr/0008):无论 .gitignore / .syncxignore 怎么写,
+   * `.git` 这类路径都不参与扫描,也不产生墓碑。第二条断言最重要——墓碑会让对端
+   * 执行真实删除,而旧库里残留的 `.git` 条目正是 2026-09-15 事故的删除来源。
+   */
+  it('never scans hard-ignored paths, even when a negation rule re-enables them', () => {
+    const { dir, root, index } = setup();
+    mkdirSync(join(root, '.git', 'objects'), { recursive: true });
+    writeFileSync(join(root, '.git', 'config'), '[core]');
+    writeFileSync(join(root, '.git', 'objects', 'ab12'), 'blob');
+    mkdirSync(join(root, '.github', 'workflows'), { recursive: true });
+    writeFileSync(join(root, '.github', 'workflows', 'ci.yml'), 'on: push');
+
+    // 旧版本遗留的活条目:磁盘上已删掉,若无硬闸门就会生成墓碑并广播出去
+    index.saveEntry({
+      path: '.git/config',
+      version: new Map([['DEV-A', 1]]),
+      size: 7,
+      deleted: false,
+      blocks: [hashBlock(Buffer.from('[core]'))],
+    });
+
+    const rules = parseIgnoreRules(['!.git', '!.git/', '!.git/**']);
+    const { changed, tombstones } = scanFolder(root, index, rules, 'DEV-A');
+
+    expect(changed).toEqual(['.github/workflows/ci.yml']);
     expect(tombstones).toEqual([]);
     index.close();
     rmDir(dir);

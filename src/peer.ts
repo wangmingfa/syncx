@@ -4,7 +4,7 @@ import type { BlockRequest, BlockResponse } from './messages.js';
 import type { LocalExecutor } from './executor.js';
 import { resolveSharePath, preserveLocalAsConflict } from './executor.js';
 import { verifyBlock, BLOCK_SIZE } from './blockstore.js';
-import { parseIgnoreRules, isIgnored } from './ignore.js';
+import { parseIgnoreRules, isIgnoredPath, isHardIgnored } from './ignore.js';
 import type { ProgressCounts } from './status.js';
 
 export interface PeerTransport {
@@ -34,6 +34,12 @@ export interface SyncPeerDeps {
   root?: string;
   /** 共享目录的 .syncxignore 行:接收保护据此跳过被忽略的文件。 */
   ignoreLines?: string[];
+  /**
+   * 从对端索引里丢弃硬忽略条目(见 HARD_IGNORE_NAMES)时回调一次,参数是路径列表。
+   * 这条路径是「静默保护」——正常运行时不该触发,一旦触发说明对端在推 .git 之类的
+   * 内容(对端版本旧、或对端把忽略规则负向覆盖了),值得在日志里留痕便于定位。
+   */
+  onHardIgnoredDropped?: (paths: string[], remoteDeviceId: string) => void;
   /** 记录一次同步变更(新增/修改/删除/冲突),由上层写入历史存储。 */
   onEvent?: (ev: SyncEventInput) => void;
   /**
@@ -79,7 +85,7 @@ const BLOCK_RETRY_LONG_MS = 30_000;
  * complete, then apply it via the executor.
  */
 export function createSyncPeer(deps: SyncPeerDeps): SyncPeer {
-  const { transport, localIndex, executor, readLocalBlock, deviceId, remoteDeviceId, root, onEvent, ignoreLines, receiveOnly } = deps;
+  const { transport, localIndex, executor, readLocalBlock, deviceId, remoteDeviceId, root, onEvent, ignoreLines, receiveOnly, onHardIgnoredDropped } = deps;
   const pending = new Map<string, PendingEntry>();
   // 逐块跟踪超时重试:块响应丢失/丢弃时自动重发,避免文件永远收不齐
   const pendingBlocks = new Map<string, PendingBlockRequest>();
@@ -185,7 +191,7 @@ export function createSyncPeer(deps: SyncPeerDeps): SyncPeer {
       if (isNew && root !== undefined && remoteDeviceId) {
         try {
           const rules = ignoreLines ? parseIgnoreRules(ignoreLines) : [];
-          if (!isIgnored(rules, path, false)) {
+          if (!isIgnoredPath(rules, path, false)) {
             preserved = preserveLocalAsConflict(root, path, remoteDeviceId);
           }
         } catch {
@@ -211,7 +217,25 @@ export function createSyncPeer(deps: SyncPeerDeps): SyncPeer {
       for (const bReq of pendingBlocks.values()) clearTimeout(bReq.timeout);
       pendingBlocks.clear();
       pendingSendCount = 0;
-      const remote = new Map(entries.map((e) => [e.path, e]));
+
+      // 入向硬闸门:对端推来的 .git/.hg/.svn/.syncx-trash/.syncx-folder 条目**一条都不收**,
+      // 活条目与墓碑一视同仁。这是「本机 .git 被对端搅坏」唯一可靠的堵法——本机的忽略集
+      // 管不住对端的忽略集:对端版本旧(早于内置忽略加入)、或对端在 .syncxignore 里写了
+      // `!.git`,都会把 .git 条目推过来。若不拦,活条目会被写进本机 .git 目录,墓碑会让
+      // 本机真实的 .git 文件被移进回收站(2026-09-15 事故中 A 的 .git 被删空正是这条路径)。
+      // 丢弃后不进 buildPlan,因此既不落盘也不回推,对端下一轮仍会推,但每次都被丢弃。
+      const dropped: string[] = [];
+      const remote = new Map<string, IndexEntry>();
+      for (const e of entries) {
+        if (isHardIgnored(e.path)) {
+          dropped.push(e.path);
+          continue;
+        }
+        remote.set(e.path, e);
+      }
+      if (dropped.length > 0) {
+        onHardIgnoredDropped?.(dropped, remoteDeviceId ?? '');
+      }
 
       const actions = buildPlan(localIndex, remote);
       const sends: IndexEntry[] = [];
@@ -298,10 +322,14 @@ export function createSyncPeer(deps: SyncPeerDeps): SyncPeer {
         }
       }
 
-      if (sends.length > 0) {
-        transport.sendEntries(sends);
+      // 出向硬闸门(localIndex 出口的兜底):进入 localIndex 的条目本已被 filterIndexedEntries
+      // 与扫描器过滤过,这里再收一道,保证「任何来源的硬忽略条目都不上线」这一性质只由
+      // 本文件的 sendEntries 调用点决定,不依赖上游每一处都记得过滤。
+      const outbound = sends.filter((e) => !isHardIgnored(e.path));
+      if (outbound.length > 0) {
+        transport.sendEntries(outbound);
       }
-      pendingSendCount = sends.length;
+      pendingSendCount = outbound.length;
     },
 
     onBlockRequest(request: BlockRequest): void {

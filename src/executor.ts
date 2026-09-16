@@ -3,6 +3,7 @@ import { dirname, join, relative, isAbsolute, extname, sep } from 'node:path';
 import type { IndexEntry } from './index.js';
 import type { IndexStore } from './indexstore.js';
 import { verifyBlock, splitIntoBlocks, hashBlock } from './blockstore.js';
+import { isHardIgnored } from './ignore.js';
 import { mergeVersions, incrementVersion, createVersionVector } from './version.js';
 
 export interface BlockProvider {
@@ -28,8 +29,17 @@ export interface LocalExecutor {
  * 共享目录之外则抛错。读写两侧共用(applyReceive/applyDelete/applyConflict
  * 与 readLocalBlock),防止对端利用目录内符号链接读写共享目录之外的文件。
  * 尚不存在的路径段(将由 mkdirSync recursive 安全创建)跳过。
+ *
+ * 同时拒绝硬忽略路径(HARD_IGNORE_NAMES:`.git`/`.hg`/`.svn`/`.syncx-trash`/
+ * `.syncx-folder`)。这是硬忽略的**最后一道、也是唯一一道文件系统级闸门**:即使上游
+ * 某个调用方漏了过滤,同步也无法把对端内容写进本机 `.git`,更无法把本机的 `.git`
+ * 移进回收站。放在这里而不是只放在 peer/scanner 里,是因为「不碰这些路径」最终要由
+ * 真正动文件的那一层保证,而这一层是全部读写操作的必经之路。
  */
 export function resolveSharePath(root: string, relPath: string): string {
+  if (isHardIgnored(relPath)) {
+    throw new Error(`hard-ignored path: ${relPath}`);
+  }
   // 根目录可能不存在(刚配置尚未创建 / 运行中被删除):realpathSync 会抛 ENOENT。
   // 此时任何候选段也不可能存在(其祖先链断了),越界检查自然跳过;根目录恢复后恢复完整校验。
   const rootReal = existsSync(root) ? realpathSync(root) : undefined;

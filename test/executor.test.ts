@@ -156,6 +156,55 @@ describe('local executor receive', () => {
 
     rmDir(dir);
   });
+
+  /**
+   * 硬忽略的文件系统级闸门(见 docs/adr/0008)。放在这一层是因为它才是真正动文件的地方:
+   * 即便 scanner / peer 的过滤同时失效,同步仍写不进本机 .git,也删不掉它。
+   */
+  it('resolveSharePath refuses hard-ignored paths and leaves them to nobody', async () => {
+    const dir = mkdtempSync(join(tmpdir(), 'syncx-exec-'));
+    const root = join(dir, 'share');
+    mkdirSync(join(root, '.git'), { recursive: true });
+    writeFileSync(join(root, '.git', 'config'), 'local git config');
+    const index = openIndexStore(join(dir, 'index.db'));
+    const executor = createLocalExecutor(root, index);
+
+    expect(() => resolveSharePath(root, '.git/config')).toThrow(/hard-ignored/);
+    expect(() => resolveSharePath(root, 'src/.git/HEAD')).toThrow(/hard-ignored/);
+    expect(() => resolveSharePath(root, '.syncx-trash/a.txt.1ab')).toThrow(/hard-ignored/);
+    expect(() => resolveSharePath(root, '.GIT/config')).toThrow(/hard-ignored/);
+    // 段相同才算命中:.github 是普通目录
+    expect(() => resolveSharePath(root, '.github/workflows/ci.yml')).not.toThrow();
+
+    // 端到端:接收与删除都被拒,本机 .git 分毫未动
+    await expect(
+      executor.applyReceive(
+        {
+          path: '.git/config',
+          version: new Map([['dev-b', 1]]),
+          size: 4,
+          deleted: false,
+          blocks: [hashBlock(Buffer.from('evil'))],
+        },
+        { getBlocks: async () => [Buffer.from('evil')] },
+      ),
+    ).rejects.toThrow(/hard-ignored/);
+    await expect(
+      executor.applyDelete('.git/config', {
+        path: '.git/config',
+        version: new Map([['dev-b', 2]]),
+        size: 0,
+        deleted: true,
+        blocks: [],
+      }),
+    ).rejects.toThrow(/hard-ignored/);
+
+    expect(readFileSync(join(root, '.git', 'config'), 'utf8')).toBe('local git config');
+    expect(existsSync(join(root, '.syncx-trash'))).toBe(false);
+
+    index.close();
+    rmDir(dir);
+  });
 });
 
 describe('local executor delete', () => {

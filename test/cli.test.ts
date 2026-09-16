@@ -5,7 +5,7 @@ import { join } from 'node:path';
 import { daemonStatusLines, formatUptime } from '../src/daemon.js';
 import { parseArgs, reconnectDelayMs } from '../src/args.js';
 import { readFolderIgnoreLines } from '../src/ignore.js';
-import { isIgnored, parseIgnoreRules } from '../src/ignore.js';
+import { isIgnored, isIgnoredPath, parseIgnoreRules } from '../src/ignore.js';
 import { helpText, packageVersion, wantsHelp, wantsVersion } from '../src/usage.js';
 
 describe('cli parseArgs', () => {
@@ -332,7 +332,7 @@ describe('readFolderIgnoreLines', () => {
     }
   });
 
-  it('ignores VCS directories (.git/.hg/.svn) by default and is overridable via .syncxignore', () => {
+  it('ignores VCS directories (.git/.hg/.svn) by default and is not overridable in practice', () => {
     const dir = mkdtempSync(join(tmpdir(), 'syncx-ignore-builtin'));
     try {
       const rules = parseIgnoreRules(readFolderIgnoreLines(dir, true));
@@ -343,10 +343,13 @@ describe('readFolderIgnoreLines', () => {
       expect(isIgnored(rules, '.syncx-folder', false)).toBe(true);
       expect(isIgnored(rules, 'src/app.ts', false)).toBe(false); // 普通文件不受内置忽略影响
 
-      // 用户用 .syncxignore 负向规则显式覆盖,可重新同步 .git
+      // 负向规则在**规则文本层面**确实能翻转内置行(isIgnored 是纯 gitignore 语义),
+      // 但同步判定走的是 isIgnoredPath,硬忽略层(HARD_IGNORE_NAMES)不接受覆盖:
+      // 写 `!.git` 不会再让 .git 参与同步(2026-09-15 的 .git 损毁促使这条收紧,见 docs/adr/0008)
       writeFileSync(join(dir, '.syncxignore'), '!.git\n');
       const overridden = parseIgnoreRules(readFolderIgnoreLines(dir, true));
       expect(isIgnored(overridden, '.git/config', false)).toBe(false);
+      expect(isIgnoredPath(overridden, '.git/config', false)).toBe(true);
     } finally {
       rmSync(dir, { recursive: true, force: true });
     }

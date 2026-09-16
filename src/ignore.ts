@@ -133,13 +133,25 @@ import type { IndexEntry } from './index.js';
  * Drop ignored entries from an index before it is exchanged or scanned.
  * Tombstones are always kept so that deletions of previously-synced files
  * still propagate even after an ignore rule was added.
+ *
+ * 例外:硬忽略路径(见 HARD_IGNORE_NAMES)**连墓碑一起丢**。墓碑是删除的载体,
+ * 让硬忽略路径的墓碑外推会反过来伤到自己——对端收到墓碑后会把本机索引里的同名
+ * 条目判为「已删除」并执行删除,于是对端的 `.git` 被移进回收站。一旦双方都残留过
+ * 这类墓碑,删除就会在两端之间来回传播,伤疤传染(2026-09-15 事故即此形态)。
+ * 用户级规则的墓碑语义保持不变(见上方注释),两者刻意区别对待。
  */
 export function filterIndexedEntries(rules: IgnoreRule[], entries: IndexEntry[]): IndexEntry[] {
-  return entries.filter((entry) => entry.deleted || !isIgnored(rules, entry.path, false));
+  return entries.filter((entry) => {
+    if (isHardIgnored(entry.path)) return false;
+    return entry.deleted || !isIgnored(rules, entry.path, false);
+  });
 }
 /**
  * 内置默认忽略:版本控制与同步自身元数据目录。优先级最低(在 .gitignore /
- * .syncxignore 之前并入),用户可用 .syncxignore 的负向规则(如 `!.git`)覆盖。
+ * .syncxignore 之前并入),用户可用 .syncxignore 的负向规则(如 `!.git`)覆盖
+ * —— 注意「可覆盖」只对**普通内置行**成立:这些名字同时还在硬忽略名单里
+ * (HARD_IGNORE_NAMES),实际同步时仍会被硬闸门挡住。保留本行是为了让忽略规则
+ * 自解释、并让 .gitignore 这类外部语义保持直观。
  *
  * 目的:避免把 .git 等 VCS 内部当成普通目录同步——双向同步下,残缺端(目录内容
  * 不完整的一方)会把缺失的 .git 文件生成墓碑广播给完整端,把完整端的 .git 搅坏/
@@ -151,11 +163,51 @@ export function filterIndexedEntries(rules: IgnoreRule[], entries: IndexEntry[])
 export const BUILTIN_IGNORE_LINES = ['.git', '.hg', '.svn', '.syncx-trash', '.syncx-folder'];
 
 /**
+ * 硬忽略名单:**任何配置都无法解除**的路径(目录或文件名)。与 BUILTIN_IGNORE_LINES
+ * 内容重合但语义不同——那一组是「默认值」,可被 `.syncxignore` 的负向规则覆盖;
+ * 这一组是「硬闸门」,`.gitignore` / `.syncxignore` 里写 `!.git` 也解不开。
+ *
+ * 判定按**路径段**做,不分大小写:`'.git/config'`、`'src/.git/x'` 命中,而
+ * `'.github/workflows/ci.yml'` 不命中(段是 `.github`,不是 `.git`)。大小写不敏感是
+ * 刻意的:Windows 与 macOS 默认文件系统大小写不敏感,`.GIT` 与 `.git` 是同一个目录,
+ * 只按小写匹配会被对端用 `.GIT/config` 绕过。
+ *
+ * 四处独立闸门共用它(见各自注释):scanner 不扫、filterIndexedEntries 不进内存索引、
+ * peer 不收不发、executor 不落盘。任何一处单独失效都还有其余三道兜底。
+ */
+export const HARD_IGNORE_NAMES = ['.git', '.hg', '.svn', '.syncx-trash', '.syncx-folder'];
+
+const HARD_IGNORE_SET = new Set(HARD_IGNORE_NAMES);
+
+/**
+ * 相对路径中任一段命中硬忽略名单(大小写不敏感,兼容 '\' 分隔符)。
+ * 路径段比较而非子串比较:`.github` / `.svnignore` 这类前缀相同但段不同的名字不受影响。
+ */
+export function isHardIgnored(relPath: string): boolean {
+  for (const segment of relPath.split(/[\\/]/)) {
+    if (segment !== '' && HARD_IGNORE_SET.has(segment.toLowerCase())) return true;
+  }
+  return false;
+}
+
+/**
+ * 同步闸门:硬忽略优先且不可解除,其余按 gitignore 语义(后读规则覆盖先读)。
+ * scanner 与 peer 判定「这个路径参不参与同步」一律走这里,不要直接用 isIgnored——
+ * 后者是纯 gitignore 语义,负向规则能把它翻转,拿来做同步决策就等于给硬忽略开后门。
+ */
+export function isIgnoredPath(rules: IgnoreRule[], relPath: string, isDir: boolean): boolean {
+  return isHardIgnored(relPath) || isIgnored(rules, relPath, isDir);
+}
+
+/**
  * 读取一个共享目录的忽略规则行(按优先级从低到高排列,后读的规则可覆盖先读的):
  * 0. 内置默认忽略(见 BUILTIN_IGNORE_LINES,永不抛错、始终并入)
  * 1. `.gitignore` — 仅当 useGitignore 为 true(目录配置缺省即开启)时并入
  * 2. `.syncxignore` — syncx 自己的忽略文件,优先级最高,可用 `!` 负向规则覆盖前两者
  * 两个文件都不存在或不可读时仅返回内置默认忽略,不抛错(目录可能刚创建)。
+ *
+ * 注意:这里返回的只是**规则文本**,负向规则在文本层面确实能覆盖内置行;真正参与
+ * 同步判定时必须走 isIgnoredPath(含硬忽略闸门),否则 `!.git` 会把 .git 重新放开。
  */
 export function readFolderIgnoreLines(folderPath: string, useGitignore: boolean): string[] {
   const lines: string[] = [...BUILTIN_IGNORE_LINES];

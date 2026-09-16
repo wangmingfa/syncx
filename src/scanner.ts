@@ -3,7 +3,7 @@ import { join, resolve, sep } from 'node:path';
 import type { IndexEntry } from './index.js';
 import type { IndexStore } from './indexstore.js';
 import type { IgnoreRule } from './ignore.js';
-import { isIgnored } from './ignore.js';
+import { isIgnoredPath } from './ignore.js';
 import { hashBlock, splitIntoBlocks } from './blockstore.js';
 import { incrementVersion } from './version.js';
 
@@ -43,7 +43,8 @@ function contentChanged(entry: IndexEntry, absPath: string): boolean {
 
 /**
  * 扫描共享目录树,与索引对比,产出需要重新索引/发送的路径与墓碑。
- * 被忽略规则命中的文件不参与(其删除也不传播)。
+ * 被忽略规则命中的文件不参与(其删除也不传播);硬忽略路径(见 HARD_IGNORE_NAMES)
+ * 无论规则怎么写都不参与——这是「.git 绝不被同步出去」的第一道闸门。
  *
  * @param nestedRoots 其它共享目录的(归一化)绝对根路径集合。本目录树中若某子目录命中其中
  *   任一路径,则视为「嵌套共享根」:其文件由那个共享自行负责同步,本题目录(父/外层)既不递归
@@ -93,11 +94,11 @@ export function scanFolder(
         // 嵌套共享根:本目录树(父/外层)不递归进去,其中文件交由那个共享自行同步
         const absNorm = resolve(abs);
         if (nestedRoots.some((nr) => absNorm === resolve(nr))) continue;
-        if (!isIgnored(rules, rel, true)) walk(abs, rel);
+        if (!isIgnoredPath(rules, rel, true)) walk(abs, rel);
         continue;
       }
       if (!dirent.isFile() || rel.endsWith(TMP_SUFFIX)) continue;
-      if (isIgnored(rules, rel, false)) continue;
+      if (isIgnoredPath(rules, rel, false)) continue;
 
       seen.add(rel);
       const prev = index.getEntry(rel);
@@ -132,7 +133,9 @@ export function scanFolder(
   const tombstones: IndexEntry[] = [];
   for (const entry of index.listEntries()) {
     if (entry.deleted || seen.has(entry.path)) continue;
-    if (isIgnored(rules, entry.path, false)) continue;
+    // 硬忽略路径(如 .git/**)绝不生成墓碑:墓碑会把「对端也有这份内容」变成
+    // 对端的一次真实删除。历史遗留的硬忽略条目由 createFolderState 从库里清掉
+    if (isIgnoredPath(rules, entry.path, false)) continue;
     // 嵌套共享根内的既有条目:本次扫描既不重扫也不墓碑,交由那个共享自行管理,
     // 避免迁移期把对方已同步的文件误删(例如父共享曾索引过子目录文件,启用跳过后被当成已删除)
     const absEntry = resolve(join(root, entry.path));
