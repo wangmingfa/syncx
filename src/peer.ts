@@ -1,5 +1,5 @@
 import type { IndexEntry } from './index.js';
-import { buildPlan } from './plan.js';
+import { buildPlan, buildDeltaPlan } from './plan.js';
 import type { BlockRequest, BlockResponse } from './messages.js';
 import type { LocalExecutor } from './executor.js';
 import { resolveSharePath, preserveLocalAsConflict } from './executor.js';
@@ -7,10 +7,25 @@ import { verifyBlock, BLOCK_SIZE } from './blockstore.js';
 import { parseIgnoreRules, isIgnoredPath, isHardIgnored } from './ignore.js';
 import type { ProgressCounts } from './status.js';
 
+/**
+ * 索引消息的两种语义:
+ *  - `full`:这条消息是**本机索引的完整声明**(会话建立时互发),接收方按并集规划;
+ *  - `delta`:只包含本轮改动的那几条,接收方**只判消息里提到的路径**。
+ * 语义搞反的后果不对称:把 delta 当 full 会引发两端互为回声的无限循环
+ * (2026-09-16 事故);把 full 当 delta 最多是少一次回推,而双方各自在会话建立时
+ * 都会发 full,收敛不受影响。所以**缺省一律按 delta**(见 SyncPeer.onPeerIndex)。
+ */
+export type IndexMode = 'full' | 'delta';
+
 export interface PeerTransport {
-  sendEntries(entries: IndexEntry[]): void;
+  sendEntries(entries: IndexEntry[], mode: IndexMode): void;
   sendBlockRequest(request: BlockRequest): void;
   sendBlockResponse(response: BlockResponse): void;
+}
+
+/** 对端索引到达时的附加说明。缺省(undefined)按 delta 处理,见 IndexMode。 */
+export interface PeerIndexOptions {
+  full?: boolean;
 }
 
 /** 一条待记录的同步变更(不含 folderId,由调用方补全)。 */
@@ -51,7 +66,7 @@ export interface SyncPeerDeps {
 }
 
 export interface SyncPeer {
-  onPeerIndex(entries: IndexEntry[]): Promise<void>;
+  onPeerIndex(entries: IndexEntry[], opts?: PeerIndexOptions): Promise<void>;
   onBlockRequest(request: BlockRequest): void;
   onBlockResponse(response: BlockResponse): Promise<void>;
   getSyncProgress(): ProgressCounts;
@@ -79,6 +94,20 @@ const MAX_BLOCK_RETRIES = 3;
 const BLOCK_RETRY_LONG_MS = 30_000;
 
 /**
+ * 「发送中」的租约时长:对端每来一个块请求,就给该路径续一次期;超过这个时长
+ * 没有新请求,即认为这条文件已经传完。
+ *
+ * 用租约而不是「本轮计划推送的条数」这种计数器,是因为计数器没有衰减路径:
+ * 它只在下一次收到对端索引时才被重算,而建立连接时互发的那次全量索引之后,
+ * 对端可能很久都不再发索引 —— 于是卡片会永远停在「传输中 · 发送 N」(2026-09-16
+ * 两端卡片转圈不停的事故形态之一)。租约天然自愈,不需要任何外部事件来清零。
+ *
+ * 取 15s:块请求的超时是 5s,正常的块流至少每 5s 会来一波(超时后的重试本身也续期),
+ * 所以只有真正停下来不传了,租约才会过期。
+ */
+const SERVE_LEASE_MS = 15_000;
+
+/**
  * Wire one sync round over an injected transport: on receiving the peer's
  * index, send newer local entries, request missing blocks, apply deletions
  * and prepare conflict copies; collect block responses until a file is
@@ -89,11 +118,22 @@ export function createSyncPeer(deps: SyncPeerDeps): SyncPeer {
   const pending = new Map<string, PendingEntry>();
   // 逐块跟踪超时重试:块响应丢失/丢弃时自动重发,避免文件永远收不齐
   const pendingBlocks = new Map<string, PendingBlockRequest>();
-  // 本轮待发送条目数(上次 onPeerIndex 产生的 sends 数量),用于同步进度展示
-  let pendingSendCount = 0;
+  // 正在向外供块的路径 → 最后一次发出该文件块的时间,用于展示「发送中」(见 SERVE_LEASE_MS)
+  const serving = new Map<string, number>();
 
   function blockKey(path: string, blockIndex: number): string {
     return `${path}:${blockIndex}`;
+  }
+
+  /** 中止某路径的在途接收与块重试:对端声明它已删除时,继续拉块毫无意义,
+   *  而且迟到的块响应会把刚删除的文件临时复活。 */
+  function abortPending(path: string): void {
+    pending.delete(path);
+    for (const [key, request] of pendingBlocks) {
+      if (key.slice(0, key.lastIndexOf(':')) !== path) continue;
+      clearTimeout(request.timeout);
+      pendingBlocks.delete(key);
+    }
   }
 
   /** 发送单个块请求并设置超时重试。 */
@@ -212,11 +252,20 @@ export function createSyncPeer(deps: SyncPeerDeps): SyncPeer {
   }
 
   return {
-    async onPeerIndex(entries: IndexEntry[]): Promise<void> {
-      // 新索引到达(如重连后)时清除旧块请求,避免基于过期条目重试
-      for (const bReq of pendingBlocks.values()) clearTimeout(bReq.timeout);
-      pendingBlocks.clear();
-      pendingSendCount = 0;
+    async onPeerIndex(entries: IndexEntry[], opts?: PeerIndexOptions): Promise<void> {
+      // 缺省按 delta 处理。旧版对端不带 full 字段,而它**确实**会发增量索引
+      // (扫描到改动就只广播那几条);把增量当全量做并集规划,就会为「它没提到的
+      // 本地条目」回推变更 → 两端互为回声、无限循环。反过来把全量当增量最多是
+      // 这一轮少回推一次,而双方在会话建立时都会各发一次全量,收敛不受影响。
+      const full = opts?.full ?? false;
+
+      // 全量轮次:这条消息是对端索引的完整声明,可以据此丢弃上一轮的在途状态
+      // (基于过期条目重试的块请求、已不再被对方索引引用的 pending)。增量轮次
+      // 绝不可做这两件事:消息里没提到 ≠ 对端没有了,清掉会把正在传的文件腰斩。
+      if (full) {
+        for (const bReq of pendingBlocks.values()) clearTimeout(bReq.timeout);
+        pendingBlocks.clear();
+      }
 
       // 入向硬闸门:对端推来的 .git/.hg/.svn/.syncx-trash/.syncx-folder 条目**一条都不收**,
       // 活条目与墓碑一视同仁。这是「本机 .git 被对端搅坏」唯一可靠的堵法——本机的忽略集
@@ -237,9 +286,9 @@ export function createSyncPeer(deps: SyncPeerDeps): SyncPeer {
         onHardIgnoredDropped?.(dropped, remoteDeviceId ?? '');
       }
 
-      const actions = buildPlan(localIndex, remote);
+      const actions = full ? buildPlan(localIndex, remote) : buildDeltaPlan(localIndex, remote);
       const sends: IndexEntry[] = [];
-      // 本轮索引实际引用的 pending 路径:用于清理上一轮遗留的陈旧条目
+      // 本轮索引实际引用的 pending 路径:仅用于全量轮次清理上一轮遗留的陈旧条目
       const livePending = new Set<string>();
 
       for (const action of actions) {
@@ -258,6 +307,8 @@ export function createSyncPeer(deps: SyncPeerDeps): SyncPeer {
               // 对端墓碑:本地删除。接收模式下同样执行——对端即权威源,删除也跟随
               await executor?.applyDelete(action.path, remoteEntry);
               localIndex.set(action.path, remoteEntry);
+              // 该路径已在对端消失,中止本机在途接收,避免迟到块响应把它复活
+              abortPending(action.path);
               onEvent?.({ ts: Date.now(), path: action.path, action: 'delete', direction: 'remote', deviceId: remoteDeviceId });
             }
             break;
@@ -313,12 +364,16 @@ export function createSyncPeer(deps: SyncPeerDeps): SyncPeer {
         }
       }
 
-      // 清理上一轮遗留、本轮索引已不再引用的陈旧 pending 条目:
+      // 清理上一轮遗留、本轮**全量**索引已不再引用的陈旧 pending 条目:
       // 对端删除/改名后这些条目会永久滞留(进度虚报),且迟到的块响应
-      // 可能把刚删除的文件临时复活
-      for (const path of pending.keys()) {
-        if (!livePending.has(path)) {
-          pending.delete(path);
+      // 可能把刚删除的文件临时复活。增量轮次不做这件事 —— 消息里没有的路径
+      // 只是「这轮没提」,清掉就会把正在传的文件腰斩、且不会再有谁重新规划它。
+      // 这里只需删 pending:本轮的 pendingBlocks 已在上面整体清掉(含全部定时器)。
+      if (full) {
+        for (const path of pending.keys()) {
+          if (!livePending.has(path)) {
+            pending.delete(path);
+          }
         }
       }
 
@@ -327,9 +382,9 @@ export function createSyncPeer(deps: SyncPeerDeps): SyncPeer {
       // 本文件的 sendEntries 调用点决定,不依赖上游每一处都记得过滤。
       const outbound = sends.filter((e) => !isHardIgnored(e.path));
       if (outbound.length > 0) {
-        transport.sendEntries(outbound);
+        // 规划出来的回推永远是「针对某几条路径的应答」,即 delta
+        transport.sendEntries(outbound, 'delta');
       }
-      pendingSendCount = outbound.length;
     },
 
     onBlockRequest(request: BlockRequest): void {
@@ -352,6 +407,8 @@ export function createSyncPeer(deps: SyncPeerDeps): SyncPeer {
         // 对端会在下一轮索引交换中收敛;忽略该请求即可。
         return;
       }
+      // 块确实发出去了 → 该路径进入「发送中」,并按最后一个块续期租约
+      serving.set(request.path, Date.now());
       transport.sendBlockResponse({
         deviceId,
         path: request.path,
@@ -399,9 +456,20 @@ export function createSyncPeer(deps: SyncPeerDeps): SyncPeer {
       for (const item of pending.values()) {
         if (item.kind === 'receive') receiving += 1;
       }
+      // 「发送中」= 租约内正被对端拉块的文件数。注意它统计的是**文件数**而不是块数:
+      // 一个文件可能被请求几十个块,但对用户而言那是「1 个文件在传」。
+      const now = Date.now();
+      let servingCount = 0;
+      for (const [path, ts] of serving) {
+        if (now - ts > SERVE_LEASE_MS) {
+          serving.delete(path);
+          continue;
+        }
+        servingCount += 1;
+      }
       return {
         pending: pending.size,
-        sending: pendingSendCount,
+        sending: servingCount,
         receiving,
       };
     },

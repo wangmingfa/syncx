@@ -3,11 +3,18 @@ import type { WebSocket } from 'ws';
 import type { IndexEntry } from '../index.js';
 import type { BlockRequest, BlockResponse } from '../messages.js';
 import { encodeIndex, decodeIndex } from '../messages.js';
-import type { PeerTransport, SyncPeer } from '../peer.js';
+import type { PeerTransport, SyncPeer, IndexMode } from '../peer.js';
 import { RateLimiter } from '../ratelimit.js';
 
 export type WireMessage =
-  | { type: 'index'; folder: string; payload: string }
+  /**
+   * 索引消息。`full` 声明这条消息的语义:true = 本机索引的完整快照,
+   * false/缺省 = 仅包含本轮改动的那几条。
+   * 旧版对端不发该字段,而它**确实**会发增量索引,所以缺省必须按增量处理
+   * (见 peer.ts 的 IndexMode):当成全量会为「它没提到的本地条目」回推,
+   * 两端互为回声、无限循环。旧版对端收到我们多出的字段会直接忽略,不受影响。
+   */
+  | { type: 'index'; folder: string; payload: string; full?: boolean }
   | { type: 'block-request'; folder: string; payload: BlockRequest }
   | { type: 'block-response'; folder: string; payload: Omit<BlockResponse, 'data'> & { data: string } }
   | { type: 'control'; payload: ControlMessage };
@@ -112,12 +119,13 @@ export function makePeerTransport(
   }
 
   return {
-    sendEntries(entries: IndexEntry[]): void {
+    sendEntries(entries: IndexEntry[], mode: IndexMode): void {
       sendRateLimited(
         encryptMessage(key, {
           type: 'index',
           folder: folderPath,
           payload: encodeIndex(entries).toString('base64'),
+          full: mode === 'full',
         }),
       );
     },
@@ -168,7 +176,10 @@ export function attachPeerMessages(
     if (!peer) return;
     switch (message.type) {
       case 'index':
-        void peer.onPeerIndex(decodeIndex(Buffer.from(message.payload, 'base64')));
+        // 缺省(旧对端不发该字段)按增量处理,理由见 WireMessage 上 index 的注释
+        void peer.onPeerIndex(decodeIndex(Buffer.from(message.payload, 'base64')), {
+          full: message.full === true,
+        });
         break;
       case 'block-request':
         peer.onBlockRequest(message.payload);

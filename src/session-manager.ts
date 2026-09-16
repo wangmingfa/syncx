@@ -645,7 +645,10 @@ export class SyncSessionManager {
     });
     session.peers.set(folder.id, peer);
     folder.peers.set(session.remoteDeviceId, peer);
-    transport.sendEntries([...folder.localIndex.values()]);
+    // 会话建立时互发的这份索引是本机索引的**完整声明**,必须标 full:对端据此
+    // 按并集规划,才能发现「本机有、对端缺」的文件并把它们拉过去。标成 delta
+    // 会让对端只判定这份清单里提到的路径,漏掉本机独有的存量文件。
+    transport.sendEntries([...folder.localIndex.values()], 'full');
   }
 
   /** 从一个存活会话上摘除指定目录的 peer/transport(设备被移出目录的 devices 时)。 */

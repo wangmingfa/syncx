@@ -263,6 +263,55 @@ describe('two real daemons sync over peers config', () => {
   );
 
   it(
+    'returns to「已同步」after a local change instead of echoing indexes forever',
+    async () => {
+      // 2026-09-16 事故的真进程回归。双方各有对方没有的存量文件 —— 这正是回声环的
+      // 燃料:任何一条增量广播里的「本机独有」都会被对端按并集语义判成「它没有」而回推。
+      const a = await setupDaemon('a', [{ path: 'a-only.txt', content: Buffer.from('A v1') }]);
+      const b = await setupDaemon('b', [{ path: 'b-only.txt', content: Buffer.from('B v1') }]);
+
+      startDaemon(a, [`ws://127.0.0.1:${b.peerPort}`], [b.deviceId]);
+      await waitForDaemonReady(a);
+      startDaemon(b, [`ws://127.0.0.1:${a.peerPort}`], [a.deviceId]);
+
+      // 首次全量交换:双方都拿到对方的存量文件(全量走并集语义,这一步本就该收敛)
+      await waitFor(() => existsSync(join(b.share, 'a-only.txt')), 45000);
+      await waitFor(() => existsSync(join(a.share, 'b-only.txt')), 45000);
+
+      // A 侧产生一次真实改动 → 扫描器广播**增量**(生产路径:scanner → broadcastFolderUpdates)
+      const changed = Buffer.from('A v2 changed');
+      writeFileSync(join(a.share, 'a-only.txt'), changed);
+      await waitFor(
+        () =>
+          existsSync(join(b.share, 'a-only.txt')) &&
+          readFileSync(join(b.share, 'a-only.txt')).equals(changed),
+        45000,
+      );
+
+      // 修复前:两端永久互推「对方没提到的条目」,status 里始终挂着「传输中 · 发送 N」。
+      // 修复后:对端停止拉块 → 15s 租约到期 → 该目录的进度行消失,卡片回到「已同步」。
+      const deadline = Date.now() + 40000;
+      let aStatus: StatusResponse = { devices: [] };
+      let bStatus: StatusResponse = { devices: [] };
+      for (;;) {
+        aStatus = await getStatus(a);
+        bStatus = await getStatus(b);
+        const idle =
+          (aStatus.syncProgress ?? []).length === 0 && (bStatus.syncProgress ?? []).length === 0;
+        if (idle || Date.now() > deadline) break;
+        await new Promise((r) => setTimeout(r, 500));
+      }
+      expect(aStatus.syncProgress ?? []).toEqual([]);
+      expect(bStatus.syncProgress ?? []).toEqual([]);
+
+      await stopChildren();
+      rmDir(a.dir);
+      rmDir(b.dir);
+    },
+    90000,
+  );
+
+  it(
     'does not sync files with a peer that is not in the devices whitelist',
     async () => {
       const a = await setupDaemon('a', [{ path: 'secret.txt', content: Buffer.from('top secret') }]);
@@ -406,6 +455,8 @@ interface StatusDevice {
 }
 interface StatusResponse {
   devices: StatusDevice[];
+  /** 仅含非零进度的目录(卡片据此显示「传输中」);全部静置时为空数组。 */
+  syncProgress?: Array<{ folder: string; pending: number; sending: number; receiving: number }>;
 }
 
 /** 携带落盘令牌读取 daemon 控制 API 的 /api/status(dev 运行态 version 为 'dev')。 */

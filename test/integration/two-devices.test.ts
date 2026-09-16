@@ -9,7 +9,8 @@ import { connectPeer } from '../../src/net/client.js';
 import { loadOrCreateIdentity } from '../../src/identity.js';
 import { openIndexStore, type IndexStore } from '../../src/indexstore.js';
 import { createLocalExecutor, type LocalExecutor } from '../../src/executor.js';
-import { createSyncPeer, type SyncPeer, type PeerTransport } from '../../src/peer.js';
+import { createSyncPeer, type SyncPeer, type PeerTransport, type IndexMode } from '../../src/peer.js';
+import { broadcastFolderUpdates } from '../../src/broadcast.js';
 import { encodeIndex, decodeIndex } from '../../src/messages.js';
 import { splitIntoBlocks, hashBlock } from '../../src/blockstore.js';
 import type { IndexEntry } from '../../src/index.js';
@@ -68,13 +69,23 @@ interface TestDevice {
   peer: SyncPeer;
   deviceId: string;
   socket: WebSocket;
+  transport: PeerTransport;
+  /** 本端发出的 index 消息条数:回声环检测用(静置后必须不再增长)。 */
+  indexMessagesSent: { count: number };
 }
 
 /** Send-side only: messages flow over the socket. */
-function makeTransport(socket: WebSocket): PeerTransport {
+function makeTransport(socket: WebSocket, indexMessagesSent?: { count: number }): PeerTransport {
   return {
-    sendEntries(entries: IndexEntry[]): void {
-      socket.send(JSON.stringify({ type: 'index', payload: encodeIndex(entries).toString('base64') }));
+    sendEntries(entries: IndexEntry[], mode: IndexMode): void {
+      if (indexMessagesSent) indexMessagesSent.count += 1;
+      socket.send(
+        JSON.stringify({
+          type: 'index',
+          payload: encodeIndex(entries).toString('base64'),
+          full: mode === 'full',
+        }),
+      );
     },
     sendBlockRequest(request): void {
       socket.send(JSON.stringify({ type: 'block-request', payload: request }));
@@ -97,10 +108,13 @@ function attachIncoming(peer: SyncPeer, socket: WebSocket): void {
     const msg = JSON.parse(raw.toString('utf8')) as {
       type: 'index' | 'block-request' | 'block-response';
       payload: unknown;
+      full?: boolean;
     };
     switch (msg.type) {
       case 'index':
-        void peer.onPeerIndex(decodeIndex(Buffer.from(msg.payload as string, 'base64')));
+        void peer.onPeerIndex(decodeIndex(Buffer.from(msg.payload as string, 'base64')), {
+          full: msg.full === true,
+        });
         break;
       case 'block-request':
         peer.onBlockRequest(msg.payload as never);
@@ -134,6 +148,10 @@ async function connectPair(
 
   let aSocket: WebSocket | undefined;
 
+  // 各自发出的 index 消息条数(回声环检测:静置后必须不再增长)
+  const aSent = { count: 0 };
+  const bSent = { count: 0 };
+
   // 进程内服务用端口 0 让系统分配,避免并行测试文件的随机端口区间互相碰撞
   const aServer = startPeerServer(
     aIdentity,
@@ -152,8 +170,8 @@ async function connectPair(
   const bSocket = bConnected.socket;
   await waitFor(() => aSocket !== undefined, 3000);
 
-  const aTransport = makeTransport(aSocket!);
-  const bTransport = makeTransport(bSocket);
+  const aTransport = makeTransport(aSocket!, aSent);
+  const bTransport = makeTransport(bSocket, bSent);
   const aPeer = createSyncPeer({
     transport: aTransport,
     localIndex: aLocal,
@@ -179,9 +197,11 @@ async function connectPair(
   attachIncoming(aPeer, aSocket!);
   attachIncoming(bPeer, bSocket);
 
-  // 双方互发完整索引
-  aSocket!.send(JSON.stringify({ type: 'index', payload: encodeIndex([...aLocal.values()]).toString('base64') }));
-  bSocket.send(JSON.stringify({ type: 'index', payload: encodeIndex([...bLocal.values()]).toString('base64') }));
+  // 双方互发完整索引(与生产路径一致:会话建立时 attachFolderToSession 会发 full)
+  const aFull = encodeIndex([...aLocal.values()]).toString('base64');
+  const bFull = encodeIndex([...bLocal.values()]).toString('base64');
+  aSocket!.send(JSON.stringify({ type: 'index', payload: aFull, full: true }));
+  bSocket.send(JSON.stringify({ type: 'index', payload: bFull, full: true }));
 
   return {
     a: {
@@ -192,6 +212,8 @@ async function connectPair(
       peer: aPeer,
       deviceId: aIdentity.deviceId,
       socket: aSocket!,
+      transport: aTransport,
+      indexMessagesSent: aSent,
     },
     b: {
       dir: bDir,
@@ -201,6 +223,8 @@ async function connectPair(
       peer: bPeer,
       deviceId: bIdentity.deviceId,
       socket: bSocket,
+      transport: bTransport,
+      indexMessagesSent: bSent,
     },
   };
 }
@@ -312,6 +336,65 @@ describe('two-device end-to-end sync', () => {
     // 至少一方生成了冲突副本
     const copies = readdirSync(aRoot).filter((name) => name.includes('.sync-conflict-'));
     expect(copies.length).toBeGreaterThan(0);
+
+    await teardown([a, b], [aDir, bDir]);
+  });
+
+  /**
+   * 2026-09-16 事故的端到端回归:两端各有对方没有的存量条目时,任何一条增量广播
+   * 都不该演变成「两端互相回推对方没提到的条目」的静默循环。
+   *
+   * 修复前的形态:A 广播 1 条改动 → B 把它当全量、按并集规划,发现本地独有的
+   * b-only.txt「对端没有」→ 回推 → A 同样回推 a-only.txt → …… 无限往返。
+   * 全程不落盘、不记历史、不打日志,用户只能看到两张卡片永远「传输中」。
+   */
+  it('a delta index does not trigger an echo loop between the two sides', async () => {
+    const aDir = mkdtempSync(join(tmpdir(), 'syncx-e2e-a-'));
+    const bDir = mkdtempSync(join(tmpdir(), 'syncx-e2e-b-'));
+    const aRoot = join(aDir, 'share');
+    const bRoot = join(bDir, 'share');
+    mkdirSync(aRoot, { recursive: true });
+    mkdirSync(bRoot, { recursive: true });
+
+    const aContent = Buffer.from('only on A');
+    const bContent = Buffer.from('only on B');
+    writeFileSync(join(aRoot, 'a-only.txt'), aContent);
+    writeFileSync(join(bRoot, 'b-only.txt'), bContent);
+    const aLocal = new Map([
+      ['a-only.txt', entry('a-only.txt', [['dev-a', 1]], hashes(aContent), aContent.length)],
+    ]);
+    const bLocal = new Map([
+      ['b-only.txt', entry('b-only.txt', [['dev-b', 1]], hashes(bContent), bContent.length)],
+    ]);
+
+    const { a, b } = await connectPair(aLocal, bLocal, aRoot, bRoot, aDir, bDir);
+
+    // 全量交换后双方各自拿到对方的文件
+    await waitFor(() => existsSync(join(bRoot, 'a-only.txt')) && existsSync(join(aRoot, 'b-only.txt')));
+    expect(readFileSync(join(bRoot, 'a-only.txt'))).toEqual(aContent);
+    expect(readFileSync(join(aRoot, 'b-only.txt'))).toEqual(bContent);
+
+    // A 侧改了一个文件 → 扫描器广播一条增量(与生产路径 broadcastFolderUpdates 一致)
+    const changed = Buffer.from('A changed it');
+    writeFileSync(join(aRoot, 'a-only.txt'), changed);
+    const updated = entry('a-only.txt', [['dev-a', 2]], hashes(changed), changed.length);
+    aLocal.set('a-only.txt', updated);
+    broadcastFolderUpdates({ transports: [a.transport] }, [updated]);
+
+    // 改动照常传到对端
+    await waitFor(() => readFileSync(join(bRoot, 'a-only.txt')).equals(changed));
+
+    // 静置后两端的索引消息数必须不再增长(修复前这里会一路涨上去)
+    await new Promise((resolve) => setTimeout(resolve, 200));
+    const aQuiet = a.indexMessagesSent.count;
+    const bQuiet = b.indexMessagesSent.count;
+    await new Promise((resolve) => setTimeout(resolve, 400));
+    expect(a.indexMessagesSent.count).toBe(aQuiet);
+    expect(b.indexMessagesSent.count).toBe(bQuiet);
+
+    // 两端都没有在途接收 —— 卡片会显示「已同步」而不是一直转圈
+    expect(b.peer.getSyncProgress().pending).toBe(0);
+    expect(a.peer.getSyncProgress().pending).toBe(0);
 
     await teardown([a, b], [aDir, bDir]);
   });

@@ -84,12 +84,30 @@ describe('control message wire channel (Phase 2)', () => {
     const idxPayload = encodeIndex([
       { path: 'a.txt', version: new Map([['DEVA', 1]]), size: 1, deleted: false, blocks: ['h'] },
     ]).toString('base64');
-    const idx = encryptMessage(key, { type: 'index', folder: 'main', payload: idxPayload });
+    const idx = encryptMessage(key, { type: 'index', folder: 'main', payload: idxPayload, full: true });
     socket.emit(idx);
 
     expect(peer.onPeerIndex).toHaveBeenCalledTimes(1);
+    // full 原样透传:接收方据此在「并集规划(全量)」与「只判消息里提到的路径(增量)」间选择
+    expect(peer.onPeerIndex).toHaveBeenCalledWith(expect.anything(), { full: true });
     // 普通 folder 消息不应触发 control 回调
     expect(onControl).not.toHaveBeenCalled();
+  });
+
+  it('treats an index message without the full field as a delta (兼容旧对端)', () => {
+    const socket = new MockSocket();
+    const peer = mockPeer();
+    const peers = new Map([['main', peer]]);
+    const onControl = vi.fn();
+    attachPeerMessages(peers, socket as never, key, onControl);
+
+    const idxPayload = encodeIndex([
+      { path: 'a.txt', version: new Map([['DEVA', 1]]), size: 1, deleted: false, blocks: ['h'] },
+    ]).toString('base64');
+    // 旧版对端不发 full 字段,而它确实会发增量索引 —— 当成全量会让两端互为回声
+    socket.emit(encryptMessage(key, { type: 'index', folder: 'main', payload: idxPayload }));
+
+    expect(peer.onPeerIndex).toHaveBeenCalledWith(expect.anything(), { full: false });
   });
 
   it('malformed/tampered messages are silently ignored (no throw, no onControl)', () => {

@@ -11,7 +11,7 @@ import {
 import { rmDir, canCreateSymlinks } from './helpers.js';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { createSyncPeer, type PeerTransport } from '../src/peer.js';
+import { createSyncPeer, type PeerTransport, type IndexMode } from '../src/peer.js';
 import type { BlockRequest, BlockResponse } from '../src/messages.js';
 import { createLocalExecutor, type LocalExecutor } from '../src/executor.js';
 import { openIndexStore } from '../src/indexstore.js';
@@ -432,7 +432,7 @@ describe('sync peer session', () => {
     rmDir(dir);
   });
 
-  it('clears stale pending entries when the peer index no longer references them', async () => {
+  it('clears stale pending entries when the peer full index no longer references them', async () => {
     const { transport } = fakeTransport();
     const peer = createSyncPeer({
       transport,
@@ -448,10 +448,10 @@ describe('sync peer session', () => {
     ]);
     expect(peer.getSyncProgress().pending).toBe(1);
 
-    // 对端下一轮索引不再包含该路径(如对端删除后不再广播该条目):
+    // 对端下一轮**全量**索引不再包含该路径(如对端删除后不再广播该条目):
     // 上一轮遗留的 pending 条目应被清理,而非永久滞留(进度虚报 +
     // 迟到块响应可能复活已被删除的文件)
-    await peer.onPeerIndex([]);
+    await peer.onPeerIndex([], { full: true });
     expect(peer.getSyncProgress().pending).toBe(0);
 
     // 迟到块响应不应复活已清理的条目
@@ -618,6 +618,234 @@ describe('sync peer session', () => {
 
     index.close();
     rmDir(dir);
+  });
+});
+
+/**
+ * 增量索引语义与「发送中」进度 —— 2026-09-16 两端目录卡空转事故的回归。
+ *
+ * 事故形态:A 的扫描器广播 19 条改动 → B 把这条**增量**消息当成全量快照,按并集
+ * 规划,于是「本地有、消息里没提到的 246 条」被判成对端缺失 → 回推 246 条 → A
+ * 同样处理 → 回推 19 条 …… 无限循环。每轮条目版本其实相等,所以全程静默:不落盘、
+ * 不记历史、不打日志,只有两端网卡和 CPU 知道(实测 A 空转烧掉约半核 CPU);
+ * 卡片则永远停在「传输中 · 发送 N」。
+ */
+describe('delta index semantics (回声环回归)', () => {
+  function fakeTransport() {
+    const sent: Array<{ entries: ReturnType<typeof entry>[]; mode: IndexMode }> = [];
+    const requests: BlockRequest[] = [];
+    return {
+      transport: {
+        sendEntries(entries: ReturnType<typeof entry>[], mode: IndexMode): void {
+          sent.push({ entries, mode });
+        },
+        sendBlockRequest(request: BlockRequest): void {
+          requests.push(request);
+        },
+        sendBlockResponse(): void {},
+      } satisfies PeerTransport,
+      sent,
+      requests,
+    };
+  }
+
+  /** 本机独有的存量条目:对端从未见过。 */
+  function localOnlyPeer(count: number) {
+    const local = new Map<string, ReturnType<typeof entry>>();
+    for (let i = 0; i < count; i += 1) {
+      local.set(`local-${i}.txt`, entry(`local-${i}.txt`, [['dev-a', 1]], [`h${i}`]));
+    }
+    return local;
+  }
+
+  function peerWith(local: Map<string, ReturnType<typeof entry>>, transport: PeerTransport) {
+    return createSyncPeer({
+      transport,
+      localIndex: local,
+      executor: null as never,
+      readLocalBlock: () => Buffer.from(''),
+      deviceId: 'DEV-A',
+    });
+  }
+
+  it('never echoes back local-only entries that the message did not mention', async () => {
+    const { transport, sent } = fakeTransport();
+    const peer = peerWith(localOnlyPeer(3), transport);
+
+    // 对端这轮只改了一个文件
+    await peer.onPeerIndex([entry('changed.txt', [['dev-b', 2]], ['x1'])]);
+
+    // 修复前:本机独有、消息里没提到的 3 条会被判成「对端没有」而回推,
+    // 对端同样处理 → 两端互为回声,直到下一次全量交换才可能停
+    expect(sent).toEqual([]);
+  });
+
+  it('uses union planning only for a full index message', async () => {
+    const { transport, sent } = fakeTransport();
+    const peer = peerWith(localOnlyPeer(2), transport);
+
+    await peer.onPeerIndex([entry('changed.txt', [['dev-b', 2]], ['x1'])], { full: true });
+
+    // 全量消息是对端索引的完整声明,「本机有、它没有」才真的意味着要推过去
+    expect(sent).toHaveLength(1);
+    expect(sent[0]!.mode).toBe('delta'); // 回推本身永远是针对若干路径的应答
+    expect(sent[0]!.entries.map((e) => e.path)).toEqual(['local-0.txt', 'local-1.txt']);
+  });
+
+  it('labels its planned replies as delta', async () => {
+    const { transport, sent } = fakeTransport();
+    const peer = peerWith(
+      new Map([['doc.txt', entry('doc.txt', [['dev-a', 2]], ['h1'])]]),
+      transport,
+    );
+
+    await peer.onPeerIndex([entry('doc.txt', [['dev-a', 1]], ['h0'])]);
+
+    expect(sent).toHaveLength(1);
+    expect(sent[0]!.mode).toBe('delta');
+    expect(sent[0]!.entries.map((e) => e.path)).toEqual(['doc.txt']);
+  });
+
+  it('keeps in-flight receives alive across a delta message that does not mention them', async () => {
+    const { transport } = fakeTransport();
+    const peer = createSyncPeer({
+      transport,
+      localIndex: new Map(),
+      executor: null as never,
+      readLocalBlock: () => Buffer.from(''),
+      deviceId: 'DEV-A',
+    });
+
+    const content = Buffer.from('in flight');
+    await peer.onPeerIndex([
+      entry('big.txt', [['dev-b', 1]], [hashBlock(content)], content.length),
+    ]);
+    expect(peer.getSyncProgress().pending).toBe(1);
+
+    // 对端这轮改了另一个文件,没提 big.txt。修复前任何一条索引消息都会清掉
+    // 「本轮未引用」的 pending,把正在传的文件腰斩,而且不会再有谁重新规划它。
+    await peer.onPeerIndex([entry('other.txt', [['dev-b', 1]], ['h'], 1)]);
+    expect(peer.getSyncProgress().pending).toBe(2);
+
+    await peer.onBlockResponse({
+      deviceId: 'DEV-B',
+      path: 'big.txt',
+      blockIndex: 0,
+      hash: hashBlock(content),
+      data: content,
+    });
+    expect(peer.getSyncProgress().pending).toBe(1);
+  });
+
+  it('aborts an in-flight receive when a delta message reports that path deleted', async () => {
+    const { transport } = fakeTransport();
+    const localIndex = new Map<string, ReturnType<typeof entry>>();
+    const peer = createSyncPeer({
+      transport,
+      localIndex,
+      executor: null as never,
+      readLocalBlock: () => Buffer.from(''),
+      deviceId: 'DEV-A',
+    });
+
+    const content = Buffer.from('doomed');
+    await peer.onPeerIndex([entry('gone.txt', [['dev-b', 1]], [hashBlock(content)], content.length)]);
+    expect(peer.getSyncProgress().pending).toBe(1);
+
+    // 对端删掉了它 → 本机在途接收应被中止,迟到块响应不得把已删除的文件复活
+    await peer.onPeerIndex([entry('gone.txt', [['dev-b', 2]], [], 0, true)]);
+    expect(peer.getSyncProgress().pending).toBe(0);
+    expect(localIndex.get('gone.txt')?.deleted).toBe(true);
+
+    await peer.onBlockResponse({
+      deviceId: 'DEV-B',
+      path: 'gone.txt',
+      blockIndex: 0,
+      hash: hashBlock(content),
+      data: content,
+    });
+    expect(peer.getSyncProgress().pending).toBe(0);
+  });
+
+  it('does not report「传输中」for entries the delta message never mentioned', async () => {
+    const { transport, sent } = fakeTransport();
+    const local = localOnlyPeer(2);
+    local.set('doc.txt', entry('doc.txt', [['dev-b', 1]], ['h']));
+    const peer = peerWith(local, transport);
+
+    // 对端复发了一条双方本就一致的条目 —— 这一轮没有任何数据要传
+    await peer.onPeerIndex([entry('doc.txt', [['dev-b', 1]], ['h'])]);
+
+    // 修复前:本机独有的 2 条会被判成「对端没有」而回推,sending 停在 2;
+    // 而且它只在下一次收到对端索引时才重算 —— 对端不再发索引就永远停在「传输中」
+    expect(sent).toEqual([]);
+    expect(peer.getSyncProgress()).toEqual({ pending: 0, sending: 0, receiving: 0 });
+  });
+});
+
+describe('sync progress: 「发送中」以租约自愈', () => {
+  function fakeTransport() {
+    const responses: BlockResponse[] = [];
+    return {
+      transport: {
+        sendEntries(): void {},
+        sendBlockRequest(): void {},
+        sendBlockResponse(response: BlockResponse): void {
+          responses.push(response);
+        },
+      } satisfies PeerTransport,
+      responses,
+    };
+  }
+
+  it('counts files being served to the peer and decays to zero when they stop asking', async () => {
+    const { transport, responses } = fakeTransport();
+    const peer = createSyncPeer({
+      transport,
+      localIndex: new Map(),
+      executor: null as never,
+      readLocalBlock: () => Buffer.from('served'),
+      deviceId: 'DEV-A',
+    });
+
+    vi.useFakeTimers();
+    peer.onBlockRequest({ deviceId: 'DEV-B', path: 'a.txt', blockIndex: 0, hash: 'h' });
+    expect(peer.getSyncProgress().sending).toBe(1);
+
+    // 同一个文件的多个块只算 1 个文件;另一个文件再 +1
+    peer.onBlockRequest({ deviceId: 'DEV-B', path: 'a.txt', blockIndex: 1, hash: 'h' });
+    peer.onBlockRequest({ deviceId: 'DEV-B', path: 'b.txt', blockIndex: 0, hash: 'h' });
+    expect(peer.getSyncProgress().sending).toBe(2);
+    expect(responses).toHaveLength(3);
+
+    // 对端不再拉块 → 租约过期后自动归零,无需任何外部事件来清零
+    await vi.advanceTimersByTimeAsync(16_000);
+    expect(peer.getSyncProgress()).toEqual({ pending: 0, sending: 0, receiving: 0 });
+
+    vi.useRealTimers();
+  });
+
+  it('renews the lease while blocks keep flowing', async () => {
+    const { transport } = fakeTransport();
+    const peer = createSyncPeer({
+      transport,
+      localIndex: new Map(),
+      executor: null as never,
+      readLocalBlock: () => Buffer.from('served'),
+      deviceId: 'DEV-A',
+    });
+
+    vi.useFakeTimers();
+    peer.onBlockRequest({ deviceId: 'DEV-B', path: 'big.bin', blockIndex: 0, hash: 'h' });
+    await vi.advanceTimersByTimeAsync(14_000);
+    expect(peer.getSyncProgress().sending).toBe(1);
+
+    // 慢速链路:块间隔接近租约上限,但只要还有块进来就不能判为已传完
+    peer.onBlockRequest({ deviceId: 'DEV-B', path: 'big.bin', blockIndex: 1, hash: 'h' });
+    await vi.advanceTimersByTimeAsync(14_000);
+    expect(peer.getSyncProgress().sending).toBe(1);
+
+    vi.useRealTimers();
   });
 });
 
