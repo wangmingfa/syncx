@@ -1,4 +1,6 @@
 import { describe, expect, it, afterEach } from 'vitest';
+import { once } from 'node:events';
+import { WebSocket } from 'ws';
 import {
   mkdtempSync,
   readFileSync,
@@ -309,6 +311,43 @@ describe('two real daemons sync over peers config', () => {
       rmDir(b.dir);
     },
     90000,
+  );
+
+  it(
+    'pushes status over /api/events without any polling',
+    async () => {
+      const a = await setupDaemon('a', [{ path: 'a.txt', content: Buffer.from('hello') }]);
+      startDaemon(a, [], []);
+      await waitForDaemonReady(a);
+
+      // 浏览器无法给 WebSocket 设请求头,真实 Web UI 走同源 cookie;非浏览器客户端
+      // 走 Bearer —— 这里用后者(前者已由 test/api-events.test.ts 覆盖)。
+      const token = readFileSync(join(a.dir, 'control.token'), 'utf8').trim();
+      const socket = new WebSocket(`ws://127.0.0.1:${a.controlPort}/api/events`, {
+        headers: { Authorization: `Bearer ${token}` },
+      });
+      type Frame = { type: string; status?: { deviceId: string; entries: number } };
+      const frames: Frame[] = [];
+      socket.on('message', (raw) => frames.push(JSON.parse(raw.toString('utf8')) as Frame));
+      const statuses = (): Array<{ deviceId: string; entries: number }> =>
+        frames.filter((f) => f.type === 'status' && f.status !== undefined).map((f) => f.status as { deviceId: string; entries: number });
+
+      await once(socket, 'open');
+      // 握手后立即收到一帧全量:界面不必等任何一次轮询就能画出来
+      await waitFor(() => statuses().length > 0, 10000);
+      expect(statuses()[0]?.deviceId).toBe(a.deviceId);
+      expect(statuses()[0]?.entries).toBe(1);
+
+      // 运行中新增文件 → 下一轮扫描触发通知 → 推送。
+      // 全程没有任何 HTTP 请求:这就是「不再轮询」的端到端证据。
+      writeFileSync(join(a.share, 'b.txt'), 'written while running');
+      await waitFor(() => statuses().some((s) => s.entries === 2), 25000);
+
+      socket.close();
+      await stopChildren();
+      rmDir(a.dir);
+    },
+    60000,
   );
 
   it(

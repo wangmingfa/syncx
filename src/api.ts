@@ -1,7 +1,8 @@
 import { createServer, type Server } from 'node:http';
+import { WebSocketServer } from 'ws';
 import { type ControlServerDeps } from './api/deps.js';
 import { createSessionAuth } from './api/session.js';
-import { isControlRoute, devViteTarget, pathname, readToken, redirect, sendJson, RequestBodyTooLargeError } from './api/helpers.js';
+import { isControlRoute, devViteTarget, pathname, readToken, redirect, sendJson, RequestBodyTooLargeError, EVENTS_PATH } from './api/helpers.js';
 import { tryPreAuthRoutes } from './api/routes/public.js';
 import { tryPublicAuthRoutes, tryAccountRoutes } from './api/routes/auth.js';
 import { trySystemRoutes } from './api/routes/system.js';
@@ -25,11 +26,15 @@ export type { ControlServerDeps } from './api/deps.js';
  *
  * 若传入 `devViteUrl`,非控制端点的请求会先重定向到 vite dev server
  * (见 `isControlRoute`),生产形态下不传该参数。
+ *
+ * WebSocket:`WS /api/events` 是状态推送通道(见 status-hub.ts)。握手不走请求
+ * 处理器而在 `upgrade` 事件里处理 —— 浏览器无法给 WebSocket 设置请求头,鉴权只能
+ * 靠同源 cookie(`syncx_session`),`readToken` 两种凭据都能读,故复用同一套校验。
  */
 export function createControlServer(deps: ControlServerDeps): Server {
   const auth = createSessionAuth(deps.token, deps.authFile);
 
-  return createServer((req, res) => {
+  const server = createServer((req, res) => {
     void (async () => {
       try {
         // 探活与图标:公开资源,必须在认证与 dev 重定向之前处理
@@ -84,4 +89,25 @@ export function createControlServer(deps: ControlServerDeps): Server {
       }
     })();
   });
+
+  // WebSocket 升级:只认 /api/events,其余路径一律断开(没有别的 upgrade 消费者,
+  // 放着不管会让连接永久挂起)。鉴权失败回一个 401 响应再断开 —— 客户端能据此
+  // 区分「没登录」与「网络不通」,而不是看到一个没有原因的重连循环。
+  const wss = new WebSocketServer({ noServer: true });
+  server.on('upgrade', (req, socket, head) => {
+    const path = req.url ? pathname(req.url) : '/';
+    if (path !== EVENTS_PATH || !deps.statusHub) {
+      socket.destroy();
+      return;
+    }
+    if (!auth.credentialOk(readToken(req))) {
+      socket.write('HTTP/1.1 401 Unauthorized\r\nConnection: close\r\n\r\n');
+      socket.destroy();
+      return;
+    }
+    const hub = deps.statusHub;
+    wss.handleUpgrade(req, socket, head, (ws) => hub.attach(ws));
+  });
+
+  return server;
 }

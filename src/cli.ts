@@ -14,7 +14,8 @@ import { startPeerServer } from './net/server.js';
 
 import { startDiscovery } from './net/discovery.js';
 import { getLanAddresses, formatHost } from './net/addresses.js';
-import { createControlServer } from './api.js';
+import { createControlServer, type ControlServerDeps } from './api.js';
+import { createStatusHub } from './status-hub.js';
 import { buildStatus, type DeviceStatus, type SyncProgress, type FolderErrorStatus } from './status.js';
 import { addSharedFolder, removeSharedFolder, isPeerAllowed, addKnownDevice, removeKnownDevice, addPeer, removePeer, setFolderDevices, setFolderGitignore, acceptFolderInvitation } from './devices.js';
 import { markOfferAccepted, markOfferDeclined, restoreDeclinedOffer, listOpenOffers, findPendingOffer } from './offers.js';
@@ -258,16 +259,37 @@ export async function run(args: ParsedArgs): Promise<void> {
     logger.warn(`legacy metadata cleanup failed: ${error instanceof Error ? error.message : String(error)}`);
   }
 
+  // 状态推送通道:Web UI 经 WS /api/events 常连,变更时收推送而不再轮询 /api/status。
+  // 取快照的实现是下方控制服务 deps 里的 getStatus —— 那里才拿得到 manager。
+  // 这里经闭包延迟取用(而非提前创建 deps):hub 必须先于 manager 存在(manager 需要
+  // 它的 notify),而 deps 又需要 manager,先后顺序只能这样错开。箭头函数在
+  // deps 初始化完成后才可能被调用(要有人连上才取快照),不存在取值窗口。
+  const statusHub = createStatusHub({
+    getStatus: () => controlDeps.getStatus(),
+    log: (message) => logger.debug(message),
+  });
+
   // 会话/目录运行期状态管理器:连接、同步通道、扫描、配置热重载、P2P 自更新全部内聚于此
   const manager = new SyncSessionManager(
-    { identity, configPath, configDir, peerPort: args.port ?? 22000, logger },
+    {
+      identity,
+      configPath,
+      configDir,
+      peerPort: args.port ?? 22000,
+      logger,
+      // 会话内的状态变更(上下线/邀请/错误/扫描结果)实时喂给 Web UI 推送通道。
+      // 拓扑:cli 先建 hub(hub 只持有取快照的闭包,不依赖 manager)→ 再建 manager
+      // (需要 hub 的 notify)→ 最后建控制服务(hub 由它按 upgrade 挂连接)。
+      onStatusChanged: () => statusHub.notify(),
+    },
     config.sharedFolders,
   );
   // 无目录提示也延迟到端口绑定成功后输出(与其它启动日志同批)
   const noFoldersAtBoot = manager.folderStates.length === 0;
 
-  // 控制 API:在 peer 状态和同步进度可用后创建
-  const control = createControlServer({
+  // 控制 API 的依赖:在 peer 状态和同步进度可用后创建(deps 提到独立 const 是为了让
+  // 上方的状态推送通道能取到同一份 getStatus 实现,避免两处各写一遍状态快照)。
+  const controlDeps: ControlServerDeps = {
     token,
     // 账号密码落盘位置:与 control.token 同一目录,0600。文件不存在即「仅令牌登录」。
     authFile: join(configDir, 'auth.json'),
@@ -436,6 +458,9 @@ export async function run(args: ParsedArgs): Promise<void> {
       // notifyPairingIntent 覆盖本机所有已把该对端列入 devices 的目录,使"先加目录后加设备"
       // 或"修复前遗留目录"也能在添加设备这一步即刻送达,不必等掉线重连。
       manager.notifyPairingIntent(deviceId);
+      // knownDevices 直接改配置文件,不经过 manager 的热重载路径 —— 手动通知一次,
+      // 否则新设备要等兜底重算才出现在设备卡片上
+      statusHub.notify();
     },
     removeDevice: (deviceId) => {
       removeKnownDevice(configPath, deviceId);
@@ -450,6 +475,7 @@ export async function run(args: ParsedArgs): Promise<void> {
       logger.info(
         `known device removed: ${deviceId}${closed > 0 ? ` (${closed} connection(s) closed)` : ''}`,
       );
+      statusHub.notify();
     },
     setFolderDevices: (path, devices) => {
       const before = loadConfig(configPath).sharedFolders.find((f) => resolve(f.path) === resolve(path));
@@ -468,6 +494,8 @@ export async function run(args: ParsedArgs): Promise<void> {
       for (const d of new Set([...beforeDevices, ...devices])) {
         manager.pushFolderSyncList(d);
       }
+      // 目录的 devices 列表直接下发在 status 里,改完立即刷新
+      statusHub.notify();
     },
     setFolderUseGitignore: (path, enabled) => {
       setFolderGitignore(configPath, path, enabled);
@@ -475,6 +503,7 @@ export async function run(args: ParsedArgs): Promise<void> {
       // 立即生效:重读忽略行并重建本地索引(开关切换会增减被忽略的文件集合)。
       // 配置 watcher 随后也会热重载,这里是让下一次扫描前就生效。
       manager.refreshFolderIgnoreRules(path);
+      statusHub.notify();
     },
     // 待确认区下发 pending + declined:已忽略项灰显供「恢复」,兜住手误忽略
     getOffers: () => listOpenOffers(configPath),
@@ -514,6 +543,9 @@ export async function run(args: ParsedArgs): Promise<void> {
       }
       // 确认后本机已信任该对端:升级已有会话(补建目录 peer 并反推本机共享意图),无需等重连
       manager.promoteSession(offer.fromDeviceId);
+      // 待确认卡片消失 + (配对接受时)knownDevices 变化;目录分支的 reloadConfig
+      // 虽已通知,但配对分支不经过它,这里统一收口
+      statusHub.notify();
     },
     declineOffer: (offerId) => {
       const offer = markOfferDeclined(configPath, offerId);
@@ -528,6 +560,7 @@ export async function run(args: ParsedArgs): Promise<void> {
       // 待确认项已消失,立即反推目录清单,让对方设备标签从「待对方确认」切回「已停止共享」
       if (offer.kind === 'folder') manager.pushFolderSyncList(offer.fromDeviceId);
       logger.info(`declined offer from ${offer.fromDeviceId}`);
+      statusHub.notify();
     },
     restoreOffer: (offerId) => {
       const offer = restoreDeclinedOffer(configPath, offerId);
@@ -535,8 +568,12 @@ export async function run(args: ParsedArgs): Promise<void> {
       // 恢复后立即反推目录清单,让对方设备标签从「已停止共享」切回「待对方确认」
       if (offer.kind === 'folder') manager.pushFolderSyncList(offer.fromDeviceId);
       logger.info(`restored declined offer from ${offer.fromDeviceId}`);
+      statusHub.notify();
     },
-  });
+    // 状态推送通道:控制服务在 WS upgrade 阶段完成鉴权后把连接交给它
+    statusHub,
+  };
+  const control = createControlServer(controlDeps);
   // 绑定控制端口:失败(EACCES/EADDRINUSE 等)在 listenControl 内打印根因与修复指引后
   // 直接退出进程;成功才继续往下走,启动日志见下批输出
   await listenControl(control, controlPort, controlHost, (msg) => logger.error(msg));
@@ -669,6 +706,8 @@ const shutdown = (): void => {
     configWatcher?.close();
     // 重连定时器、peer socket、目录索引库的清理在 manager 内完成
     manager.close();
+    // 状态推送连接先于控制端口关闭:否则浏览器会以为通道还活着,一直等推送而不重连
+    statusHub.close();
     control.close();
     discovery.close();
     server.close();

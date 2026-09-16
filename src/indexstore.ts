@@ -2,10 +2,22 @@ import { DatabaseSync } from 'node:sqlite';
 import type { IndexEntry } from './index.js';
 import type { VersionVector } from './version.js';
 
+/** 条目/墓碑计数(状态接口下发的统计口径)。 */
+export interface IndexCounts {
+  entries: number;
+  tombstones: number;
+}
+
 export interface IndexStore {
   saveEntry(entry: IndexEntry): void;
   getEntry(path: string): IndexEntry | undefined;
   listEntries(): IndexEntry[];
+  /**
+   * 条目/墓碑计数。两条 COUNT(*) 聚合查询,不把全表拉进内存 —— 状态接口
+   * (`/api/status`)与被推送的每一帧都要用它,而 `listEntries()` 是
+   * 「全表 SELECT + 逐行反序列化 version/blocks」,在目录大时是纯粹的浪费。
+   */
+  countEntries(): IndexCounts;
   removeEntry(path: string): void;
   close(): void;
 }
@@ -68,6 +80,8 @@ export function openIndexStore(dbPath: string): IndexStore {
     );
     const getEntry = db.prepare('SELECT path, version, size, deleted, blocks, mtime FROM entries WHERE path = ?');
     const listEntries = db.prepare('SELECT path, version, size, deleted, blocks, mtime FROM entries');
+    const countLive = db.prepare('SELECT COUNT(*) AS n FROM entries WHERE deleted = 0');
+    const countTombstones = db.prepare('SELECT COUNT(*) AS n FROM entries WHERE deleted = 1');
     const removeEntry = db.prepare('DELETE FROM entries WHERE path = ?');
 
     return {
@@ -87,6 +101,11 @@ export function openIndexStore(dbPath: string): IndexStore {
       },
       listEntries(): IndexEntry[] {
         return (listEntries.all() as Array<Record<string, unknown>>).map(rowToEntry);
+      },
+      countEntries(): IndexCounts {
+        const live = countLive.get() as { n?: number } | undefined;
+        const dead = countTombstones.get() as { n?: number } | undefined;
+        return { entries: live?.n ?? 0, tombstones: dead?.n ?? 0 };
       },
       removeEntry(path: string): void {
         removeEntry.run(path);

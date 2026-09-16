@@ -97,7 +97,10 @@ export default defineConfig(({ mode }: { mode: string }) => {
     //   GET /login 是页面壳,交给 vite 自身 SPA fallback 返回 index.html,避免回环。
     // - /favicon.svg:8384 侧提供的站点图标,避免 5173 页面 404。
     proxy: {
-      '/api': 'http://127.0.0.1:8384',
+      // ws: true 让 /api/events(状态推送通道)的 Upgrade 请求也转发到控制服务。
+      // 少了它,5173 页面上的 WebSocket 会被当成普通请求处理、握手失败,前端只能
+      // 退回轮询 —— 功能不报错但实时性失效,很难察觉。
+      '/api': { target: 'http://127.0.0.1:8384', ws: true },
       '/favicon.svg': 'http://127.0.0.1:8384',
       '/login': {
         target: 'http://127.0.0.1:8384',

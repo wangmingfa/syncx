@@ -56,6 +56,33 @@ describe('index store', () => {
     store.close();
   });
 
+  /**
+   * 状态接口与每一帧推送都按目录取条目/墓碑计数(`session-manager.getIndexStats`)。
+   * 之前走 listEntries() 全表拉取再遍历,目录一大就是纯粹的浪费;改为两条 COUNT(*)
+   * 聚合后必须与前者口径完全一致 —— 这里把两者对齐断言。
+   */
+  it('counts live entries and tombstones separately, matching a full listing', () => {
+    const store = openIndexStore(':memory:');
+    store.saveEntry(entry('a.txt', [['dev-a', 1]]));
+    store.saveEntry(entry('b.txt', [['dev-a', 1]]));
+    store.saveEntry(entry('gone.txt', [['dev-a', 2]], 0, true));
+
+    expect(store.countEntries()).toEqual({ entries: 2, tombstones: 1 });
+
+    const all = store.listEntries();
+    expect(store.countEntries()).toEqual({
+      entries: all.filter((e) => !e.deleted).length,
+      tombstones: all.filter((e) => e.deleted).length,
+    });
+    store.close();
+  });
+
+  it('reports zero counts for an empty index', () => {
+    const store = openIndexStore(':memory:');
+    expect(store.countEntries()).toEqual({ entries: 0, tombstones: 0 });
+    store.close();
+  });
+
   it('removes an entry', () => {
     const store = openIndexStore(':memory:');
     store.saveEntry(entry('a.txt', [['dev-a', 1]]));

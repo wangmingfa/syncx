@@ -10,8 +10,22 @@ export interface StatusProps {
 }
 
 /**
- * 核心状态与基础设施:status 本地持有(初始值来自 props,交互后由 fetch 更新),
- * 周期轮询刷新,以及通用的 post/copy。其余业务 composable 通过 CoreDeps 复用这些。
+ * 状态推送通道路径。与后端 `src/api/helpers.ts` 的 EVENTS_PATH 是同一个字面量 ——
+ * 客户端 bundle 不 import 后端模块,两边不一致的表现是「界面悄悄退回轮询」,
+ * 不报错也很难发现,改一侧务必同步改另一侧。
+ */
+const EVENTS_PATH = '/api/events';
+/** WS 不可用时的回退轮询间隔(与改造前的行为一致,保证界面仍在更新)。 */
+const FALLBACK_POLL_MS = 4000;
+const RECONNECT_MIN_MS = 1000;
+const RECONNECT_MAX_MS = 30000;
+
+/**
+ * 核心状态与基础设施:status 本地持有(初始值来自 props,交互后由 fetch 更新)。
+ *
+ * 状态刷新走 `WS /api/events` 推送:服务端在变更时推一帧全量 status,连上后不需要
+ * 任何轮询。WS 建不起来时(反向代理未转发 Upgrade、daemon 正在重启等)自动退回
+ * 4s 轮询,连上即停 —— 两条路径互斥,不会同时刷新。
  */
 export function useStatus(props: StatusProps): {
   status: Ref<StatusData>;
@@ -66,14 +80,109 @@ export function useStatus(props: StatusProps): {
     showToast(ok ? '已复制到剪贴板' : '复制失败,请手动选择');
   }
 
-  // 挂载后立即刷新一次 + 周期轮询(让对方推送的待确认项及时弹出);卸载清理定时器
+  /* ==================== 推送通道(含轮询回退) ==================== */
+
+  let socket: WebSocket | undefined;
   let pollTimer: ReturnType<typeof setInterval> | undefined;
+  let reconnectTimer: ReturnType<typeof setTimeout> | undefined;
+  let reconnectDelay = RECONNECT_MIN_MS;
+  let disposed = false;
+
+  function startPolling(): void {
+    if (pollTimer !== undefined || disposed) return;
+    pollTimer = setInterval(() => void refreshStatus(), FALLBACK_POLL_MS);
+  }
+
+  function stopPolling(): void {
+    if (pollTimer === undefined) return;
+    clearInterval(pollTimer);
+    pollTimer = undefined;
+  }
+
+  function scheduleReconnect(): void {
+    if (disposed || reconnectTimer !== undefined) return;
+    reconnectTimer = setTimeout(() => {
+      reconnectTimer = undefined;
+      connect();
+    }, reconnectDelay);
+    // 指数退避封顶 30s:daemon 升级重启期间不会把控制端口打满,恢复后又很快追上
+    reconnectDelay = Math.min(reconnectDelay * 2, RECONNECT_MAX_MS);
+  }
+
+  function connect(): void {
+    if (disposed || socket !== undefined) return;
+    const proto = globalThis.location?.protocol === 'https:' ? 'wss:' : 'ws:';
+    let ws: WebSocket;
+    try {
+      ws = new WebSocket(`${proto}//${globalThis.location?.host ?? ''}${EVENTS_PATH}`);
+    } catch {
+      // 构造失败(地址非法等):按通道不可用处理,直接走回退
+      startPolling();
+      scheduleReconnect();
+      return;
+    }
+    socket = ws;
+
+    ws.addEventListener('open', () => {
+      // 连上即停轮询:此后状态只由推送驱动,不再有定时请求
+      reconnectDelay = RECONNECT_MIN_MS;
+      stopPolling();
+    });
+
+    ws.addEventListener('message', (event) => {
+      let message: { type?: string; status?: StatusData };
+      try {
+        message = JSON.parse(String(event.data)) as { type?: string; status?: StatusData };
+      } catch {
+        return; // 非法帧忽略:通道仍在,不必因此重连
+      }
+      // ping 仅保活(也让中间代理不因空闲掐断连接),不触发任何渲染
+      if (message.type === 'status' && message.status) status.value = message.status;
+    });
+
+    const onGone = (): void => {
+      if (socket !== ws) return; // 已被新一轮连接取代(或已卸载),不重复处理
+      socket = undefined;
+      if (disposed) return;
+      // 通道不可用:退回轮询保证界面继续更新,同时后台重连
+      startPolling();
+      scheduleReconnect();
+    };
+    ws.addEventListener('close', onGone);
+    // error 后必然跟一个 close,统一在 close 里收口,避免双份重连
+    ws.addEventListener('error', () => {});
+
+    // 首帧由服务端在握手后立刻下发,不必在这里再拉一次
+  }
+
+  function onVisibilityChange(): void {
+    if (disposed) return;
+    if (globalThis.document?.visibilityState !== 'visible') return;
+    // 后台标签页里连接可能已被浏览器/代理静默掐断而未触发 close:
+    // 回到前台时补一次连接与拉取,避免界面停在旧数据上
+    if (socket === undefined || socket.readyState !== WebSocket.OPEN) {
+      connect();
+      void refreshStatus();
+    }
+  }
+
   onMounted(() => {
+    // 首屏先拉一次:SSR/初始注入的数据可能已过期,不等握手就能画出界面
     void refreshStatus();
-    pollTimer = setInterval(() => void refreshStatus(), 4000);
+    connect();
+    globalThis.document?.addEventListener('visibilitychange', onVisibilityChange);
   });
+
   onUnmounted(() => {
-    if (pollTimer) clearInterval(pollTimer);
+    disposed = true;
+    globalThis.document?.removeEventListener('visibilitychange', onVisibilityChange);
+    stopPolling();
+    if (reconnectTimer !== undefined) {
+      clearTimeout(reconnectTimer);
+      reconnectTimer = undefined;
+    }
+    socket?.close();
+    socket = undefined;
   });
 
   // 邀请链接进页面的提示属重要通知,走 alert 级

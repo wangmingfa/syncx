@@ -3,6 +3,13 @@ import type { IncomingMessage, ServerResponse } from 'node:http';
 
 export const COOKIE_NAME = 'syncx_session';
 
+/**
+ * 状态推送通道的路径。前端 useStatus.ts 里手写了同一个字面量(客户端 bundle 不 import
+ * 后端模块),改这里时务必同步改那边 —— 两边不一致的表现是「界面不再实时更新,悄悄退回
+ * 轮询」,不会报错,很难发现。
+ */
+export const EVENTS_PATH = '/api/events';
+
 /** 纯 CSR 页面壳:客户端 bundle 挂载后自行拉取状态与处理交互。 */
 export const UI_SHELL = `<!DOCTYPE html><html lang="zh-CN"><head>
 <meta charset="UTF-8">

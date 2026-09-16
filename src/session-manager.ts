@@ -99,6 +99,15 @@ export interface SessionManagerDeps {
   /** 本机 peer 监听端口(出站拨号时对端会回校,这里仅作为 connectPeer 参数)。 */
   peerPort: number;
   logger: Logger;
+  /**
+   * 对外可见状态可能已变(设备上下线、对端版本/目录清单、邀请与错误增删、
+   * 扫描结果、接收落地)。控制面的状态推送通道据此实时刷新 Web UI。
+   *
+   * 这是「低延迟」入口,不是「唯一」入口:状态推送另有兜底重算,所以这里漏打一个
+   * 通知点只表现为「该变化晚几秒到界面」,不会永久不刷新。多个通知点合并在一个
+   * 窗口内也只推一帧,因此宁可多打不可漏打。
+   */
+  onStatusChanged?: () => void;
 }
 
 export class SyncSessionManager {
@@ -110,6 +119,8 @@ export class SyncSessionManager {
   private readonly configDir: string;
   private readonly peerPort: number;
   private readonly logger: Logger;
+  /** 状态变更通知(见 SessionManagerDeps.onStatusChanged);缺省为空操作。 */
+  private readonly notifyStatus: () => void;
 
   // --- 目录级同步错误采集(Web UI 目录卡上的错误提示) ---
   // 记录每个目录最近一次同步失败的错误信息(内存态,不落盘);同一目录再次出错覆盖,
@@ -171,6 +182,7 @@ export class SyncSessionManager {
     this.configDir = deps.configDir;
     this.peerPort = deps.peerPort;
     this.logger = deps.logger;
+    this.notifyStatus = deps.onStatusChanged ?? ((): void => {});
     this.folderStates = initialFolders.map((f) => this.createFolderState(f));
     this.startHeartbeat();
   }
@@ -297,10 +309,13 @@ export class SyncSessionManager {
     const full = detail ? `${detail}: ${message}` : message;
     this.folderErrorsState.set(folderId, { message: full, ts: Date.now() });
     this.logger.warn(`folder ${folderId} sync error: ${full}`);
+    // 目录卡上的错误横幅属「要看就得看到」的信息,不能等兜底 tick
+    this.notifyStatus();
   }
 
   private clearFolderError(folderId: string): void {
-    this.folderErrorsState.delete(folderId);
+    // 内容未变时不打扰推送通道(clearFolderError 每轮扫描都会对每个目录调用)
+    if (this.folderErrorsState.delete(folderId)) this.notifyStatus();
   }
 
   /**
@@ -355,6 +370,9 @@ export class SyncSessionManager {
       await this.scanOnce();
     } finally {
       this.scanning = false;
+      // 一轮扫描会同时改动条目/墓碑数、传输进度与目录错误 —— 扫完统一通知一次。
+      // 传输过程中的进度由兜底 tick 补齐,不必逐块推送。
+      this.notifyStatus();
     }
   }
 
@@ -638,7 +656,11 @@ export class SyncSessionManager {
           `folder ${folder.id}: dropped ${paths.length} hard-ignored entr${paths.length === 1 ? 'y' : 'ies'} from ${remoteDeviceId || 'peer'} (e.g. ${paths[0]})`,
         ),
       // 远端推送的变更(新增/修改/删除/冲突)落盘为同步记录(此处补全 folderId)
-      onEvent: (ev) => recordSyncEvent(this.configPath, { ...ev, folderId: folder.id }),
+      onEvent: (ev) => {
+        recordSyncEvent(this.configPath, { ...ev, folderId: folder.id });
+        // 远端变更落地即改变了索引统计,立即刷新(这是「对端在同步」最直观的反馈)
+        this.notifyStatus();
+      },
       // 接收模式:本机只收不推(对端索引规划时跳过 send / 本地墓碑外推,
       // 冲突以对端版本覆盖本地)
       receiveOnly: folder.config.receiveOnly ?? false,
@@ -767,6 +789,9 @@ export class SyncSessionManager {
         break;
       }
     }
+    // 控制面消息多会改动待确认项/共享关系(设备卡与邀请卡的内容),统一通知一次。
+    // 未产生实际变化时推送端会自行比对丢弃,故不必在这里逐分支判断。
+    this.notifyStatus();
   }
 
   /**
@@ -934,6 +959,8 @@ export class SyncSessionManager {
         // (现在 pairing / invitation / folder-sync-list 都带版本)
         if (message.version && message.version !== prev?.version) {
           this.logger.info(`peer ${message.fromDeviceId} runs syncx ${message.version}${message.hostname ? ` (host ${message.hostname})` : ''}`);
+          // 设备卡上的对端版本/主机名/可否升级都依赖它,首次学到时立即刷新
+          this.notifyStatus();
         }
       }
       if (message.kind === 'hello') return;
@@ -953,10 +980,15 @@ export class SyncSessionManager {
           this.logger.info(`pruned ${pruned} revoked folder invitation(s) from ${remoteDeviceId}`);
         }
         this.logger.info(`folder sync list from ${remoteDeviceId}: ${message.folderIds.length} folder(s)`);
+        // 设备卡上的「已停止共享 / 待对方确认」判定完全依赖这份清单,且对方可能在
+        // 本端重连后立刻重播 —— 立即通知,避免界面停留在过期的共享状态
+        this.notifyStatus();
         return;
       }
       this.onControl(message);
     });
+    // 会话建立即改变了在线状态与各目录的同步通道(进度会随之从 0 变成非 0)
+    this.notifyStatus();
     socket.on('error', (error) => this.logger.debug(`socket error for peer ${remoteDeviceId}: ${error.message}`));
     socket.on('close', (code, reason) => {
       this.logger.debug(`socket closed for peer ${remoteDeviceId}, code=${code}, reason=${reason?.toString('utf8') ?? '(empty)'}`);
@@ -987,6 +1019,8 @@ export class SyncSessionManager {
           this.scheduleReconnect(remoteDeviceId);
         }
       }
+      // 掉线会同时改变设备卡的在线标记与各目录的传输进度
+      this.notifyStatus();
     });
   }
 
@@ -1096,9 +1130,11 @@ export class SyncSessionManager {
     let entries = 0;
     let tombstones = 0;
     for (const folder of this.folderStates) {
-      const all = folder.index.listEntries();
-      entries += all.filter((e) => !e.deleted).length;
-      tombstones += all.filter((e) => e.deleted).length;
+      // 走 COUNT(*) 聚合而非 listEntries():后者要全表 SELECT 并逐行反序列化
+      // version/blocks,而本方法被状态接口与每一帧推送调用(高频)。
+      const counts = folder.index.countEntries();
+      entries += counts.entries;
+      tombstones += counts.tombstones;
     }
     return { entries, tombstones };
   }
@@ -1239,6 +1275,8 @@ export class SyncSessionManager {
       for (const session of this.activeSessions) {
         this.pushFolderSyncList(session.remoteDeviceId);
       }
+      // 目录增删/改路径/改接收模式都会改变状态接口的下发内容
+      this.notifyStatus();
       return newConfig;
     } catch (error) {
       this.logger.error(`config reload failed: ${error instanceof Error ? error.message : String(error)}`);

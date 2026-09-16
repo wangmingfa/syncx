@@ -11,6 +11,11 @@ export interface ControlServerDeps {
   /** stop 命令经 POST /api/shutdown 触发的优雅关闭;不传则该端点返回 503。 */
   shutdown?: () => void;
   /**
+   * 状态推送通道(`WS /api/events`)。传入后控制服务在 upgrade 阶段完成鉴权并把
+   * 连接交给它;不传则对 `/api/events` 的握手一律拒绝(测试里的最小 deps 用不着)。
+   */
+  statusHub?: { attach(socket: import('ws').WebSocket): void };
+  /**
    * Web UI 触发的「从对端拉取安装包自更新」:完成校验与 updater 派发后返回新版本号;
    * 路由在响应完 HTTP 后调用 shutdown 优雅关闭,由 updater 完成换入与重启。
    * 抛错(设备离线/版本不匹配/校验失败)时路由返回 400 与原因。
