@@ -74,11 +74,17 @@ export interface StatusContext {
   upgrading: Ref<boolean>;
   askSelfUpdate: (u: { latest: string; current: string }) => void;
   checkForUpdate: () => Promise<void>;
-  /** 上传本地安装包升级:弹窗由 StatusPage 挂载,入口在顶栏。 */
+  /** 上传本地安装包升级:弹窗由 StatusPage 挂载,入口在顶栏与页面级拖入。 */
   uploadOpen: Ref<boolean>;
   openUpload: () => void;
   closeUpload: () => void;
-  inspectUpload: (file: File) => Promise<UploadPackageInfo>;
+  /** 选包与预检状态:页面级拖入(DropOverlay)与弹窗内点选共用同一份。 */
+  uploadFile: Ref<File | null>;
+  uploadInfo: Ref<UploadPackageInfo | null>;
+  uploadInspecting: Ref<boolean>;
+  uploadError: Ref<string>;
+  selectUploadFile: (file: File) => Promise<void>;
+  resetUpload: () => void;
   applyUpload: (file: File) => Promise<void>;
   authOpen: Ref<boolean>;
   logout: () => Promise<void>;

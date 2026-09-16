@@ -28,6 +28,7 @@ import EditFolderModal from './components/EditFolderModal.vue';
 import AuthPasswordModal from './components/AuthPasswordModal.vue';
 import LogsModal from './components/LogsModal.vue';
 import UploadUpdateModal from './components/UploadUpdateModal.vue';
+import DropOverlay from './components/DropOverlay.vue';
 import StatusTopbar from './components/StatusTopbar.vue';
 import StatusPills from './components/StatusPills.vue';
 import OffersPanel from './components/OffersPanel.vue';
@@ -53,7 +54,7 @@ const fmt = useFormat(status);
 
 // 需要本页模板双向绑定的模态状态:必须提到顶层,否则 <script setup> 模板不会自动拆包 Ref
 const { historyFolder, editDevicesOpen, editFolder, saveEditDevices } = folders;
-const { upgrading, askSelfUpdate, uploadOpen } = selfUpdate;
+const { upgrading, askSelfUpdate, uploadOpen, openUpload, selectUploadFile } = selfUpdate;
 const { toast, showToast } = useToast();
 
 // 本页 overlay 模态开关(子组件通过 openXxx 触发)
@@ -68,6 +69,15 @@ function openLogs(): void {
 }
 function openAuth(): void {
   authOpen.value = true;
+}
+
+/**
+ * 页面任意处拖入安装包并松在中间投放区:打开弹窗并立刻送去预检。
+ * 先 openUpload(会把上一轮的选包状态清干净)再选包,顺序不能颠倒。
+ */
+function onPackageDrop(file: File): void {
+  openUpload();
+  void selectUploadFile(file);
 }
 
 // Esc 关闭使用指南 / 日志弹窗(其余弹窗自行处理 Esc)
@@ -170,7 +180,10 @@ provide(StatusContextKey, {
     <!-- 日志弹窗 -->
     <LogsModal :open="logsOpen" @close="logsOpen = false" />
 
-    <!-- 上传本地安装包升级(入口在顶栏「上传升级」) -->
+    <!-- 上传本地安装包升级(入口在顶栏「上传升级」，或把文件拖到页面中间) -->
     <UploadUpdateModal :open="uploadOpen" @close="uploadOpen = false" />
+
+    <!-- 页面级拖入安装包:遮罩常驻挂在这里,只有拖文件进页面时才显示 -->
+    <DropOverlay @package="onPackageDrop" />
   </div>
 </template>

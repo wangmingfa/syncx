@@ -26,6 +26,7 @@
   --mono: ui-monospace, SFMono-Regular, Menlo, Consolas, "Liberation Mono", monospace;
   /* 层叠顺序(z 轴):数值越大越靠上。集中管理,新增浮层在此声明,避免相互遮挡 */
   --z-overlay: 100;   /* 模态遮罩 + 弹窗 */
+  --z-drop: 900;      /* 页面级拖放遮罩:要盖住弹窗,但仍低于轻提示 */
   --z-toast: 2000;    /* 轻提示:必须高于所有弹窗,弹窗内触发的提示才不会被遮住 */
 }
 
@@ -1405,6 +1406,108 @@ tbody tr:last-child td {
   .guide-leave-to .modal {
     transform: none;
   }
+
+  /* 拖放激活:保留配色与边框的强弱对比(那是唯一的「松手会生效」提示),只去掉动效 */
+  .drop-mask--inside .drop-mask__zone {
+    animation: none;
+  }
+
+  .drop-mask--inside .drop-mask__inner {
+    transform: none;
+  }
+}
+
+/* ---------- 页面级拖入安装包遮罩(DropOverlay) ---------- */
+/*
+ * 拖文件进页面时整页压暗,中间留一个内缩的虚线框当投放区;框外松手即取消。
+ * pointer-events: none —— 命中判定走 window 上的拖放事件,遮罩本身不参与,
+ * 万一它意外残留也不会把整个页面点不动。
+ */
+.drop-mask {
+  /* 深底专用的三档颜色:面板与外围都是暗的,所以文字要反着来(浅色) */
+  --drop-ink: #f2f5f9;                     /* 主文案 */
+  --drop-ink-soft: rgb(255 255 255 / 0.78); /* 次要文案:低于 0.78 时 13px 达不到 4.5:1 */
+  --drop-mark: #a8c6ec;                    /* 图标与「已就绪」描边:--accent 在深底上偏暗,提亮一档 */
+  position: fixed;
+  inset: 0;
+  z-index: var(--z-drop);
+  /* 压暗到接近不透明:页面明显退到后面,页面内容不再和投放区抢注意力 */
+  background: rgb(7 11 20 / 0.8);
+  backdrop-filter: blur(4px);
+  pointer-events: none;
+  transition: background 0.16s ease;
+}
+
+/* 指针进框后外围再压暗一档:投放区随之「亮起来」,是激活感的一半来源 */
+.drop-mask--inside {
+  background: rgb(7 11 20 / 0.88);
+}
+
+.drop-mask__zone {
+  position: absolute;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 20px;
+  border: 2px dashed rgb(255 255 255 / 0.7);
+  border-radius: 16px;
+  /* 只比外围亮一点点:仍读作「挖出来的那个洞」,但不会糊成一大片白 */
+  background: rgb(255 255 255 / 0.1);
+  color: var(--drop-mark);
+  text-align: center;
+  transition: border-color 0.16s ease, background 0.16s ease, box-shadow 0.16s ease;
+}
+
+/* 内容单独一层:激活时只放大它,不动投放区本身 —— 框的 rect 必须与命中判定保持一致 */
+.drop-mask__inner {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 10px;
+  transition: transform 0.16s ease;
+}
+
+.drop-mask__title {
+  font-size: 20px;
+  font-weight: 600;
+  color: var(--drop-ink);
+}
+
+.drop-mask__hint {
+  font-size: 13px;
+  color: var(--drop-ink-soft);
+}
+
+/* 指针落在投放区内:虚线转粗实线 + 双层光晕 + 面板提亮 + 内容放大一档,
+   配合外围压暗,整块明显「亮起来」,松手会生效这件事不用猜 */
+.drop-mask--inside .drop-mask__zone {
+  border-style: solid;
+  border-width: 3px;
+  border-color: var(--drop-mark);
+  background: rgb(255 255 255 / 0.2);
+  box-shadow:
+    0 0 0 6px rgb(168 198 236 / 0.24),
+    0 0 0 16px rgb(168 198 236 / 0.1),
+    0 24px 52px -24px rgb(0 0 0 / 0.7);
+  animation: drop-armed 0.34s ease-out;
+}
+
+.drop-mask--inside .drop-mask__inner {
+  transform: scale(1.06);
+}
+
+.drop-mask--inside .drop-mask__title {
+  color: var(--drop-mark);
+}
+
+/* 刚进框的一瞬:光晕从大收到小,给一下「已就绪」的确认 */
+@keyframes drop-armed {
+  from {
+    box-shadow:
+      0 0 0 24px rgb(168 198 236 / 0.3),
+      0 0 0 34px rgb(168 198 236 / 0.14),
+      0 24px 52px -24px rgb(0 0 0 / 0.7);
+  }
 }
 
 /* ---------- 上传安装包升级弹窗 ---------- */
@@ -1430,12 +1533,18 @@ tbody tr:last-child td {
   font-family: inherit;
   font-size: 13px;
   cursor: pointer;
+  user-select: none;
   transition: border-color 0.16s ease, background 0.16s ease, color 0.16s ease;
 }
 
 .upload-drop:hover:not(:disabled) {
   border-color: var(--accent);
   background: var(--accent-soft);
+}
+
+.upload-drop:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
 }
 
 .upload-drop:disabled {
