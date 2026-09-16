@@ -129,8 +129,8 @@ async function connectPair(
   const bIdentity = loadOrCreateIdentity(bDir);
   const aIndex = openIndexStore(join(aDir, 'index.db'));
   const bIndex = openIndexStore(join(bDir, 'index.db'));
-  const aExec = createLocalExecutor(aRoot, aIndex);
-  const bExec = createLocalExecutor(bRoot, bIndex);
+  const aExec = createLocalExecutor(aRoot, aIndex, join(aRoot, '.syncx-trash'));
+  const bExec = createLocalExecutor(bRoot, bIndex, join(bRoot, '.syncx-trash'));
 
   let aSocket: WebSocket | undefined;
 

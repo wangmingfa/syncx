@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, statSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, statSync, writeFileSync } from 'node:fs';
 import { rmDir } from './helpers.js';
 import { tmpdir, homedir } from 'node:os';
 import { join, resolve } from 'node:path';
@@ -182,14 +182,22 @@ describe('shared folder configuration', () => {
     rmDir(dir);
   });
 
-  it('creates the mount marker and flags it so scans are allowed', () => {
+  it('records the folder identity and writes nothing into the shared directory', () => {
     const dir = tempDir();
     const configPath = join(dir, 'config.json');
     const docs = join(dir, 'docs');
     addSharedFolder(configPath, docs, ['DEV1234567']);
-    expect(existsSync(join(docs, '.syncx-folder'))).toBe(true);
+    // 身份指纹落在配置里,**不往共享目录写任何文件** —— 旧的 .syncx-folder 标记文件会以
+    // 未跟踪文件的形式出现在用户的 git status 里
     const raw = JSON.parse(readFileSync(configPath, 'utf8'));
-    expect(raw.sharedFolders[0].markerChecked).toBe(true);
+    expect(raw.sharedFolders[0].folderIdentity).toEqual({
+      dev: expect.any(String),
+      ino: expect.any(String),
+    });
+    expect(raw.sharedFolders[0].markerChecked).toBeUndefined();
+    expect(existsSync(join(docs, '.syncx-folder'))).toBe(false);
+    expect(existsSync(join(docs, '.syncx-trash'))).toBe(false);
+    expect(readdirSync(docs)).toEqual([]);
     rmDir(dir);
   });
 });

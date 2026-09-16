@@ -19,8 +19,8 @@ import { randomBytes } from 'node:crypto';
 import type { Logger } from 'pino';
 import { WebSocket } from 'ws';
 
-import { loadConfig, folderIdFor, folderIndexKey, folderIndexPath, purgeFolderIndex, type SharedFolderConfig } from './config.js';
-import { FOLDER_MARKER, ensureFolderMarker, hasFolderMarker } from './marker.js';
+import { loadConfig, mutateConfig, folderIdFor, folderIndexKey, folderIndexPath, folderTrashPath, purgeFolderIndex, type SharedFolderConfig } from './config.js';
+import { checkFolderIdentity, readFolderIdentity } from './folder-identity.js';
 import { openIndexStore, type IndexStore } from './indexstore.js';
 import { createLocalExecutor, resolveSharePath, type LocalExecutor } from './executor.js';
 import { filterIndexedEntries, HARD_IGNORE_NAMES, isHardIgnored, parseIgnoreRules, readFolderIgnoreLines } from './ignore.js';
@@ -217,7 +217,12 @@ export class SyncSessionManager {
     const indexKey = folderIndexKey(f);
     // 索引按「目录实例 key」命名:新实例必然打开全新空库,不可能继承上一轮的旧条目/旧墓碑
     const index = openIndexStore(folderIndexPath(this.configDir, indexKey));
-    const executor = this.captureFolderErrors(id, createLocalExecutor(f.path, index));
+    // 回收站在共享目录之外:`<configDir>/trash/<index key>`。放在共享根里会在用户目录中
+    // 留下常驻痕迹(并被 git status 报成未跟踪文件),见 config.folderTrashPath。
+    const executor = this.captureFolderErrors(
+      id,
+      createLocalExecutor(f.path, index, folderTrashPath(this.configDir, indexKey)),
+    );
     // 索引快照只取一次:下面三处(硬忽略断根 / 本地索引 / 基线判定)都要用,
     // 而 listEntries 是全表扫描,启动时对每个目录重复调用不划算。
     const stored = index.listEntries();
@@ -245,6 +250,39 @@ export class SyncSessionManager {
     // daemon 离线期间的真实改动,要写同步记录
     const baselinePending = usable.length === 0;
     return { id, indexKey, path: f.path, index, executor, localIndex, ignoreLines, transports: [], peers: new Map(), config: f, baselinePending };
+  }
+
+  /**
+   * 为尚未记录身份指纹的目录采集并持久化指纹(仅本机、不写共享目录)。
+   *
+   * 只在**索引为空**时采集:新实例的索引必然为空 → 扫描只可能「发送」、绝不可能产生墓碑,
+   * 此时把当前根目录当作「正常身份」记下来是安全的。反过来说,既有实例的索引非空时,
+   * 若目录正处于「盘未挂载 / 被换掉 / 被清空」的坏状态,贸然采集就把坏状态当成正常身份
+   * 记了下来,保护彻底失效 —— 那种情况留给用户在界面上「移除并重新添加」。
+   *
+   * 覆盖「手改 config.json 热重载新增目录」这条不经 addSharedFolder 的路径,否则该目录会
+   * 因缺指纹退化为「结构守卫」模式(能同步,但只在整棵目录清空时才拦得住)。
+   */
+  private adoptFolderIdentityIfSafe(f: SharedFolderConfig, index: IndexStore): void {
+    if (f.folderIdentity !== undefined) return;
+    if (index.listEntries().length > 0) return;
+    const identity = readFolderIdentity(f.path);
+    if (!identity) return;
+    // 先写内存:即使持久化失败,本次运行期间也已被保护
+    f.folderIdentity = identity;
+    try {
+      mutateConfig(this.configPath, (config) => {
+        const target = config.sharedFolders.find((x) => folderIdFor(x) === folderIdFor(f));
+        if (!target || target.folderIdentity !== undefined) return false;
+        target.folderIdentity = identity;
+        return true;
+      });
+      this.logger.info(`folder identity recorded: ${f.path} (dev=${identity.dev} ino=${identity.ino})`);
+    } catch (error) {
+      this.logger.warn(
+        `folder identity persist failed: ${f.path}: ${error instanceof Error ? error.message : String(error)}`,
+      );
+    }
   }
 
   /** 目录级错误列表(倒序),供 status 下发到目录卡。 */
@@ -328,16 +366,23 @@ export class SyncSessionManager {
       // 一轮扫描走到这里且后续无错误即视为「干净」:清除该目录上一次的错误提示,
       // 让问题自愈后目录卡上的错误横幅自动消失
       this.clearFolderError(folder.id);
-      // 挂载标记门禁:标记缺失 = 目录未挂载 / 被整体清空 → 跳过本轮扫描、绝不产生墓碑。
-      // 这是「盘不见了」与「用户删光了文件」之间唯一可靠的区分点(参照 Syncthing 的 .stfolder)。
+      // 目录身份门禁:共享根的 dev/ino 与首次纳入同步时记录的不一致 = 换盘 / 重新挂载 /
+      // 目录被删了重建 → 跳过本轮扫描、绝不产生墓碑。这是「盘不见了 / 目录被换掉了」与
+      // 「用户真的删光了文件」之间唯一可靠的区分点(后者根目录身份不变)。
+      // 参照 Syncthing 的 .stfolder,但**不往共享目录写任何文件**(见 folder-identity.ts)。
       // 目录卡上给出原因与恢复方式,而不是静默不同步;同一原因不重复刷日志。
-      if (!hasFolderMarker(folder.path)) {
+      const verdict = checkFolderIdentity(folder.path, folder.config.folderIdentity);
+      if (verdict === 'missing' || verdict === 'changed') {
+        const reason =
+          verdict === 'missing'
+            ? '目录不存在或不可读(盘未挂载?)'
+            : '目录身份与记录不符(换盘 / 重新挂载 / 目录被重建?)';
         const prev = this.folderErrorsState.get(folder.id);
-        if (!prev || !prev.message.includes('缺少挂载标记')) {
+        if (!prev || !prev.message.includes('目录身份校验失败')) {
           this.recordFolderError(
             folder.id,
             new Error(
-              `缺少共享目录标记 ${FOLDER_MARKER}(目录未挂载或已被整体清空):已暂停该目录同步以防误删。` +
+              `目录身份校验失败:${reason}。已暂停该目录同步以防误删。` +
                 `确认目录内容无误后,在界面移除并重新添加该目录即可恢复`,
             ),
             '目录不可信',
@@ -361,6 +406,25 @@ export class SyncSessionManager {
       } catch (error) {
         // 扫描本身失败(如目录读取权限异常):记录到目录卡,下一轮扫描重试
         this.recordFolderError(folder.id, error, '扫描失败');
+        continue;
+      }
+      // 结构性守卫:目录身份无法校验时(平台不提供 inode / 配置里尚未采集指纹),把
+      // 「一个文件都没看到、却要删东西」当作目录不可信的形态,拒绝执行这批删除。
+      // 只有这个极端情形被挡 —— 而那正是「盘未挂载 / 目录被换掉」的样子;正常的单文件
+      // 删除(扫描仍能看到别的文件)不受影响。采集到指纹的目录根本不走这条分支。
+      if (verdict === 'unknown' && diff.filesSeen === 0 && diff.tombstones.length > 0) {
+        const prev = this.folderErrorsState.get(folder.id);
+        if (!prev || !prev.message.includes('无法校验目录身份')) {
+          this.recordFolderError(
+            folder.id,
+            new Error(
+              `无法校验目录身份(平台未提供 inode 或尚未采集指纹),且本轮扫描未发现任何文件:` +
+                `已拒绝执行这 ${diff.tombstones.length} 条删除。确认目录未挂载/未被清空后,` +
+                `在界面移除并重新添加该目录即可恢复`,
+            ),
+            '目录不可信',
+          );
+        }
         continue;
       }
       // 建基线的目录(空索引首扫)不写记录,避免把存量文件当成"新增"刷屏;
@@ -1100,11 +1164,8 @@ export class SyncSessionManager {
             continue;
           }
           // 新目录实例的索引必然为空 → 扫描只可能「发送」、绝不可能产生墓碑(墓碑只来自
-          // 索引里已有的条目),此时补挂载标记是安全的。覆盖「手改 config.json 热重载新增
-          // 目录」这条不经 addSharedFolder 的路径,否则新目录会因缺标记被暂停并报错。
-          if (!hasFolderMarker(f.path) && folder.index.listEntries().length === 0) {
-            if (ensureFolderMarker(f.path)) this.logger.info(`mount marker established: ${f.path}`);
-          }
+          // 索引里已有的条目),此时采集身份指纹是安全的(见 adoptFolderIdentityIfSafe)。
+          this.adoptFolderIdentityIfSafe(f, folder.index);
           this.folderStates.push(folder);
         } else {
           const nextIndexKey = folderIndexKey(f);
@@ -1137,9 +1198,17 @@ export class SyncSessionManager {
             continue;
           }
           if (existing.path !== f.path) {
-            // 路径变更:以新路径重建执行器与本地索引(索引库按目录实例 key 复用)
+            // 路径变更:以新路径重建执行器与本地索引(索引库按目录实例 key 复用)。
+            // 注意身份指纹**不随之更新**:换了指向的目录就是换了身份,下一次扫描必然
+            // 校验失败并暂停该目录(与旧的「新路径没有标记文件」等价),等用户显式
+            // 「移除并重新添加」再建立新身份 —— 否则新目录里的文件会被当成「本机新增」
+            // 全量推给对端,而索引里的旧路径全部变成墓碑。
             existing.path = f.path;
-            existing.executor = createLocalExecutor(f.path, existing.index);
+            existing.executor = createLocalExecutor(
+              f.path,
+              existing.index,
+              folderTrashPath(this.configDir, existing.indexKey),
+            );
             existing.localIndex = new Map(
               filterIndexedEntries(parseIgnoreRules(existing.ignoreLines), existing.index.listEntries()).map((e) => [e.path, e]),
             );

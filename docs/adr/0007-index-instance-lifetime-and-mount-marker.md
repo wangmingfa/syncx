@@ -63,8 +63,17 @@ only *send*, never delete), and once for pre-existing folders at daemon start
 live entries but the root is empty, since that is precisely the "unmounted or
 wiped" shape and adopting would re-enable the deletion it exists to prevent.
 
+> **Superseded by [ADR-0009](0009-out-of-band-folder-identity.md).** The marker
+> file is no longer created: it left a permanent untracked file in the user's
+> share root. Mount detection now uses an out-of-band identity fingerprint
+> (`dev` + `ino`, recorded in `config.json`), the recycle bin moved to
+> `~/.syncx/trash`, and the startup adoption above was carried over verbatim to
+> the fingerprint (same dangerous-state guard). The reasoning in this section is
+> otherwise unchanged, including the blind spot at the end of it.
+
 Known blind spot, shared with Syncthing: the marker only lives at the share
 root, so a subdirectory that is itself a mount point is not protected.
+(The fingerprint has the same limitation.)
 
 ## Consequences
 

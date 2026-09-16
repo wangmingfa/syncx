@@ -38,7 +38,7 @@ describe('local executor receive', () => {
     mkdirSync(root, { recursive: true });
     const index = openIndexStore(join(dir, 'index.db'));
 
-    const executor = createLocalExecutor(root, index);
+    const executor = createLocalExecutor(root, index, join(root, '.syncx-trash'));
     const content = Buffer.from('hello world');
     const remote = entry('docs/plan.md', [['dev-a', 1]], [hashBlock(content)], content.length);
     const provider = {
@@ -60,7 +60,7 @@ describe('local executor receive', () => {
     mkdirSync(root, { recursive: true });
     const index = openIndexStore(join(dir, 'index.db'));
 
-    const executor = createLocalExecutor(root, index);
+    const executor = createLocalExecutor(root, index, join(root, '.syncx-trash'));
     const target = join(root, 'doc.txt');
     writeFileSync(target, 'old content that is longer than the new one');
 
@@ -86,7 +86,7 @@ describe('local executor receive', () => {
     mkdirSync(root, { recursive: true });
     const index = openIndexStore(join(dir, 'index.db'));
 
-    const executor = createLocalExecutor(root, index);
+    const executor = createLocalExecutor(root, index, join(root, '.syncx-trash'));
     const remote = entry('doc.txt', [['dev-a', 1]], [hashBlock(Buffer.from('expected'))]);
     const provider = {
       getBlocks: async (): Promise<Buffer[]> => [Buffer.from('corrupted')],
@@ -111,7 +111,7 @@ describe('local executor receive', () => {
     // 共享目录内一个指向目录外的符号链接
     symlinkSync(escape, join(root, 'escape'));
 
-    const executor = createLocalExecutor(root, index);
+    const executor = createLocalExecutor(root, index, join(root, '.syncx-trash'));
     const content = Buffer.from('injected');
     // 恶意对端:经符号链接写入共享目录之外
     const remote = entry('escape/secret.txt', [['dev-b', 1]], [hashBlock(content)], content.length);
@@ -167,7 +167,7 @@ describe('local executor receive', () => {
     mkdirSync(join(root, '.git'), { recursive: true });
     writeFileSync(join(root, '.git', 'config'), 'local git config');
     const index = openIndexStore(join(dir, 'index.db'));
-    const executor = createLocalExecutor(root, index);
+    const executor = createLocalExecutor(root, index, join(root, '.syncx-trash'));
 
     expect(() => resolveSharePath(root, '.git/config')).toThrow(/hard-ignored/);
     expect(() => resolveSharePath(root, 'src/.git/HEAD')).toThrow(/hard-ignored/);
@@ -214,7 +214,10 @@ describe('local executor delete', () => {
     mkdirSync(root, { recursive: true });
     const index = openIndexStore(join(dir, 'index.db'));
 
-    const executor = createLocalExecutor(root, index);
+    // 回收站在共享目录**之外**(生产路径是 <configDir>/trash/<index key>):放在共享根里
+    // 会在用户目录中留下常驻痕迹,并被 git status 报成未跟踪文件
+    const trashDir = join(dir, 'trash');
+    const executor = createLocalExecutor(root, index, trashDir);
     const target = join(root, 'doc.txt');
     writeFileSync(target, 'bye');
     index.saveEntry(entry('doc.txt', [['dev-a', 1]], [hashBlock(Buffer.from('bye'))], 3));
@@ -223,14 +226,17 @@ describe('local executor delete', () => {
     await executor.applyDelete('doc.txt', tombstone);
 
     expect(existsSync(target)).toBe(false); // 原路径已不在(被移走)
-    // 删除改进回收站:内容可在 .syncx-trash 找回,而非硬删永久丢失
-    const trashed = readdirSync(join(root, '.syncx-trash'));
+    // 删除改进回收站:内容可在回收站找回,而非硬删永久丢失
+    const trashed = readdirSync(trashDir);
     expect(trashed).toHaveLength(1);
     const trashedName = trashed[0];
     if (!trashedName) throw new Error('expected the deleted file to be trashed');
     expect(trashedName.startsWith('doc.txt.')).toBe(true);
-    expect(readFileSync(join(root, '.syncx-trash', trashedName))).toEqual(Buffer.from('bye'));
+    expect(readFileSync(join(trashDir, trashedName))).toEqual(Buffer.from('bye'));
     expect(index.getEntry('doc.txt')).toEqual(tombstone);
+    // 共享目录里不留任何 syncx 痕迹
+    expect(existsSync(join(root, '.syncx-trash'))).toBe(false);
+    expect(readdirSync(root)).toEqual([]);
 
     index.close();
     rmDir(dir);
@@ -242,7 +248,8 @@ describe('local executor delete', () => {
     mkdirSync(root, { recursive: true });
     const index = openIndexStore(join(dir, 'index.db'));
 
-    const executor = createLocalExecutor(root, index);
+    const trashDir = join(dir, 'trash');
+    const executor = createLocalExecutor(root, index, trashDir);
     const target = join(root, 'docs', 'plan.md');
     mkdirSync(join(root, 'docs'), { recursive: true });
     writeFileSync(target, 'secret plan');
@@ -253,13 +260,16 @@ describe('local executor delete', () => {
 
     expect(existsSync(target)).toBe(false);
     // 回收站内保留原相对路径结构(docs/plan.md.<stamp>),便于原样还原
-    const trashDocs = readdirSync(join(root, '.syncx-trash', 'docs'));
+    const trashDocs = readdirSync(join(trashDir, 'docs'));
     expect(trashDocs).toHaveLength(1);
     const trashedNested = trashDocs[0];
     if (!trashedNested) throw new Error('expected the nested file to be trashed');
     expect(trashedNested.startsWith('plan.md.')).toBe(true);
-    expect(readFileSync(join(root, '.syncx-trash', 'docs', trashedNested))).toEqual(Buffer.from('secret plan'));
+    expect(readFileSync(join(trashDir, 'docs', trashedNested))).toEqual(Buffer.from('secret plan'));
     expect(index.getEntry('docs/plan.md')).toEqual(tombstone);
+    // 共享目录里只剩空目录结构,不出现 .syncx-trash
+    expect(existsSync(join(root, '.syncx-trash'))).toBe(false);
+    expect(readdirSync(join(root, 'docs'))).toEqual([]);
 
     index.close();
     rmDir(dir);
@@ -271,7 +281,7 @@ describe('local executor delete', () => {
     mkdirSync(root, { recursive: true });
     const index = openIndexStore(join(dir, 'index.db'));
 
-    const executor = createLocalExecutor(root, index);
+    const executor = createLocalExecutor(root, index, join(root, '.syncx-trash'));
     const tombstone = entry('ghost.txt', [['dev-a', 1]], [], 0, true);
     await executor.applyDelete('ghost.txt', tombstone);
 
@@ -290,7 +300,7 @@ describe('local executor conflict', () => {
     mkdirSync(root, { recursive: true });
     const index = openIndexStore(join(dir, 'index.db'));
 
-    const executor = createLocalExecutor(root, index);
+    const executor = createLocalExecutor(root, index, join(root, '.syncx-trash'));
     const target = join(root, 'doc.txt');
     const localContent = Buffer.from('local edit');
     writeFileSync(target, localContent);
@@ -335,7 +345,7 @@ describe('local executor conflict', () => {
     mkdirSync(root, { recursive: true });
     const index = openIndexStore(join(dir, 'index.db'));
 
-    const executor = createLocalExecutor(root, index);
+    const executor = createLocalExecutor(root, index, join(root, '.syncx-trash'));
     // 双方同时删除:两个墓碑版本向量并发,冲突处理不得把空文件写回磁盘复活删除
     const localTombstone = entry('doc.txt', [['dev-a', 2]], [], 0, true);
     const remoteTombstone = entry('doc.txt', [['dev-b', 2]], [], 0, true);
@@ -364,7 +374,7 @@ describe('local executor conflict', () => {
     const root = join(dir, 'share');
     mkdirSync(root, { recursive: true });
     const index = openIndexStore(join(dir, 'index.db'));
-    const executor = createLocalExecutor(root, index);
+    const executor = createLocalExecutor(root, index, join(root, '.syncx-trash'));
     const target = join(root, 'doc.txt');
     const localContent = Buffer.from('local edit');
     writeFileSync(target, localContent);
@@ -428,7 +438,7 @@ describe('local executor conflict', () => {
     const root = join(dir, 'share');
     mkdirSync(root, { recursive: true });
     const index = openIndexStore(join(dir, 'index.db'));
-    const executor = createLocalExecutor(root, index);
+    const executor = createLocalExecutor(root, index, join(root, '.syncx-trash'));
     const target = join(root, 'doc.txt');
     const localContent = Buffer.from('local edit');
     writeFileSync(target, localContent);
@@ -516,7 +526,7 @@ describe('local executor send', () => {
     mkdirSync(root, { recursive: true });
     const index = openIndexStore(join(dir, 'index.db'));
 
-    const executor = createLocalExecutor(root, index);
+    const executor = createLocalExecutor(root, index, join(root, '.syncx-trash'));
     const content = Buffer.from('hello world');
     writeFileSync(join(root, 'doc.txt'), content);
     index.saveEntry(entry('doc.txt', [['dev-a', 1]], [hashBlock(content)], content.length));

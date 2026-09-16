@@ -2,8 +2,8 @@ import { existsSync, mkdirSync, statSync } from 'node:fs';
 import { resolve, isAbsolute, sep, dirname } from 'node:path';
 import { homedir } from 'node:os';
 import { randomBytes } from 'node:crypto';
-import { loadConfig, saveConfig, mutateConfig, normalizePeerUrl, DEFAULT_CONFIG, folderIdFor, folderIndexKey, generateFolderInstanceId, purgeFolderIndex, type Config, type SharedFolderConfig, type DeviceConfig } from './config.js';
-import { ensureFolderMarker } from './marker.js';
+import { loadConfig, saveConfig, mutateConfig, normalizePeerUrl, DEFAULT_CONFIG, folderIdFor, folderIndexKey, generateFolderInstanceId, purgeFolderIndex, type Config, type FolderIdentity, type SharedFolderConfig, type DeviceConfig } from './config.js';
+import { readFolderIdentity } from './folder-identity.js';
 
 /**
  * 共享目录黑名单:平台相关。
@@ -83,6 +83,9 @@ export function generateFolderId(): string {
 /**
  * 在已加载的 config 上追加/合并一个共享目录(被 addSharedFolder 与 acceptFolderInvitation 复用)。
  * 不做磁盘 IO,只在内存 config 上原地修改;由调用方负责持锁与落盘。
+ * @param identity 调用方已采集的共享根身份指纹(见 folder-identity.ts)。此处**刻意不做
+ *   磁盘 IO** —— stat 放在 config 临界区外,临界区保持微秒级;采集不到(平台不提供 inode)
+ *   则留空,运行期退化为「结构守卫」而不会凭空信任。
  * 返回是否新建了共享条目(区分「目录已存在仅合并设备」与「新增条目」)。
  */
 function addSharedFolderTo(
@@ -92,6 +95,7 @@ function addSharedFolderTo(
   id: string | undefined,
   remote: boolean,
   receiveOnly: boolean,
+  identity?: FolderIdentity,
 ): boolean {
   // 任意两个共享目录之间都不允许物理嵌套(本机自有 / 接收映射同等对待):
   // 嵌套会让同一批文件同时参与两份独立的索引与版本向量,产生重复订阅(fan-in)与同步歧义;
@@ -138,8 +142,8 @@ function addSharedFolderTo(
     // 于是「移除后重加」「folderId 兜回来复用」都只会打开全新的空索引,结构上不可能
     // 继承上一轮的旧条目/旧墓碑(否则会把磁盘上已不存在的旧条目当删除广播出去)。
     instanceId: generateFolderInstanceId(),
-    // 标记由调用方随目录创建一并写入(此处不做磁盘 IO);缺失即暂停该目录扫描。
-    markerChecked: true,
+    // 身份指纹由调用方采集后传入(此处不做磁盘 IO);采不到则留空,运行期走结构守卫。
+    folderIdentity: identity,
   });
   return true;
 }
@@ -177,13 +181,14 @@ export function addSharedFolder(
     mkdirSync(resolved, { recursive: true });
     created = true;
   }
-  // 建立挂载标记(幂等,best-effort):标记存在才允许扫描,缺失会被判为「目录不可信」
-  // 并暂停同步,用于区分「盘没挂/目录被清空」与「用户确实删除了文件」。
-  ensureFolderMarker(resolved);
+  // 采集共享根身份指纹(dev + ino):运行期据此区分「盘未挂载/目录被换掉」与「用户确实
+  // 删光了文件」。刻意**不往共享目录里写任何文件** —— 标记文件那种做法会在用户目录里留下
+  // 常驻痕迹,并被 git status 报成未跟踪文件。
+  const identity = readFolderIdentity(resolved);
   // 目录落盘与校验在锁外完成;共享条目登记放进 mutateConfig 临界区,保证
   // load→改→save 原子,避免 daemon 与 CLI 并发改配置时后写覆盖前写。
   mutateConfig(configPath, (config) => {
-    addSharedFolderTo(config, resolved, devices, id, remote ?? false, receiveOnly === true);
+    addSharedFolderTo(config, resolved, devices, id, remote ?? false, receiveOnly === true, identity ?? undefined);
   });
   return created;
 }
@@ -238,16 +243,16 @@ export function acceptFolderInvitation(
       if (receiveOnly) byPath.receiveOnly = true;
       return;
     }
-    // 3) 全新路径:自动创建目录(与 addSharedFolder 的「自动创建」承诺一致)并建标记,
+    // 3) 全新路径:自动创建目录(与 addSharedFolder 的「自动创建」承诺一致)并采集身份指纹,
     //    再复用 addSharedFolderTo 统一校验(嵌套 / folderId 唯一)。
-    //    注意此处只对新实例建标记:新实例索引为空,扫描不会产生任何墓碑,建标记是安全的;
-    //    而 case 1/2 命中的是既有实例(索引非空),若目录处于「未挂载/被清空」的坏状态,
-    //    贸然补标记反而会让下一次扫描把整棵空目录当成大规模删除 —— 交给启动收养(带危险态守卫)。
+    //    注意此处只对**新实例**采集:新实例索引为空,扫描不会产生任何墓碑,采集是安全的;
+    //    而 case 1/2 命中的是既有实例(索引非空),若目录处于「未挂载/被换掉」的坏状态,
+    //    贸然采集就把坏状态当成正常身份记了下来 —— 那种情况留给用户在界面上「移除并重新添加」。
     if (!existsSync(resolved)) {
       mkdirSync(resolved, { recursive: true });
     }
-    ensureFolderMarker(resolved);
-    addSharedFolderTo(config, resolved, [deviceId], folderId, true, receiveOnly === true);
+    const identity = readFolderIdentity(resolved);
+    addSharedFolderTo(config, resolved, [deviceId], folderId, true, receiveOnly === true, identity ?? undefined);
   });
 }
 

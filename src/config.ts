@@ -2,6 +2,18 @@ import { existsSync, readdirSync, readFileSync, writeFileSync, renameSync, openS
 import { basename, join } from 'node:path';
 import { createHash, randomBytes } from 'node:crypto';
 
+/**
+ * 共享根的目录身份指纹:根目录的 `dev` + `ino`,以十进制字符串存放。
+ * 采集与比对实现见 `folder-identity.ts`;类型放在这里是因为它随配置持久化。
+ *
+ * 用字符串而不是 number:一是 JSON 无法序列化 BigInt,二是部分文件系统(如 XFS/ZFS)的
+ * inode 超过 2^53,用 number 会丢精度、可能把两个不同目录算成同一个身份。
+ */
+export interface FolderIdentity {
+  dev: string;
+  ino: string;
+}
+
 export interface SharedFolderConfig {
   path: string;
   devices: string[];
@@ -47,12 +59,23 @@ export interface SharedFolderConfig {
    */
   instanceId?: string;
   /**
-   * 本机是否已为该目录建立 `.syncx-folder` 标记(缺省 = 尚未建立,启动时一次性收养)。
-   * 标记存在于共享根是「目录已正确挂载/内容可信」的信号;标记缺失时扫描会跳过该目录、
-   * 绝不推断删除,用于防「盘未挂载 / 目录被整体清空」被误判成「用户删光了文件」。
-   * 之所以需要这个持久化闸门而不是「缺了就补」:否则「先清空目录、再重启 daemon」
-   * 会在启动时重建标记,随即把空目录当成大规模删除广播出去,保护形同虚设。
+   * 共享根的**身份指纹**(dev + ino),首次纳入同步时采集。
+   *
+   * 作用与 Syncthing 的 `.stfolder` 标记相同:区分「盘未挂载 / 目录被整体清空」与
+   * 「用户确实删光了文件」——前者绝不能推断删除,否则会把对端文件成批删掉
+   * (2026-09-15 事故)。但**不往用户目录里写任何文件**:标记文件那种做法虽然直观,
+   * 却会在共享目录里留下常驻痕迹,并被 `git status` 报成未跟踪文件。
+   *
+   * 指纹强于标记文件:换盘、重新挂载、目录被删了重建都会改变 dev/ino;而「同一个路径上
+   * 挂了另一块盘」这种情况,标记文件认不出、指纹能。目录内容被删空但根目录身份不变
+   * (= 用户真的删了)则照常同步删除。
+   *
+   * 必须持久化、绝不能「缺了就补」:否则「先清空目录、再重启 daemon」会在启动时重新采集
+   * 指纹,随即把空目录当成大规模删除广播出去,保护形同虚设。
+   * 旧配置缺省(尚未采集),启动时一次性收养;平台不提供 ino 时保持缺省。
    */
+  folderIdentity?: FolderIdentity;
+  /** @deprecated 旧版的「`.syncx-folder` 标记已建立」标志,已被 folderIdentity 取代;仅在迁移时清理。 */
   markerChecked?: boolean;
 }
 
@@ -78,6 +101,21 @@ export function generateFolderInstanceId(): string {
 export function folderIndexPath(configDir: string, key: string): string {
   const hash = createHash('sha1').update(key).digest('hex').slice(0, 16);
   return join(configDir, `index-${hash}.db`);
+}
+
+/**
+ * 某个共享目录的删除回收站目录:`<configDir>/trash/<index key 哈希>`。
+ *
+ * 刻意放在**共享目录之外**——放在共享根里的 `.syncx-trash` 会在用户的目录里留下常驻痕迹
+ * (并被 `git status` 报成未跟踪文件)。命名与索引库同源(同一个 key、同一种哈希),使
+ * 「目录实例 → 回收站」的对应关系与「目录实例 → 索引库」完全一致。
+ *
+ * 代价:共享盘与 configDir 不在同一个文件系统时,删除无法用 rename,退化为拷贝后删
+ * (见 executor 的 moveToTrash),大文件会慢一些、瞬时占双倍空间。
+ */
+export function folderTrashPath(configDir: string, key: string): string {
+  const hash = createHash('sha1').update(key).digest('hex').slice(0, 16);
+  return join(configDir, 'trash', hash);
 }
 
 /**

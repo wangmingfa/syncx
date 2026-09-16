@@ -375,9 +375,19 @@ describe('two real daemons sync over peers config', () => {
       const idx = openIndexStore(folderIndexPath(a.dir, folderIdFor({ id: 'secondary', path: secondaryId, devices: [] })));
       expect(idx.listEntries()).toEqual([]);
       idx.close();
-      // 手改 config.json 热重载新增的目录也会被建立挂载标记:否则新目录会被「标记缺失」门禁
-      // 暂停同步(新实例索引为空,补标记不可能产生墓碑,是安全的)
-      await waitFor(() => existsSync(join(secondaryId, '.syncx-folder')), 5000);
+      // 手改 config.json 热重载新增的目录也会被采集身份指纹:否则新目录会因「无法校验身份」
+      // 退化为结构守卫(新实例索引为空,采集指纹不可能产生墓碑,是安全的)。
+      // 注意指纹落在配置里,**不往共享目录写任何文件**。
+      await waitFor(
+        () =>
+          (
+            JSON.parse(readFileSync(a.configPath, 'utf8')) as {
+              sharedFolders: Array<{ id: string; folderIdentity?: unknown }>;
+            }
+          ).sharedFolders.some((f) => f.id === 'secondary' && f.folderIdentity !== undefined),
+        5000,
+      );
+      expect(existsSync(join(secondaryId, '.syncx-folder'))).toBe(false);
 
       await stopChildren();
       rmDir(a.dir);

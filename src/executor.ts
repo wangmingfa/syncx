@@ -93,23 +93,29 @@ export function preserveLocalAsConflict(root: string, path: string, remoteDevice
   return true;
 }
 
-export function createLocalExecutor(root: string, index: IndexStore): LocalExecutor {
+/**
+ * 创建一个共享目录的本地执行器。
+ *
+ * @param trashDir 删除回收站目录的绝对路径。**刻意由调用方传入而不是在共享根下现算**:
+ *   回收站放在共享目录里会在用户目录中留下常驻痕迹(并被 `git status` 报成未跟踪文件),
+ *   故生产路径一律传 `<configDir>/trash/<index key>`(见 config.folderTrashPath)。
+ */
+export function createLocalExecutor(root: string, index: IndexStore, trashDir: string): LocalExecutor {
   /** 共享目录内相对路径解析:复用模块级守卫(含符号链接越界校验)。 */
   function resolvePath(relPath: string): string {
     return resolveSharePath(root, relPath);
   }
 
   /**
-   * 把待删除文件移入共享根目录下的回收站(.syncx-trash,已在默认忽略列表中),
-   * 而非硬删:误删可经回收站找回,避免 2026-09-15 那样的不可逆数据丢失。
-   * 保留原相对路径结构(便于原样还原);同路径短时间内多次删除用自增序号避免覆盖。
-   * 同文件系统走 rename(瞬时、原子);跨文件系统或文件被占用(如 Windows)时退化为
-   * 拷贝后删,仍保留可恢复副本。
+   * 把待删除文件移入回收站(共享目录之外),而非硬删:误删可经回收站找回,避免
+   * 2026-09-15 那样的不可逆数据丢失。保留原相对路径结构(便于原样还原);
+   * 同路径短时间内多次删除用自增序号避免覆盖。
+   * 同文件系统走 rename(瞬时、原子);跨文件系统(共享盘与配置目录不同盘)或文件被
+   * 占用(如 Windows)时退化为拷贝后删,仍保留可恢复副本。
    */
   function moveToTrash(relPath: string): void {
     const target = resolvePath(relPath);
     if (!existsSync(target) || !statSync(target).isFile()) return;
-    const trashDir = join(root, '.syncx-trash');
     mkdirSync(trashDir, { recursive: true });
     const stamp = Date.now().toString(36);
     let dest = join(trashDir, `${relPath}.${stamp}`);
@@ -159,7 +165,7 @@ export function createLocalExecutor(root: string, index: IndexStore): LocalExecu
     async applyDelete(path: string, tombstone: IndexEntry): Promise<void> {
       const target = resolvePath(path);
       if (existsSync(target) && statSync(target).isFile()) {
-        // 移入回收站而非硬删:误删可经 .syncx-trash 找回(2026-09-15 事故前删除不可恢复)
+        // 移入回收站而非硬删:误删可经回收站找回(2026-09-15 事故前删除不可恢复)
         moveToTrash(path);
       }
       index.saveEntry(tombstone);

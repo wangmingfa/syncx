@@ -25,6 +25,12 @@ export interface ScanDiff {
   changed: string[];
   /** 本地已删除文件的墓碑条目(需传播)。 */
   tombstones: IndexEntry[];
+  /**
+   * 本轮**实际看到**的文件数(已排除忽略/硬忽略/临时件,不含嵌套共享根内的文件)。
+   * 供上层做结构性守卫:无法校验目录身份时,「一个文件都没看到、却要删东西」是
+   * 目录未挂载或被换掉的典型形态,此时必须拒绝执行这批删除。
+   */
+  filesSeen: number;
 }
 
 function contentChanged(entry: IndexEntry, absPath: string): boolean {
@@ -61,7 +67,7 @@ export function scanFolder(
   // 共享目录根不存在(盘符卸载 / 权限丢失 / 未挂载):不做墓碑推断,避免
   // 把整个目录误判为已删除而批量传播墓碑给对端
   if (!existsSync(root) || !statSync(root).isDirectory()) {
-    return { changed: [], tombstones: [] };
+    return { changed: [], tombstones: [], filesSeen: 0 };
   }
 
   const changed: string[] = [];
@@ -161,5 +167,5 @@ export function scanFolder(
     });
   }
 
-  return { changed, tombstones };
+  return { changed, tombstones, filesSeen: seen.size };
 }

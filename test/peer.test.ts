@@ -87,7 +87,7 @@ describe('sync peer session', () => {
     const root = join(dir, 'share');
     mkdirSync(root, { recursive: true });
     const index = openIndexStore(join(dir, 'index.db'));
-    const executor = createLocalExecutor(root, index);
+    const executor = createLocalExecutor(root, index, join(root, '.syncx-trash'));
     const { transport } = fakeTransport();
 
     const content = Buffer.from('hello peer');
@@ -125,7 +125,7 @@ describe('sync peer session', () => {
     const root = join(dir, 'share');
     mkdirSync(root, { recursive: true });
     const index = openIndexStore(join(dir, 'index.db'));
-    const executor = createLocalExecutor(root, index);
+    const executor = createLocalExecutor(root, index, join(root, '.syncx-trash'));
     const { transport, requests } = fakeTransport();
 
     // 本地文件 3 块:A/B/C;对端改为 A/X/C(仅中间块变化)
@@ -177,19 +177,24 @@ describe('sync peer session', () => {
       data: blockX,
     });
     await new Promise((r) => setTimeout(r, 10));
-    expect(readFileSync(join(root, 'changed.bin'))).toEqual(remoteContent);
+    // 用 Buffer#equals 逐字节比较,不用 toEqual:vitest 的深比较对此处的 2MB Buffer
+    // 要跑十几秒(本机 2.3s,termux/Android 上 15.7s),会把用例拖过超时线。
+    // equals 走原生 memcmp,微秒级。先断长度,失败时能直接看出是截断还是内容不符。
+    const landed = readFileSync(join(root, 'changed.bin'));
+    expect(landed.length).toBe(remoteContent.length);
+    expect(landed.equals(remoteContent)).toBe(true);
     expect(index.getEntry('changed.bin')?.version.get('dev-b')).toBe(2);
 
     index.close();
     rmDir(dir);
-  }, 20000);
+  });
 
   it('lands empty files (0 blocks) without any block round-trip', async () => {
     const dir = mkdtempSync(join(tmpdir(), 'syncx-peer-'));
     const root = join(dir, 'share');
     mkdirSync(root, { recursive: true });
     const index = openIndexStore(join(dir, 'index.db'));
-    const executor = createLocalExecutor(root, index);
+    const executor = createLocalExecutor(root, index, join(root, '.syncx-trash'));
     const { transport, requests } = fakeTransport();
 
     const peer = createSyncPeer({
@@ -216,7 +221,7 @@ describe('sync peer session', () => {
     const root = join(dir, 'share');
     mkdirSync(root, { recursive: true });
     const index = openIndexStore(join(dir, 'index.db'));
-    const executor = createLocalExecutor(root, index);
+    const executor = createLocalExecutor(root, index, join(root, '.syncx-trash'));
     const { transport } = fakeTransport();
 
     const content = Buffer.from('dedupe me');
@@ -252,7 +257,7 @@ describe('sync peer session', () => {
     const root = join(dir, 'share');
     mkdirSync(root, { recursive: true });
     const index = openIndexStore(join(dir, 'index.db'));
-    const executor = createLocalExecutor(root, index);
+    const executor = createLocalExecutor(root, index, join(root, '.syncx-trash'));
     // 共享的内存索引:模拟 daemon 在会话内复用的同一个 Map
     const localIndex = new Map();
     const { transport, requests } = fakeTransport();
@@ -296,7 +301,7 @@ describe('sync peer session', () => {
     const root = join(dir, 'share');
     mkdirSync(root, { recursive: true });
     const index = openIndexStore(join(dir, 'index.db'));
-    const executor = createLocalExecutor(root, index);
+    const executor = createLocalExecutor(root, index, join(root, '.syncx-trash'));
     const { transport } = fakeTransport();
 
     const peer = createSyncPeer({
@@ -530,7 +535,7 @@ describe('sync peer session', () => {
     const root = join(dir, 'share');
     mkdirSync(root, { recursive: true });
     const index = openIndexStore(join(dir, 'index.db'));
-    const executor = createLocalExecutor(root, index);
+    const executor = createLocalExecutor(root, index, join(root, '.syncx-trash'));
     const { transport } = fakeTransport();
 
     // 冷设备:磁盘已有 doc.txt,但 localIndex 为空(尚未首扫);对端是“热”的
@@ -579,7 +584,7 @@ describe('sync peer session', () => {
     mkdirSync(root, { recursive: true });
     writeFileSync(join(root, '.syncxignore'), 'secret.txt\n');
     const index = openIndexStore(join(dir, 'index.db'));
-    const executor = createLocalExecutor(root, index);
+    const executor = createLocalExecutor(root, index, join(root, '.syncx-trash'));
     const { transport } = fakeTransport();
 
     writeFileSync(join(root, 'secret.txt'), 'local ignored');
@@ -650,7 +655,7 @@ describe('hard ignore (VCS 元数据不收不发)', () => {
     mkdirSync(join(root, '.git'), { recursive: true });
     writeFileSync(join(root, '.git', 'config'), 'local git config');
     const index = openIndexStore(join(dir, 'index.db'));
-    const executor = createLocalExecutor(root, index);
+    const executor = createLocalExecutor(root, index, join(root, '.syncx-trash'));
     const { transport, sentEntries, requests } = fakeTransport();
     const dropped: string[][] = [];
     const localIndex = new Map<string, ReturnType<typeof entry>>();
@@ -804,7 +809,7 @@ describe('receive-only mode (只拉不推)', () => {
     const root = join(dir, 'share');
     mkdirSync(root, { recursive: true });
     const index = openIndexStore(join(dir, 'index.db'));
-    const executor = createLocalExecutor(root, index);
+    const executor = createLocalExecutor(root, index, join(root, '.syncx-trash'));
     const { transport } = fakeTransport();
 
     // 本地与对端都改了 shared.txt,版本向量分叉 → 在双向模式里是 conflict

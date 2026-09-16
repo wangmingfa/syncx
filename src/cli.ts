@@ -2,8 +2,9 @@ import type { ParsedArgs } from './args.js';
 import { basename, dirname, join, resolve } from 'node:path';
 import { homedir } from 'node:os';
 import { loadOrCreateIdentity } from './identity.js';
-import { loadConfig, saveConfig, mutateConfig } from './config.js';
-import { ensureFolderMarker } from './marker.js';
+import { loadConfig, saveConfig, mutateConfig, folderTrashPath } from './config.js';
+import { readFolderIdentity, removeLegacyFolderMarker } from './folder-identity.js';
+import { migrateLegacyTrash } from './trash.js';
 import { openIndexStore } from './indexstore.js';
 
 import { listSyncHistory, clearSyncHistory } from './history.js';
@@ -191,32 +192,70 @@ export async function run(args: ParsedArgs): Promise<void> {
   } catch (error) {
     logger.warn(`orphan index sweep failed: ${error instanceof Error ? error.message : String(error)}`);
   }
-  // 2) 挂载标记收养:为升级前创建的存量目录补建 .syncx-folder 并落盘 markerChecked,使用期
-  //    「标记缺失 → 暂停同步」只对真正的异常生效。只收养一次;目录不存在则留给下次启动。
-  //    危险态(索引里有活条目但目录顶层为空,疑似未挂载/被清空)不自动收养 —— 否则补上标记后
-  //    下一次扫描会把整棵空目录当成「用户删光了」广播出去。
+  // 2) 目录身份指纹收养:为升级前创建的存量目录采集共享根指纹(dev + ino)并落盘。
+  //    旧版本用共享根里的 `.syncx-folder` 标记文件做同一件事,但会在用户目录里留下常驻
+  //    痕迹(被 git status 报成未跟踪文件)。指纹等价且更强:换盘 / 重新挂载 / 目录被删了
+  //    重建都会改变 dev/ino,而「同一个路径上换了另一块盘」标记文件根本认不出。
+  //    只收养一次;目录不存在则留给下次启动。危险态(索引里有活条目但目录顶层为空,疑似
+  //    未挂载/被清空)不自动收养 —— 否则把坏状态记成正常身份,保护就彻底失效了。
+  //    注意 mutateConfig 内部加载的是**独立副本**,而下面构造 SyncSessionManager 用的是上面
+  //    第 76 行那份快照:采集到的指纹必须同步回快照,否则 daemon 本次运行仍按「未采集」处理,
+  //    退化成结构守卫(「删掉目录里最后一个文件」会被误拦)。
+  const startupFolders = config.sharedFolders;
+  const identityAdopted = new Set<string>();
   try {
-    mutateConfig(configPath, () => {
+    mutateConfig(configPath, (cfg) => {
       let changed = false;
-      for (const f of config.sharedFolders) {
-        if (f.markerChecked) continue;
+      for (const f of cfg.sharedFolders) {
+        if (f.folderIdentity) continue;
         if (!existsSync(f.path) || !statSync(f.path).isDirectory()) continue;
         if (indexHasLiveEntries(configDir, f) && readdirSync(f.path).length === 0) {
           logger.warn(
-            `shared folder looks empty but its index still has entries; refusing to create the ` +
-              `mount marker automatically: ${f.path} (确认目录内容无误后,在界面移除并重新添加该目录)`,
+            `shared folder looks empty but its index still has entries; refusing to record its ` +
+              `identity automatically: ${f.path} (确认目录内容无误后,在界面移除并重新添加该目录)`,
           );
           continue;
         }
-        if (!ensureFolderMarker(f.path)) continue; // 不可写等:不标记,下次启动重试
-        f.markerChecked = true;
+        // 平台/文件系统不提供 inode(部分网络盘)时留空:运行期退化为结构守卫,不凭空信任
+        const identity = readFolderIdentity(f.path);
+        if (!identity) {
+          logger.warn(`shared folder identity unavailable (no inode reported by the filesystem): ${f.path}`);
+          continue;
+        }
+        f.folderIdentity = identity;
+        for (const live of startupFolders) {
+          if (live.path === f.path) live.folderIdentity = identity;
+        }
+        identityAdopted.add(f.path);
         changed = true;
-        logger.info(`shared folder mount marker established: ${f.path}`);
+        logger.info(`shared folder identity recorded: ${f.path} (dev=${identity.dev} ino=${identity.ino})`);
       }
       return changed;
     });
   } catch (error) {
-    logger.warn(`mount marker migration failed: ${error instanceof Error ? error.message : String(error)}`);
+    logger.warn(`folder identity migration failed: ${error instanceof Error ? error.message : String(error)}`);
+  }
+
+  // 3) 共享目录内遗留元数据清理:删掉旧版写的 `.syncx-folder` 标记文件,并把旧版回收站
+  //    `.syncx-trash` 的内容搬到共享目录之外(`<configDir>/trash/<目录实例 key>`)。这两样
+  //    留在用户目录里都会以未跟踪文件的形式污染 git status —— 正是本次改造要解决的问题。
+  //    只清理**已确认身份**的目录:没记下指纹就说明这个目录还没被信任,此时动它的内容
+  //    (哪怕只是删一个标记文件)都不合适,留给下次启动。
+  try {
+    for (const f of config.sharedFolders) {
+      if (!f.folderIdentity && !identityAdopted.has(f.path)) continue;
+      if (!existsSync(f.path) || !statSync(f.path).isDirectory()) continue;
+      if (removeLegacyFolderMarker(f.path)) {
+        logger.info(`legacy mount marker removed from shared folder: ${f.path}`);
+      }
+      const { moved, failed } = migrateLegacyTrash(f.path, folderTrashPath(configDir, folderIndexKey(f)));
+      if (moved > 0) logger.info(`legacy trash moved out of shared folder: ${f.path} (${moved} file(s))`);
+      if (failed > 0) {
+        logger.warn(`legacy trash migration incomplete, ${failed} file(s) left in ${f.path} (可手动搬运后删除该目录)`);
+      }
+    }
+  } catch (error) {
+    logger.warn(`legacy metadata cleanup failed: ${error instanceof Error ? error.message : String(error)}`);
   }
 
   // 会话/目录运行期状态管理器:连接、同步通道、扫描、配置热重载、P2P 自更新全部内聚于此

@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import pino from 'pino';
@@ -8,7 +8,7 @@ import { rmDir } from './helpers.js';
 import { SyncSessionManager, type FolderState } from '../src/session-manager.js';
 import { loadOrCreateIdentity } from '../src/identity.js';
 import { folderIdFor, folderIndexPath, purgeOrphanIndexFiles, type Config, type SharedFolderConfig } from '../src/config.js';
-import { ensureFolderMarker } from '../src/marker.js';
+import { readFolderIdentity } from '../src/folder-identity.js';
 import type { IndexEntry } from '../src/index.js';
 
 /**
@@ -33,6 +33,14 @@ function folderAt(mgr: SyncSessionManager, index = 0): FolderState {
   const state = mgr.folderStates[index];
   if (!state) throw new Error(`folder state #${index} not found (count=${mgr.folderStates.length})`);
   return state;
+}
+
+/**
+ * 给目录配置补上「实测的当前身份指纹」,等价于「这个目录是正常采集进来的」。
+ * 不补的话运行期会落到 `unknown` 分支(结构性守卫),那是给「平台不提供 inode」准备的降级路径。
+ */
+function withIdentity(folder: SharedFolderConfig): SharedFolderConfig {
+  return { ...folder, folderIdentity: readFolderIdentity(folder.path) ?? undefined };
 }
 
 function setup(): {
@@ -265,9 +273,8 @@ describe('硬忽略断根(.git 等历史条目在启动时被清出索引库)', 
 describe('可疑删除防御(墓碑路径含平台分隔符)', () => {
   it("路径含 '\\' 的墓碑被拒绝执行:索引错配绝不演变成数据丢失", async () => {
     const { dir, share, writeConfig, createManager } = setup();
-    const folder: SharedFolderConfig = { path: share, devices: [], id: 'sepguard00001' };
+    const folder: SharedFolderConfig = withIdentity({ path: share, devices: [], id: 'sepguard00001' });
     writeConfig([folder]);
-    ensureFolderMarker(share);
     const mgr = createManager([folder]);
     // 模拟「本地路径构造与协议索引不一致」:索引条目用 '\' 分隔,而扫描器按 '/' 生成路径,
     // 于是这条看起来「盘上已无」→ 会被判成墓碑。这正是 2026-09-15 的事故形态。
@@ -290,13 +297,9 @@ describe('可疑删除防御(墓碑路径含平台分隔符)', () => {
   });
 });
 
-describe('挂载标记门禁(.syncx-folder)', () => {
-  it('标记缺失时跳过扫描:目录不可信不会被误判成「文件被删光」', async () => {
-    const { dir, share, writeConfig, createManager } = setup();
-    const folder: SharedFolderConfig = { path: share, devices: [], id: 'markergate001' };
-    writeConfig([folder]);
-    const mgr = createManager([folder]);
-    // 造出「索引里有、磁盘上无」的形态(盘未挂载 / 目录被整体清空的典型样貌)
+describe('目录身份门禁(dev + ino 指纹,替代 .syncx-folder 标记文件)', () => {
+  /** 造出「索引里有、磁盘上无」的形态:盘未挂载 / 目录被整体清空的典型样貌。 */
+  function seedLiveEntry(mgr: SyncSessionManager): void {
     folderAt(mgr).index.saveEntry({
       path: 'doc.txt',
       version: new Map([['DEV', 1]]),
@@ -304,18 +307,84 @@ describe('挂载标记门禁(.syncx-folder)', () => {
       deleted: false,
       blocks: ['h'],
     });
+  }
+
+  it('身份不符时跳过扫描:换盘/重新挂载不会被误判成「文件被删光」', async () => {
+    const { dir, share, writeConfig, createManager } = setup();
+    // 记录一个**不是**当前目录的指纹:等价于「这个路径上挂了另一块盘 / 目录被重建」
+    const folder: SharedFolderConfig = {
+      path: share,
+      devices: [],
+      id: 'identitygate1',
+      folderIdentity: { dev: '1', ino: '2' },
+    };
+    writeConfig([folder]);
+    const mgr = createManager([folder]);
+    seedLiveEntry(mgr);
 
     await mgr.runScan();
 
     // 无墓碑:索引条目保持「活的」,并给出可见的目录错误与恢复指引
     expect(folderAt(mgr).index.getEntry('doc.txt')?.deleted).toBe(false);
-    expect(mgr.getFolderErrors().some((e) => e.message.includes('缺少共享目录标记'))).toBe(true);
+    expect(mgr.getFolderErrors().some((e) => e.message.includes('目录身份校验失败'))).toBe(true);
 
-    // 建立标记后放行:此时才允许按真实差异推断删除
-    ensureFolderMarker(share);
+    // 身份对上后放行:此时才允许按真实差异推断删除
+    folder.folderIdentity = readFolderIdentity(share) ?? undefined;
     await mgr.runScan();
     expect(folderAt(mgr).index.getEntry('doc.txt')?.deleted).toBe(true);
     expect(mgr.getFolderErrors()).toHaveLength(0);
+
+    mgr.close();
+    rmDir(dir);
+  });
+
+  it('身份无法校验且扫描不到任何文件时,拒绝执行这批删除', async () => {
+    const { dir, share, writeConfig, createManager } = setup();
+    // 没有指纹 = 无法校验(平台不提供 inode / 手工改过 config):退化为结构性守卫
+    const folder: SharedFolderConfig = { path: share, devices: [], id: 'identitygate2' };
+    writeConfig([folder]);
+    const mgr = createManager([folder]);
+    seedLiveEntry(mgr);
+
+    await mgr.runScan();
+
+    expect(folderAt(mgr).index.getEntry('doc.txt')?.deleted).toBe(false);
+    expect(mgr.getFolderErrors().some((e) => e.message.includes('无法校验目录身份'))).toBe(true);
+
+    mgr.close();
+    rmDir(dir);
+  });
+
+  it('身份一致时「用户真的删光了文件」照常同步删除,不被守卫误伤', async () => {
+    const { dir, share, writeConfig, createManager } = setup();
+    const folder = withIdentity({ path: share, devices: [], id: 'identitygate3' });
+    writeConfig([folder]);
+    const mgr = createManager([folder]);
+    seedLiveEntry(mgr);
+
+    await mgr.runScan();
+
+    expect(folderAt(mgr).index.getEntry('doc.txt')?.deleted).toBe(true);
+    expect(mgr.getFolderErrors()).toHaveLength(0);
+
+    mgr.close();
+    rmDir(dir);
+  });
+
+  it('扫描与运行期状态都不往共享目录写任何元数据', async () => {
+    const { dir, share, writeConfig, createManager } = setup();
+    writeFileSync(join(share, 'keep.txt'), 'hi');
+    const folder = withIdentity({ path: share, devices: [], id: 'identitygate4' });
+    writeConfig([folder]);
+    const mgr = createManager([folder]);
+
+    await mgr.runScan();
+    await mgr.runScan();
+
+    // 共享目录里应当只有用户自己的文件:既没有 .syncx-folder 标记,也没有 .syncx-trash 回收站
+    expect(readdirSync(share)).toEqual(['keep.txt']);
+    expect(existsSync(join(share, '.syncx-folder'))).toBe(false);
+    expect(existsSync(join(share, '.syncx-trash'))).toBe(false);
 
     mgr.close();
     rmDir(dir);
