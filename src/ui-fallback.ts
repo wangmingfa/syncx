@@ -14,7 +14,7 @@ function escapeHtml(value: string): string {
 }
 
 const STYLE = `
-  :root { --bg:#f4f6f9; --bg-soft:#eaeef3; --card:#ffffff; --card-hi:#ffffff; --text:#1e2630; --muted:#7e8aa0; --accent:#4a7fc0; --accent-2:#2bb6ac; --accent-3:#2fa56f; --flow:linear-gradient(90deg,var(--accent),var(--accent-2)); --border:#e5e9f0; --border-strong:#d4dae4; --online:#2fa56f; --offline:#d96b6b; }
+  :root { --bg:#f4f6f9; --bg-soft:#eaeef3; --card:#ffffff; --card-hi:#ffffff; --text:#1e2630; --muted:#7e8aa0; --muted-strong:#55606f; --accent:#4a7fc0; --accent-2:#2bb6ac; --accent-3:#2fa56f; --flow:linear-gradient(90deg,var(--accent),var(--accent-2)); --border:#e5e9f0; --border-strong:#d4dae4; --online:#2fa56f; --offline:#d96b6b; }
   * { box-sizing: border-box; margin: 0; padding: 0; }
   body { background: var(--bg); color: var(--text); font-family: system-ui, sans-serif; padding: 24px; line-height: 1.5; }
   .container { max-width: 720px; margin: 0 auto; }

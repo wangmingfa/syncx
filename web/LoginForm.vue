@@ -330,19 +330,9 @@ async function submitToken(): Promise<void> {
 
 /* ---------- 表单 ---------- */
 
-.field {
-  display: block;
-  margin-top: 14px;
-}
-
-.field__label {
-  display: block;
-  font-family: var(--mono);
-  font-size: 10px;
-  letter-spacing: 0.14em;
-  text-transform: uppercase;
-  color: var(--muted);
-}
+/* .field / .field__label 由全局 style.css 提供(登录页与「登录密码」弹窗同款)。
+   这里曾各抄一份,特异性更高 —— 全局那份改了它不跟着变,两边会静默分叉,
+   所以删掉,只保留这一处来源。 */
 
 .login__error {
   display: flex;

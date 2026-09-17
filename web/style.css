@@ -12,6 +12,9 @@
   --card-hi: #ffffff;
   --text: #1e2630;
   --muted: #7e8aa0;
+  /* 比 --muted 深一档:用于需要立得住、但又不该抢正文的次要标题(如字段名)。
+     --muted 在白底上只有 3.48:1,做小字标签时不达标。 */
+  --muted-strong: #55606f;
   --accent: #4a7fc0;
   --accent-soft: #eaf1fb;
   --accent-2: #2bb6ac;
@@ -704,6 +707,15 @@ tbody tr:last-child td {
   padding: 14px 16px;
   /* 叠加 col 的 12px gap,分隔线两侧共 20px 间距 */
   margin-bottom: 8px;
+}
+
+/* 字段 + 它的提示绑成一组:提示跟着上面的输入框,而不是被 form 的 gap
+   推得离下一个字段更近、读起来像下一个字段的 label。
+   (gap 8px 与 .form-hint 的 margin-top 4px 会叠加,不分组时输入框到提示
+   实测 12px、提示到下一个字段只有 8px —— 层次是倒的。) */
+.add-field {
+  display: flex;
+  flex-direction: column;
 }
 
 /* 表单与已添加列表之间的分隔线:加深颜色,左右延伸到外层 .col 的边框
@@ -1638,21 +1650,27 @@ tbody tr:last-child td {
   cursor: pointer;
 }
 
-/* 弹窗内的表单字段(登录密码等)。与登录页同款标签排版,故提到全局。
-   登录页 <style scoped> 里的同名规则优先,视觉一致。 */
+/* 表单字段(登录密码弹窗 / 登录页共用;登录页不再自带一份 scoped 副本,
+   否则那边的特异性更高、改这里它不跟着变,两边会分叉)。 */
 .field {
   display: block;
   margin-top: 14px;
 }
 
+/* 字段名。曾经是 10px / 400 / var(--muted):白底上对比度只有 3.48:1(小字要求
+   4.5:1),而且弹窗里紧挨着它的说明文字是 12px 的同一个灰色 —— 标签比自己的注解
+   还小还淡,层次是倒的。改法是「抬对比 + 给字重 + 收字距」:深一档的 --muted-strong
+   到 6.4:1,600 的字重让它在输入框上方立得住,字距从 0.14em 收到 0.08em(中文字距
+   过大会显稀薄,反而更弱)。仍保留等宽 + 大写,与 .eyebrow 同属一套小标签语言。 */
 .field__label {
   display: block;
   margin-bottom: 6px;
   font-family: var(--mono);
-  font-size: 10px;
-  letter-spacing: 0.14em;
+  font-size: 11px;
+  font-weight: 600;
+  letter-spacing: 0.08em;
   text-transform: uppercase;
-  color: var(--muted);
+  color: var(--muted-strong);
 }
 
 /* ---------- 使用指南弹窗开合动画(由 <Transition name="guide"> 驱动) ---------- */

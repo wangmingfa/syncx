@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { NButton } from 'naive-ui';
+import { NButton, NInput } from 'naive-ui';
 import { useStatusContext } from '../composables/statusContext';
 
 const {

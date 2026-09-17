@@ -44,8 +44,12 @@ const {
 
     <!-- 添加共享目录:头部按钮触发展开;列表为空时表单常显 -->
     <form v-if="addFolderOpen || status.folders.length === 0" class="add-form" @submit.prevent="addFolder">
-      <n-input v-model:value="newPath" placeholder="本地目录绝对路径,如 /home/me/Documents" />
-      <p class="form-hint">目录不存在时会自动创建</p>
+      <!-- 输入框与它的提示包成一组:.add-form 的 flex gap 会插进两者之间(8px gap + 4px margin
+           叠成 12px),而到下一个字段只有 8px —— 提示反而离自己的字段更远,被读成下方字段的 label -->
+      <div class="add-field">
+        <n-input v-model:value="newPath" placeholder="本地目录绝对路径,如 /home/me/Documents" />
+        <p class="form-hint">目录不存在时会自动创建</p>
+      </div>
       <n-input v-model:value="newFolderId" placeholder="目录 ID(留空自动生成;跨机同步需与对方一致)" />
       <n-checkbox-group v-model:value="newFolderDevices">
         <div v-if="status.devices.length > 0" class="device-checks">
