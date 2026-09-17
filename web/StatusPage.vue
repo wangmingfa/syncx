@@ -7,6 +7,7 @@ import { useStatus } from './composables/useStatus';
 import { useConfirm } from './composables/useConfirm';
 import { useDevices } from './composables/useDevices';
 import { useFolders } from './composables/useFolders';
+import { useFolderDiff } from './composables/useFolderDiff';
 import { useOffers } from './composables/useOffers';
 import { useSelfUpdate } from './composables/useSelfUpdate';
 import { useFormat } from './composables/useFormat';
@@ -23,6 +24,7 @@ import {
 import UpdateBanner from './components/UpdateBanner.vue';
 import GuideModal from './components/GuideModal.vue';
 import HistoryModal from './components/HistoryModal.vue';
+import FolderDiffModal from './components/FolderDiffModal.vue';
 import ConfirmModal from './components/ConfirmModal.vue';
 import EditFolderModal from './components/EditFolderModal.vue';
 import AuthPasswordModal from './components/AuthPasswordModal.vue';
@@ -49,6 +51,7 @@ const deps: CoreDeps = { status, busy, refreshStatus, post, askConfirm };
 const devices = useDevices(deps);
 const folders = useFolders(deps);
 const offers = useOffers(deps);
+const folderDiff = useFolderDiff(deps);
 const selfUpdate = useSelfUpdate(deps);
 const fmt = useFormat(status);
 
@@ -105,6 +108,7 @@ provide(StatusContextKey, {
   ...folders,
   ...offers,
   ...selfUpdate,
+  ...folderDiff,
   ...fmt,
   folderKey,
   monogram,
@@ -160,6 +164,9 @@ provide(StatusContextKey, {
 
     <!-- 同步记录弹窗 -->
     <HistoryModal :folder="historyFolder" :notify="showToast" @close="historyFolder = null" />
+
+    <!-- 内容对比弹窗(与指定对端逐条比对同一目录 id;只读诊断) -->
+    <FolderDiffModal />
 
     <!-- 通用二次确认弹窗 -->
     <ConfirmModal :state="confirmState" :notify="showToast" @closed="confirmState = null" />

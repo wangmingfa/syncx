@@ -1,8 +1,8 @@
 /** CLI 参数解析与重连退避策略(纯函数,无 daemon 状态)。 */
 
 export interface ParsedArgs {
-  command: 'start' | 'stop' | 'status' | 'install' | 'invite' | 'join' | 'revoke' | 'upgrade';
-  /** 位置参数(如 invite/join 的参数)。 */
+  command: 'start' | 'stop' | 'status' | 'install' | 'invite' | 'join' | 'revoke' | 'upgrade' | 'diff';
+  /** 位置参数(如 invite/join/diff 的参数)。 */
   positionals: string[];
   configPath?: string;
   port?: number;
@@ -11,11 +11,13 @@ export interface ParsedArgs {
   host?: string;
   /** 日志文件路径;不指定则仅输出到 stdout。 */
   logFile?: string;
+  /** diff 命令的目标对端设备 id;不指定则对比该目录指派的全部设备。 */
+  device?: string;
   /** dev 模式:vite dev server 基址(如 http://127.0.0.1:5173)。设置后 8384 的 web 页面请求会 302 重定向过去,由 vite 提供 HMR;不设置则 8384 直接提供页面(生产/打包形态)。 */
   devViteUrl?: string;
 }
 
-const COMMANDS = new Set(['start', 'stop', 'status', 'install', 'invite', 'join', 'revoke', 'upgrade']);
+const COMMANDS = new Set(['start', 'stop', 'status', 'install', 'invite', 'join', 'revoke', 'upgrade', 'diff']);
 
 /** 控制 API 可安全绑定的回环地址;非回环地址必须显式 --expose-control。 */
 const LOOPBACK_HOSTS = new Set(['127.0.0.1', '::1', 'localhost']);
@@ -64,6 +66,9 @@ export function parseArgs(argv: string[]): ParsedArgs {
       i++;
     } else if (flag === '--log-file') {
       result.logFile = value;
+      i++;
+    } else if (flag === '--device') {
+      result.device = value;
       i++;
     } else if (flag === '--dev-vite') {
       // 用 URL 构造器校验:非法基址在此处就报错,而不是等某次请求代理时才炸。

@@ -90,6 +90,58 @@ export interface SyncEventItem {
   deviceId?: string;
 }
 
+/** 内容对比:单侧状态(版本向量保持 wire 形态)。 */
+export interface FolderDiffSide {
+  version: Array<[string, number]>;
+  size: number;
+  deleted: boolean;
+  digest: string;
+  mtime?: number;
+}
+
+/** 内容对比的分类(与后端 diff.ts 的 DiffKind 一一对应)。 */
+export type FolderDiffKind =
+  | 'content-mismatch'
+  | 'conflict'
+  | 'local-newer'
+  | 'remote-newer'
+  | 'ignored-locally'
+  | 'ignored-remotely'
+  | 'in-sync';
+
+export interface FolderDiffItem {
+  path: string;
+  kind: FolderDiffKind;
+  local?: FolderDiffSide;
+  remote?: FolderDiffSide;
+  /** 命中的忽略规则原文(ignored-* 才有)。 */
+  rule?: string;
+  /** 命中硬忽略名单(不可解除)。 */
+  hard?: boolean;
+  /** 本机盘上复核:missing / size-differs 说明索引陈旧,不是两端不同步。 */
+  disk?: 'ok' | 'missing' | 'size-differs';
+}
+
+/** GET /api/folders/diff 的响应(与后端 FolderDiffResult 同形)。 */
+export interface FolderDiffData {
+  folderId: string;
+  folderPath: string;
+  deviceId: string;
+  deviceVersion?: string;
+  /** 对端快照的收齐时刻(毫秒)。 */
+  remoteAt: number;
+  diff: {
+    items: FolderDiffItem[];
+    counts: Record<FolderDiffKind, number>;
+    localTotal: number;
+    remoteTotal: number;
+    /** 对端是否提供了忽略规则;false = 旧版本对端,「规则使然」无法区分。 */
+    remoteRulesKnown: boolean;
+  };
+  localProgress?: { pending: number; sending: number; receiving: number };
+  remoteProgress?: { pending: number; sending: number; receiving: number };
+}
+
 /** 二次确认弹窗的完整描述(移除目录 / 移除设备 / 升级共用)。 */
 export interface ConfirmState {
   title: string;

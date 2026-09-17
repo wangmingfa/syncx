@@ -1,4 +1,5 @@
 import type { IndexEntry } from './index.js';
+import type { SnapshotEntry } from './diff.js';
 import type { VersionVector } from './version.js';
 
 interface WireEntry {
@@ -29,6 +30,22 @@ export function decodeIndex(buffer: Buffer): IndexEntry[] {
     deleted: e.deleted,
     blocks: e.blocks,
   }));
+}
+
+/**
+ * 诊断用的索引快照编解码(内容对比功能)。
+ *
+ * 与 encodeIndex 的区别:快照条目带的是**折叠后的内容摘要**而不是完整块列表
+ * (见 diff.ts 的 SnapshotEntry),因此条目体积不随文件大小膨胀,几千个文件的
+ * 目录也能靠分片传完。分片逻辑在 session-manager(每片若干条 + seq/total),
+ * 这里只负责一帧之内的编解码。
+ */
+export function encodeSnapshot(entries: SnapshotEntry[]): Buffer {
+  return Buffer.from(JSON.stringify(entries), 'utf8');
+}
+
+export function decodeSnapshot(buffer: Buffer): SnapshotEntry[] {
+  return JSON.parse(buffer.toString('utf8')) as SnapshotEntry[];
 }
 
 export interface BlockRequest {

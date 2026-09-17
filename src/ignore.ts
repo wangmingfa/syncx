@@ -1,6 +1,8 @@
 import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
 
+import type { IndexEntry } from './index.js';
+
 export interface IgnoreRule {
   pattern: string;
   negated: boolean;
@@ -43,7 +45,7 @@ export function parseIgnoreRules(lines: string[]): IgnoreRule[] {
  *   STAR.log       matches app.log, src/app.log
  *   /root.txt      matches only root.txt at the root
  */
-function toRegex(pattern: string): RegExp {
+function buildRegex(pattern: string): RegExp {
   // 单独的 ** :匹配任意层级与文件名
   if (pattern === '**') return /^.*$/;
   let body = '';
@@ -92,42 +94,77 @@ function toRegex(pattern: string): RegExp {
 }
 
 /**
+ * 编译结果缓存。忽略判定要对**每个**路径逐条规则试用,而 toRegex 原先每判一条
+ * 规则就重新构造一次 RegExp:一个 100 行的 .gitignore 配一个几千条目的目录,
+ * 一轮扫描就是几十万次正则构造。模式串的取值集合由规则文本决定(有界),缓存
+ * 不会无限增长;忽略规则变更只是换一批模式串,旧条目留给 GC。
+ */
+const regexCache = new Map<string, RegExp>();
+
+function toRegex(pattern: string): RegExp {
+  const cached = regexCache.get(pattern);
+  if (cached !== undefined) return cached;
+  const built = buildRegex(pattern);
+  regexCache.set(pattern, built);
+  return built;
+}
+
+/** 单条规则是否命中该相对路径(判定细节与 gitignore 一致,见上方 toRegex 注释)。 */
+function ruleMatches(rule: IgnoreRule, relPath: string): boolean {
+  const dirOnly = rule.pattern.endsWith('/');
+  const anchored = rule.pattern.startsWith('/');
+  let pattern = rule.pattern;
+  if (dirOnly) pattern = pattern.slice(0, -1);
+  if (anchored) pattern = pattern.slice(1);
+
+  const hasSlash = pattern.includes('/');
+  const re = toRegex(pattern);
+
+  if (dirOnly) {
+    // 目录规则:匹配目录本身及其下所有内容
+    return relPath === pattern || relPath.startsWith(`${pattern}/`);
+  }
+  if (anchored || hasSlash) {
+    // 含斜杠或锚定的模式匹配完整相对路径
+    return re.test(relPath);
+  }
+  // 无斜杠模式匹配任意层级的该文件名
+  return relPath.split('/').some((segment) => re.test(segment));
+}
+
+/**
  * Decide whether a relative path is ignored. Later rules override earlier
- * ones; a matching negation rule un-ignores the path. `isDir` follows the
- * gitignore convention for trailing-slash directory rules.
+ * ones; a matching negation rule un-ignores the path.
+ *
+ * `isDir` 参数保留仅为兼容既有调用点(当前判定只看规则自身是否以 `/` 结尾,
+ * 不看目标是不是目录 —— gitignore 里目录规则的语义由模式串表达)。
  */
 export function isIgnored(rules: IgnoreRule[], relPath: string, isDir: boolean): boolean {
   let ignored = false;
 
   for (const rule of rules) {
-    const dirOnly = rule.pattern.endsWith('/');
-    const anchored = rule.pattern.startsWith('/');
-    let pattern = rule.pattern;
-    if (dirOnly) pattern = pattern.slice(0, -1);
-    if (anchored) pattern = pattern.slice(1);
-
-    const hasSlash = pattern.includes('/');
-    const re = toRegex(pattern);
-    let match: boolean;
-
-    if (dirOnly) {
-      // 目录规则:匹配目录本身及其下所有内容
-      match = relPath === pattern || relPath.startsWith(`${pattern}/`);
-    } else if (anchored || hasSlash) {
-      // 含斜杠或锚定的模式匹配完整相对路径
-      match = re.test(relPath);
-    } else {
-      // 无斜杠模式匹配任意层级的该文件名
-      match = relPath.split('/').some((segment) => re.test(segment));
-    }
-
-    if (match) ignored = !rule.negated;
+    if (ruleMatches(rule, relPath)) ignored = !rule.negated;
   }
 
   return ignored;
 }
 
-import type { IndexEntry } from './index.js';
+/**
+ * 找出决定该路径「被忽略」的那条规则(最后一条命中的非负向规则),未命中返回
+ * undefined。语义与 isIgnored 严格等价(返回 undefined ⟺ isIgnored 为 false),
+ * 存在的意义是**能说出是哪一行挡住了** —— 内容对比功能据此把「对端没有这个文件」
+ * 与「本机按规则不收它」区分开,否则用户会把规则使然的差异当成同步故障去查。
+ *
+ * 注意:此函数只覆盖 .gitignore/.syncxignore 语义,硬忽略(见 isHardIgnored)
+ * 是独立的、不可解除的闸门,调用方需要时另行判定。
+ */
+export function matchIgnoreRule(rules: IgnoreRule[], relPath: string): IgnoreRule | undefined {
+  let matched: IgnoreRule | undefined;
+  for (const rule of rules) {
+    if (ruleMatches(rule, relPath)) matched = rule;
+  }
+  return matched && !matched.negated ? matched : undefined;
+}
 
 /**
  * Drop ignored entries from an index before it is exchanged or scanned.

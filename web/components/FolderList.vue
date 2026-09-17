@@ -16,6 +16,7 @@ const {
   askRemoveFolder,
   openEditDevices,
   openHistory,
+  openDiff,
   copy,
   hoverFolderKey,
   onFolderEnter,
@@ -83,6 +84,13 @@ const {
         </span>
         <span class="item-title">{{ f.path }}</span>
         <span v-if="f.receiveOnly" class="ro-badge" title="接收模式:只拉不推,本机改动不会同步出去">接收</span>
+        <n-button
+          size="small"
+          tertiary
+          :disabled="busy || f.devices.length === 0"
+          :title="f.devices.length === 0 ? '该目录还没有指派设备,无从对比' : '与对端逐条比对同一目录 id 的内容(只读诊断)'"
+          @click="openDiff(f)"
+        >对比</n-button>
         <n-button size="small" tertiary :disabled="busy" @click="openHistory(f)">记录</n-button>
         <n-button
           size="small"

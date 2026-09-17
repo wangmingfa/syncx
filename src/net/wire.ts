@@ -5,6 +5,7 @@ import type { BlockRequest, BlockResponse } from '../messages.js';
 import { encodeIndex, decodeIndex } from '../messages.js';
 import type { PeerTransport, SyncPeer, IndexMode } from '../peer.js';
 import { RateLimiter } from '../ratelimit.js';
+import type { ProgressCounts } from '../status.js';
 
 export type WireMessage =
   /**
@@ -44,7 +45,23 @@ export type ControlMessage =
   | { kind: 'self-binary-request'; requestId: string; fromDeviceId: string; version?: string; hostname?: string }
   /** 对端安装包回传:base64 的整包 tgz(含 package.json 与 dist/syncx.js)+ 内容
    *  sha256 指纹;data 缺省 = 对端无法提供(dev 态或打包失败)。 */
-  | { kind: 'self-binary-response'; requestId: string; fromDeviceId: string; version: string; sha256: string; data?: string; hostname?: string };
+  | { kind: 'self-binary-response'; requestId: string; fromDeviceId: string; version: string; sha256: string; data?: string; hostname?: string }
+  /**
+   * 内容对比:请求对端把它某个共享目录的索引快照发过来。**全程只读** ——
+   * 不改动任何一端的状态、不触发索引交换。刻意不走「强制重连拿全量索引」那条路:
+   * 诊断工具不该扰动被观察的系统,否则用户看到的可能是自己造成的现象。
+   * requestId 用于把分片的响应拼回同一次请求(并发多次对比互不干扰)。
+   */
+  | { kind: 'folder-index-request'; requestId: string; fromDeviceId: string; folderId: string; version?: string; hostname?: string }
+  /**
+   * 索引快照分片:seq 从 0 开始,total 为总片数。ignoreLines 与 progress 每片都带
+   * (体量远小于条目本身,冗余一点换「不依赖首片必达」的简单性)。
+   *
+   * error 非空表示对端无法提供(未共享给本机、目录不存在等),此时 entries 缺省。
+   * progress 让报告能提示「对端正在收 3 个文件,本报告可能含传输中的中间态」——
+   * 传输中的文件在索引里已是新版本、盘上却是旧内容,不标注会误导排查方向。
+   */
+  | { kind: 'folder-index-snapshot'; requestId: string; fromDeviceId: string; folderId: string; seq: number; total: number; entries?: string; error?: string; ignoreLines?: string[]; progress?: ProgressCounts; version?: string; hostname?: string };
 
 export function encodeWireMessage(message: WireMessage): string {
   return JSON.stringify(message);

@@ -8,7 +8,7 @@ export async function tryFolderRoutes(
   res: ServerResponse,
   deps: ControlServerDeps,
 ): Promise<boolean> {
-  const { addFolder, removeFolder, setFolderDevices, setFolderUseGitignore, getFolderHistory, clearFolderHistory } = deps;
+  const { addFolder, removeFolder, setFolderDevices, setFolderUseGitignore, getFolderHistory, clearFolderHistory, diffFolder } = deps;
   const path = req.url ? pathname(req.url) : '/';
 
   // Form POST /folders : add or (via _method=DELETE) remove a folder
@@ -99,6 +99,25 @@ export async function tryFolderRoutes(
       return true;
     }
     sendJson(res, 200, { events: getFolderHistory(folderId) });
+    return true;
+  }
+
+  // GET /api/folders/diff?folderId=xxx&device=yyy : 与指定对端对比同一目录 id 的内容
+  // (诊断用,只读:不改动任何一端的状态,见 docs/adr/0013)
+  if (req.method === 'GET' && req.url && path === '/api/folders/diff' && diffFolder) {
+    const url = new URL(req.url, 'http://localhost');
+    const folderId = url.searchParams.get('folderId');
+    const device = url.searchParams.get('device');
+    if (!folderId || !device) {
+      sendJson(res, 400, { error: 'folderId and device are required' });
+      return true;
+    }
+    try {
+      sendJson(res, 200, await diffFolder(folderId, device));
+    } catch (e) {
+      // 设备离线 / 对端版本过旧 / 目录未共享给它:都是「这次比不了」,如实回原因
+      sendJson(res, 400, { error: e instanceof Error ? e.message : '对比失败' });
+    }
     return true;
   }
 

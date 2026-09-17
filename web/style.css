@@ -1196,6 +1196,228 @@ tbody tr:last-child td {
   text-overflow: ellipsis;
 }
 
+/* ---------- 内容对比弹窗(FolderDiffModal) ---------- */
+
+.diff-bar {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+  margin-bottom: 12px;
+}
+
+.diff-bar__label {
+  font-size: 12px;
+  color: var(--muted);
+}
+
+.diff-bar__rerun {
+  margin-left: auto;
+}
+
+.diff-loading {
+  padding: 24px 4px;
+  color: var(--muted);
+  font-size: 13px;
+}
+
+.diff-hint {
+  margin-top: 6px;
+  font-size: 12px;
+  color: var(--muted);
+}
+
+.diff-error {
+  display: flex;
+  align-items: flex-start;
+  gap: 12px;
+  padding: 14px 16px;
+  border: 1px dashed rgb(224 65 59 / 0.5);
+  border-radius: 10px;
+  background: rgb(224 65 59 / 0.06);
+  color: #b8332e;
+  font-size: 13px;
+}
+
+.diff-error__msg {
+  flex: 1;
+  min-width: 0;
+}
+
+.diff-meta {
+  font-size: 13px;
+  color: var(--text);
+}
+
+.diff-legend {
+  margin-top: 2px;
+  font-size: 12px;
+  color: var(--muted);
+}
+
+.diff-note {
+  margin-top: 8px;
+  padding: 8px 10px;
+  border-radius: 8px;
+  background: rgb(196 127 0 / 0.08);
+  color: #9a6b00;
+  font-size: 12px;
+}
+
+.diff-clean {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-top: 14px;
+  padding: 16px;
+  border-radius: 10px;
+  background: rgb(47 165 111 / 0.08);
+  color: #1f7a52;
+  font-size: 14px;
+}
+
+.diff-clean__mark {
+  font-size: 16px;
+}
+
+.diff-groups {
+  margin-top: 12px;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.diff-group__head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  width: 100%;
+  padding: 6px 8px;
+  border: 0;
+  border-radius: 8px;
+  background: transparent;
+  color: var(--text);
+  font: inherit;
+  font-size: 13px;
+  text-align: left;
+  cursor: pointer;
+}
+
+.diff-group__head:hover {
+  background: rgb(127 140 170 / 0.1);
+}
+
+.diff-group__caret {
+  color: var(--muted);
+  transition: transform 0.15s ease;
+}
+
+.diff-group__caret.is-open {
+  transform: rotate(90deg);
+}
+
+.diff-group__label {
+  font-weight: 600;
+}
+
+.diff-group__count {
+  font-family: var(--mono);
+  font-size: 12px;
+  font-variant-numeric: tabular-nums;
+  padding: 1px 8px;
+  border-radius: 999px;
+  color: #b8332e;
+  background: rgb(224 65 59 / 0.12);
+}
+
+/* 「规则使然」不是故障:计数刻意弱化,避免把用户的注意力吸走 */
+.diff-group__count.is-noise {
+  color: var(--muted);
+  background: rgb(127 140 170 / 0.14);
+}
+
+.diff-group__hint {
+  color: var(--muted);
+  font-size: 12px;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.diff-items {
+  list-style: none;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  margin-top: 4px;
+  max-height: 46vh;
+  overflow-y: auto;
+}
+
+.diff-item {
+  padding: 8px 10px;
+  border-radius: 8px;
+  font-size: 13px;
+}
+
+.diff-item:nth-child(odd) {
+  background: rgb(127 140 170 / 0.06);
+}
+
+.diff-item__path {
+  color: var(--text);
+}
+
+.diff-item__side {
+  display: flex;
+  gap: 8px;
+  margin-top: 2px;
+  font-size: 12px;
+  color: var(--text);
+}
+
+.diff-item__side-label {
+  flex: none;
+  width: 28px;
+  color: var(--muted);
+}
+
+.diff-item__rule {
+  margin-top: 2px;
+  font-size: 12px;
+  color: var(--muted);
+}
+
+.diff-item__rule code {
+  color: #7c3aed;
+  background: rgb(124 58 237 / 0.1);
+  padding: 1px 6px;
+  border-radius: 6px;
+}
+
+.diff-item__warn {
+  margin-top: 4px;
+  font-size: 12px;
+  color: #9a6b00;
+}
+
+.diff-chip {
+  margin-left: 6px;
+  font-size: 11px;
+  padding: 1px 7px;
+  border-radius: 999px;
+}
+
+.diff-chip--hard {
+  color: #b8332e;
+  background: rgb(224 65 59 / 0.12);
+}
+
+.diff-more {
+  padding: 4px 10px;
+}
+
 .guide-steps {
   list-style: none;
   display: flex;

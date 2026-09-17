@@ -11,6 +11,7 @@ import type {
   UploadPackageInfo,
 } from '../types';
 import type { ToastKind } from './useToast';
+import type { FolderDiffApi } from './useFolderDiff';
 
 /** 目录卡设备标签的四态:同步中 / 待对方确认 / 对方已停止共享 / 设备离线。 */
 export type DeviceTagStatus = 'syncing' | 'pending' | 'stopped' | 'offline';
@@ -18,8 +19,11 @@ export type DeviceTagStatus = 'syncing' | 'pending' | 'stopped' | 'offline';
 /**
  * StatusPage 向子组件注入的共享上下文。子组件通过 useStatusContext() 取用,
  * 无需层层 props 透传。status 与各 action(刷新/确认/业务操作)共享同一实例。
+ *
+ * 内容对比那一组(diffOpen / diffData / openDiff …)直接继承 useFolderDiff 的返回类型,
+ * 免得同一份形状在两处各写一遍、改一处忘一处。
  */
-export interface StatusContext {
+export interface StatusContext extends FolderDiffApi {
   // 核心
   status: Ref<StatusData>;
   busy: Ref<boolean>;

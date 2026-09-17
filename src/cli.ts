@@ -28,7 +28,8 @@ import { compareVersions } from './upgrade.js';
 import { consumeUpdateDoneFile, inspectPackage, isBundledRuntime, runSelfUpdate, runtimeVersion } from './selfupdate.js';
 import { createUpdateChecker, downloadTarball } from './update-check.js';
 import { loadOrCreateToken, daemonStatusLines, stopDaemon, listenControl, pidFilePath, type PidRecord } from './daemon.js';
-import { SyncSessionManager } from './session-manager.js';
+import { SyncSessionManager, type FolderDiffResult } from './session-manager.js';
+import { formatFolderDiff } from './diff-text.js';
 
 /**
  * 目录索引里是否存在「活条目」(非墓碑)。用于启动收养标记前判断该目录是否曾同步过真实文件:
@@ -45,6 +46,66 @@ function indexHasLiveEntries(configDir: string, folder: SharedFolderConfig): boo
     }
   } catch {
     return false;
+  }
+}
+
+/**
+ * diff 命令:对比本机某共享目录与对端**同一个目录 id** 的内容(诊断用)。
+ *
+ * 走控制 API 而不是直接读本机索引库:对比需要的是**对端的**索引,只有活着的
+ * daemon 才持有那条已建立的会话,索引库只说明本机自己。
+ *
+ * 不指定 --device 时对比该目录指派的全部设备(逐个一段报告)。
+ */
+async function runDiffCommand(
+  args: ParsedArgs,
+  configDir: string,
+  config: { sharedFolders: SharedFolderConfig[] },
+  selfDeviceId: string,
+): Promise<void> {
+  const target = args.positionals[0];
+  if (!target) throw new Error('usage: syncx diff <folder-path> [--device <id>]');
+  const folder = config.sharedFolders.find((f) => resolve(f.path) === resolve(target));
+  if (!folder) throw new Error(`不是已配置的共享目录: ${target}`);
+  const devices = args.device ? [args.device] : (folder.devices ?? []);
+  if (devices.length === 0) throw new Error('该目录还没有指派任何设备,无从对比');
+
+  // 令牌只读不建:诊断命令不该在没有 daemon 的机器上凭空创建文件
+  const tokenFile = join(configDir, 'control.token');
+  if (!existsSync(tokenFile)) {
+    throw new Error('找不到控制令牌,syncx 似乎从未在这台机器上启动过');
+  }
+  const token = readFileSync(tokenFile, 'utf8').trim();
+  let record: PidRecord = {};
+  try {
+    record = JSON.parse(readFileSync(pidFilePath(configDir), 'utf8')) as PidRecord;
+  } catch {
+    // pid 文件缺失/损坏:仍按默认端口试一次,连不上时下面给出可操作的提示
+  }
+  const port = args.controlPort ?? record.controlPort ?? 8384;
+
+  for (const device of devices) {
+    if (devices.length > 1) console.log(`===== 对端 ${device} =====`);
+    const url =
+      `http://127.0.0.1:${port}/api/folders/diff` +
+      `?folderId=${encodeURIComponent(folderIdFor(folder))}&device=${encodeURIComponent(device)}`;
+    let res: Response;
+    try {
+      res = await fetch(url, {
+        headers: { Authorization: `Bearer ${token}` },
+        // 比 daemon 等对端快照的 20s 上限再宽一点,让 daemon 自己的超时先报出来
+        signal: AbortSignal.timeout(30_000),
+      });
+    } catch {
+      throw new Error(`连不上本机 daemon(控制端口 ${port});先执行 syncx status 确认它在运行`);
+    }
+    const body = (await res.json()) as FolderDiffResult | { error?: string };
+    if (!res.ok) {
+      throw new Error(('error' in body && body.error) || `对比失败(HTTP ${res.status})`);
+    }
+    for (const line of formatFolderDiff(body as FolderDiffResult, { localDeviceId: selfDeviceId })) {
+      console.log(line);
+    }
   }
 }
 
@@ -96,6 +157,12 @@ export async function run(args: ParsedArgs): Promise<void> {
       );
       idx.close();
     }
+    return;
+  }
+
+  // 内容对比:诊断两个设备同一目录 id 的内容差异(只读,走控制 API)
+  if (args.command === 'diff') {
+    await runDiffCommand(args, configDir, config, identity.deviceId);
     return;
   }
 
@@ -509,6 +576,8 @@ export async function run(args: ParsedArgs): Promise<void> {
     getOffers: () => listOpenOffers(configPath),
     getFolderHistory: (folderId) => listSyncHistory(configPath, folderId),
     clearFolderHistory: (folderId) => clearSyncHistory(configPath, folderId),
+    // 内容对比(诊断,只读):向对端索取同一目录 id 的索引快照并分类差异
+    diffFolder: (folderId, deviceId) => manager.diffFolder(folderId, deviceId),
     acceptOffer: (offerId, localPath, receiveOnly) => {
       // 先查再落状态:校验失败时不能把邀请标成 accepted,否则目录没建起来、
       // 卡片却已从「待确认」消失,用户失去重试入口。

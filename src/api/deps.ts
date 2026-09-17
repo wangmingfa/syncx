@@ -57,6 +57,12 @@ export interface ControlServerDeps {
   /** 清空某共享目录的同步记录(不可逆)。参数为目录 ID。 */
   clearFolderHistory?: (folderId: string) => unknown;
   /**
+   * 内容对比(诊断):把本机某共享目录与指定对端的**同一目录 id** 逐条比对,
+   * 返回分类后的差异报告(见 diff.ts)。全程只读,不改动任何一端的状态。
+   * 设备离线 / 该目录未共享给对端 / 对端版本过旧时抛错,路由转成 400。
+   */
+  diffFolder?: (folderId: string, deviceId: string) => Promise<unknown>;
+  /**
    * 日志文件路径(--log-file 启动参数)。设置后 GET /api/logs 可读取日志尾部;
    * 未设置时该端点返回 ok:false,前端提示需以 --log-file 启动才有日志可看。
    */

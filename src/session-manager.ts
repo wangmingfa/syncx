@@ -29,6 +29,8 @@ import { scanFolder } from './scanner.js';
 import type { IndexEntry } from './index.js';
 import { splitIntoBlocks } from './blockstore.js';
 import { recordSyncEvent } from './history.js';
+import { encodeSnapshot, decodeSnapshot } from './messages.js';
+import { buildFolderDiff, checkDiffAgainstDisk, toSnapshotEntry, type FolderDiff, type SnapshotEntry } from './diff.js';
 import { broadcastFolderUpdates } from './broadcast.js';
 import { connectPeer } from './net/client.js';
 import { makePeerTransport, attachPeerMessages, sendControlMessage, type ControlMessage } from './net/wire.js';
@@ -89,6 +91,55 @@ export interface DeviceLinkInfo {
   version?: string;
   /** 对端主机名(hello 宣告);undefined=旧版本对端未发。 */
   hostname?: string;
+}
+
+/** 内容对比时对端返回的目录索引快照(见 folder-index-request)。 */
+export interface PeerSnapshot {
+  entries: SnapshotEntry[];
+  /**
+   * 对端该目录生效的忽略规则行(含内置默认行)。
+   * undefined = 对端未提供(旧版本):此时无法判定「差异是规则使然」,
+   * 报告会退化为把这类条目一律当成待同步差异。
+   */
+  ignoreLines?: string[];
+  /** 对端此刻的传输进度,用于在报告里提示「可能含传输中的中间态」。 */
+  progress?: { pending: number; sending: number; receiving: number };
+  /** 本机收齐快照的时刻(毫秒)。 */
+  at: number;
+}
+
+/** 一次目录对比的完整结果(Web 弹窗与 CLI 共用同一份 JSON)。 */
+export interface FolderDiffResult {
+  folderId: string;
+  /** 本机该目录的落地路径。 */
+  folderPath: string;
+  deviceId: string;
+  /** 对端版本(来自 hello);undefined = 未知。 */
+  deviceVersion?: string;
+  /** 对端快照的收齐时刻,报告上标注「数据取自 …」。 */
+  remoteAt: number;
+  diff: FolderDiff;
+  /** 本机此刻的传输进度(全为 0 时不给)。非零说明报告可能含传输中的中间态。 */
+  localProgress?: PeerSnapshot['progress'];
+  /** 对端快照里带回的它此刻的传输进度。 */
+  remoteProgress?: PeerSnapshot['progress'];
+}
+
+/** 对比请求等待对端快照的上限。目录很大时对端要现算摘要 + 分片发送,给足余量。 */
+const SNAPSHOT_TIMEOUT_MS = 20_000;
+/** 一片多少条:2000 条约几百 KB,远低于单帧上限,又不会把大目录拆成几十片。 */
+const SNAPSHOT_CHUNK_ENTRIES = 2000;
+/** 片数上限(仅用于校验对端声明的 total,挡异常/恶意消息造成内存膨胀)。 */
+const MAX_SNAPSHOT_CHUNKS = 500;
+
+/**
+ * 进度是否表示「此刻真的有传输在跑」。
+ *
+ * 目录卡的进度是常态存在的(每个共享目录都有一条,空闲时为 0/0/0),所以判断
+ * 「要不要提醒用户报告可能含中间态」不能只看字段有没有,必须看数值。
+ */
+function isTransferring(p: { pending: number; sending: number; receiving: number }): boolean {
+  return p.pending + p.sending + p.receiving > 0;
 }
 
 export interface SessionManagerDeps {
@@ -173,8 +224,36 @@ export class SyncSessionManager {
   private heartbeatTimer: ReturnType<typeof setInterval> | undefined;
   /** 等待对端 self-binary-response 的挂起请求(requestId → resolver)。 */
   private readonly pendingBinary = new Map<string, (resp: Extract<ControlMessage, { kind: 'self-binary-response' }>) => void>();
+  /**
+   * 等待对端索引快照的挂起请求(requestId → 累积分片)。内容对比功能用:
+   * 快照按片返回,集齐 total 片才 resolve;超时或对端明确报错则 reject。
+   * 与 pendingBinary 分开存放:对比请求允许并发(多个目录/多个对端同时比),
+   * 键都是随机 requestId,互不干扰。
+   */
+  private readonly pendingSnapshots = new Map<
+    string,
+    {
+      folderId: string;
+      total: number;
+      chunks: Map<number, SnapshotEntry[]>;
+      ignoreLines?: string[];
+      progress?: PeerSnapshot['progress'];
+      resolve: (result: PeerSnapshot) => void;
+      reject: (error: Error) => void;
+      timer: ReturnType<typeof setTimeout>;
+    }
+  >();
   /** 扫描重入保护(见 runScan)。 */
   private scanning = false;
+  /**
+   * close() 之后置位:随后 socket 的 close 事件**不得再排定重连**。
+   * 优雅关闭时 close() 会 terminate 所有 peer socket,而 terminate 触发的 close
+   * 事件是异步到达的 —— 那时 close() 早已清空 reconnectTimers 并返回,于是关闭
+   * 路径上反而会新排一个 0~30s 的重连定时器(未 unref),既把正在退出的 daemon
+   * 钉在事件循环里,又可能真的向外拨号。与「peer socket 未 terminate 导致进程
+   * 无法退出」同源,由本标志兜底。
+   */
+  private closed = false;
 
   constructor(deps: SessionManagerDeps, initialFolders: SharedFolderConfig[]) {
     this.identity = deps.identity;
@@ -558,6 +637,9 @@ export class SyncSessionManager {
       onRejected?: (error: unknown) => void;
     } = {},
   ): void {
+    // 关闭中不再发起新连接(forceReconnect 也走这里):否则退出路径上会多出一条
+    // 在途拨号,与正在关闭的进程竞争。
+    if (this.closed) return;
     void connectPeer(this.identity, url, this.peerPort)
       .then(({ socket, remoteDeviceId, key }) => {
         opts.onConnected?.(remoteDeviceId);
@@ -575,6 +657,7 @@ export class SyncSessionManager {
   }
 
   private scheduleReconnect(deviceId: string): void {
+    if (this.closed) return;
     const url = this.outboundPeerUrls.get(deviceId);
     if (!url) return;
     // attempts = 已连续失败次数:首连失败(0)立即重试,之后指数退避
@@ -789,6 +872,14 @@ export class SyncSessionManager {
         })();
         break;
       }
+      case 'folder-index-request':
+        // 对端要做内容对比:回一份只读快照(不重扫、不改状态)
+        this.serveIndexSnapshot(message.fromDeviceId, message.folderId, message.requestId);
+        break;
+      case 'folder-index-snapshot':
+        // 我们发出的对比请求的回片
+        this.onSnapshotChunk(message);
+        break;
     }
     // 控制面消息多会改动待确认项/共享关系(设备卡与邀请卡的内容),统一通知一次。
     // 未产生实际变化时推送端会自行比对丢弃,故不必在这里逐分支判断。
@@ -838,6 +929,179 @@ export class SyncSessionManager {
     await runSelfUpdate(tgz, resp.version);
     this.logger.info(`self-update staged: ${mine} → ${resp.version} (from ${deviceId}), shutting down for swap`);
     return { version: resp.version };
+  }
+
+  /* ---------- 内容对比(诊断用,全程只读;见 docs/adr/0013) ---------- */
+
+  /**
+   * 向对端索取它某个共享目录的索引快照。失败一律抛错(离线 / 超时 / 旧版本不认这条
+   * 消息),不拿会话建立时那份内存镜像糊弄 —— 那份只在 attach 时刻准确,对端之后改
+   * 忽略规则或只发增量都会让它悄悄过期,而「给出过期结论」比「不给结论」更糟。
+   */
+  async fetchPeerSnapshot(deviceId: string, folderId: string): Promise<PeerSnapshot> {
+    const session = this.peerSessions.get(deviceId);
+    if (!session || !this.sessionAlive(session)) throw new Error('设备离线,无法对比');
+    const requestId = randomBytes(8).toString('hex');
+    return new Promise<PeerSnapshot>((resolve, reject) => {
+      const timer = setTimeout(() => {
+        this.pendingSnapshots.delete(requestId);
+        reject(new Error('对端响应超时(20s):可能是旧版本,或对端目录过大'));
+      }, SNAPSHOT_TIMEOUT_MS);
+      this.pendingSnapshots.set(requestId, {
+        folderId,
+        total: 0,
+        chunks: new Map(),
+        resolve,
+        reject,
+        timer,
+      });
+      const sent = this.sendControlTo(deviceId, {
+        kind: 'folder-index-request',
+        requestId,
+        fromDeviceId: this.identity.deviceId,
+        folderId,
+      });
+      if (!sent) {
+        clearTimeout(timer);
+        this.pendingSnapshots.delete(requestId);
+        reject(new Error('发送对比请求失败(设备可能刚离线)'));
+      }
+    });
+  }
+
+  /**
+   * 客户端的对比请求打到对端时由对端执行:回传本机该目录的本地索引快照。
+   * **只读** —— 取的是内存里那份索引,不重新扫描、不改版本向量、不落盘。
+   */
+  private serveIndexSnapshot(deviceId: string, folderId: string, requestId: string): void {
+    // 与「未授权对端不附加目录 peer」同一道闸门:目录没有把对方列进 devices 就
+    // 一条索引都不给,否则这条诊断通道会变成绕过共享关系的索引读取入口。
+    const folder = this.folderStates.find(
+      (f) => f.id === folderId && (f.config.devices ?? []).includes(deviceId),
+    );
+    if (!folder) {
+      this.sendControlTo(deviceId, {
+        kind: 'folder-index-snapshot',
+        requestId,
+        fromDeviceId: this.identity.deviceId,
+        folderId,
+        seq: 0,
+        total: 1,
+        error: '该目录未共享给请求方',
+      });
+      this.logger.info(`index snapshot denied: folder ${folderId} is not shared with ${deviceId}`);
+      return;
+    }
+    const entries = [...folder.localIndex.values()].map(toSnapshotEntry);
+    const total = Math.max(1, Math.ceil(entries.length / SNAPSHOT_CHUNK_ENTRIES));
+    const progress = this.folderProgress(folder);
+    for (let seq = 0; seq < total; seq++) {
+      const chunk = entries.slice(seq * SNAPSHOT_CHUNK_ENTRIES, (seq + 1) * SNAPSHOT_CHUNK_ENTRIES);
+      this.sendControlTo(deviceId, {
+        kind: 'folder-index-snapshot',
+        requestId,
+        fromDeviceId: this.identity.deviceId,
+        folderId,
+        seq,
+        total,
+        entries: encodeSnapshot(chunk).toString('base64'),
+        // 忽略规则与该目录此刻的进度每片都带:体量远小于条目本身,换来「不必假设首片必达」
+        ignoreLines: folder.ignoreLines,
+        // 只有真的有传输在跑才带上(全 0 的进度不带,免得对端凭空多一句「此刻在传输」提示)
+        ...(progress && isTransferring(progress) ? { progress } : {}),
+      });
+    }
+    this.logger.info(
+      `index snapshot served to ${deviceId} for ${folderId}: ${entries.length} entries in ${total} chunk(s)`,
+    );
+  }
+
+  /** 收到一片快照:累积,集齐 total 片才放行等待方。 */
+  private onSnapshotChunk(message: Extract<ControlMessage, { kind: 'folder-index-snapshot' }>): void {
+    const pending = this.pendingSnapshots.get(message.requestId);
+    if (!pending) return; // 超时之后迟到的片:直接丢弃
+    if (message.error) {
+      clearTimeout(pending.timer);
+      this.pendingSnapshots.delete(message.requestId);
+      pending.reject(new Error(message.error));
+      return;
+    }
+    // 畸形/异常声明一律忽略(靠超时兜底),不因一条坏消息中断或撑爆内存
+    const sane =
+      Number.isInteger(message.seq) &&
+      Number.isInteger(message.total) &&
+      message.total >= 1 &&
+      message.total <= MAX_SNAPSHOT_CHUNKS &&
+      message.seq >= 0 &&
+      message.seq < message.total;
+    if (!sane) return;
+    if (pending.total === 0) pending.total = message.total;
+    if (pending.total !== message.total) return; // 片间声明不一致
+    if (message.ignoreLines) pending.ignoreLines = message.ignoreLines;
+    if (message.progress) pending.progress = message.progress;
+    if (message.entries) {
+      pending.chunks.set(message.seq, decodeSnapshot(Buffer.from(message.entries, 'base64')));
+    }
+    if (pending.chunks.size < pending.total) return;
+    clearTimeout(pending.timer);
+    this.pendingSnapshots.delete(message.requestId);
+    const entries: SnapshotEntry[] = [];
+    for (let seq = 0; seq < pending.total; seq++) {
+      entries.push(...(pending.chunks.get(seq) ?? []));
+    }
+    pending.resolve({
+      entries,
+      ...(pending.ignoreLines ? { ignoreLines: pending.ignoreLines } : {}),
+      ...(pending.progress ? { progress: pending.progress } : {}),
+      at: Date.now(),
+    });
+  }
+
+  /**
+   * 对比本机某共享目录与指定对端的同一目录 id:取对端快照 → 分类差异 → 盘上复核。
+   * 全程只读,不改变任何一端的状态(诊断工具不该扰动被观察的系统)。
+   */
+  async diffFolder(folderId: string, deviceId: string): Promise<FolderDiffResult> {
+    const folder = this.folderStates.find((f) => f.id === folderId);
+    if (!folder) throw new Error('共享目录不存在(可能刚被移除)');
+    if (!(folder.config.devices ?? []).includes(deviceId)) {
+      throw new Error('该目录未与这台设备共享,无法对比');
+    }
+    const snapshot = await this.fetchPeerSnapshot(deviceId, folderId);
+    const diff = buildFolderDiff({
+      local: folder.localIndex,
+      remote: snapshot.entries,
+      localRules: parseIgnoreRules(folder.ignoreLines),
+      ...(snapshot.ignoreLines ? { remoteRules: parseIgnoreRules(snapshot.ignoreLines) } : {}),
+    });
+    checkDiffAgainstDisk(folder.path, diff.items);
+    const version = this.peerInfo.get(deviceId)?.version;
+    const localProgress = this.folderProgress(folder);
+    const remoteProgress = snapshot.progress;
+    return {
+      folderId,
+      folderPath: folder.path,
+      deviceId,
+      ...(version ? { deviceVersion: version } : {}),
+      remoteAt: snapshot.at,
+      diff,
+      // 全为 0 的进度不带:那不是「此刻在传输」,带了会让报告凭空多一句
+      // 「本机此刻在传输(发送 0 · 接收 0 · 待处理 0)」,把真正的提示淹掉
+      ...(localProgress && isTransferring(localProgress) ? { localProgress } : {}),
+      ...(remoteProgress && isTransferring(remoteProgress) ? { remoteProgress } : {}),
+    };
+  }
+
+  /** 某目录此刻的传输进度(对该目录所有对端求和);全为 0 时返回 undefined。 */
+  private folderProgress(folder: FolderState): PeerSnapshot['progress'] {
+    const sum = { pending: 0, sending: 0, receiving: 0 };
+    for (const peer of folder.peers.values()) {
+      const p = peer.getSyncProgress();
+      sum.pending += p.pending;
+      sum.sending += p.sending;
+      sum.receiving += p.receiving;
+    }
+    return sum.pending > 0 || sum.sending > 0 || sum.receiving > 0 ? sum : undefined;
   }
 
   /**
@@ -946,6 +1210,11 @@ export class SyncSessionManager {
     //   (否则删掉唯一一个共享目录后,allowed 变 false,清单永远不发,对方的卡片不会消失)
     this.pushFolderSyncList(remoteDeviceId);
     attachPeerMessages(session.peers, socket, key, (message) => {
+      // 已关闭:不再处理任何入站控制消息。close() 用 terminate() 硬断 socket,
+      // 但已排入事件循环的消息仍会到达 —— 那时索引库已关、配置锁已释放,继续
+      // 处理会去碰已关闭的资源(folder-sync-list 会触发 mutateConfig 重写配置,
+      // 在测试里表现为对已删除目录重试 5s 后抛 config lock timeout)。
+      if (this.closed) return;
       // 版本 / 主机名随每条控制消息携带(hello 必然带,其余控制消息也在发送侧注入)。
       // 即便一次性 hello 在双连接 / 重连抖动中丢失,只要任意一条控制消息到达,
       // 对端版本即可被学到 —— 设备卡不再偶发「版本未知」。用消息里的 fromDeviceId
@@ -1295,8 +1564,17 @@ export class SyncSessionManager {
 
   /** daemon 优雅关闭:清重连定时器、停心跳、断开所有 peer socket、关闭索引库。 */
   close(): void {
+    // 先置位再拆连接:terminate 触发的 socket 'close' 是异步的,会在 close() 返回
+    // 之后才跑,届时必须已被标记为「关闭中」,否则又会排定重连(见 closed 的注释)。
+    this.closed = true;
     for (const timer of this.reconnectTimers.values()) clearTimeout(timer);
     this.reconnectTimers.clear();
+    // 挂起的对比请求:拒绝掉,别让调用方(HTTP 路由)空等到超时
+    for (const pending of this.pendingSnapshots.values()) {
+      clearTimeout(pending.timer);
+      pending.reject(new Error('daemon 正在关闭,对比已取消'));
+    }
+    this.pendingSnapshots.clear();
     if (this.heartbeatTimer) {
       clearInterval(this.heartbeatTimer);
       this.heartbeatTimer = undefined;

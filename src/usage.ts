@@ -62,6 +62,7 @@ export function helpText(version: string): string {
     '  join <code> <local-path>  接受邀请并添加本地共享目录',
     '  revoke <code>             吊销一个已发出的邀请码',
     '  upgrade [tag]             自升级 npm 包(tag 为发布通道,默认 latest,可填 beta)',
+    '  diff <folder-path>        对比本机某共享目录与对端同一目录的内容(排查用,--device 指定对端)',
     '',
     '选项:',
     '  -h, --help                显示本帮助',
@@ -82,6 +83,7 @@ export function helpText(version: string): string {
     '  syncx join <code> D:/sync      接受邀请并开始同步',
     '  syncx upgrade                  升级到最新正式版',
     '  syncx upgrade beta             切到 beta 预发布通道',
+    '  syncx diff D:/sync             对比本机该目录与对端同一目录的内容差异',
     '',
   ].join('\n');
 }
