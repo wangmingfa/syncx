@@ -58,7 +58,20 @@ const {
         <span class="status-pill" :class="p.online ? 'pill-online' : 'pill-offline'">
           {{ p.online ? '在线' : '离线' }}
         </span>
-        <n-button size="small" type="error" tertiary :disabled="busy" @click="askRemoveDevice(p.deviceId)">移除</n-button>
+        <!-- 重连紧挨状态标签:动作跟着它要修的那种状态走,也省掉下方一整行 -->
+        <span class="item-actions">
+          <n-button
+            v-if="!p.online"
+            size="small"
+            tertiary
+            class="btn-inline"
+            :disabled="busy"
+            @click="reconnect(p.deviceId)"
+          >
+            重连
+          </n-button>
+          <n-button size="small" type="error" tertiary class="btn-inline" :disabled="busy" @click="askRemoveDevice(p.deviceId)">移除</n-button>
+        </span>
       </div>
       <div class="item-sub">
         共享 {{ deviceFolderCount(p.deviceId) }} 个目录
@@ -79,9 +92,6 @@ const {
           </template>
           升级到 {{ p.version }}
         </n-button>
-      </div>
-      <div v-if="!p.online" class="actions">
-        <n-button size="small" tertiary :disabled="busy" @click="reconnect(p.deviceId)">重连</n-button>
       </div>
     </div>
   </section>

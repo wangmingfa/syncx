@@ -562,6 +562,39 @@ tbody tr:last-child td {
   gap: 10px;
 }
 
+/* 标题行内的操作:自己绝不收缩,把窄屏下的让步留给标题(它自带 min-width:0 会省略)。
+   没有这条,长设备 ID 会把「重连 / 移除」压成换行或半截字。 */
+.item-top .btn-inline {
+  flex: none;
+}
+
+/* 操作成组:同排时贴右缘;空间不够时**整组**一起落到下一行,不让单个按钮孤零零占一行 */
+.item-top .item-actions {
+  display: flex;
+  gap: 10px;
+  flex: none;
+  margin-left: auto;
+}
+
+/* 设备卡标题行:窄屏允许换行,但**只让操作整组换行**,标题自己不折行。
+   10 位设备 ID 是卡片的身份标识:实测 320px 下若不设保底,ID 只剩 18px 宽,被
+   word-break: break-all 拆成一列竖排字符,卡片从 30px 涨到 104px。
+   保底取 84px = 10 位 mono 13px + letter-spacing 0.39px 的实测宽度(82.17px)向上取整,
+   ID 因此永不折行,只会是「操作整组落到第二行」。
+   flex-basis 取 0(而不是 auto)是关键 —— 换行判定按 flex-basis 算,写 auto 会用
+   ID 的满宽参与判定,390px 就差 2px 放不下、整组被推下去;写 0 则第一行只占
+   「头像 + 保底宽度 + 状态标签」,放得下就同排(标题再 grow 吃掉剩余宽度),
+   放不下才是操作整组落到第二行。 */
+.col--devices .item-top {
+  flex-wrap: wrap;
+  row-gap: 8px;
+}
+
+.col--devices .item-top .item-title {
+  flex: 1 1 0;
+  min-width: 84px;
+}
+
 /* 首字母/图标徽标 */
 .avatar {
   display: inline-flex;
