@@ -775,11 +775,15 @@ tbody tr:last-child td {
   flex-wrap: wrap;
 }
 
+/* 目录卡「目录 ID」标签。与 .field__label 同一套小标签语言(11px/600/
+   --muted-strong/0.08em):它标注的是旁边那串不易读的目录 id,自身要先立得住;
+   旧的 10px/--muted 白底只有 3.48:1,0.16em 宽字距摊在中文上更显稀薄。 */
 .fid-label {
-  font-size: 10px;
-  letter-spacing: 0.16em;
+  font-size: 11px;
+  font-weight: 600;
+  letter-spacing: 0.08em;
   text-transform: uppercase;
-  color: var(--muted);
+  color: var(--muted-strong);
   font-family: var(--mono);
 }
 
