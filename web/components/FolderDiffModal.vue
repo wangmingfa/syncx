@@ -2,6 +2,7 @@
 import { computed, ref, watch } from 'vue';
 import { NButton } from 'naive-ui';
 import { useStatusContext } from '../composables/statusContext';
+import { stripWs } from '../utils/format';
 import type { FolderDiffItem, FolderDiffKind } from '../types';
 
 const {
@@ -67,6 +68,29 @@ const totalDiff = computed<number>(() => {
   const counts = diffData.value?.diff.counts;
   if (!counts) return 0;
   return GROUPS.reduce((sum, g) => sum + (counts[g.kind] ?? 0), 0);
+});
+
+/**
+ * 设备 id 后面的「主机名 · IP」。
+ *
+ * 缺项就少一项、不做占位:旧版本对端不宣告主机名、还没学到地址时没有 IP,填一个
+ * 「未知」既占地方又不提供信息。对端多带一个版本号 —— 它和主机名一样是「这是哪台
+ * 机器」的属性,顺带说明该版本是否支持「规则使然」这类新能力。
+ */
+const localWhere = computed<string>(() => {
+  const d = diffData.value;
+  if (!d) return '';
+  return [d.localHostname, ...d.localAddresses].filter(Boolean).join(' · ');
+});
+
+const remoteWhere = computed<string>(() => {
+  const d = diffData.value;
+  if (!d) return '';
+  return [
+    d.deviceHostname ?? '',
+    d.deviceUrl ? stripWs(d.deviceUrl) : '',
+    d.deviceVersion ? `syncx ${d.deviceVersion}` : '',
+  ].filter(Boolean).join(' · ');
 });
 
 /** 「刚刚 / N 分钟前」:一眼判断这份快照新不新。 */
@@ -160,8 +184,19 @@ function transferring(p?: { pending: number; sending: number; receiving: number 
             双方一致 {{ diffData.diff.counts['in-sync'] }} 条
           </div>
 
+          <!-- 设备身份:本机 / 对端各一行(主机名 + IP)。多设备时「在跟哪台机器比」比设备
+               id 好认,也便于确认这份报告出自哪台机器(同一台机器开多个界面时尤其明显)。 -->
           <div class="diff-legend mono">
-            设备：{{ status.deviceId }} = 本机，{{ diffData.deviceId }} = 对端{{ diffData.deviceVersion ? `（syncx ${diffData.deviceVersion}）` : '' }}
+            <div class="diff-legend__row">
+              <span class="diff-legend__role">本机</span>
+              <span class="diff-legend__id">{{ status.deviceId }}</span>
+              <span v-if="localWhere" class="diff-legend__where">{{ localWhere }}</span>
+            </div>
+            <div class="diff-legend__row">
+              <span class="diff-legend__role">对端</span>
+              <span class="diff-legend__id">{{ diffData.deviceId }}</span>
+              <span v-if="remoteWhere" class="diff-legend__where">{{ remoteWhere }}</span>
+            </div>
           </div>
 
           <!-- 报告可信度提示:传输中 / 对端规则缺失都会让结论打折,先讲清楚 -->

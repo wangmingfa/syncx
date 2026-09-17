@@ -128,6 +128,14 @@ export interface FolderDiffData {
   folderPath: string;
   deviceId: string;
   deviceVersion?: string;
+  /** 对端主机名(hello 宣告);undefined = 旧版本对端未宣告。 */
+  deviceHostname?: string;
+  /** 本机记录的该对端可达地址(ws://ip:port);undefined = 尚未学到。 */
+  deviceUrl?: string;
+  /** 本机主机名:报告里「本机」一栏,便于确认这份报告出自哪台机器。 */
+  localHostname: string;
+  /** 本机 LAN 地址(IPv4,多网卡时多个)。 */
+  localAddresses: string[];
   /** 对端快照的收齐时刻(毫秒)。 */
   remoteAt: number;
   diff: {

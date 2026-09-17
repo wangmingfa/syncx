@@ -34,7 +34,7 @@ import { buildFolderDiff, checkDiffAgainstDisk, toSnapshotEntry, type FolderDiff
 import { broadcastFolderUpdates } from './broadcast.js';
 import { connectPeer } from './net/client.js';
 import { makePeerTransport, attachPeerMessages, sendControlMessage, type ControlMessage } from './net/wire.js';
-import { learnPeerUrl, learnPeerIp } from './net/addresses.js';
+import { learnPeerUrl, learnPeerIp, getLanAddresses } from './net/addresses.js';
 import { hostname as osHostname } from 'node:os';
 import { RateLimiter } from './ratelimit.js';
 import { isPeerAllowed, addPeer } from './devices.js';
@@ -116,6 +116,17 @@ export interface FolderDiffResult {
   deviceId: string;
   /** 对端版本(来自 hello);undefined = 未知。 */
   deviceVersion?: string;
+  /** 对端主机名(hello 宣告);undefined = 旧版本对端未宣告。 */
+  deviceHostname?: string;
+  /**
+   * 本机记录的该对端可达地址(ws://ip:port,手动填写或反向发现学到)。
+   * undefined = 尚未学到(只有入站连接且对方未广播端口时)。
+   */
+  deviceUrl?: string;
+  /** 本机主机名:报告里「本机」一栏,便于确认这份报告出自哪台机器。 */
+  localHostname: string;
+  /** 本机 LAN 地址(IPv4,多网卡时多个);空数组 = 没有非环回地址。 */
+  localAddresses: string[];
   /** 对端快照的收齐时刻,报告上标注「数据取自 …」。 */
   remoteAt: number;
   diff: FolderDiff;
@@ -1075,14 +1086,20 @@ export class SyncSessionManager {
       ...(snapshot.ignoreLines ? { remoteRules: parseIgnoreRules(snapshot.ignoreLines) } : {}),
     });
     checkDiffAgainstDisk(folder.path, diff.items);
-    const version = this.peerInfo.get(deviceId)?.version;
+    // 设备身份(版本 / 主机名 / 可达地址)直接取 describeDevice,与设备卡同源 ——
+    // 两处显示的是同一份数据,不会出现「设备卡说在某地址、对比报告说在另一处」的困扰
+    const link = this.describeDevice(deviceId);
     const localProgress = this.folderProgress(folder);
     const remoteProgress = snapshot.progress;
     return {
       folderId,
       folderPath: folder.path,
       deviceId,
-      ...(version ? { deviceVersion: version } : {}),
+      ...(link.version ? { deviceVersion: link.version } : {}),
+      ...(link.hostname ? { deviceHostname: link.hostname } : {}),
+      ...(link.url ? { deviceUrl: link.url } : {}),
+      localHostname: osHostname(),
+      localAddresses: getLanAddresses().map((a) => a.address),
       remoteAt: snapshot.at,
       diff,
       // 全为 0 的进度不带:那不是「此刻在传输」,带了会让报告凭空多一句

@@ -67,6 +67,14 @@ a stale conclusion is worse than one that returns none.
 8. **Differences (normally tens of entries, not thousands) are re-checked against the local disk**
    with a single `stat`, so "our index is stale" is reported as such instead of as a difference.
    Paths that would resolve outside the shared root are skipped rather than reported as missing.
+9. **The result names both machines, not only by device id.** Device ids are random strings, so a
+   report that says nothing but `AALQHUYOGA` ↔ `CKTRRFTGBP` does not tell the reader which physical
+   machine the "local" side is — which matters when the Web UI is open against more than one host,
+   or when the peer's address has changed. The result therefore carries the local hostname plus its
+   LAN addresses, and the peer's hostname plus its reachable URL, all read from `describeDevice` —
+   the same source the device card renders — so the two views cannot disagree. Absent values are
+   omitted rather than replaced with a placeholder: an older peer does not announce a hostname, and
+   a placeholder both takes space and reads as if it were information.
 
 ## Consequences
 

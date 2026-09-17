@@ -30,6 +30,10 @@ function result(
     progress?: FolderDiffResult['localProgress'];
     remoteProgress?: FolderDiffResult['remoteProgress'];
     remoteRulesKnown?: boolean;
+    localHostname?: string;
+    localAddresses?: string[];
+    deviceHostname?: string;
+    deviceUrl?: string;
   } = {},
 ): FolderDiffResult {
   const counts = {
@@ -46,6 +50,10 @@ function result(
     folderId: 'fid',
     folderPath: '/share/dir',
     deviceId: REMOTE,
+    localHostname: opts.localHostname ?? 'my-host',
+    localAddresses: opts.localAddresses ?? ['10.0.0.5'],
+    ...(opts.deviceHostname ? { deviceHostname: opts.deviceHostname } : {}),
+    ...(opts.deviceUrl ? { deviceUrl: opts.deviceUrl } : {}),
     remoteAt: Date.now(),
     diff: {
       items,
@@ -136,5 +144,33 @@ describe('formatFolderDiff', () => {
     expect(out).toContain(REMOTE);
     expect(out).toContain('/share/dir');
     expect(out).toContain('目录 id fid');
+  });
+
+  it('identifies both machines by hostname and address, not only by device id', () => {
+    const out = run(
+      result([item('local-newer', 'a.txt')], {
+        localHostname: 'mac-mini',
+        localAddresses: ['10.0.0.5', '192.168.1.9'],
+        deviceHostname: 'desktop-win',
+        deviceUrl: 'ws://10.0.0.7:22000',
+      }),
+    );
+    const line = out.split('\n').find((l) => l.startsWith('设备 ')) ?? '';
+    expect(line).toContain(`${LOCAL} = 本机(mac-mini · 10.0.0.5 · 192.168.1.9)`);
+    expect(line).toContain('desktop-win');
+    // ws:// 在终端里只是噪声,端口才是有信息的
+    expect(line).toContain('10.0.0.7:22000');
+    expect(line).not.toContain('ws://');
+  });
+
+  it('omits an unknown hostname/address instead of printing a placeholder', () => {
+    // 旧版本对端不宣告主机名;本机没有非环回地址时 localAddresses 为空
+    const out = run(result([item('local-newer', 'a.txt')], { localAddresses: [] }));
+    const line = out.split('\n').find((l) => l.startsWith('设备 ')) ?? '';
+    expect(line).toContain(`${LOCAL} = 本机(my-host)`);
+    expect(line).toContain(`${REMOTE} = 对端`);
+    expect(line).not.toContain('未知');
+    // 缺信息时不该留下空括号
+    expect(line).not.toContain('()');
   });
 });

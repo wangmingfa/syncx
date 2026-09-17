@@ -68,6 +68,11 @@ function diskNote(item: DiffItem): string {
   return '';
 }
 
+/** `ws://a.b.c.d:22000` → `a.b.c.d:22000`。终端里协议前缀是噪声,端口才是有信息的。 */
+function stripWs(url: string): string {
+  return url.startsWith('ws://') ? url.slice(5) : url;
+}
+
 /**
  * 进度是否表示「此刻真的有传输在跑」。
  *
@@ -94,7 +99,16 @@ export function formatFolderDiff(result: FolderDiffResult, options: DiffTextOpti
     `对端快照取自 ${formatTime(result.remoteAt)}(${formatAgo(result.remoteAt, now)}) · ` +
       `本机索引 ${diff.localTotal} 条 · 对端 ${diff.remoteTotal} 条 · 双方一致 ${diff.counts['in-sync']} 条`,
   );
-  lines.push(`设备 ${localDeviceId} = 本机,${result.deviceId} = 对端`);
+  // 设备身份:主机名 + IP。多设备 / IP 变动时,「我到底在跟哪台机器比」比设备 id
+  // 好认得多,也便于一眼判断两台是否同网段。对端地址取本机记录的可达地址,可能缺失。
+  const localWhere = [result.localHostname, ...result.localAddresses].filter(Boolean).join(' · ');
+  const remoteWhere = [result.deviceHostname, result.deviceUrl ? stripWs(result.deviceUrl) : '']
+    .filter(Boolean)
+    .join(' · ');
+  lines.push(
+    `设备 ${localDeviceId} = 本机${localWhere ? `(${localWhere})` : ''},` +
+      `${result.deviceId} = 对端${remoteWhere ? `(${remoteWhere})` : ''}`,
+  );
 
   if (transferring(result.localProgress)) {
     lines.push(

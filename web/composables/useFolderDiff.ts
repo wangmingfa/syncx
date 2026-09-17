@@ -1,6 +1,7 @@
 import { computed, ref, type ComputedRef, type Ref } from 'vue';
 import { apiJson, errText } from '../utils/api';
 import { copyText } from '../utils/clipboard';
+import { stripWs } from '../utils/format';
 import { useToast } from './useToast';
 import type { CoreDeps } from './statusContext';
 import type { FolderDiffData, FolderDiffItem, FolderInfo } from '../types';
@@ -152,7 +153,16 @@ export function diffReportText(data: FolderDiffData, localDeviceId: string): str
   lines.push(
     `对端快照取自 ${fmtTime(data.remoteAt)} · 本机索引 ${diff.localTotal} 条 · 对端 ${diff.remoteTotal} 条 · 双方一致 ${diff.counts['in-sync']} 条`,
   );
-  lines.push(`设备 ${localDeviceId} = 本机,${data.deviceId} = 对端`);
+  // 设备身份与弹窗一致:主机名 + IP(对端再带版本)。贴给别人看时,
+  // 「哪台机器 ↔ 哪台机器」比一串设备 id 有用得多。
+  const localWhere = [data.localHostname, ...data.localAddresses].filter(Boolean).join(' · ');
+  const remoteWhere = [data.deviceHostname ?? '', data.deviceUrl ? stripWs(data.deviceUrl) : '']
+    .filter(Boolean)
+    .join(' · ');
+  lines.push(
+    `设备 ${localDeviceId} = 本机${localWhere ? ` (${localWhere})` : ''},` +
+      `${data.deviceId} = 对端${remoteWhere ? ` (${remoteWhere})` : ''}`,
+  );
 
   // 与弹窗同一套提示:报告可信度打折的原因要先讲清楚(全 0 的进度不算「在传输」)
   if (transferring(data.localProgress)) {

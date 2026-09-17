@@ -142,6 +142,18 @@ describe('folder diff over real sockets', () => {
       expect(new Set(result.diff.items.map((i) => i.rule))).toEqual(new Set(['bulk/']));
       // 对端版本来自 hello / 控制消息(报告上要显示「与哪一版对端比的」)
       expect(result.deviceVersion).toBeTypeOf('string');
+      // 设备身份:报告要能说清「哪台机器 ↔ 哪台机器」,只给设备 id 不够用
+      expect(result.localHostname).toBeTypeOf('string');
+      expect(result.localHostname.length).toBeGreaterThan(0);
+      expect(Array.isArray(result.localAddresses)).toBe(true);
+      for (const addr of result.localAddresses) {
+        // 只收非环回 IPv4(与 getLanAddresses 的口径一致)
+        expect(addr).toMatch(/^\d+\.\d+\.\d+\.\d+$/);
+      }
+      // 两端在同一个进程里跑,对端宣告的主机名就是本机主机名
+      expect(result.deviceHostname).toBe(result.localHostname);
+      // 地址来自本机记录的出站 URL(这里是我们自己 connectTo 填的那个)
+      expect(result.deviceUrl).toMatch(/^ws:\/\/127\.0\.0\.1:\d+$/);
       expect(result.remoteAt).toBeGreaterThan(0);
       // 空闲(进度全为 0)时不该给进度:否则报告会凭空多一句「本机此刻在传输
       // (发送 0 · 接收 0 · 待处理 0)」,把真正的提示淹掉

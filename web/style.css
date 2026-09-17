@@ -1288,6 +1288,35 @@ tbody tr:last-child td {
   color: var(--muted);
 }
 
+/* 设备身份:本机 / 对端各一行。role 与 id 用主色,「主机名 · IP」留在次要色,
+   一眼分得清「哪一台」和「它的网络位置」。窄屏折行时次要信息整段落到下一行,
+   不会把设备 id 拆断(与设备卡同一套思路)。 */
+.diff-legend__row {
+  display: flex;
+  align-items: baseline;
+  gap: 10px;
+  flex-wrap: wrap;
+}
+
+.diff-legend__row + .diff-legend__row {
+  margin-top: 3px;
+}
+
+.diff-legend__role,
+.diff-legend__id {
+  flex: none;
+  color: var(--text);
+}
+
+.diff-legend__where {
+  min-width: 0;
+  /* 用 anywhere 而不是 break-all:主机名与 IP 之间已有空格可断,break-all 会无视空格
+     在任意字符处断行 —— 实测 320px 下把 192.168.5.20 拆成「192.」+「168.5.20」,
+     一个 IP 断成两截比整体换行难读得多。anywhere 只在「整块放不下」时才硬断,
+     超长主机名仍不会溢出。 */
+  overflow-wrap: anywhere;
+}
+
 .diff-note {
   margin-top: 8px;
   padding: 8px 10px;
