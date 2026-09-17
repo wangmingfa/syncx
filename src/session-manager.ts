@@ -647,8 +647,9 @@ export class SyncSessionManager {
       remoteDeviceId: session.remoteDeviceId,
       // 块请求服务侧路径校验(经符号链接逃逸的路径不响应)
       root: folder.path,
-      // .syncxignore 行:接收保护据此跳过被忽略文件,避免反向同步出去
-      ignoreLines: folder.ignoreLines,
+      // 忽略规则取**函数而非快照**:scanOnce 每轮重读并整体回写 folder.ignoreLines,
+      // 快照一份的话「刚写进 .gitignore 的路径」要等重连才被入向闸门挡住(见 ADR 0012)
+      readIgnoreLines: () => folder.ignoreLines,
       // 对端推来 .git 之类硬忽略内容时留痕:这是保护在生效,不是错误,所以只记 info。
       // 触发通常意味着对端版本旧(内置忽略早于本次改动)或对端把忽略规则负向覆盖了
       onHardIgnoredDropped: (paths, remoteDeviceId) =>

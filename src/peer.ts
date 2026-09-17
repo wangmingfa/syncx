@@ -4,7 +4,7 @@ import type { BlockRequest, BlockResponse } from './messages.js';
 import type { LocalExecutor } from './executor.js';
 import { resolveSharePath, preserveLocalAsConflict } from './executor.js';
 import { verifyBlock, BLOCK_SIZE } from './blockstore.js';
-import { parseIgnoreRules, isIgnoredPath, isHardIgnored } from './ignore.js';
+import { parseIgnoreRules, isIgnoredPath, isHardIgnored, type IgnoreRule } from './ignore.js';
 import type { ProgressCounts } from './status.js';
 
 /**
@@ -47,8 +47,18 @@ export interface SyncPeerDeps {
   remoteDeviceId?: string;
   /** 共享目录根路径:块请求服务侧用它拒绝经符号链接逃逸目录的路径。 */
   root?: string;
-  /** 共享目录的 .syncxignore 行:接收保护据此跳过被忽略的文件。 */
-  ignoreLines?: string[];
+  /**
+   * 取共享目录**当前生效**的忽略规则行(`.gitignore` + `.syncxignore` + 内置默认)。
+   *
+   * 是函数而非数组快照,这是刻意的:`.gitignore` 是运行期改的 —— `scanOnce` 每轮重读
+   * 并整体回写 `folder.ignoreLines`。若在会话建立时快照一份,刚写进忽略的路径要等
+   * 重连之后才被入向闸门挡住,而扫描侧(外推)下一轮就生效了 —— 同一个规则两个方向
+   * 生效时间不一致,排查起来极难。
+   *
+   * 用途有二:接收保护据此跳过被忽略的文件(冷启动不覆盖);入向闸门据此丢弃
+   * 命中的条目(见 docs/adr/0012)。
+   */
+  readIgnoreLines?: () => string[];
   /**
    * 从对端索引里丢弃硬忽略条目(见 HARD_IGNORE_NAMES)时回调一次,参数是路径列表。
    * 这条路径是「静默保护」——正常运行时不该触发,一旦触发说明对端在推 .git 之类的
@@ -114,12 +124,26 @@ const SERVE_LEASE_MS = 15_000;
  * complete, then apply it via the executor.
  */
 export function createSyncPeer(deps: SyncPeerDeps): SyncPeer {
-  const { transport, localIndex, executor, readLocalBlock, deviceId, remoteDeviceId, root, onEvent, ignoreLines, receiveOnly, onHardIgnoredDropped } = deps;
+  const { transport, localIndex, executor, readLocalBlock, deviceId, remoteDeviceId, root, onEvent, readIgnoreLines, receiveOnly, onHardIgnoredDropped } = deps;
   const pending = new Map<string, PendingEntry>();
   // 逐块跟踪超时重试:块响应丢失/丢弃时自动重发,避免文件永远收不齐
   const pendingBlocks = new Map<string, PendingBlockRequest>();
   // 正在向外供块的路径 → 最后一次发出该文件块的时间,用于展示「发送中」(见 SERVE_LEASE_MS)
   const serving = new Map<string, number>();
+
+  // 忽略规则的解析结果按「数组实例」缓存:readIgnoreLines 每次扫描返回全新数组,
+  // 引用变化即失效。这样一条索引消息只解析一次规则,而不是每个条目解析一遍
+  // (`.gitignore` 动辄上百行,逐条构造正则的代价会随索引规模放大)。
+  let cachedIgnoreLines: string[] | undefined;
+  let cachedIgnoreRules: IgnoreRule[] = [];
+  function currentIgnoreRules(): IgnoreRule[] {
+    const lines = readIgnoreLines?.() ?? [];
+    if (lines !== cachedIgnoreLines) {
+      cachedIgnoreLines = lines;
+      cachedIgnoreRules = parseIgnoreRules(lines);
+    }
+    return cachedIgnoreRules;
+  }
 
   function blockKey(path: string, blockIndex: number): string {
     return `${path}:${blockIndex}`;
@@ -230,8 +254,7 @@ export function createSyncPeer(deps: SyncPeerDeps): SyncPeer {
       let preserved = false;
       if (isNew && root !== undefined && remoteDeviceId) {
         try {
-          const rules = ignoreLines ? parseIgnoreRules(ignoreLines) : [];
-          if (!isIgnoredPath(rules, path, false)) {
+          if (!isIgnoredPath(currentIgnoreRules(), path, false)) {
             preserved = preserveLocalAsConflict(root, path, remoteDeviceId);
           }
         } catch {
@@ -267,12 +290,24 @@ export function createSyncPeer(deps: SyncPeerDeps): SyncPeer {
         pendingBlocks.clear();
       }
 
-      // 入向硬闸门:对端推来的 .git/.hg/.svn/.syncx-trash/.syncx-folder 条目**一条都不收**,
-      // 活条目与墓碑一视同仁。这是「本机 .git 被对端搅坏」唯一可靠的堵法——本机的忽略集
-      // 管不住对端的忽略集:对端版本旧(早于内置忽略加入)、或对端在 .syncxignore 里写了
-      // `!.git`,都会把 .git 条目推过来。若不拦,活条目会被写进本机 .git 目录,墓碑会让
-      // 本机真实的 .git 文件被移进回收站(2026-09-15 事故中 A 的 .git 被删空正是这条路径)。
+      // 入向闸门一:硬忽略(.git/.hg/.svn/.syncx-trash/.syncx-folder,见 ADR 0008)——
+      // 对端推来的这些条目**一条都不收**,活条目与墓碑一视同仁。这是「本机 .git 被对端搅坏」
+      // 唯一可靠的堵法——本机的忽略集管不住对端的忽略集:对端版本旧(早于内置忽略加入)、
+      // 或对端在 .syncxignore 里写了 `!.git`,都会把 .git 条目推过来。若不拦,活条目会被写进
+      // 本机 .git 目录,墓碑会让本机真实的 .git 文件被移进回收站(2026-09-15 事故即此路径)。
       // 丢弃后不进 buildPlan,因此既不落盘也不回推,对端下一轮仍会推,但每次都被丢弃。
+      //
+      // 入向闸门二:本机忽略规则(.gitignore/.syncxignore,见 ADR 0012)—— **同样活条目与
+      // 墓碑一律丢弃**。只挡外推是不够的:被忽略的路径本机不再扫描,它的本地改动就
+      // **没有任何索引保护**,而对端的索引里往往仍留着这条(规则变更不会回溯清理任何一端的
+      // 索引库),会话建立互发全量索引时本机内存索引已过滤掉它 → 被判成「对端有、本机没有」
+      // = remote-newer → 拉回来覆盖落盘。而冷启动保护(preserveLocalAsConflict)对被忽略路径
+      // 是刻意跳过的,所以没有冲突副本、直接盖掉(2026-09-16 实测:/shared/mo 的
+      // .workbuddy/memory/*.md 与 .idea/workspace.xml 在本机重启时被对端那份旧内容盖回)。
+      // 丢弃意味着忽略路径**不会再被本机应用任何入向变更**:对端新增/修改不再覆盖本机,
+      // 对端删除也不再跟着删——两边安静分叉,这正是「本机不碰它」的语义。
+      // 注意硬忽略仍走在前面:它比用户规则更强(不可用 `!` 解开),这里的分支只是为了留痕。
+      const rules = currentIgnoreRules();
       const dropped: string[] = [];
       const remote = new Map<string, IndexEntry>();
       for (const e of entries) {
@@ -280,6 +315,7 @@ export function createSyncPeer(deps: SyncPeerDeps): SyncPeer {
           dropped.push(e.path);
           continue;
         }
+        if (isIgnoredPath(rules, e.path, false)) continue;
         remote.set(e.path, e);
       }
       if (dropped.length > 0) {

@@ -552,7 +552,7 @@ describe('sync peer session', () => {
       deviceId: 'DEV-A',
       remoteDeviceId: 'DEV-B',
       root,
-      ignoreLines: [],
+      readIgnoreLines: () => [],
       onEvent: (ev) => events.push(ev.action),
     });
 
@@ -578,17 +578,19 @@ describe('sync peer session', () => {
     rmDir(dir);
   });
 
-  it('does not preserve ignored files on receive (lets them be overwritten, avoids re-syncing them out)', async () => {
+  it('leaves an ignored path completely alone on receive (inbound gate, ADR 0012)', async () => {
     const dir = mkdtempSync(join(tmpdir(), 'syncx-peer-'));
     const root = join(dir, 'share');
     mkdirSync(root, { recursive: true });
     writeFileSync(join(root, '.syncxignore'), 'secret.txt\n');
     const index = openIndexStore(join(dir, 'index.db'));
     const executor = createLocalExecutor(root, index, join(root, '.syncx-trash'));
-    const { transport } = fakeTransport();
+    const { transport, requests } = fakeTransport();
 
-    writeFileSync(join(root, 'secret.txt'), 'local ignored');
+    const localContent = Buffer.from('local ignored');
+    writeFileSync(join(root, 'secret.txt'), localContent);
     const localIndex = new Map();
+    const events: string[] = [];
 
     const peer = createSyncPeer({
       transport,
@@ -598,26 +600,51 @@ describe('sync peer session', () => {
       deviceId: 'DEV-A',
       remoteDeviceId: 'DEV-B',
       root,
-      ignoreLines: ['secret.txt'],
+      readIgnoreLines: () => ['secret.txt'],
+      onEvent: (ev) => events.push(ev.action),
     });
 
+    // 对端推来一个活条目 + 一个墓碑:两者都不该被本机应用
     const remoteContent = Buffer.from('peer version');
-    await peer.onPeerIndex([entry('secret.txt', [['dev-b', 1]], [hashBlock(remoteContent)], remoteContent.length)]);
-    peer.onBlockResponse({
-      deviceId: 'DEV-B',
-      path: 'secret.txt',
-      blockIndex: 0,
-      hash: hashBlock(remoteContent),
-      data: remoteContent,
-    });
-    await new Promise((r) => setTimeout(r, 10));
+    await peer.onPeerIndex([
+      entry('secret.txt', [['dev-b', 1]], [hashBlock(remoteContent)], remoteContent.length),
+    ]);
+    await peer.onPeerIndex([entry('secret.txt', [['dev-b', 2]], [], 0, true)], { full: true });
 
-    // 被忽略文件:不保留冲突副本,直接接收覆盖(与旧行为一致,避免反向同步出去)
+    // 不落盘、不覆盖(连冲突副本也不留)、不请求块、不进 pending、不记变更
+    expect(readFileSync(join(root, 'secret.txt'))).toEqual(localContent);
     expect(readdirSync(root).filter((n) => n.includes('.sync-conflict-'))).toHaveLength(0);
-    expect(readFileSync(join(root, 'secret.txt'))).toEqual(remoteContent);
+    expect(requests).toEqual([]);
+    expect(peer.getSyncProgress()).toEqual({ pending: 0, sending: 0, receiving: 0 });
+    expect(events).toEqual([]);
 
     index.close();
     rmDir(dir);
+  });
+
+  it('reads ignore rules per message instead of snapshotting them at attach', async () => {
+    const { transport, requests } = fakeTransport();
+    let lines: string[] = [];
+    const peer = createSyncPeer({
+      transport,
+      localIndex: new Map(),
+      executor: null as never,
+      readLocalBlock: () => Buffer.from(''),
+      deviceId: 'DEV-A',
+      remoteDeviceId: 'DEV-B',
+      readIgnoreLines: () => lines,
+    });
+
+    // 规则是运行期改的(scanOnce 每轮重读):同一份 peer 上必须立刻生效,
+    // 否则「刚加进 .gitignore 的路径」要等重连才被挡住,而扫描侧下一轮就停了
+    await peer.onPeerIndex([entry('later.txt', [['dev-b', 1]], ['h1'])]);
+    expect(requests.map((r) => r.path)).toEqual(['later.txt']);
+
+    requests.length = 0;
+    lines = ['later.txt'];
+    await peer.onPeerIndex([entry('later.txt', [['dev-b', 2]], ['h2'])], { full: true });
+    expect(requests).toEqual([]);
+    expect(peer.getSyncProgress().pending).toBe(0);
   });
 });
 
@@ -898,7 +925,7 @@ describe('hard ignore (VCS 元数据不收不发)', () => {
       deviceId: 'DEV-A',
       remoteDeviceId: 'DEV-B',
       root,
-      ignoreLines: [],
+      readIgnoreLines: () => [],
       onHardIgnoredDropped: (paths) => dropped.push(paths),
     });
 

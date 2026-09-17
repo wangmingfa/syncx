@@ -138,6 +138,8 @@ async function connectPair(
   bRoot: string,
   aDir: string,
   bDir: string,
+  /** 各侧当前生效的忽略规则行(ADR 0012 的入向闸门用);缺省两侧都没有规则。 */
+  ignore?: { a?: () => string[]; b?: () => string[] },
 ): Promise<{ a: TestDevice; b: TestDevice }> {
   const aIdentity = loadOrCreateIdentity(aDir);
   const bIdentity = loadOrCreateIdentity(bDir);
@@ -182,6 +184,7 @@ async function connectPair(
     },
     deviceId: aIdentity.deviceId,
     remoteDeviceId: bIdentity.deviceId,
+    readIgnoreLines: ignore?.a,
   });
   const bPeer = createSyncPeer({
     transport: bTransport,
@@ -193,6 +196,7 @@ async function connectPair(
     },
     deviceId: bIdentity.deviceId,
     remoteDeviceId: aIdentity.deviceId,
+    readIgnoreLines: ignore?.b,
   });
   attachIncoming(aPeer, aSocket!);
   attachIncoming(bPeer, bSocket);
@@ -249,6 +253,38 @@ describe('two-device end-to-end sync', () => {
     await waitFor(() => existsSync(join(bRoot, 'new.txt')));
     expect(readFileSync(join(bRoot, 'new.txt'))).toEqual(content);
     expect(b.index.getEntry('new.txt')?.version.get('dev-a')).toBe(1);
+
+    await teardown([a, b], [aDir, bDir]);
+  });
+
+  it('never applies a peer change for a path the local side ignores (ADR 0012)', async () => {
+    const aDir = mkdtempSync(join(tmpdir(), 'syncx-e2e-a-'));
+    const bDir = mkdtempSync(join(tmpdir(), 'syncx-e2e-b-'));
+    const aRoot = join(aDir, 'share');
+    const bRoot = join(bDir, 'share');
+    mkdirSync(aRoot, { recursive: true });
+    mkdirSync(bRoot, { recursive: true });
+
+    const content = Buffer.from('peer version');
+    writeFileSync(join(aRoot, 'secret.txt'), content);
+    const aLocal = new Map([
+      ['secret.txt', entry('secret.txt', [['dev-a', 1]], hashes(content), content.length)],
+    ]);
+
+    // B 侧已把 secret.txt 写进 .gitignore(且它自己的磁盘上什么都没有):
+    // 对端条目必须一条都不落地 —— 修复前 B 会把它拉下来覆盖,而这个路径
+    // B 已经不扫描了,本地改动将无人保护(ADR 0012 的真实事故形态)
+    const { a, b } = await connectPair(aLocal, new Map(), aRoot, bRoot, aDir, bDir, {
+      b: () => ['secret.txt'],
+    });
+
+    // A 收到 B 的空索引后会把本机较新的条目推过来(并集规划);等它发生完再断言
+    await waitFor(() => a.indexMessagesSent.count > 0);
+    await new Promise((r) => setTimeout(r, 200));
+
+    expect(existsSync(join(bRoot, 'secret.txt'))).toBe(false);
+    expect(b.index.getEntry('secret.txt')).toBeUndefined();
+    expect(b.peer.getSyncProgress()).toEqual({ pending: 0, sending: 0, receiving: 0 });
 
     await teardown([a, b], [aDir, bDir]);
   });
