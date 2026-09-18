@@ -13,6 +13,13 @@ export async function trySystemRoutes(
     deps;
   const path = req.url ? pathname(req.url) : '/';
 
+  // dev 运行态:源码启动无单文件运行时可替换,所有自更新接口一律拒绝。
+  // 前端入口已拦截,这里作为最后一道防线(防直连 API),并返回明确原因。
+  if (deps.devMode && path.startsWith('/api/self-update')) {
+    sendJson(res, 400, { ok: false, error: '开发模式下不支持升级功能（运行态为 dev，无单文件运行时可替换）' });
+    return true;
+  }
+
   // GET /api/status
   if (req.method === 'GET' && path === '/api/status') {
     sendJson(res, 200, getStatus());

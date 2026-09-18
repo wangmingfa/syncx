@@ -27,8 +27,11 @@ export function useSelfUpdate(deps: CoreDeps): {
   applyUpload: (file: File) => Promise<void>;
   logout: () => Promise<void>;
 } {
-  const { status, busy, refreshStatus, askConfirm } = deps;
+  const { status, busy, isDev, refreshStatus, askConfirm } = deps;
   const { showToast } = useToast();
+
+  /** dev 运行态下自更新不可用:原因统一在此说明,各入口拦截后原样透出。 */
+  const DEV_UPDATE_BLOCKED = '开发模式下不支持升级功能（运行态为 dev，无单文件运行时可替换）';
 
   /** 升级进行中:隐藏横幅、禁用入口并防止重复触发。 */
   const upgrading = ref(false);
@@ -53,6 +56,10 @@ export function useSelfUpdate(deps: CoreDeps): {
   }
 
   function openUpload(): void {
+    if (isDev) {
+      showToast(DEV_UPDATE_BLOCKED, 'alert');
+      return;
+    }
     resetUpload(); // 每次打开都从干净态开始,不残留上一轮的包与结论
     uploadOpen.value = true;
   }
@@ -85,6 +92,10 @@ export function useSelfUpdate(deps: CoreDeps): {
 
   /** 横幅「立即升级」:二次确认后走 npm 自升级,服务重启完成自动刷新页面。 */
   function askSelfUpdate(u: { latest: string; current: string }): void {
+    if (isDev) {
+      showToast(DEV_UPDATE_BLOCKED, 'alert');
+      return;
+    }
     askConfirm({
       title: `升级到 ${u.latest}?`,
       message: `将从 npm 下载官方安装包,校验通过后自动重启服务(当前 ${u.current})。重启期间页面会短暂失去连接,完成后自动刷新。`,
@@ -172,6 +183,10 @@ export function useSelfUpdate(deps: CoreDeps): {
 
   /** 顶栏「检查更新」:立即查一次 registry 并刷新状态。 */
   async function checkForUpdate(): Promise<void> {
+    if (isDev) {
+      showToast(DEV_UPDATE_BLOCKED, 'alert');
+      return;
+    }
     try {
       const body = await apiJson<{
         ok?: boolean;

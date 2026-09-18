@@ -361,6 +361,9 @@ export async function run(args: ParsedArgs): Promise<void> {
     // 账号密码落盘位置:与 control.token 同一目录,0600。文件不存在即「仅令牌登录」。
     authFile: join(configDir, 'auth.json'),
     devViteUrl: args.devViteUrl,
+    // dev 运行态(dev 子命令 / 源码启动)无单文件运行时可替换:所有自更新接口由路由层统一拒绝,
+    // 与前端入口拦截互为纵深防御。打包形态 isBundledRuntime() 为 true,此标记即 false。
+    devMode: !isBundledRuntime(),
     // stop 命令经 POST /api/shutdown 触发:与 SIGTERM 走同一条优雅关闭链路
     shutdown: () => triggerShutdown(),
     // Web UI「从对端升级」:拉取对端安装包并整包替换;重启由 api 路由响应后触发

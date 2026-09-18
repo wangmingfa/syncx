@@ -47,7 +47,7 @@ const { status, busy, isDev, controlPort, refreshStatus, post, copy } = core;
 const { confirmState, askConfirm } = useConfirm(busy);
 
 // 各业务 composable 共享的核心依赖
-const deps: CoreDeps = { status, busy, refreshStatus, post, askConfirm };
+const deps: CoreDeps = { status, busy, isDev, refreshStatus, post, askConfirm };
 const devices = useDevices(deps);
 const folders = useFolders(deps);
 const offers = useOffers(deps);
@@ -79,6 +79,10 @@ function openAuth(): void {
  * 先 openUpload(会把上一轮的选包状态清干净)再选包,顺序不能颠倒。
  */
 function onPackageDrop(file: File): void {
+  if (isDev) {
+    showToast('开发模式下不支持拖入升级包（运行态为 dev，无单文件运行时可替换）', 'alert');
+    return;
+  }
   openUpload();
   void selectUploadFile(file);
 }

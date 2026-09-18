@@ -120,6 +120,8 @@ export interface StatusContext extends FolderDiffApi {
 export interface CoreDeps {
   status: Ref<StatusData>;
   busy: Ref<boolean>;
+  /** 是否源码 dev 运行态:部分功能(自更新)在 dev 下不可用,需入口处拦截并提示。 */
+  isDev: boolean;
   refreshStatus: () => Promise<void>;
   post: (action: string, body?: Record<string, string>) => Promise<void>;
   askConfirm: (state: ConfirmState) => void;

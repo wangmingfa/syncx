@@ -86,6 +86,12 @@ export interface ControlServerDeps {
    * 生产/打包形态不传,走内嵌 bundle 直接提供页面。
    */
   devViteUrl?: string;
+  /**
+   * 是否源码 dev 运行态(非打包单文件运行时)。为 true 时,所有自更新接口
+   * (/api/self-update*) 一律拒绝,作为前端入口拦截之外的最后一道防线,
+   * 防止有人直连 API 在 dev 态触发自更新。
+   */
+  devMode?: boolean;
 }
 
 /** 域路由处理器的统一签名:处理了请求返回 true,未命中返回 false(交给下一个域)。 */

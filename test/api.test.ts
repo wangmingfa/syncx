@@ -1196,3 +1196,67 @@ describe('上传安装包升级', () => {
     server.close();
   });
 });
+
+describe('dev 运行态拦截自更新接口', () => {
+  it('devMode 下四个自更新接口一律 400 且不调用后端 deps', async () => {
+    const called: string[] = [];
+    const server = createControlServer({
+      token: 'secret',
+      getStatus: () => ({}),
+      devMode: true,
+      checkForUpdate: async () => {
+        called.push('check');
+        return { latest: '9.9.9', current: '0.1.0' };
+      },
+      selfUpdateNpm: async () => {
+        called.push('npm');
+        return { version: '9.9.9' };
+      },
+      inspectLocalPackage: async () => {
+        called.push('inspect');
+        return { version: '9.9.9', name: 'x', current: '0.1.0' };
+      },
+      selfUpdateUpload: async () => {
+        called.push('upload');
+        return { version: '9.9.9' };
+      },
+    });
+    server.listen(0, '127.0.0.1');
+    await once(server, 'listening');
+    const port = (server.address() as AddressInfo).port;
+
+    const check = await fetchJson(port, '/api/self-update/check', 'secret', { method: 'POST' });
+    const npm = await fetchJson(port, '/api/self-update', 'secret', { method: 'POST' });
+    const ins = await postBinary(port, '/api/self-update/upload/inspect', 'secret', Buffer.from('x'));
+    const up = await postBinary(port, '/api/self-update/upload', 'secret', Buffer.from('x'));
+
+    expect([check.status, npm.status, ins.status, up.status]).toEqual([400, 400, 400, 400]);
+    for (const r of [check, npm, ins, up]) {
+      expect((r.body as { error: string }).error).toContain('开发模式下不支持升级功能');
+    }
+    // 路由层已在最前面拒绝,后端 deps 一律不应被触发
+    expect(called).toEqual([]);
+
+    server.close();
+  });
+
+  it('非 dev 运行态下 devMode 缺省为 false,自更新接口照常工作', async () => {
+    let npmCalled = false;
+    const server = createControlServer({
+      token: 'secret',
+      getStatus: () => ({}),
+      selfUpdateNpm: async () => {
+        npmCalled = true;
+        return { version: '0.2.0' };
+      },
+    });
+    server.listen(0, '127.0.0.1');
+    await once(server, 'listening');
+    const port = (server.address() as AddressInfo).port;
+
+    const res = await fetchJson(port, '/api/self-update', 'secret', { method: 'POST' });
+    expect(res.status).toBe(200);
+    expect(npmCalled).toBe(true);
+    server.close();
+  });
+});
