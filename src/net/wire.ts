@@ -15,7 +15,7 @@ export type WireMessage =
    * (见 peer.ts 的 IndexMode):当成全量会为「它没提到的本地条目」回推,
    * 两端互为回声、无限循环。旧版对端收到我们多出的字段会直接忽略,不受影响。
    */
-  | { type: 'index'; folder: string; payload: string; full?: boolean }
+  | { type: 'index'; folder: string; payload: string; full?: boolean; relayed?: boolean }
   | { type: 'block-request'; folder: string; payload: BlockRequest }
   | { type: 'block-response'; folder: string; payload: Omit<BlockResponse, 'data'> & { data: string } }
   | { type: 'control'; payload: ControlMessage };
@@ -136,13 +136,14 @@ export function makePeerTransport(
   }
 
   return {
-    sendEntries(entries: IndexEntry[], mode: IndexMode): void {
+    sendEntries(entries: IndexEntry[], mode: IndexMode, opts?: { relayed?: boolean }): void {
       sendRateLimited(
         encryptMessage(key, {
           type: 'index',
           folder: folderPath,
           payload: encodeIndex(entries).toString('base64'),
           full: mode === 'full',
+          relayed: opts?.relayed === true,
         }),
       );
     },
@@ -196,6 +197,7 @@ export function attachPeerMessages(
         // 缺省(旧对端不发该字段)按增量处理,理由见 WireMessage 上 index 的注释
         void peer.onPeerIndex(decodeIndex(Buffer.from(message.payload, 'base64')), {
           full: message.full === true,
+          relayed: message.relayed === true,
         });
         break;
       case 'block-request':

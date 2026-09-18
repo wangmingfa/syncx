@@ -18,7 +18,7 @@ import type { ProgressCounts } from './status.js';
 export type IndexMode = 'full' | 'delta';
 
 export interface PeerTransport {
-  sendEntries(entries: IndexEntry[], mode: IndexMode): void;
+  sendEntries(entries: IndexEntry[], mode: IndexMode, opts?: { relayed?: boolean }): void;
   sendBlockRequest(request: BlockRequest): void;
   sendBlockResponse(response: BlockResponse): void;
 }
@@ -26,6 +26,13 @@ export interface PeerTransport {
 /** 对端索引到达时的附加说明。缺省(undefined)按 delta 处理,见 IndexMode。 */
 export interface PeerIndexOptions {
   full?: boolean;
+  /**
+   * 这条索引是中转来的(某兄弟 peer 收到后又转发给我),见 ADR-0014。
+   * 接收端据此区分「并发版本 = 兄弟端自己真改过(保留冲突副本)」与
+   * 「并发版本 = 兄弟端只是陈旧同步副本(直接覆盖,不生成 .sync-conflict)」,
+   * 避免给从没改过文件的设备刷出一堆冲突副本。旧版对端不发该字段,忽略即可。
+   */
+  relayed?: boolean;
 }
 
 /** 一条待记录的同步变更(不含 folderId,由调用方补全)。 */
@@ -67,6 +74,14 @@ export interface SyncPeerDeps {
   onHardIgnoredDropped?: (paths: string[], remoteDeviceId: string) => void;
   /** 记录一次同步变更(新增/修改/删除/冲突),由上层写入历史存储。 */
   onEvent?: (ev: SyncEventInput) => void;
+  /**
+   * 收到并落地远程条目后回调(中转用,见 ADR-0014):上层据此把这批条目转发给
+   * 同目录的其它 transport。只在「增量(非 full)接收」时触发——full 交换已经
+   * 收敛整张网,无需再中转,否则每次(重)连都会把整份索引爆发式转发给兄弟端。
+   * 仅包含真正进入 receive/conflict 落地的条目(其版本向量已是最终值),
+   * 不含 send/delete 这类本地决策动作。
+   */
+  onLanded?: (entries: IndexEntry[]) => void;
   /**
    * 接收模式(只拉不推):本机只从对端拉取变更、应用对端删除,但**绝不**把本机
    * 的本地新增/修改/删除反灌给对端。开启后:本地较新/本地墓碑不再外推,冲突
@@ -124,7 +139,7 @@ const SERVE_LEASE_MS = 15_000;
  * complete, then apply it via the executor.
  */
 export function createSyncPeer(deps: SyncPeerDeps): SyncPeer {
-  const { transport, localIndex, executor, readLocalBlock, deviceId, remoteDeviceId, root, onEvent, readIgnoreLines, receiveOnly, onHardIgnoredDropped } = deps;
+  const { transport, localIndex, executor, readLocalBlock, deviceId, remoteDeviceId, root, onEvent, readIgnoreLines, receiveOnly, onHardIgnoredDropped, onLanded } = deps;
   const pending = new Map<string, PendingEntry>();
   // 逐块跟踪超时重试:块响应丢失/丢弃时自动重发,避免文件永远收不齐
   const pendingBlocks = new Map<string, PendingBlockRequest>();
@@ -326,6 +341,8 @@ export function createSyncPeer(deps: SyncPeerDeps): SyncPeer {
       const sends: IndexEntry[] = [];
       // 本轮索引实际引用的 pending 路径:仅用于全量轮次清理上一轮遗留的陈旧条目
       const livePending = new Set<string>();
+      // 本轮真正落地(进入 receive/conflict 接收)的远程条目:供 onLanded 中转给兄弟端
+      const landed: IndexEntry[] = [];
 
       for (const action of actions) {
         switch (action.kind) {
@@ -359,6 +376,7 @@ export function createSyncPeer(deps: SyncPeerDeps): SyncPeer {
                 received: 0,
               });
               livePending.add(remoteEntry.path);
+              landed.push(remoteEntry);
               requestMissingBlocks(remoteEntry.path, remoteEntry);
               // 空文件(0 块)不产生块请求,直接落地
               await completeIfReady(remoteEntry.path);
@@ -368,8 +386,12 @@ export function createSyncPeer(deps: SyncPeerDeps): SyncPeer {
           case 'conflict': {
             const remoteEntry = remote.get(action.path);
             const localEntry = localIndex.get(action.path);
-            if (receiveOnly) {
-              // 接收模式:本地变更不推送,冲突直接以对端版本覆盖本地(纯镜像语义)
+            // 本端是否真的改过这条文件:版本向量里带本机 deviceId 计数器 > 0 才算。
+            // 否则只是「之前从别处同步来的陈旧副本」,与中转来的并发版本不构成真冲突。
+            const genuineLocalEdit = !!localEntry && (localEntry.version.get(deviceId) ?? 0) > 0;
+            // 中转场景(relayed):兄弟端只是陈旧同步副本 → 直接覆盖,不生成 .sync-conflict
+            // (ADR-0014)。接收模式本就镜像覆盖。这两种都走 receive 落地,不保留冲突副本。
+            if (receiveOnly || (opts?.relayed === true && !genuineLocalEdit)) {
               if (remoteEntry) {
                 pending.set(remoteEntry.path, {
                   kind: 'receive',
@@ -378,6 +400,7 @@ export function createSyncPeer(deps: SyncPeerDeps): SyncPeer {
                   received: 0,
                 });
                 livePending.add(remoteEntry.path);
+                landed.push(remoteEntry);
                 requestMissingBlocks(remoteEntry.path, remoteEntry);
                 await completeIfReady(remoteEntry.path);
               }
@@ -392,12 +415,20 @@ export function createSyncPeer(deps: SyncPeerDeps): SyncPeer {
                 received: 0,
               });
               livePending.add(remoteEntry.path);
+              landed.push(remoteEntry);
               requestMissingBlocks(remoteEntry.path, remoteEntry);
               await completeIfReady(remoteEntry.path);
             }
             break;
           }
         }
+      }
+
+      // 中转(ADR-0014):非 full 的增量接收落地后,把这批条目转发给同目录其它 transport。
+      // 排除源端由 relayToSiblings 负责;full 交换已收敛整网,不中转避免(重)连时爆发式转发。
+      // 接收模式(receiveOnly)设备不中转:它的契约就是「不向外推任何索引帧」,中转也是外推。
+      if (!opts?.full && !receiveOnly && landed.length > 0) {
+        onLanded?.(landed);
       }
 
       // 清理上一轮遗留、本轮**全量**索引已不再引用的陈旧 pending 条目:

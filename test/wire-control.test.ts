@@ -89,7 +89,7 @@ describe('control message wire channel (Phase 2)', () => {
 
     expect(peer.onPeerIndex).toHaveBeenCalledTimes(1);
     // full 原样透传:接收方据此在「并集规划(全量)」与「只判消息里提到的路径(增量)」间选择
-    expect(peer.onPeerIndex).toHaveBeenCalledWith(expect.anything(), { full: true });
+    expect(peer.onPeerIndex).toHaveBeenCalledWith(expect.anything(), { full: true, relayed: false });
     // 普通 folder 消息不应触发 control 回调
     expect(onControl).not.toHaveBeenCalled();
   });
@@ -107,7 +107,23 @@ describe('control message wire channel (Phase 2)', () => {
     // 旧版对端不发 full 字段,而它确实会发增量索引 —— 当成全量会让两端互为回声
     socket.emit(encryptMessage(key, { type: 'index', folder: 'main', payload: idxPayload }));
 
-    expect(peer.onPeerIndex).toHaveBeenCalledWith(expect.anything(), { full: false });
+    expect(peer.onPeerIndex).toHaveBeenCalledWith(expect.anything(), { full: false, relayed: false });
+  });
+
+  it('透传 relayed 标记(中转帧,见 ADR-0014)', () => {
+    const socket = new MockSocket();
+    const peer = mockPeer();
+    const peers = new Map([['main', peer]]);
+    const onControl = vi.fn();
+    attachPeerMessages(peers, socket as never, key, onControl);
+
+    const idxPayload = encodeIndex([
+      { path: 'a.txt', version: new Map([['DEVC', 2]]), size: 1, deleted: false, blocks: ['h'] },
+    ]).toString('base64');
+    socket.emit(encryptMessage(key, { type: 'index', folder: 'main', payload: idxPayload, relayed: true }));
+
+    // relayed 原样透传:接收端据此放宽对「陈旧同步副本」的并发判定
+    expect(peer.onPeerIndex).toHaveBeenCalledWith(expect.anything(), { full: false, relayed: true });
   });
 
   it('malformed/tampered messages are silently ignored (no throw, no onControl)', () => {

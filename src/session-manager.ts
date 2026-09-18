@@ -32,6 +32,7 @@ import { recordSyncEvent } from './history.js';
 import { encodeSnapshot, decodeSnapshot } from './messages.js';
 import { buildFolderDiff, checkDiffAgainstDisk, toSnapshotEntry, type FolderDiff, type SnapshotEntry } from './diff.js';
 import { broadcastFolderUpdates } from './broadcast.js';
+import { relayToSiblings } from './relay.js';
 import { connectPeer } from './net/client.js';
 import { makePeerTransport, attachPeerMessages, sendControlMessage, type ControlMessage } from './net/wire.js';
 import { learnPeerUrl, learnPeerIp, getLanAddresses } from './net/addresses.js';
@@ -759,6 +760,9 @@ export class SyncSessionManager {
       // 接收模式:本机只收不推(对端索引规划时跳过 send / 本地墓碑外推,
       // 冲突以对端版本覆盖本地)
       receiveOnly: folder.config.receiveOnly ?? false,
+      // 中转(ADR-0014):收到并落地远程条目后,转发给同目录其它 transport(排除来源端本身)。
+      // 仅增量接收触发(peer.ts 内 gate),full 交换已收敛整网,不中转。
+      onLanded: (entries) => relayToSiblings(folder.transports, transport, entries),
     });
     session.peers.set(folder.id, peer);
     folder.peers.set(session.remoteDeviceId, peer);
