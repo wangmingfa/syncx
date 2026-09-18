@@ -47,11 +47,12 @@ export function useStatus(props: StatusProps): {
 
   async function refreshStatus(): Promise<void> {
     try {
-      const res = await fetch('/api/status');
-      if (!res.ok) throw new Error(`status ${res.status}`);
-      status.value = (await res.json()) as StatusData;
+      // 走统一 apiJson:会话失效(401)时由 apiJson 内部统一跳回登录页,
+      // 这里只需静默保留当前状态,不必再单独判断未登录。
+      const data = await apiJson<StatusData>('/api/status');
+      status.value = data;
     } catch {
-      // 静默失败,保留当前状态
+      // 静默失败,保留当前状态(401 已在 apiJson 内统一跳转登录页)
     }
   }
 

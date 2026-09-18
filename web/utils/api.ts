@@ -7,8 +7,26 @@ export interface ApiError extends Error {
   status?: number;
 }
 
+/**
+ * 会话失效(401)后统一跳回登录页的一次性守卫:避免并发请求各自触发跳转。
+ * 置位后页面即将卸载(跳转),后续请求不会再 assign。
+ */
+let authRedirected = false;
+
 export async function apiJson<T = unknown>(url: string, init?: RequestInit): Promise<T> {
   const res = await fetch(url, init);
+  // 会话已失效:统一跳回登录页。否则接口静默 401、页面还停在「已登录」界面,
+  // 用户以为操作成功、实则未生效,只能手动刷新才发现掉线。
+  // 这里作为副作用直接跳转(在抛异常之前),调用方的 catch 即使吞掉异常也不影响跳转。
+  if (res.status === 401) {
+    if (!authRedirected) {
+      authRedirected = true;
+      globalThis.location.assign('/login');
+    }
+    const err = new Error('登录已过期，请重新登录') as ApiError;
+    err.status = 401;
+    throw err;
+  }
   const text = await res.text();
   let data: unknown = null;
   if (text) {
