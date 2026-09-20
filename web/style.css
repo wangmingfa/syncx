@@ -1309,8 +1309,9 @@ tbody tr:last-child td {
   font-size: 11px;
 }
 
-/* 日志弹窗:等宽日志尾部,浅色底仿终端观感 */
-.logs-view {
+/* 日志弹窗 / 对比报告弹窗:等宽纯文本块,浅色底仿终端观感(同一块规则共用) */
+.logs-view,
+.report-view {
   margin: 0;
   padding: 12px 14px;
   max-height: 56vh;

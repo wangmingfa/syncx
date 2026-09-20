@@ -3,11 +3,11 @@ import { computed, ref, toRef, watch } from 'vue';
 import { NButton } from 'naive-ui';
 import { useCompare } from './composables/useCompare';
 import { diffReportText } from './utils/diff-report';
-import { useToast } from './composables/useToast';
-import { copyText } from './utils/clipboard';
 import { fmtTime, stripWs } from './utils/format';
 import type { StatusData } from './types';
 import FileDiffModal from './components/FileDiffModal.vue';
+import ReportModal from './components/ReportModal.vue';
+import ToastView from './components/ToastView.vue';
 import FileIcon from './components/FileIcon.vue';
 
 const props = defineProps<{
@@ -25,8 +25,6 @@ const {
   fileOpen, filePath, fileData, fileLoading, fileError,
   openFile, closeFile, syncFile,
 } = useCompare(statusRef, props.folderId, props.device);
-
-const { showToast } = useToast();
 
 /** 只看差异:目录大时全量树会很长,这个开关是主要的浏览方式。 */
 const onlyDiff = ref(false);
@@ -130,16 +128,21 @@ function onRowDblClick(row: { isDir: boolean; path: string }): void {
   void openFile(row.path);
 }
 
-async function copyReport(): Promise<void> {
+/** 报告弹窗。原先页头直接放「复制报告」一点就进剪贴板,用户对要复制的东西没有预期;
+ *  现在先弹窗里看全文,再在弹窗里自己复制(与运行日志弹窗同一交互模式)。 */
+const reportOpen = ref(false);
+/** 报告正文:data 一变就重算,弹窗开着时后台重新对比也能看到最新内容。 */
+const reportText = computed<string>(() => {
   const d = data.value;
-  if (!d) return;
-  const ok = await copyText(diffReportText(d, props.status.deviceId));
-  showToast(ok ? '已复制差异报告到剪贴板' : '复制失败，请手动选择文本复制', ok ? 'info' : 'alert');
-}
+  return d ? diffReportText(d, props.status.deviceId) : '';
+});
 </script>
 
 <template>
   <div class="cmp-page">
+    <!-- toast 渲染器:toast 是全局单例,旧版只有状态页渲染它 —— 对比页上的
+         showToast(同步成功/复制报告)全都静默丢掉,这就是根因修复。 -->
+    <ToastView />
     <header class="cmp-head">
       <div class="cmp-head__left">
         <n-button size="small" tertiary @click="onBack()">← 返回</n-button>
@@ -155,7 +158,7 @@ async function copyReport(): Promise<void> {
           @click="onlyDiff = !onlyDiff"
         >只看差异</n-button>
         <n-button size="small" tertiary :disabled="loading || !device" @click="reload">重新对比</n-button>
-        <n-button size="small" tertiary :disabled="!data" @click="copyReport">复制报告</n-button>
+        <n-button size="small" tertiary :disabled="!data" @click="reportOpen = true">查看报告</n-button>
       </div>
     </header>
 
@@ -277,6 +280,13 @@ async function copyReport(): Promise<void> {
       :device-id="data.deviceId"
       @close="closeFile"
       @sync="syncFile"
+    />
+
+    <ReportModal
+      :open="reportOpen"
+      :report="reportText"
+      :folder-path="folder?.path ?? ''"
+      @close="reportOpen = false"
     />
   </div>
 </template>

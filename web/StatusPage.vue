@@ -30,6 +30,7 @@ import LogsModal from './components/LogsModal.vue';
 import TopologyModal from './components/TopologyModal.vue';
 import UploadUpdateModal from './components/UploadUpdateModal.vue';
 import DropOverlay from './components/DropOverlay.vue';
+import ToastView from './components/ToastView.vue';
 import StatusTopbar from './components/StatusTopbar.vue';
 import StatusPills from './components/StatusPills.vue';
 import OffersPanel from './components/OffersPanel.vue';
@@ -56,7 +57,7 @@ const fmt = useFormat(status);
 // 需要本页模板双向绑定的模态状态:必须提到顶层,否则 <script setup> 模板不会自动拆包 Ref
 const { historyFolder, editDevicesOpen, editFolder, saveEditDevices } = folders;
 const { upgrading, askSelfUpdate, uploadOpen, openUpload, selectUploadFile } = selfUpdate;
-const { toast, showToast } = useToast();
+const { showToast } = useToast();
 
 // 本页 overlay 模态开关(子组件通过 openXxx 触发)
 const showGuide = ref(false);
@@ -137,13 +138,7 @@ provide(StatusContextKey, {
 
 <template>
   <div class="container">
-    <div v-if="toast" class="toast" :class="{ 'toast--alert': toast.kind === 'alert' }">
-      <svg v-if="toast.kind === 'alert'" viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
-        <path d="M18 8a6 6 0 0 0-12 0c0 7-3 9-3 9h18s-3-2-3-9" />
-        <path d="M13.7 21a2 2 0 0 1-3.4 0" />
-      </svg>
-      {{ toast.msg }}
-    </div>
+    <ToastView />
 
     <!-- 顶部:品牌条 + 操作 -->
     <StatusTopbar />
