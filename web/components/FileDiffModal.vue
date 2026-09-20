@@ -4,6 +4,7 @@ import { NButton, NTooltip } from 'naive-ui';
 import { applyHunk, countChanged, diffText, type DiffHunk } from '../utils/text-diff';
 import { formatBytes } from '../utils/bytes';
 import { fileIconKind } from '../utils/file-icon';
+import { escapeHtml, highlightText } from '../utils/syntax';
 import type { FileCompareData, FileSideData } from '../types';
 import ModalCloseButton from './ModalCloseButton.vue';
 
@@ -124,6 +125,37 @@ const hunkAtStart = computed<Map<number, DiffHunk>>(() => {
 });
 
 const changedCount = computed<number>(() => countChanged(diff.value.rows));
+
+/**
+ * 语法高亮:两侧各算一次,内容完全一致时直接共用同一份结果(大文件省一半高亮时间)。
+ *
+ * `null` = 不着色,是**预期路径不是错误**:扩展名没有对应语言(.log/.txt/.bat…)、
+ * 文件超过上限、或者高亮本身抛错,都应静默退回纯文本 —— 染色是锦上添花,
+ * 绝不能因为它的失败让对比本身看不了。
+ */
+const hl = computed<{ left: string[] | null; right: string[] | null }>(() => {
+  if (!showText.value) return { left: null, right: null };
+  const l = typeof left.value.text === 'string' ? left.value.text : null;
+  const r = typeof right.value.text === 'string' ? right.value.text : null;
+  const leftLines = l === null ? null : highlightText(l, props.path);
+  const rightLines = r === null ? null : l === r ? leftLines : highlightText(r, props.path);
+  return { left: leftLines, right: rightLines };
+});
+
+/**
+ * 一行的渲染内容(HTML 字符串)。有高亮时按**行号**取,而不是按文本匹配 ——
+ * 行号由 diff 给出、与对面那一栏天然对齐,重复行也不会取错。
+ *
+ * ⚠️ 模板里用的是 `v-html`,所以这里**必须自己保证内容已转义**,两种情况分别兜住:
+ *  - 有高亮:内容是 hljs 的输出,它会把 `&` `<` `>` 转义成实体;
+ *  - 不着色 / 行号越界:走 escapeHtml()。
+ * 少兜一处就等于把「被对比的那个文件」当成 HTML 执行 —— 文件内容来自对端设备,不可信。
+ */
+function cell(hlLines: string[] | null, no: number | undefined, text: string | undefined): string {
+  const raw = text ?? '';
+  if (hlLines === null || no === undefined) return escapeHtml(raw);
+  return hlLines[no - 1] ?? escapeHtml(raw);
+}
 
 /**
  * 两侧内容是否**真的**一模一样 —— 整文件覆盖按钮据此禁用。
@@ -400,7 +432,9 @@ function apply(hunk: DiffHunk, target: 'left' | 'right'): void {
                   @mouseenter="hoverIndex = i"
                 >
                   <span class="fd-no">{{ row.leftNo ?? '' }}</span>
-                  <pre class="fd-text">{{ row.leftText ?? '' }}</pre>
+                  <!-- 语法高亮:内容是 hljs 的输出或 escapeHtml 过的纯文本(见 cell 的说明),
+                       走 v-html 而不是插值。行号仍由 .fd-no 这一格负责。 -->
+                  <pre class="fd-text" v-html="cell(hl.left, row.leftNo, row.leftText)"></pre>
                   <span class="fd-gutter">
                     <template v-if="hunkAtStart.get(i)">
                       <button
@@ -434,7 +468,7 @@ function apply(hunk: DiffHunk, target: 'left' | 'right'): void {
                   @mouseenter="hoverIndex = i"
                 >
                   <span class="fd-no">{{ row.rightNo ?? '' }}</span>
-                  <pre class="fd-text">{{ row.rightText ?? '' }}</pre>
+                  <pre class="fd-text" v-html="cell(hl.right, row.rightNo, row.rightText)"></pre>
                 </div>
               </div>
             </div>

@@ -2557,6 +2557,65 @@ tbody tr:last-child td {
   white-space: pre;
 }
 
+/* ---------- 语法高亮(文件对比弹窗的代码着色) ----------
+   配色自己定,不引 highlight.js 的现成主题(github.css 之类),两个原因:
+   ① 那些主题是按「纯白代码块」设计的,落到这里的差异底色(浅橙/浅红/浅绿)与悬停色上
+      对比度会掉一档;② 主题文件还带一堆与本项目无关的容器样式。
+   变量声明在 .fd-rows 上而非 :root —— 它只服务这个视图,不外溢。
+
+   刻意**不给注释加 font-style: italic**:等宽字体缺真斜体时浏览器会合成倾斜或改用别的
+   字体,字的宽度一变,左右两栏同一条长行的字符对齐就散了。而「两侧严格对齐」是这里
+   唯一的硬约束(两栏的横向滚动位置都是锁死的)。同理也不再改字重 —— 只靠颜色区分。 */
+.fd-rows {
+  /* 这六个色都按「在**最暗的行底色**上仍 ≥ 4.6:1」定过(最差的是删除行悬停的 #f9d9d9),
+     不是照抄某个现成主题 —— 那些主题只保证白底。 */
+  --hl-comment: #596271;
+  --hl-keyword: #a02c9f;
+  --hl-string: #2a6f46;
+  --hl-number: #935200;
+  --hl-title: #2f5fa8;
+  --hl-tag: #9b4937;
+}
+
+/* class 名沿用 highlight.js 的约定(hljs-*),按它官方主题的归类收敛成 5 组 ——
+   12px 的正文里色相分得太细反而看不出层次,还容易和差异底色打架。
+   注释 / 关键字字面量 / 字符串与 attribute / 数字与属性名 / 函数类名与类型 / 标签与变量。 */
+.fd-text .hljs-comment,
+.fd-text .hljs-quote { color: var(--hl-comment); }
+
+.fd-text .hljs-keyword,
+.fd-text .hljs-literal,
+.fd-text .hljs-doctag,
+.fd-text .hljs-selector-tag { color: var(--hl-keyword); }
+
+.fd-text .hljs-string,
+.fd-text .hljs-regexp,
+.fd-text .hljs-addition,
+.fd-text .hljs-attribute,
+.fd-text .hljs-meta .hljs-string { color: var(--hl-string); }
+
+.fd-text .hljs-number,
+.fd-text .hljs-attr,
+.fd-text .hljs-symbol,
+.fd-text .hljs-bullet,
+.fd-text .hljs-link,
+.fd-text .hljs-selector-attr,
+.fd-text .hljs-selector-pseudo { color: var(--hl-number); }
+
+.fd-text .hljs-title,
+.fd-text .hljs-section,
+.fd-text .hljs-built_in,
+.fd-text .hljs-type,
+.fd-text .hljs-meta { color: var(--hl-title); }
+
+.fd-text .hljs-tag,
+.fd-text .hljs-name,
+.fd-text .hljs-variable,
+.fd-text .hljs-template-variable,
+.fd-text .hljs-deletion,
+.fd-text .hljs-selector-id,
+.fd-text .hljs-selector-class { color: var(--hl-tag); }
+
 /* 差异块按钮:钉在左窗格右缘(原先是「两栏之间的中间列」)。
    必须横排 —— 竖排会把该行撑到两倍高,而右窗格同一行没有这个格子,
    两个窗格从该行起就会整体错位(行高必须两侧严格相等)。 */
