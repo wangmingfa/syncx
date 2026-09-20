@@ -1,10 +1,21 @@
 /** Web UI 共享类型:status 载荷与各弹窗组件的 Props 形状。 */
 
+/** 单个正在传输的文件(文件级进度);bytesTotal 为 0 时表示大小未知。 */
+export interface TransferFile {
+  path: string;
+  /** 'receive' = 本机正从对端拉取;'send' = 本机正供块给对端。 */
+  direction: 'send' | 'receive';
+  bytesDone: number;
+  bytesTotal: number;
+}
+
 export interface SyncProgressItem {
   folder: string;
   pending: number;
   sending: number;
   receiving: number;
+  /** 文件级进度(可选):每个正在传输的文件一条。 */
+  files?: TransferFile[];
 }
 
 export interface FolderInfo {
@@ -68,6 +79,20 @@ export interface StatusData {
   folderErrors?: FolderErrorItem[];
   /** npm 检查到的可用更新(打包态且发现更高版本时才有值)。 */
   updateAvailable?: { latest: string; current: string } | null;
+  /** 最近的中转活动(ADR-0014):本机把来源设备的目录变更转发给其他对端时记录。无中转则缺省。 */
+  relayActivity?: RelayActivity[];
+}
+
+/** 一次中转活动(与后端 RelayActivity 同形):本机作为枢纽,把 from 的变更中转给 to。 */
+export interface RelayActivity {
+  /** 发生中转的目录 id。 */
+  folder: string;
+  /** 变更的原始来源设备 id。 */
+  from: string;
+  /** 中转目标设备 id。 */
+  to: string;
+  /** 发生时刻(毫秒时间戳)。 */
+  at: number;
 }
 
 /** 上传安装包的服务端只读预检结果(不改动任何状态,仅用于确认前展示)。 */
@@ -122,32 +147,63 @@ export interface FolderDiffItem {
   disk?: 'ok' | 'missing' | 'size-differs';
 }
 
-/** GET /api/folders/diff 的响应(与后端 FolderDiffResult 同形)。 */
-export interface FolderDiffData {
+/** 双栏对比:一侧的一条索引条目(与后端 SnapshotEntry 同形)。 */
+export interface CompareEntry {
+  path: string;
+  version: Array<[string, number]>;
+  size: number;
+  deleted: boolean;
+  /** 内容摘要;墓碑为空串。 */
+  digest: string;
+  mtime?: number;
+}
+
+/** GET /api/folders/compare 的响应:两侧条目清单 + 既有差异分类。 */
+export interface FolderCompareData {
   folderId: string;
   folderPath: string;
   deviceId: string;
   deviceVersion?: string;
-  /** 对端主机名(hello 宣告);undefined = 旧版本对端未宣告。 */
   deviceHostname?: string;
-  /** 本机记录的该对端可达地址(ws://ip:port);undefined = 尚未学到。 */
   deviceUrl?: string;
-  /** 本机主机名:报告里「本机」一栏,便于确认这份报告出自哪台机器。 */
   localHostname: string;
-  /** 本机 LAN 地址(IPv4,多网卡时多个)。 */
   localAddresses: string[];
-  /** 对端快照的收齐时刻(毫秒)。 */
   remoteAt: number;
+  local: CompareEntry[];
+  remote: CompareEntry[];
   diff: {
     items: FolderDiffItem[];
     counts: Record<FolderDiffKind, number>;
     localTotal: number;
     remoteTotal: number;
-    /** 对端是否提供了忽略规则;false = 旧版本对端,「规则使然」无法区分。 */
     remoteRulesKnown: boolean;
   };
   localProgress?: { pending: number; sending: number; receiving: number };
   remoteProgress?: { pending: number; sending: number; receiving: number };
+}
+
+/** 文件内容对比:某一侧的状态。 */
+export interface FileSideData {
+  exists: boolean;
+  /** 文本内容;二进制 / 过大 / 取不到时为 undefined。 */
+  text?: string;
+  size?: number;
+  binary?: boolean;
+  /** 超过体积上限:只给大小不回传内容。 */
+  tooLarge?: boolean;
+  version?: Array<[string, number]>;
+  /** 取不到内容的原因(对端离线 / 未共享 / 不存在)。 */
+  error?: string;
+}
+
+/** GET /api/folders/file 的响应:同一个文件在本机与对端的两侧状态。 */
+export interface FileCompareData {
+  folderId: string;
+  folderPath: string;
+  deviceId: string;
+  path: string;
+  local: FileSideData;
+  remote: FileSideData;
 }
 
 /** 二次确认弹窗的完整描述(移除目录 / 移除设备 / 升级共用)。 */

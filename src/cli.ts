@@ -491,6 +491,8 @@ export async function run(args: ParsedArgs): Promise<void> {
       const { entries, tombstones } = manager.getIndexStats();
       // 目录级同步错误:按发生时间倒序,前端展示到对应目录卡上
       const folderErrors = manager.getFolderErrors();
+      // 最近中转活动(ADR-0014 遥测):本机作为枢纽转发来源设备变更给其他对端的记录
+      const relayActivity = manager.getRelayActivity();
       return buildStatus(
         identity,
         config,
@@ -503,6 +505,7 @@ export async function run(args: ParsedArgs): Promise<void> {
         selfVersion,
         // npm 检查到的可用更新:仅打包态有检查器,发现更高版本才非空
         updateChecker?.available(),
+        relayActivity,
       );
     },
     rescan: () => {
@@ -551,6 +554,10 @@ export async function run(args: ParsedArgs): Promise<void> {
       const before = loadConfig(configPath).sharedFolders.find((f) => resolve(f.path) === resolve(path));
       const beforeDevices = new Set(before?.devices ?? []);
       setFolderDevices(configPath, path, devices);
+      // 配置已落盘:显式热重载,把「指派变化」立即对账到存活会话(新增设备补挂通道、摘除设备摘通道)。
+      // 不显式调用则只依赖 config watcher —— watcher 未触发/被禁用(见下方 config hot-reload disabled
+      // 分支)或 fs.watch 的 filename 为 null 时,指派变更要等重连才生效(与 addFolder 同款处理)。
+      manager.reloadConfig();
       logger.info(`folder devices updated: ${path}`);
       // 对本次新加入的对端,若当前在线立即推送目录共享邀请(无需等下次重连;离线由重连补推)
       const folder = manager.folderStates.find((f) => resolve(f.path) === resolve(path));
@@ -581,6 +588,11 @@ export async function run(args: ParsedArgs): Promise<void> {
     clearFolderHistory: (folderId) => clearSyncHistory(configPath, folderId),
     // 内容对比(诊断,只读):向对端索取同一目录 id 的索引快照并分类差异
     diffFolder: (folderId, deviceId) => manager.diffFolder(folderId, deviceId),
+    // 双栏对比页:同一份只读数据再带上两侧条目清单
+    compareFolder: (folderId, deviceId) => manager.compareFolder(folderId, deviceId),
+    // 文件内容对比弹窗(只读)与其同步动作
+    readFilePair: (folderId, deviceId, path) => manager.readFilePair(folderId, deviceId, path),
+    applyFileSync: (opts) => manager.applyFileSync(opts),
     acceptOffer: (offerId, localPath, receiveOnly) => {
       // 先查再落状态:校验失败时不能把邀请标成 accepted,否则目录没建起来、
       // 卡片却已从「待确认」消失,用户失去重试入口。

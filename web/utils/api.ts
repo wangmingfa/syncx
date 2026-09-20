@@ -49,6 +49,15 @@ export async function apiJson<T = unknown>(url: string, init?: RequestInit): Pro
   return data as T;
 }
 
+/** POST 一段 JSON;与 apiJson 共用同一套错误/401 处理。 */
+export function apiPost<T = unknown>(url: string, body: unknown): Promise<T> {
+  return apiJson<T>(url, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(body),
+  });
+}
+
 /** 把异常转成给用户看的文案:优先用后端返回的具体原因,兜底用通用提示。 */
 export function errText(e: unknown, fallback = '操作失败,请重试'): string {
   return e instanceof Error && e.message ? e.message : fallback;

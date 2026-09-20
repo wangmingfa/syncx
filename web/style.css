@@ -695,6 +695,54 @@ tbody tr:last-child td {
   margin-top: 2px;
 }
 
+/* 目录卡进度条下的「传输中文件」列表:每个文件一行,方向箭头 + 文件名 + 百分比 + 细进度条 */
+.xfer-files {
+  list-style: none;
+  margin: 6px 0 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.xfer-file {
+  display: grid;
+  grid-template-columns: 14px 1fr auto;
+  grid-template-areas:
+    'dir name pct'
+    'bar bar bar';
+  align-items: center;
+  gap: 2px 6px;
+  font-size: 11.5px;
+}
+
+.xfer-file__dir {
+  grid-area: dir;
+  text-align: center;
+  color: var(--muted-strong);
+}
+
+.xfer-file__name {
+  grid-area: name;
+  color: var(--text);
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.xfer-file__pct {
+  grid-area: pct;
+  color: var(--muted-strong);
+  font-variant-numeric: tabular-nums;
+}
+
+.xfer-file__bar {
+  grid-area: bar;
+  height: 3px;
+  min-width: 0;
+}
+
 .add-form {
   position: relative;
   display: flex;
@@ -1245,301 +1293,6 @@ tbody tr:last-child td {
   text-overflow: ellipsis;
 }
 
-/* ---------- 内容对比弹窗(FolderDiffModal) ---------- */
-
-.diff-bar {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  flex-wrap: wrap;
-  margin-bottom: 12px;
-}
-
-.diff-bar__label {
-  font-size: 12px;
-  color: var(--muted);
-}
-
-.diff-bar__rerun {
-  margin-left: auto;
-}
-
-.diff-loading {
-  padding: 24px 4px;
-  color: var(--muted);
-  font-size: 13px;
-}
-
-.diff-hint {
-  margin-top: 6px;
-  font-size: 12px;
-  color: var(--muted);
-}
-
-.diff-error {
-  display: flex;
-  align-items: flex-start;
-  gap: 12px;
-  padding: 14px 16px;
-  border: 1px dashed rgb(224 65 59 / 0.5);
-  border-radius: 10px;
-  background: rgb(224 65 59 / 0.06);
-  color: #b8332e;
-  font-size: 13px;
-}
-
-.diff-error__msg {
-  flex: 1;
-  min-width: 0;
-}
-
-.diff-meta {
-  font-size: 13px;
-  color: var(--text);
-}
-
-.diff-legend {
-  margin-top: 2px;
-  font-size: 12px;
-  color: var(--muted);
-}
-
-/* 设备身份:本机 / 对端各一行。role 与 id 用主色,「主机名 · IP」留在次要色,
-   一眼分得清「哪一台」和「它的网络位置」。窄屏折行时次要信息整段落到下一行,
-   不会把设备 id 拆断(与设备卡同一套思路)。 */
-.diff-legend__row {
-  display: flex;
-  align-items: baseline;
-  gap: 10px;
-  flex-wrap: wrap;
-}
-
-.diff-legend__row + .diff-legend__row {
-  margin-top: 3px;
-}
-
-.diff-legend__role,
-.diff-legend__id {
-  flex: none;
-  color: var(--text);
-}
-
-.diff-legend__where {
-  min-width: 0;
-  /* 用 anywhere 而不是 break-all:主机名与 IP 之间已有空格可断,break-all 会无视空格
-     在任意字符处断行 —— 实测 320px 下把 192.168.5.20 拆成「192.」+「168.5.20」,
-     一个 IP 断成两截比整体换行难读得多。anywhere 只在「整块放不下」时才硬断,
-     超长主机名仍不会溢出。 */
-  overflow-wrap: anywhere;
-}
-
-.diff-note {
-  margin-top: 8px;
-  padding: 8px 10px;
-  border-radius: 8px;
-  background: rgb(196 127 0 / 0.08);
-  color: #9a6b00;
-  font-size: 12px;
-}
-
-.diff-clean {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  margin-top: 14px;
-  padding: 16px;
-  border-radius: 10px;
-  background: rgb(47 165 111 / 0.08);
-  color: #1f7a52;
-  font-size: 14px;
-}
-
-.diff-clean__mark {
-  font-size: 16px;
-}
-
-.diff-groups {
-  margin-top: 12px;
-  display: flex;
-  flex-direction: column;
-  gap: 10px;
-}
-
-.diff-group__head {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  width: 100%;
-  padding: 6px 8px;
-  border: 0;
-  border-radius: 8px;
-  background: transparent;
-  color: var(--text);
-  font: inherit;
-  font-size: 13px;
-  text-align: left;
-  cursor: pointer;
-}
-
-.diff-group__head:hover {
-  background: rgb(127 140 170 / 0.1);
-}
-
-.diff-group__caret {
-  color: var(--muted);
-  transition: transform 0.15s ease;
-}
-
-.diff-group__caret.is-open {
-  transform: rotate(90deg);
-}
-
-.diff-group__label {
-  font-weight: 600;
-}
-
-.diff-group__count {
-  font-family: var(--mono);
-  font-size: 12px;
-  font-variant-numeric: tabular-nums;
-  padding: 1px 8px;
-  border-radius: 999px;
-  color: #b8332e;
-  background: rgb(224 65 59 / 0.12);
-}
-
-/* 「规则使然」不是故障:计数刻意弱化,避免把用户的注意力吸走 */
-.diff-group__count.is-noise {
-  color: var(--muted);
-  background: rgb(127 140 170 / 0.14);
-}
-
-.diff-group__hint {
-  color: var(--muted);
-  font-size: 12px;
-  min-width: 0;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-
-.diff-items {
-  list-style: none;
-  display: flex;
-  flex-direction: column;
-  gap: 2px;
-  margin-top: 4px;
-  max-height: 46vh;
-  overflow-y: auto;
-}
-
-.diff-item {
-  padding: 8px 10px;
-  border-radius: 8px;
-  font-size: 13px;
-}
-
-.diff-item:nth-child(odd) {
-  background: rgb(127 140 170 / 0.06);
-}
-
-.diff-item__path {
-  color: var(--text);
-}
-
-.diff-item__side {
-  display: flex;
-  gap: 8px;
-  margin-top: 2px;
-  font-size: 12px;
-  color: var(--text);
-}
-
-.diff-item__side-label {
-  flex: none;
-  width: 28px;
-  color: var(--muted);
-}
-
-.diff-item__rule {
-  margin-top: 2px;
-  font-size: 12px;
-  color: var(--muted);
-}
-
-.diff-item__rule code {
-  color: #7c3aed;
-  background: rgb(124 58 237 / 0.1);
-  padding: 1px 6px;
-  border-radius: 6px;
-}
-
-.diff-item__warn {
-  margin-top: 4px;
-  font-size: 12px;
-  color: #9a6b00;
-}
-
-.diff-chip {
-  margin-left: 6px;
-  font-size: 11px;
-  padding: 1px 7px;
-  border-radius: 999px;
-}
-
-.diff-chip--hard {
-  color: #b8332e;
-  background: rgb(224 65 59 / 0.12);
-}
-
-.diff-more {
-  padding: 4px 10px;
-}
-
-.guide-steps {
-  list-style: none;
-  display: flex;
-  flex-direction: column;
-  gap: 14px;
-  margin: 0;
-  padding: 0;
-}
-
-.guide-step-h {
-  font-size: 14px;
-  font-weight: 600;
-  color: var(--text);
-  margin-bottom: 3px;
-}
-
-.guide-step-b {
-  font-size: 13px;
-  color: var(--muted);
-  line-height: 1.7;
-}
-
-.guide-step-b strong {
-  color: var(--text);
-  font-weight: 600;
-}
-
-.guide-note {
-  margin-top: 18px;
-  padding: 12px 14px;
-  background: var(--accent-soft);
-  border: 1px solid rgb(74 127 192 / 0.2);
-  border-radius: 10px;
-  font-size: 12.5px;
-  color: var(--accent);
-  line-height: 1.6;
-}
-
-.modal-ok {
-  display: block;
-  width: 100%;
-  margin-top: 18px;
-}
-
 /* ---------- 二次确认弹窗 ---------- */
 /* 被操作对象(目录路径 / 设备 ID):等宽展示,长路径自动换行,便于确认前核对 */
 .confirm-detail {
@@ -1560,6 +1313,133 @@ tbody tr:last-child td {
 
 .modal-actions > * {
   flex: 1;
+}
+
+/* ---------- 设备同步拓扑弹窗 ---------- */
+.topo-svg {
+  width: 100%;
+  height: auto;
+  background: var(--bg-soft, #f6f8fb);
+  border-radius: 10px;
+  margin-top: 6px;
+}
+.topo-edge {
+  stroke: #9fb3c8;
+  stroke-width: 1.6;
+}
+.topo-edge-label {
+  font-size: 9px;
+  fill: var(--muted-strong, #55606f);
+  text-anchor: middle;
+}
+.topo-node .topo-dot {
+  stroke: #fff;
+  stroke-width: 2.5;
+}
+.topo-node.is-self .topo-dot {
+  fill: #2bb6ac;
+}
+.topo-node.is-online .topo-dot {
+  fill: #4a7fc0;
+}
+.topo-node.is-offline .topo-dot {
+  fill: #b9c2cc;
+}
+.topo-dot-label {
+  font-size: 11px;
+  font-weight: 600;
+  fill: var(--text, #28323d);
+  text-anchor: middle;
+}
+.topo-node-sub {
+  font-size: 8px;
+  fill: var(--muted, #7a8696);
+  text-anchor: middle;
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+}
+.topo-node-state {
+  font-size: 8px;
+  text-anchor: middle;
+}
+.topo-node-state.is-on {
+  fill: #2f9e6b;
+}
+.topo-node-state.is-off {
+  fill: #9aa6b2;
+}
+.topo-legend {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 14px;
+  margin: 10px 0 4px;
+  font-size: 12px;
+  color: var(--muted-strong, #55606f);
+}
+.topo-legend .lg {
+  display: inline-block;
+  width: 10px;
+  height: 10px;
+  border-radius: 50%;
+  margin-right: 5px;
+  vertical-align: -1px;
+}
+.lg-self { background: #2bb6ac; }
+.lg-on { background: #4a7fc0; }
+.lg-off { background: #b9c2cc; }
+.topo-legend-hint {
+  margin-left: auto;
+  color: var(--muted, #7a8696);
+}
+.topo-relay {
+  margin-top: 12px;
+  border-top: 1px solid var(--border, #e6eaf0);
+  padding-top: 10px;
+}
+.topo-relay-head {
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--text, #28323d);
+  margin-bottom: 6px;
+}
+.topo-relay-empty {
+  font-size: 12px;
+  color: var(--muted, #7a8696);
+}
+.topo-relay-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  max-height: 160px;
+  overflow-y: auto;
+}
+.topo-relay-row {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 10px;
+  padding: 5px 0;
+  font-size: 12px;
+  border-bottom: 1px dashed var(--border, #eef1f5);
+}
+.topo-relay-route b {
+  color: var(--text, #28323d);
+}
+.topo-relay-arrow {
+  color: var(--muted, #7a8696);
+  margin: 0 6px;
+}
+.topo-relay-meta {
+  color: var(--muted, #7a8696);
+  white-space: nowrap;
+}
+.topo-note {
+  margin: 12px 0 0;
+  font-size: 12px;
+  line-height: 1.6;
+  color: var(--muted-strong, #55606f);
+}
+.topo-note b {
+  color: var(--text, #28323d);
 }
 
 /* 受影响目录清单:目录多时可滚动,长路径省略号截断 */
@@ -1903,4 +1783,411 @@ tbody tr:last-child td {
 .upload-verdict__to {
   font-weight: 600;
   color: var(--accent);
+}
+
+/* ---------- 双栏对比页(/compare/<folderId>) ----------
+   左右两列逐行对齐:同一相对路径只占一行,缺失的一侧留空行占位。
+   行底色与文件名颜色一起表达「这一行是什么关系」,扫一眼就能定位差异。 */
+
+.cmp-page {
+  max-width: 1180px;
+  margin: 0 auto;
+  padding: 24px 18px 56px;
+}
+
+.cmp-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  flex-wrap: wrap;
+  margin-bottom: 14px;
+}
+
+.cmp-head__left {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  min-width: 0;
+}
+
+.cmp-head__right {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.cmp-title {
+  font-size: 17px;
+  font-weight: 650;
+  letter-spacing: 0.01em;
+}
+
+/* 目录路径:单行截断,完整值靠 title 兜底 —— 路径比页面宽度长是常态 */
+.cmp-path {
+  font-size: 12px;
+  color: var(--muted-strong);
+  background: var(--bg-soft);
+  border-radius: 7px;
+  padding: 2px 8px;
+  max-width: 46ch;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.cmp-bar {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex-wrap: wrap;
+  margin-bottom: 12px;
+}
+
+.cmp-bar__label {
+  font-family: var(--mono);
+  font-size: 11px;
+  font-weight: 600;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: var(--muted-strong);
+}
+
+.cmp-bar__empty {
+  font-size: 12px;
+  color: var(--muted);
+}
+
+.cmp-state {
+  padding: 28px 4px;
+  color: var(--muted);
+  font-size: 13px;
+  text-align: center;
+}
+
+.cmp-error {
+  background: #fff6f6;
+  border: 1px solid #f3d3d3;
+  border-radius: var(--radius);
+  padding: 18px 16px;
+  display: grid;
+  gap: 10px;
+  justify-items: start;
+}
+
+.cmp-error__title {
+  font-size: 15px;
+  font-weight: 650;
+  color: #a33;
+}
+
+.cmp-error__msg {
+  font-size: 13px;
+  color: var(--text);
+}
+
+.cmp-meta {
+  font-size: 12px;
+  color: var(--muted-strong);
+  margin-bottom: 10px;
+}
+
+.cmp-legend,
+.fd-legend {
+  display: flex;
+  gap: 8px;
+  align-items: baseline;
+  font-size: 11.5px;
+  color: var(--muted-strong);
+  margin-bottom: 10px;
+  flex-wrap: wrap;
+}
+
+.cmp-legend {
+  display: grid;
+  gap: 2px;
+}
+
+.cmp-legend__role {
+  min-width: 34px;
+  color: var(--muted);
+}
+
+.cmp-legend__id {
+  color: var(--text);
+}
+
+.cmp-legend__where {
+  color: var(--muted);
+}
+
+.cmp-table {
+  background: var(--card);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  box-shadow: var(--shadow);
+  overflow: hidden;
+}
+
+.cmp-thead {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  border-bottom: 1px solid var(--border);
+  background: var(--bg-soft);
+}
+
+.cmp-th {
+  font-size: 11px;
+  font-weight: 600;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: var(--muted-strong);
+  padding: 8px 12px;
+}
+
+.cmp-th + .cmp-th {
+  border-left: 1px solid var(--border);
+}
+
+.cmp-row {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  border-bottom: 1px solid #f1f4f8;
+}
+
+/* 状态底色先声明,hover 放在最后 —— 悬停反馈要能盖住任何状态色,否则
+   「鼠标在哪一行」在差异密集的目录里反而看不清 */
+.cmp-row.is-diff {
+  background: #fffaf5;
+}
+
+.cmp-row.is-only-local {
+  background: #f6fafe;
+}
+
+.cmp-row.is-only-remote {
+  background: #faf7fe;
+}
+
+.cmp-row:hover {
+  background: #f1f5fb;
+}
+
+.cmp-cell {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 4px 12px;
+  min-height: 26px;
+  font-size: 13px;
+  overflow: hidden;
+  white-space: nowrap;
+  user-select: none;
+}
+
+.cmp-cell + .cmp-cell {
+  border-left: 1px solid #f1f4f8;
+}
+
+.cmp-pad {
+  flex: none;
+}
+
+.cmp-icon {
+  flex: none;
+  width: 10px;
+  font-size: 10px;
+  color: var(--muted);
+}
+
+.cmp-name {
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.cmp-tag {
+  flex: none;
+  font-size: 10px;
+  color: var(--offline);
+  border: 1px solid #f0cdcd;
+  border-radius: 5px;
+  padding: 0 4px;
+}
+
+.cmp-row.is-diff .cmp-name {
+  color: #b3541e;
+  font-weight: 600;
+}
+
+.cmp-row.is-only-local .cmp-name {
+  color: var(--accent);
+  font-weight: 600;
+}
+
+.cmp-row.is-only-remote .cmp-name {
+  color: #7a52c0;
+  font-weight: 600;
+}
+
+.cmp-hint {
+  margin-top: 10px;
+  font-size: 11.5px;
+  color: var(--muted);
+}
+
+/* ---------- 文件内容对比弹窗 ---------- */
+
+.fd-modal {
+  width: min(1100px, 94vw);
+  max-width: none;
+  display: flex;
+  flex-direction: column;
+}
+
+.fd-legend__role {
+  color: var(--muted);
+}
+
+.fd-legend__id {
+  color: var(--text);
+}
+
+.fd-legend__sep {
+  color: var(--muted);
+}
+
+.fd-state {
+  padding: 24px 4px;
+  text-align: center;
+  color: var(--muted);
+  font-size: 13px;
+}
+
+.fd-body {
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+}
+
+.fd-head {
+  display: flex;
+  justify-content: space-between;
+  align-items: baseline;
+  padding: 0 2px 6px;
+  font-size: 11px;
+  font-weight: 600;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: var(--muted-strong);
+}
+
+.fd-head__count {
+  color: #b3541e;
+  text-transform: none;
+  letter-spacing: 0;
+}
+
+.fd-head__clean {
+  color: var(--online);
+  text-transform: none;
+  letter-spacing: 0;
+}
+
+.fd-rows {
+  flex: 1;
+  min-height: 220px;
+  max-height: 54vh;
+  overflow: auto;
+  background: #fff;
+  border: 1px solid var(--border);
+  border-radius: 9px;
+  font-family: var(--mono);
+  font-size: 12px;
+  line-height: 1.55;
+}
+
+/* 行号 | 左文本 | 差异块操作区 | 行号 | 右文本 */
+.fd-row {
+  display: grid;
+  grid-template-columns: 46px minmax(0, 1fr) 34px 46px minmax(0, 1fr);
+  align-items: stretch;
+}
+
+.fd-no {
+  padding: 0 8px;
+  color: #a7b0c0;
+  text-align: right;
+  font-variant-numeric: tabular-nums;
+  user-select: none;
+}
+
+/* pre 保留原始空白(缩进是代码的一部分);超宽由 .fd-rows 横向滚动 */
+.fd-text {
+  margin: 0;
+  padding: 0 8px;
+  white-space: pre;
+}
+
+.fd-gutter {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 2px;
+  padding-top: 1px;
+}
+
+.fd-apply {
+  width: 20px;
+  height: 17px;
+  padding: 0;
+  border: 1px solid var(--border-strong);
+  border-radius: 5px;
+  background: #fff;
+  color: var(--muted-strong);
+  font-size: 11px;
+  line-height: 1;
+  cursor: pointer;
+}
+
+.fd-apply:hover {
+  background: var(--accent-soft);
+  border-color: var(--accent);
+  color: var(--accent);
+}
+
+.fd-row.is-change .fd-text {
+  background: #fff6e8;
+}
+
+.fd-row.is-del .fd-text {
+  background: #fdeeee;
+}
+
+.fd-row.is-add .fd-text {
+  background: #eaf7ee;
+}
+
+.fd-blocked {
+  padding: 18px 12px;
+  background: var(--bg-soft);
+  border-radius: 9px;
+}
+
+.fd-blocked__msg {
+  font-size: 13px;
+  color: var(--text);
+}
+
+.fd-blocked__hint {
+  margin-top: 4px;
+  font-size: 12px;
+  color: var(--muted);
+}
+
+.fd-confirm__msg {
+  flex: 1 1 auto;
+  margin-right: 8px;
+  font-size: 12.5px;
+  line-height: 1.4;
+  color: #b06a00; /* 警示橙:整文件覆盖不可撤销,需先二次确认 */
 }

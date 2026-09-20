@@ -1,6 +1,29 @@
 <script setup lang="ts">
 import { NButton, NInput, NCheckbox, NCheckboxGroup, NTooltip } from 'naive-ui';
 import { useStatusContext } from '../composables/statusContext';
+import { navigate } from '../utils/route';
+import type { FolderInfo, TransferFile } from '../types';
+
+/**
+ * 卡片上的「对比」跳到双栏对比页,而不是开一个弹窗。
+ *
+ * 目录 id 放进路径(`/compare/<id>`):链接可分享、可刷新、可用浏览器后退回来;
+ * 对比设备到页面上再选(首次进入默认选第一个指派设备)。
+ */
+function openCompare(f: FolderInfo): void {
+  navigate(`/compare/${encodeURIComponent(folderKey(f))}`);
+}
+
+/** 路径取文件名(共享根内的相对路径,用 / 分隔)。 */
+function basename(p: string): string {
+  const i = p.lastIndexOf('/');
+  return i >= 0 ? p.slice(i + 1) : p;
+}
+/** 传输百分比(0–100);总字节未知或 0 时记 0。 */
+function filePercent(f: TransferFile): number {
+  if (!f.bytesTotal) return 0;
+  return Math.max(0, Math.min(100, Math.round((f.bytesDone / f.bytesTotal) * 100)));
+}
 
 const {
   status,
@@ -16,7 +39,6 @@ const {
   askRemoveFolder,
   openEditDevices,
   openHistory,
-  openDiff,
   copy,
   hoverFolderKey,
   onFolderEnter,
@@ -92,8 +114,8 @@ const {
           size="small"
           tertiary
           :disabled="busy || f.devices.length === 0"
-          :title="f.devices.length === 0 ? '该目录还没有指派设备,无从对比' : '与对端逐条比对同一目录 id 的内容(只读诊断)'"
-          @click="openDiff(f)"
+          :title="f.devices.length === 0 ? '该目录还没有指派设备,无从对比' : '打开双栏对比:左右目录结构对齐,双击文件可看内容差异'"
+          @click="openCompare(f)"
         >对比</n-button>
         <n-button size="small" tertiary :disabled="busy" @click="openHistory(f)">记录</n-button>
         <n-button
@@ -148,6 +170,16 @@ const {
           ></div>
         </div>
         <div class="item-sub">{{ progressText(progressOf(f)!) }}</div>
+        <ul v-if="progressOf(f)!.files && progressOf(f)!.files!.length" class="xfer-files">
+          <li v-for="tf in progressOf(f)!.files!" :key="tf.path" class="xfer-file">
+            <span class="xfer-file__dir" :title="tf.direction === 'receive' ? '下载中' : '上传中'">{{ tf.direction === 'receive' ? '↓' : '↑' }}</span>
+            <span class="xfer-file__name" :title="tf.path">{{ basename(tf.path) }}</span>
+            <span class="xfer-file__pct">{{ filePercent(tf) }}%</span>
+            <div class="progress-bar xfer-file__bar">
+              <div class="progress-fill" :style="{ width: filePercent(tf) + '%' }"></div>
+            </div>
+          </li>
+        </ul>
       </div>
     </div>
   </section>

@@ -29,10 +29,23 @@ export interface DeviceStatus {
   canUpgrade?: boolean;
 }
 
+export interface TransferFile {
+  /** 正在传输的文件相对路径。 */
+  path: string;
+  /** 'receive' = 本机正从对端拉取;'send' = 本机正供块给对端。 */
+  direction: 'send' | 'receive';
+  /** 已传字节数(估算,最后一块可能偏小)。 */
+  bytesDone: number;
+  /** 文件总字节数。 */
+  bytesTotal: number;
+}
+
 export interface ProgressCounts {
   pending: number;
   sending: number;
   receiving: number;
+  /** 文件级进度(可选):每个正在传输的文件一条。无传输时不带,避免状态快照凭空变大。 */
+  files?: TransferFile[];
 }
 
 export interface SyncProgress extends ProgressCounts {
@@ -47,6 +60,19 @@ export interface FolderErrorStatus {
   message: string;
   /** 发生时间(毫秒时间戳)。 */
   ts: number;
+}
+
+/** 一次中转活动(ADR-0014):本机作为枢纽,把来源设备收到的目录索引条目转发给目标设备。
+ *  同目录会话内单跳;from/to 均为对端设备 id。at 为发生时刻(毫秒)。 */
+export interface RelayActivity {
+  /** 发生中转的目录 id。 */
+  folder: string;
+  /** 变更的原始来源设备(本机是从它那里收到条目的)。 */
+  from: string;
+  /** 中转的目标设备(本机把条目转发给了它)。 */
+  to: string;
+  /** 发生时刻(毫秒时间戳)。 */
+  at: number;
 }
 
 export interface StatusPayload {
@@ -64,6 +90,8 @@ export interface StatusPayload {
   offers: PendingOffer[];
   /** npm 检查到的可用更新(打包态且发现更高版本时才有值),Web UI 据此弹升级提示。 */
   updateAvailable?: { latest: string; current: string };
+  /** 最近的中转活动(ADR-0014);本机把来源设备的目录变更转发给其他对端时记录。无中转则缺省。 */
+  relayActivity?: RelayActivity[];
 }
 
 export function buildStatus(
@@ -76,6 +104,7 @@ export function buildStatus(
   folderErrors: FolderErrorStatus[] = [],
   selfVersion = 'unknown',
   updateAvailable?: { latest: string; current: string },
+  relayActivity?: RelayActivity[],
 ): StatusPayload {
   return {
     deviceId: identity.deviceId,
@@ -88,5 +117,6 @@ export function buildStatus(
     offers,
     folderErrors,
     updateAvailable,
+    relayActivity,
   };
 }

@@ -7,7 +7,6 @@ import { useStatus } from './composables/useStatus';
 import { useConfirm } from './composables/useConfirm';
 import { useDevices } from './composables/useDevices';
 import { useFolders } from './composables/useFolders';
-import { useFolderDiff } from './composables/useFolderDiff';
 import { useOffers } from './composables/useOffers';
 import { useSelfUpdate } from './composables/useSelfUpdate';
 import { useFormat } from './composables/useFormat';
@@ -24,11 +23,11 @@ import {
 import UpdateBanner from './components/UpdateBanner.vue';
 import GuideModal from './components/GuideModal.vue';
 import HistoryModal from './components/HistoryModal.vue';
-import FolderDiffModal from './components/FolderDiffModal.vue';
 import ConfirmModal from './components/ConfirmModal.vue';
 import EditFolderModal from './components/EditFolderModal.vue';
 import AuthPasswordModal from './components/AuthPasswordModal.vue';
 import LogsModal from './components/LogsModal.vue';
+import TopologyModal from './components/TopologyModal.vue';
 import UploadUpdateModal from './components/UploadUpdateModal.vue';
 import DropOverlay from './components/DropOverlay.vue';
 import StatusTopbar from './components/StatusTopbar.vue';
@@ -51,7 +50,6 @@ const deps: CoreDeps = { status, busy, isDev, refreshStatus, post, askConfirm };
 const devices = useDevices(deps);
 const folders = useFolders(deps);
 const offers = useOffers(deps);
-const folderDiff = useFolderDiff(deps);
 const selfUpdate = useSelfUpdate(deps);
 const fmt = useFormat(status);
 
@@ -63,12 +61,16 @@ const { toast, showToast } = useToast();
 // 本页 overlay 模态开关(子组件通过 openXxx 触发)
 const showGuide = ref(false);
 const logsOpen = ref(false);
+const topoOpen = ref(false);
 const authOpen = ref(false);
 function openGuide(): void {
   showGuide.value = true;
 }
 function openLogs(): void {
   logsOpen.value = true;
+}
+function openTopology(): void {
+  topoOpen.value = true;
 }
 function openAuth(): void {
   authOpen.value = true;
@@ -92,6 +94,7 @@ function onKeydown(e: KeyboardEvent): void {
   if (e.key !== 'Escape') return;
   if (showGuide.value) showGuide.value = false;
   if (logsOpen.value) logsOpen.value = false;
+  if (topoOpen.value) topoOpen.value = false;
   if (uploadOpen.value) uploadOpen.value = false;
 }
 onMounted(() => window.addEventListener('keydown', onKeydown));
@@ -112,7 +115,6 @@ provide(StatusContextKey, {
   ...folders,
   ...offers,
   ...selfUpdate,
-  ...folderDiff,
   ...fmt,
   folderKey,
   monogram,
@@ -124,8 +126,10 @@ provide(StatusContextKey, {
   deviceAddrLine,
   showGuide,
   logsOpen,
+  topoOpen,
   openGuide,
   openLogs,
+  openTopology,
   openAuth,
   authOpen,
 });
@@ -169,9 +173,6 @@ provide(StatusContextKey, {
     <!-- 同步记录弹窗 -->
     <HistoryModal :folder="historyFolder" :notify="showToast" @close="historyFolder = null" />
 
-    <!-- 内容对比弹窗(与指定对端逐条比对同一目录 id;只读诊断) -->
-    <FolderDiffModal />
-
     <!-- 通用二次确认弹窗 -->
     <ConfirmModal :state="confirmState" :notify="showToast" @closed="confirmState = null" />
 
@@ -190,6 +191,9 @@ provide(StatusContextKey, {
 
     <!-- 日志弹窗 -->
     <LogsModal :open="logsOpen" @close="logsOpen = false" />
+
+    <!-- 设备同步拓扑弹窗 -->
+    <TopologyModal :open="topoOpen" :status="status" @close="topoOpen = false" />
 
     <!-- 上传本地安装包升级(入口在顶栏「上传升级」，或把文件拖到页面中间) -->
     <UploadUpdateModal :open="uploadOpen" @close="uploadOpen = false" />

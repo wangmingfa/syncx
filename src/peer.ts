@@ -5,7 +5,7 @@ import type { LocalExecutor } from './executor.js';
 import { resolveSharePath, preserveLocalAsConflict } from './executor.js';
 import { verifyBlock, BLOCK_SIZE } from './blockstore.js';
 import { parseIgnoreRules, isIgnoredPath, isHardIgnored, type IgnoreRule } from './ignore.js';
-import type { ProgressCounts } from './status.js';
+import type { ProgressCounts, TransferFile } from './status.js';
 
 /**
  * 索引消息的两种语义:
@@ -145,6 +145,10 @@ export function createSyncPeer(deps: SyncPeerDeps): SyncPeer {
   const pendingBlocks = new Map<string, PendingBlockRequest>();
   // 正在向外供块的路径 → 最后一次发出该文件块的时间,用于展示「发送中」(见 SERVE_LEASE_MS)
   const serving = new Map<string, number>();
+  // 文件级发送进度:每个供块路径累计 已发字节 / 总字节。servedBlocks 记录已发出的块下标,
+  // 对端重试同一块时不重复计入(否则进度会虚高)。总字节取本地索引的 size,缺则回退 0。
+  const servingBytes = new Map<string, { done: number; total: number }>();
+  const servedBlocks = new Map<string, Set<number>>();
 
   // 忽略规则的解析结果按「数组实例」缓存:readIgnoreLines 每次扫描返回全新数组,
   // 引用变化即失效。这样一条索引消息只解析一次规则,而不是每个条目解析一遍
@@ -476,6 +480,17 @@ export function createSyncPeer(deps: SyncPeerDeps): SyncPeer {
       }
       // 块确实发出去了 → 该路径进入「发送中」,并按最后一个块续期租约
       serving.set(request.path, Date.now());
+      // 文件级发送进度:按块精确累计,跳过已发过的块(对端重试不重复计)
+      const sentSet = servedBlocks.get(request.path) ?? new Set<number>();
+      if (!sentSet.has(request.blockIndex)) {
+        sentSet.add(request.blockIndex);
+        servedBlocks.set(request.path, sentSet);
+        const total = localIndex.get(request.path)?.size ?? 0;
+        const rec = servingBytes.get(request.path) ?? { done: 0, total };
+        rec.total = total || rec.total;
+        rec.done += data.length;
+        servingBytes.set(request.path, rec);
+      }
       transport.sendBlockResponse({
         deviceId,
         path: request.path,
@@ -519,6 +534,14 @@ export function createSyncPeer(deps: SyncPeerDeps): SyncPeer {
     },
 
     getSyncProgress(): ProgressCounts {
+      const files: TransferFile[] = [];
+      // 接收中:逐项累加已收块缓冲的字节数(本地预填的块也是真实 Buffer,一并计入)
+      for (const [path, item] of pending) {
+        if (item.kind !== 'receive') continue;
+        let done = 0;
+        for (const b of item.blocks) done += b?.length ?? 0;
+        files.push({ path, direction: 'receive', bytesDone: done, bytesTotal: item.entry.size });
+      }
       let receiving = 0;
       for (const item of pending.values()) {
         if (item.kind === 'receive') receiving += 1;
@@ -530,15 +553,21 @@ export function createSyncPeer(deps: SyncPeerDeps): SyncPeer {
       for (const [path, ts] of serving) {
         if (now - ts > SERVE_LEASE_MS) {
           serving.delete(path);
+          servingBytes.delete(path);
+          servedBlocks.delete(path);
           continue;
         }
         servingCount += 1;
+        const rec = servingBytes.get(path);
+        if (rec) files.push({ path, direction: 'send', bytesDone: rec.done, bytesTotal: rec.total });
       }
-      return {
+      const result: ProgressCounts = {
         pending: pending.size,
         sending: servingCount,
         receiving,
       };
+      if (files.length) result.files = files;
+      return result;
     },
   };
 }

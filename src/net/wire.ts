@@ -61,7 +61,32 @@ export type ControlMessage =
    * progress 让报告能提示「对端正在收 3 个文件,本报告可能含传输中的中间态」——
    * 传输中的文件在索引里已是新版本、盘上却是旧内容,不标注会误导排查方向。
    */
-  | { kind: 'folder-index-snapshot'; requestId: string; fromDeviceId: string; folderId: string; seq: number; total: number; entries?: string; error?: string; ignoreLines?: string[]; progress?: ProgressCounts; version?: string; hostname?: string };
+  | { kind: 'folder-index-snapshot'; requestId: string; fromDeviceId: string; folderId: string; seq: number; total: number; entries?: string; error?: string; ignoreLines?: string[]; progress?: ProgressCounts; version?: string; hostname?: string }
+  /**
+   * 双栏对比页:向对端索取它某个共享目录里**单个文件的内容**(只读)。
+   *
+   * 与 folder-index-request 一样走「按需索取」,并复用同一道共享关系闸门(见
+   * servePeerFile):目录没把对方列进 devices 就一个字节都不给 —— 否则这条通道
+   * 会变成绕过共享关系的任意文件读取入口。
+   */
+  | { kind: 'file-content-request'; requestId: string; fromDeviceId: string; folderId: string; path: string; version?: string; hostname?: string }
+  /**
+   * 文件内容回传。data 为 base64;error 非空表示对端无法提供(未共享 / 不存在 /
+   * 不是文件 / 超过体积上限),此时 data 缺省。
+   * entryVersion 是对端该条目的**版本向量** —— 字段名刻意避开 version:控制消息里的
+   * version 是「syncx 运行版本」(withSelfInfo 每条都注入),两者混用会让读代码的人
+   * 把版本向量当成软件版本号。
+   */
+  | { kind: 'file-content-response'; requestId: string; fromDeviceId: string; folderId: string; path: string; data?: string; size?: number; entryVersion?: Array<[string, number]>; error?: string; version?: string; hostname?: string }
+  /**
+   * 双栏对比页的「把本机内容推到对端」:请对端按给定内容落盘,并**采纳给定版本**。
+   *
+   * 采纳外部给定的版本(而不是让对端自增自己的计数器再扫描发现)是为了让两端的
+   * 版本向量可控地对齐:否则对端下一轮扫描会把刚写入的内容判成「本机新编辑」再推回来,
+   * 而这一侧又会把它当成远端更新拉一次 —— 一次点击变成两轮无意义传输。
+   */
+  | { kind: 'file-content-write'; requestId: string; fromDeviceId: string; folderId: string; path: string; data: string; entryVersion: Array<[string, number]>; version?: string; hostname?: string }
+  | { kind: 'file-content-write-result'; requestId: string; fromDeviceId: string; folderId: string; path: string; ok: boolean; error?: string; version?: string; hostname?: string };
 
 export function encodeWireMessage(message: WireMessage): string {
   return JSON.stringify(message);

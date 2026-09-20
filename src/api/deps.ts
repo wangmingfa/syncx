@@ -63,6 +63,28 @@ export interface ControlServerDeps {
    */
   diffFolder?: (folderId: string, deviceId: string) => Promise<unknown>;
   /**
+   * 双栏对比页:在差异分类之外,再给出**两侧的条目清单**(供目录结构对齐视图用)。
+   * 与 diffFolder 同源、同样全程只读;失败原因也一致(离线 / 未共享 / 对端版本过旧)。
+   */
+  compareFolder?: (folderId: string, deviceId: string) => Promise<unknown>;
+  /**
+   * 读同一个文件在本机与对端的两侧内容(文件内容对比弹窗)。只读。
+   * 二进制 / 超过体积上限时该侧不回传内容,只给大小与标记,由弹窗降级展示。
+   */
+  readFilePair?: (folderId: string, deviceId: string, path: string) => Promise<unknown>;
+  /**
+   * 把一侧文件的内容同步到另一侧(对比页的逐块应用 / 整文件覆盖)。
+   * direction:'pull' 写入本机;'push' 写入对端。
+   * content 省略表示「整文件照抄来源侧」,给了则以给定内容为准(逐块应用的结果)。
+   */
+  applyFileSync?: (opts: {
+    folderId: string;
+    deviceId: string;
+    path: string;
+    direction: 'pull' | 'push';
+    content?: string;
+  }) => Promise<void>;
+  /**
    * 日志文件路径(--log-file 启动参数)。设置后 GET /api/logs 可读取日志尾部;
    * 未设置时该端点返回 ok:false,前端提示需以 --log-file 启动才有日志可看。
    */

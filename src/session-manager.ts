@@ -13,8 +13,8 @@
  *  - 本地变更扫描(5s 周期由 cli 的定时器驱动)与配置热重载(reloadConfig)
  *  - P2P 自更新(upgradeFromPeer:请求对端 tgz → sha256 校验 → updater 接管)
  */
-import { existsSync, readFileSync } from 'node:fs';
-import { join, resolve } from 'node:path';
+import { existsSync, mkdirSync, readFileSync, renameSync, statSync, writeFileSync } from 'node:fs';
+import { dirname, join, resolve } from 'node:path';
 import { randomBytes } from 'node:crypto';
 import type { Logger } from 'pino';
 import { WebSocket } from 'ws';
@@ -27,7 +27,8 @@ import { filterIndexedEntries, HARD_IGNORE_NAMES, isHardIgnored, parseIgnoreRule
 import { createSyncPeer, type PeerTransport, type SyncPeer } from './peer.js';
 import { scanFolder } from './scanner.js';
 import type { IndexEntry } from './index.js';
-import { splitIntoBlocks } from './blockstore.js';
+import { hashBlock, splitIntoBlocks } from './blockstore.js';
+import { createVersionVector, incrementVersion, mergeVersions, type VersionVector } from './version.js';
 import { recordSyncEvent } from './history.js';
 import { encodeSnapshot, decodeSnapshot } from './messages.js';
 import { buildFolderDiff, checkDiffAgainstDisk, toSnapshotEntry, type FolderDiff, type SnapshotEntry } from './diff.js';
@@ -41,6 +42,7 @@ import { RateLimiter } from './ratelimit.js';
 import { isPeerAllowed, addPeer } from './devices.js';
 import { receiveOffer, makeOfferId, pruneRevokedOffers } from './offers.js';
 import type { DeviceIdentity } from './identity.js';
+import type { ProgressCounts, RelayActivity, TransferFile } from './status.js';
 import { isBundledRuntime, packSelfTgz, runSelfUpdate, runtimeVersion, sha256Hex } from './selfupdate.js';
 import { compareVersions } from './upgrade.js';
 import { reconnectDelayMs } from './args.js';
@@ -60,6 +62,9 @@ export interface FolderState {
   ignoreLines: string[];
   transports: PeerTransport[];
   peers: Map<string, SyncPeer>;
+  /** transport → 对端设备 id 的映射(attach 时写入,detach 时清理);
+   *  仅用于中转遥测记录(把中继目标的对端 id 解析出来),不影响同步逻辑。 */
+  transportDevice: Map<PeerTransport, string>;
   config: SharedFolderConfig;
   /**
    * 首轮扫描是否只建基线(不写同步记录):索引为空(新目录)时为 true,
@@ -104,9 +109,17 @@ export interface PeerSnapshot {
    */
   ignoreLines?: string[];
   /** 对端此刻的传输进度,用于在报告里提示「可能含传输中的中间态」。 */
-  progress?: { pending: number; sending: number; receiving: number };
+  progress?: ProgressCounts;
   /** 本机收齐快照的时刻(毫秒)。 */
   at: number;
+}
+
+/** 从对端取回的单个文件内容(只读,见 file-content-request)。 */
+export interface PeerFileResult {
+  data: Buffer;
+  size: number;
+  /** 对端该条目的版本向量;同步后据此算两端都认可的新版本。 */
+  version?: Array<[string, number]>;
 }
 
 /** 一次目录对比的完整结果(Web 弹窗与 CLI 共用同一份 JSON)。 */
@@ -137,12 +150,62 @@ export interface FolderDiffResult {
   remoteProgress?: PeerSnapshot['progress'];
 }
 
+/**
+ * 双栏对比页一次请求的完整结果:在差异分类之外,额外给出**两侧的条目清单**。
+ *
+ * 差异分类(ADR-0013)刻意不返回 in-sync 的条目 —— 报告里它们没有信息量;
+ * 但目录结构视图必须看到「两边都一样的那些文件」,否则用户无法相信「对齐」是完整的。
+ * 两侧清单 + 分类结果一起给,前端按路径合并成行即可,不必再猜哪条被折叠了。
+ */
+export interface FolderCompareResult extends FolderDiffResult {
+  /** 本机索引条目(含墓碑:UI 按 deleted 决定是否展示)。 */
+  local: SnapshotEntry[];
+  /** 对端快照条目。 */
+  remote: SnapshotEntry[];
+}
+
+/** 单个文件某一侧的状态(内容对比弹窗用)。 */
+export interface FileSideState {
+  exists: boolean;
+  /** 文本内容;二进制 / 过大 / 不存在时为 undefined。 */
+  text?: string;
+  size?: number;
+  binary?: boolean;
+  /** 超过体积上限:不回传内容,只给大小(弹窗降级为整文件覆盖)。 */
+  tooLarge?: boolean;
+  /** 该侧条目的版本向量。 */
+  version?: Array<[string, number]>;
+  /** 取不到内容的原因(对端离线 / 未共享 / 文件不存在 / 读取失败)。 */
+  error?: string;
+}
+
+/** GET /api/folders/file 的响应:同一个文件在本机与对端的两侧状态。 */
+export interface FileCompareResult {
+  folderId: string;
+  folderPath: string;
+  deviceId: string;
+  path: string;
+  local: FileSideState;
+  remote: FileSideState;
+}
+
 /** 对比请求等待对端快照的上限。目录很大时对端要现算摘要 + 分片发送,给足余量。 */
 const SNAPSHOT_TIMEOUT_MS = 20_000;
 /** 一片多少条:2000 条约几百 KB,远低于单帧上限,又不会把大目录拆成几十片。 */
 const SNAPSHOT_CHUNK_ENTRIES = 2000;
 /** 片数上限(仅用于校验对端声明的 total,挡异常/恶意消息造成内存膨胀)。 */
 const MAX_SNAPSHOT_CHUNKS = 500;
+
+/**
+ * 单文件内容对比的体积上限(2 MiB)。
+ *
+ * 内容要经控制通道以 base64 回传(体积 ×4/3),再进 JSON 交给浏览器做行级差异;
+ * 再大既撑爆单帧(chunk 上限 64MB,但大文件会让 UI 卡死),也没有可读性 ——
+ * 超限时弹窗降级为「整文件覆盖」,不回传内容。
+ */
+const FILE_COMPARE_MAX_BYTES = 2 * 1024 * 1024;
+/** 等待对端回文件内容 / 写入回执的上限。 */
+const FILE_REQUEST_TIMEOUT_MS = 20_000;
 
 /**
  * 进度是否表示「此刻真的有传输在跑」。
@@ -152,6 +215,19 @@ const MAX_SNAPSHOT_CHUNKS = 500;
  */
 function isTransferring(p: { pending: number; sending: number; receiving: number }): boolean {
   return p.pending + p.sending + p.receiving > 0;
+}
+
+/**
+ * Buffer → 文本;二进制返回 undefined。
+ *
+ * 判据不只是「含 NUL」:UTF-16 / 部分单字节编码的文件不含 NUL 却也不是可读文本,
+ * 故再补一道 UTF-8 往返校验(解码后重新编码必须与原文逐字节相同)。
+ */
+function decodeText(data: Buffer): string | undefined {
+  if (data.length === 0) return '';
+  if (data.subarray(0, Math.min(data.length, 8192)).includes(0)) return undefined;
+  const text = data.toString('utf8');
+  return Buffer.compare(Buffer.from(text, 'utf8'), data) === 0 ? text : undefined;
 }
 
 export interface SessionManagerDeps {
@@ -234,6 +310,9 @@ export class SyncSessionManager {
   private readonly peerLiveness = new Map<WebSocket, boolean>();
   /** 心跳定时器句柄;close() 时清除,避免阻止 daemon 退出。 */
   private heartbeatTimer: ReturnType<typeof setInterval> | undefined;
+  /** 最近的中转活动环形缓冲(ADR-0014 遥测);上限 100,溢出丢弃最旧。仅供拓扑视图展示。 */
+  private readonly relayActivity: RelayActivity[] = [];
+  private static readonly RELAY_ACTIVITY_CAP = 100;
   /** 等待对端 self-binary-response 的挂起请求(requestId → resolver)。 */
   private readonly pendingBinary = new Map<string, (resp: Extract<ControlMessage, { kind: 'self-binary-response' }>) => void>();
   /**
@@ -251,6 +330,28 @@ export class SyncSessionManager {
       ignoreLines?: string[];
       progress?: PeerSnapshot['progress'];
       resolve: (result: PeerSnapshot) => void;
+      reject: (error: Error) => void;
+      timer: ReturnType<typeof setTimeout>;
+    }
+  >();
+  /**
+   * 等待对端「单个文件内容」的挂起读请求(requestId → resolve/reject)。
+   * 双栏对比页用:文件内容按需索取,一次响应即完成(不像快照要分片),
+   * 故用最简单的 pending 形态。
+   */
+  private readonly pendingPeerFiles = new Map<
+    string,
+    {
+      resolve: (result: PeerFileResult) => void;
+      reject: (error: Error) => void;
+      timer: ReturnType<typeof setTimeout>;
+    }
+  >();
+  /** 等待对端「已按指定内容落盘」回执的挂起写请求。 */
+  private readonly pendingPeerWrites = new Map<
+    string,
+    {
+      resolve: () => void;
       reject: (error: Error) => void;
       timer: ReturnType<typeof setTimeout>;
     }
@@ -352,7 +453,7 @@ export class SyncSessionManager {
     // 索引为空 → 首扫是建基线(存量文件不算新增);索引有存量 → 首扫 diff 是
     // daemon 离线期间的真实改动,要写同步记录
     const baselinePending = usable.length === 0;
-    return { id, indexKey, path: f.path, index, executor, localIndex, ignoreLines, transports: [], peers: new Map(), config: f, baselinePending };
+    return { id, indexKey, path: f.path, index, executor, localIndex, ignoreLines, transports: [], peers: new Map(), transportDevice: new Map(), config: f, baselinePending };
   }
 
   /**
@@ -723,6 +824,7 @@ export class SyncSessionManager {
       : undefined;
     const transport = makePeerTransport(session.socket, session.key, folder.id, rateLimiter);
     folder.transports.push(transport);
+    folder.transportDevice.set(transport, session.remoteDeviceId);
     session.transports.push({ folder, transport });
     const peer = createSyncPeer({
       transport,
@@ -762,7 +864,24 @@ export class SyncSessionManager {
       receiveOnly: folder.config.receiveOnly ?? false,
       // 中转(ADR-0014):收到并落地远程条目后,转发给同目录其它 transport(排除来源端本身)。
       // 仅增量接收触发(peer.ts 内 gate),full 交换已收敛整网,不中转。
-      onLanded: (entries) => relayToSiblings(folder.transports, transport, entries),
+      onLanded: (entries) => {
+        // 先原样执行中转,绝不被遥测记录影响(记录失败也必须照常中转)
+        relayToSiblings(folder.transports, transport, entries);
+        // 遥测:把「本机作为枢纽,把 from 的变更中转给同目录其它设备」记录下来供拓扑视图展示。
+        // 完全旁路、独立 try/catch,任何异常都不允许冒泡到中转路径。
+        try {
+          const from = session.remoteDeviceId;
+          const at = Date.now();
+          for (const t of folder.transports) {
+            if (t === transport) continue;
+            const to = folder.transportDevice.get(t);
+            if (to) this.recordRelay(folder.id, from, to, at);
+          }
+        } catch {
+          // 遥测失败不影响同步:仅记日志,不抛
+          this.logger.warn(`relay telemetry recording failed for folder ${folder.id}`);
+        }
+      },
     });
     session.peers.set(folder.id, peer);
     folder.peers.set(session.remoteDeviceId, peer);
@@ -779,6 +898,8 @@ export class SyncSessionManager {
     for (const t of removed) {
       const i = folder.transports.indexOf(t);
       if (i !== -1) folder.transports.splice(i, 1);
+      // 同步清理 transport → 设备 id 映射,避免悬挂引用
+      folder.transportDevice.delete(t);
     }
     folder.peers.delete(session.remoteDeviceId);
     session.peers.delete(folder.id);
@@ -894,6 +1015,21 @@ export class SyncSessionManager {
       case 'folder-index-snapshot':
         // 我们发出的对比请求的回片
         this.onSnapshotChunk(message);
+        break;
+      case 'file-content-request':
+        // 对端在做文件内容对比:回一份该文件的内容(只读)
+        this.servePeerFile(message.fromDeviceId, message.folderId, message.path, message.requestId);
+        break;
+      case 'file-content-response':
+        // 我们发出的文件内容请求的回包
+        this.onPeerFileResponse(message);
+        break;
+      case 'file-content-write':
+        // 对端要求本机按给定内容落盘并采纳给定版本(对比页的「推到对端」)
+        void this.applyPeerFileWrite(message);
+        break;
+      case 'file-content-write-result':
+        this.onPeerFileWriteResult(message);
         break;
     }
     // 控制面消息多会改动待确认项/共享关系(设备卡与邀请卡的内容),统一通知一次。
@@ -1113,16 +1249,397 @@ export class SyncSessionManager {
     };
   }
 
-  /** 某目录此刻的传输进度(对该目录所有对端求和);全为 0 时返回 undefined。 */
+  /** 某目录此刻的传输进度(对该目录所有对端求和);全为 0 且无在传文件时返回 undefined。 */
   private folderProgress(folder: FolderState): PeerSnapshot['progress'] {
     const sum = { pending: 0, sending: 0, receiving: 0 };
+    const files: TransferFile[] = [];
     for (const peer of folder.peers.values()) {
       const p = peer.getSyncProgress();
       sum.pending += p.pending;
       sum.sending += p.sending;
       sum.receiving += p.receiving;
+      if (p.files) files.push(...p.files);
     }
-    return sum.pending > 0 || sum.sending > 0 || sum.receiving > 0 ? sum : undefined;
+    if (sum.pending > 0 || sum.sending > 0 || sum.receiving > 0 || files.length > 0) {
+      return { ...sum, ...(files.length ? { files } : {}) };
+    }
+    return undefined;
+  }
+
+  /* ---------- 双栏对比:单文件读写(ADR-0013 只读原则的唯一例外) ---------- */
+
+  /** 从对端读取它某个共享目录里单个文件的内容。离线 / 未共享 / 不存在 / 过大一律抛错。 */
+  async fetchPeerFile(deviceId: string, folderId: string, path: string): Promise<PeerFileResult> {
+    const session = this.peerSessions.get(deviceId);
+    if (!session || !this.sessionAlive(session)) throw new Error('设备离线,无法读取对端文件');
+    const requestId = randomBytes(8).toString('hex');
+    return new Promise<PeerFileResult>((resolve, reject) => {
+      const timer = setTimeout(() => {
+        this.pendingPeerFiles.delete(requestId);
+        reject(new Error('对端响应超时(20s)'));
+      }, FILE_REQUEST_TIMEOUT_MS);
+      this.pendingPeerFiles.set(requestId, { resolve, reject, timer });
+      const sent = this.sendControlTo(deviceId, {
+        kind: 'file-content-request',
+        requestId,
+        fromDeviceId: this.identity.deviceId,
+        folderId,
+        path,
+      });
+      if (!sent) {
+        clearTimeout(timer);
+        this.pendingPeerFiles.delete(requestId);
+        reject(new Error('发送文件请求失败(设备可能刚离线)'));
+      }
+    });
+  }
+
+  /** 让对端按给定内容落盘并采纳给定版本。 */
+  async writePeerFile(
+    deviceId: string,
+    folderId: string,
+    path: string,
+    data: Buffer,
+    version: VersionVector,
+  ): Promise<void> {
+    const session = this.peerSessions.get(deviceId);
+    if (!session || !this.sessionAlive(session)) throw new Error('设备离线,无法写入对端文件');
+    const requestId = randomBytes(8).toString('hex');
+    return new Promise<void>((resolve, reject) => {
+      const timer = setTimeout(() => {
+        this.pendingPeerWrites.delete(requestId);
+        reject(new Error('对端响应超时(20s):文件可能并未写入'));
+      }, FILE_REQUEST_TIMEOUT_MS);
+      this.pendingPeerWrites.set(requestId, { resolve, reject, timer });
+      const sent = this.sendControlTo(deviceId, {
+        kind: 'file-content-write',
+        requestId,
+        fromDeviceId: this.identity.deviceId,
+        folderId,
+        path,
+        data: data.toString('base64'),
+        entryVersion: [...version.entries()],
+      });
+      if (!sent) {
+        clearTimeout(timer);
+        this.pendingPeerWrites.delete(requestId);
+        reject(new Error('发送写入请求失败(设备可能刚离线)'));
+      }
+    });
+  }
+
+  /**
+   * 对端索取文件内容时由本机执行:回一份只读内容。
+   *
+   * 与索引快照共用同一道共享关系闸门 —— 目录没把对方列进 devices 就一个字节都不给,
+   * 否则这条诊断通道会变成绕过共享关系的任意文件读取入口。
+   */
+  private servePeerFile(deviceId: string, folderId: string, path: string, requestId: string): void {
+    const reply = (extra: { data?: string; size?: number; entryVersion?: Array<[string, number]>; error?: string }): void => {
+      this.sendControlTo(deviceId, {
+        kind: 'file-content-response',
+        requestId,
+        fromDeviceId: this.identity.deviceId,
+        folderId,
+        path,
+        ...extra,
+      });
+    };
+    const folder = this.folderStates.find(
+      (f) => f.id === folderId && (f.config.devices ?? []).includes(deviceId),
+    );
+    if (!folder) {
+      reply({ error: '该目录未共享给请求方' });
+      return;
+    }
+    // 只认索引里登记在册的活条目:索引之外的文件(被忽略规则排除、或刚被删除)
+    // 不该经这条通道被读走 —— 它反映的是「参与同步的内容」,不是磁盘全貌
+    const entry = folder.localIndex.get(path);
+    if (!entry || entry.deleted) {
+      reply({ error: '该文件不存在(或已删除)' });
+      return;
+    }
+    try {
+      // resolveSharePath 同时挡掉硬忽略路径与符号链接越界
+      const abs = resolveSharePath(folder.path, path);
+      const st = statSync(abs);
+      if (!st.isFile()) {
+        reply({ error: '该路径不是文件' });
+        return;
+      }
+      if (st.size > FILE_COMPARE_MAX_BYTES) {
+        reply({
+          error: `文件过大(${Math.round(st.size / 1024)}KB,上限 ${Math.round(FILE_COMPARE_MAX_BYTES / 1024)}KB),不支持内容对比`,
+        });
+        return;
+      }
+      const data = readFileSync(abs);
+      reply({ data: data.toString('base64'), size: data.length, entryVersion: [...entry.version.entries()] });
+    } catch (e) {
+      reply({ error: e instanceof Error ? e.message : '读取失败' });
+    }
+  }
+
+  private onPeerFileResponse(message: Extract<ControlMessage, { kind: 'file-content-response' }>): void {
+    const pending = this.pendingPeerFiles.get(message.requestId);
+    if (!pending) return; // 超时之后迟到的响应:直接丢弃
+    clearTimeout(pending.timer);
+    this.pendingPeerFiles.delete(message.requestId);
+    if (message.error || message.data === undefined) {
+      pending.reject(new Error(message.error ?? '对端未提供文件内容'));
+      return;
+    }
+    pending.resolve({
+      data: Buffer.from(message.data, 'base64'),
+      size: message.size ?? message.data.length,
+      ...(message.entryVersion ? { version: message.entryVersion } : {}),
+    });
+  }
+
+  private onPeerFileWriteResult(message: Extract<ControlMessage, { kind: 'file-content-write-result' }>): void {
+    const pending = this.pendingPeerWrites.get(message.requestId);
+    if (!pending) return;
+    clearTimeout(pending.timer);
+    this.pendingPeerWrites.delete(message.requestId);
+    if (message.ok) pending.resolve();
+    else pending.reject(new Error(message.error ?? '对端写入失败'));
+  }
+
+  /**
+   * 对端要求本机按给定内容落盘(对比页的「推到对端」):校验共享关系与路径,
+   * 写盘后**采纳对端给定的版本**而不是自增本机计数器 —— 自增会把这次写入判成
+   * 「本机新编辑」再推回对端,一次点击变成两轮无意义传输。
+   */
+  private async applyPeerFileWrite(message: Extract<ControlMessage, { kind: 'file-content-write' }>): Promise<void> {
+    const { fromDeviceId, folderId, path, requestId } = message;
+    const fail = (error: string): void => {
+      this.sendControlTo(fromDeviceId, {
+        kind: 'file-content-write-result',
+        requestId,
+        fromDeviceId: this.identity.deviceId,
+        folderId,
+        path,
+        ok: false,
+        error,
+      });
+    };
+    const folder = this.folderStates.find(
+      (f) => f.id === folderId && (f.config.devices ?? []).includes(fromDeviceId),
+    );
+    if (!folder) {
+      fail('该目录未共享给请求方');
+      return;
+    }
+    try {
+      const data = Buffer.from(message.data, 'base64');
+      if (data.length > FILE_COMPARE_MAX_BYTES) {
+        fail('内容超过体积上限');
+        return;
+      }
+      this.writeLocalFile(folder, path, data, new Map(message.entryVersion));
+      this.sendControlTo(fromDeviceId, {
+        kind: 'file-content-write-result',
+        requestId,
+        fromDeviceId: this.identity.deviceId,
+        folderId,
+        path,
+        ok: true,
+      });
+      this.logger.info(`compare sync: wrote ${folderId}/${path} (${data.length}B) requested by ${fromDeviceId}`);
+      this.notifyStatus();
+    } catch (e) {
+      fail(e instanceof Error ? e.message : '写入失败');
+    }
+  }
+
+  /**
+   * 原子写文件并以**给定版本**登记索引(写临时文件 + rename,与执行器同一套落地方式)。
+   * 版本由调用方给:这是「按指定内容对齐」,不是本机新编辑。
+   */
+  private writeLocalFile(folder: FolderState, path: string, data: Buffer, version: VersionVector): IndexEntry {
+    const abs = resolveSharePath(folder.path, path);
+    mkdirSync(dirname(abs), { recursive: true });
+    const tmp = `${abs}.syncx-tmp`;
+    writeFileSync(tmp, data);
+    renameSync(tmp, abs);
+    const entry: IndexEntry = {
+      path,
+      version,
+      size: data.length,
+      deleted: false,
+      blocks: splitIntoBlocks(data).map(hashBlock),
+      mtime: statSync(abs).mtimeMs,
+    };
+    folder.index.saveEntry(entry);
+    folder.localIndex.set(path, entry);
+    return entry;
+  }
+
+  /** 双栏对比:差异分类之外再给出两侧条目清单(见 FolderCompareResult)。全程只读。 */
+  async compareFolder(folderId: string, deviceId: string): Promise<FolderCompareResult> {
+    const folder = this.folderStates.find((f) => f.id === folderId);
+    if (!folder) throw new Error('共享目录不存在(可能刚被移除)');
+    if (!(folder.config.devices ?? []).includes(deviceId)) {
+      throw new Error('该目录未与这台设备共享,无法对比');
+    }
+    const snapshot = await this.fetchPeerSnapshot(deviceId, folderId);
+    const diff = buildFolderDiff({
+      local: folder.localIndex,
+      remote: snapshot.entries,
+      localRules: parseIgnoreRules(folder.ignoreLines),
+      ...(snapshot.ignoreLines ? { remoteRules: parseIgnoreRules(snapshot.ignoreLines) } : {}),
+    });
+    checkDiffAgainstDisk(folder.path, diff.items);
+    const link = this.describeDevice(deviceId);
+    const localProgress = this.folderProgress(folder);
+    const remoteProgress = snapshot.progress;
+    return {
+      folderId,
+      folderPath: folder.path,
+      deviceId,
+      ...(link.version ? { deviceVersion: link.version } : {}),
+      ...(link.hostname ? { deviceHostname: link.hostname } : {}),
+      ...(link.url ? { deviceUrl: link.url } : {}),
+      localHostname: osHostname(),
+      localAddresses: getLanAddresses().map((a) => a.address),
+      remoteAt: snapshot.at,
+      diff,
+      local: [...folder.localIndex.values()].map(toSnapshotEntry),
+      remote: snapshot.entries,
+      ...(localProgress && isTransferring(localProgress) ? { localProgress } : {}),
+      ...(remoteProgress && isTransferring(remoteProgress) ? { remoteProgress } : {}),
+    };
+  }
+
+  /** 读本机某文件在对比弹窗里的一侧状态(越界 / 缺失 / 二进制 / 过大都如实标记)。 */
+  private readLocalFileForCompare(folder: FolderState, path: string): FileSideState {
+    const v = folder.localIndex.get(path);
+    const version = v ? [...v.version.entries()] : undefined;
+    try {
+      const abs = resolveSharePath(folder.path, path);
+      const st = statSync(abs);
+      if (!st.isFile()) return { exists: false, ...(version ? { version } : {}) };
+      if (st.size > FILE_COMPARE_MAX_BYTES) {
+        return { exists: true, size: st.size, tooLarge: true, ...(version ? { version } : {}) };
+      }
+      const text = decodeText(readFileSync(abs));
+      return {
+        exists: true,
+        size: st.size,
+        ...(text === undefined ? { binary: true } : { text }),
+        ...(version ? { version } : {}),
+      };
+    } catch {
+      return { exists: false, ...(version ? { version } : {}) };
+    }
+  }
+
+  /** 本机文件字节;不存在 / 越界 / 非文件 / 超过上限时返回 undefined。 */
+  private tryReadLocalBytes(folder: FolderState, path: string): Buffer | undefined {
+    try {
+      const abs = resolveSharePath(folder.path, path);
+      const st = statSync(abs);
+      if (!st.isFile() || st.size > FILE_COMPARE_MAX_BYTES) return undefined;
+      return readFileSync(abs);
+    } catch {
+      return undefined;
+    }
+  }
+
+  /** 同一个文件在本机与对端的两侧状态(内容对比弹窗的数据源)。只读。 */
+  async readFilePair(folderId: string, deviceId: string, path: string): Promise<FileCompareResult> {
+    const folder = this.folderStates.find((f) => f.id === folderId);
+    if (!folder) throw new Error('共享目录不存在(可能刚被移除)');
+    if (!(folder.config.devices ?? []).includes(deviceId)) {
+      throw new Error('该目录未与这台设备共享,无法对比');
+    }
+    const local = this.readLocalFileForCompare(folder, path);
+    let remote: FileSideState;
+    try {
+      const r = await this.fetchPeerFile(deviceId, folderId, path);
+      const text = decodeText(r.data);
+      remote = {
+        exists: true,
+        size: r.size,
+        ...(text === undefined ? { binary: true } : { text }),
+        ...(r.version ? { version: r.version } : {}),
+      };
+    } catch (e) {
+      // 对端离线 / 文件不存在 / 过大:都要如实交给弹窗,由它决定怎么提示
+      remote = { exists: false, error: e instanceof Error ? e.message : '读取对端文件失败' };
+    }
+    return { folderId, folderPath: folder.path, deviceId, path, local, remote };
+  }
+
+  /**
+   * 把一侧文件的内容同步到另一侧(对比页的「逐块应用 / 整文件覆盖」)。
+   *
+   * 唯一需要小心的是**版本怎么给**:
+   *  - 写入后两侧内容完全一致 → 两侧都置为 merge(本地,对端):立刻收敛,不再互推;
+   *  - 只应用了部分差异块(两侧仍不同) → 目标侧置为 merge 后再自增**目标设备**的
+   *    计数器,即把它当作目标侧的一次真实编辑,由正常同步把它传播过去收敛。
+   *
+   * 第二种情况下绝不能把两侧版本设成相等 —— 那就是 ADR-0013 里最强的异常信号
+   * 「版本相同但内容不同」:两端都以为一致,这份差异会永远沉下去。
+   */
+  async applyFileSync(opts: {
+    folderId: string;
+    deviceId: string;
+    path: string;
+    direction: 'pull' | 'push';
+    /** 目标侧最终内容;省略表示「照抄来源侧整文件」。 */
+    content?: string;
+  }): Promise<void> {
+    const { folderId, deviceId, path, direction, content } = opts;
+    const folder = this.folderStates.find((f) => f.id === folderId);
+    if (!folder) throw new Error('共享目录不存在(可能刚被移除)');
+    if (!(folder.config.devices ?? []).includes(deviceId)) {
+      throw new Error('该目录未与这台设备共享,无法同步');
+    }
+    const localEntry = folder.localIndex.get(path);
+    const localBytes = this.tryReadLocalBytes(folder, path);
+
+    // 即便内容由前端给定,也要读一次对端:版本向量必须来自对端索引,不能用前端传的
+    let remoteData: Buffer | undefined;
+    let remoteVersion: VersionVector = createVersionVector();
+    try {
+      const r = await this.fetchPeerFile(deviceId, folderId, path);
+      remoteData = r.data;
+      remoteVersion = new Map(r.version ?? []);
+    } catch (e) {
+      if (direction === 'pull') {
+        throw new Error(`读取对端文件失败:${e instanceof Error ? e.message : String(e)}`);
+      }
+    }
+    const merged = mergeVersions(localEntry?.version ?? createVersionVector(), remoteVersion);
+
+    if (direction === 'pull') {
+      const target = content !== undefined ? Buffer.from(content, 'utf8') : remoteData;
+      if (!target) throw new Error('对端文件内容不可用,无法拉取');
+      const identical = !!remoteData && Buffer.compare(target, remoteData) === 0;
+      const version = identical ? merged : incrementVersion(merged, this.identity.deviceId);
+      this.writeLocalFile(folder, path, target, version);
+      recordSyncEvent(this.configPath, {
+        ts: Date.now(), path, action: 'update', direction: 'remote', deviceId, folderId,
+      });
+    } else {
+      const target = content !== undefined ? Buffer.from(content, 'utf8') : localBytes;
+      if (!target) throw new Error('本机文件不存在或过大,无法推送');
+      const identical = !!localBytes && Buffer.compare(target, localBytes) === 0;
+      const remoteTarget = identical ? merged : incrementVersion(merged, deviceId);
+      await this.writePeerFile(deviceId, folderId, path, target, remoteTarget);
+      // 本机内容没动,但版本要跟到 merge:否则本机仍以旧版本自居,下一轮会把
+      // 同一份内容当作「本机较新」再推一次
+      if (localEntry) {
+        const updated: IndexEntry = { ...localEntry, version: merged };
+        folder.index.saveEntry(updated);
+        folder.localIndex.set(path, updated);
+      }
+      recordSyncEvent(this.configPath, {
+        ts: Date.now(), path, action: 'update', direction: 'local', deviceId, folderId,
+      });
+    }
+    this.notifyStatus();
   }
 
   /**
@@ -1414,6 +1931,19 @@ export class SyncSessionManager {
       }
     }
     return result;
+  }
+
+  /** 记录一次中转活动(本机把 from 的目录变更中转给了同目录的 to);环形缓冲,溢出丢弃最旧。 */
+  private recordRelay(folder: string, from: string, to: string, at: number): void {
+    this.relayActivity.push({ folder, from, to, at });
+    if (this.relayActivity.length > SyncSessionManager.RELAY_ACTIVITY_CAP) {
+      this.relayActivity.splice(0, this.relayActivity.length - SyncSessionManager.RELAY_ACTIVITY_CAP);
+    }
+  }
+
+  /** 返回最近的中转活动副本(拓扑视图用);空数组表示尚无中转。 */
+  getRelayActivity(): RelayActivity[] {
+    return this.relayActivity.slice();
   }
 
   /** 全部目录的索引统计(条目/墓碑数)。 */

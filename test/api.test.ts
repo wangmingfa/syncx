@@ -1260,3 +1260,128 @@ describe('dev 运行态拦截自更新接口', () => {
     server.close();
   });
 });
+
+/** 读原始响应体(页面壳是 HTML,不能用 fetchJson 的 JSON.parse)。 */
+function fetchRaw(
+  port: number,
+  path: string,
+  token?: string,
+): Promise<{ status: number; text: string }> {
+  return new Promise((resolve, reject) => {
+    const req = request(
+      {
+        host: '127.0.0.1',
+        port,
+        path,
+        method: 'GET',
+        headers: token ? { Authorization: `Bearer ${token}` } : {},
+      },
+      (res) => {
+        res.setEncoding('utf8');
+        let data = '';
+        res.on('data', (chunk) => {
+          data += chunk;
+        });
+        res.on('end', () => resolve({ status: res.statusCode ?? 0, text: data }));
+      },
+    );
+    req.on('error', reject);
+    req.end();
+  });
+}
+
+describe('control api 双栏对比', () => {
+  it('compare 缺 folderId / device 一律 400', async () => {
+    const server = createControlServer({
+      token: 'secret',
+      getStatus: () => ({}),
+      compareFolder: async () => ({}),
+    });
+    server.listen(0, '127.0.0.1');
+    await once(server, 'listening');
+    const port = (server.address() as AddressInfo).port;
+
+    expect((await fetchJson(port, '/api/folders/compare?device=D1', 'secret')).status).toBe(400);
+    expect((await fetchJson(port, '/api/folders/compare?folderId=f1', 'secret')).status).toBe(400);
+    server.close();
+  });
+
+  it('compare 正常时透出两侧数据', async () => {
+    const server = createControlServer({
+      token: 'secret',
+      getStatus: () => ({}),
+      compareFolder: async (folderId, deviceId) => ({ folderId, deviceId, local: [], remote: [] }),
+    });
+    server.listen(0, '127.0.0.1');
+    await once(server, 'listening');
+    const port = (server.address() as AddressInfo).port;
+
+    const res = await fetchJson(port, '/api/folders/compare?folderId=f1&device=D1', 'secret');
+    expect(res.status).toBe(200);
+    expect(res.body).toMatchObject({ folderId: 'f1', deviceId: 'D1' });
+    server.close();
+  });
+
+  it('file 缺任一参数返回 400', async () => {
+    const server = createControlServer({
+      token: 'secret',
+      getStatus: () => ({}),
+      readFilePair: async () => ({}),
+    });
+    server.listen(0, '127.0.0.1');
+    await once(server, 'listening');
+    const port = (server.address() as AddressInfo).port;
+
+    expect((await fetchJson(port, '/api/folders/file?folderId=f1&device=D1', 'secret')).status).toBe(400);
+    expect((await fetchJson(port, '/api/folders/file?folderId=f1&path=p', 'secret')).status).toBe(400);
+    server.close();
+  });
+
+  it('file/sync 拒绝非法 direction,合法时透传参数', async () => {
+    const calls: Array<Record<string, unknown>> = [];
+    const server = createControlServer({
+      token: 'secret',
+      getStatus: () => ({}),
+      applyFileSync: async (opts) => {
+        calls.push({ ...opts });
+      },
+    });
+    server.listen(0, '127.0.0.1');
+    await once(server, 'listening');
+    const port = (server.address() as AddressInfo).port;
+
+    const bad = await fetchJson(port, '/api/folders/file/sync', 'secret', {
+      method: 'POST',
+      body: { folderId: 'f1', device: 'D1', path: 'a.txt', direction: 'sideways' },
+    });
+    expect(bad.status).toBe(400);
+    expect(calls).toEqual([]);
+
+    const ok = await fetchJson(port, '/api/folders/file/sync', 'secret', {
+      method: 'POST',
+      body: { folderId: 'f1', device: 'D1', path: 'a.txt', direction: 'push', content: 'x' },
+    });
+    expect(ok.status).toBe(200);
+    expect(calls).toEqual([
+      { folderId: 'f1', deviceId: 'D1', path: 'a.txt', direction: 'push', content: 'x' },
+    ]);
+    server.close();
+  });
+
+  it('GET /compare/<id> 免认证返回页面壳,未知路径仍 404', async () => {
+    const server = createControlServer({ token: 'secret', getStatus: () => ({}) });
+    server.listen(0, '127.0.0.1');
+    await once(server, 'listening');
+    const port = (server.address() as AddressInfo).port;
+
+    // 路径路由要能刷新 / 分享:服务端必须回页面壳,否则刷新直接 404
+    const shell = await fetchRaw(port, '/compare/f1');
+    expect(shell.status).toBe(200);
+    expect(shell.text).toContain('/client.js');
+
+    // SPA fallback 只放行 /compare 这一棵子树:拼错的 API 路径不能被掩盖成一张空页面
+    const unknown = await fetchRaw(port, '/nope', 'secret');
+    expect(unknown.status).toBe(404);
+    server.close();
+  });
+});

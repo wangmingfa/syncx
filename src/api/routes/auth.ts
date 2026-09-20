@@ -94,6 +94,15 @@ export async function tryPublicAuthRoutes(
     return true;
   }
 
+  // GET /compare/* : 双栏对比页(纯 CSR,路径里带目录 id、设备走查询参数)。
+  // 用路径路由而不是哈希路由,链接可分享、可刷新 —— 代价是服务端必须对这个路径
+  // 回页面壳,否则刷新直接 404。刻意只放行 /compare 这一棵子树:其余未知路径仍按
+  // 原样 404,不让「任何路径都回首页」把拼错的 API 路径掩盖成一张空页面。
+  if (req.method === 'GET' && (path === '/compare' || path.startsWith('/compare/'))) {
+    sendHtml(res, UI_SHELL);
+    return true;
+  }
+
   // POST /login : 令牌登录(恢复通道)。同样下发签名会话,不再把 token 原文写进 cookie ——
   // 分号/空格/非 ASCII 会破坏 cookie 语法(甚至让 writeHead 抛错),签名串天然是安全字符集。
   if (req.method === 'POST' && path === '/login') {
