@@ -17,7 +17,7 @@ import { join } from 'node:path';
 import { spawn, type ChildProcess } from 'node:child_process';
 import { loadOrCreateIdentity } from '../../src/identity.js';
 import { openIndexStore } from '../../src/indexstore.js';
-import { hashBlock } from '../../src/blockstore.js';
+import { hashBlock, splitIntoBlocks } from '../../src/blockstore.js';
 import { folderIdFor, folderIndexPath } from '../../src/config.js';
 import { allocatePort, cleanDaemonEnv } from './ports.js';
 
@@ -92,7 +92,9 @@ async function setupDaemon(
       version: new Map([[identity.deviceId, 1]]),
       size: file.content.length,
       deleted: false,
-      blocks: [hashBlock(file.content)],
+      // 必须按 BLOCK_SIZE 切块再算哈希:直接 hashBlock(整个文件)只在单块文件上凑巧相等,
+      // 多块文件的索引会指向一个对端永远给不出的块哈希 → 传输静默卡死。
+      blocks: splitIntoBlocks(file.content).map(hashBlock),
     });
   }
   index.close();
@@ -611,6 +613,123 @@ describe('peer version visibility under dual connections (peerInfo regression)',
       rmDir(a.dir);
       rmDir(b.dir);
       rmDir(c.dir);
+    },
+    120000,
+  );
+});
+
+/* ==================== 对比弹窗:图片预览 ==================== */
+
+/** 真实可解码的 1×1 纯色 PNG(测试只关心字节能原样往返,不关心画面)。 */
+const PNG_1PX = Buffer.from(
+  'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mO4o6HxHwAFPAIs0Zo91QAAAABJRU5ErkJggg==',
+  'base64',
+);
+
+interface CompareSide {
+  exists: boolean;
+  text?: string;
+  size?: number;
+  binary?: boolean;
+  tooLarge?: boolean;
+  image?: { mime: string; data: string };
+  error?: string;
+}
+
+interface ComparePair {
+  local: CompareSide;
+  remote: CompareSide;
+}
+
+/** 携带落盘令牌索取「同一个文件的两侧状态」(对比弹窗的数据源)。 */
+async function getFilePair(
+  setup: DaemonSetup,
+  folderId: string,
+  deviceId: string,
+  filePath: string,
+): Promise<ComparePair> {
+  const token = readFileSync(join(setup.dir, 'control.token'), 'utf8').trim();
+  const res = await fetch(
+    `http://127.0.0.1:${setup.controlPort}/api/folders/file?folderId=${folderId}` +
+      `&device=${encodeURIComponent(deviceId)}&path=${encodeURIComponent(filePath)}`,
+    { headers: { Authorization: `Bearer ${token}` } },
+  );
+  if (!res.ok) {
+    throw new Error(`GET /api/folders/file returned ${res.status}: ${await res.text()}`);
+  }
+  return (await res.json()) as ComparePair;
+}
+
+describe('file compare:图片预览', () => {
+  it(
+    '图片两侧都带回 MIME 与 base64;体积上限按类型分档(3 MiB 的图可预览,同样大的非图片降级)',
+    async () => {
+      // 两个同名不同后缀、同为 3 MiB 的文件,用来把「按类型分档」这条规则钉住:
+      // 文本上限 2 MiB 会让它们都读不了,图片上限 8 MiB 只放行 .png 那个。
+      const bigPng = Buffer.concat([PNG_1PX, Buffer.alloc(3 * 1024 * 1024, 0x41)]);
+      const bigBin = Buffer.alloc(3 * 1024 * 1024, 0x42);
+
+      const a = await setupDaemon('a', [
+        { path: 'pic.png', content: PNG_1PX },
+        { path: 'big.png', content: bigPng },
+        { path: 'big.bin', content: bigBin },
+      ]);
+      const b = await setupDaemon('b', []);
+
+      startDaemon(a, [`ws://127.0.0.1:${b.peerPort}`], [b.deviceId]);
+      await waitForDaemonReady(a);
+      startDaemon(b, [`ws://127.0.0.1:${a.peerPort}`], [a.deviceId]);
+
+      // 先让 B 真拿到这三个文件:对端必须「索引里有、盘上也有」才给得出内容
+      try {
+        await waitFor(
+          () =>
+            ['pic.png', 'big.png', 'big.bin'].every((f) => existsSync(join(b.share, f))),
+          60000,
+        );
+      } catch (error) {
+        dumpLogs(a, b);
+        throw error;
+      }
+
+      // ---- 小图:两侧都给 MIME + base64,且 base64 解回来就是原字节 ----
+      const pic = await getFilePair(a, 'main', b.deviceId, 'pic.png');
+      expect(pic.local.image?.mime).toBe('image/png');
+      expect(pic.remote.image?.mime).toBe('image/png');
+      expect(Buffer.from(pic.local.image!.data, 'base64').equals(PNG_1PX)).toBe(true);
+      expect(Buffer.from(pic.remote.image!.data, 'base64').equals(PNG_1PX)).toBe(true);
+      // 图片就是二进制:text 不给(前端据此走「看图」而不是「逐行」)
+      expect(pic.local.binary).toBe(true);
+      expect(pic.local.text).toBeUndefined();
+      expect(pic.local.tooLarge).toBeUndefined();
+      expect(pic.local.size).toBe(PNG_1PX.length);
+
+      // 反方向也成立:B 读 A 的图片
+      const picFromB = await getFilePair(b, 'main', a.deviceId, 'pic.png');
+      expect(picFromB.local.image?.mime).toBe('image/png');
+      expect(picFromB.remote.image?.mime).toBe('image/png');
+
+      // ---- 3 MiB 的 png:超过文本上限、仍在图片上限内 → 照样预览(本 ADR 的行为变更点) ----
+      const big = await getFilePair(a, 'main', b.deviceId, 'big.png');
+      expect(big.local.size).toBe(bigPng.length);
+      expect(big.local.size!).toBeGreaterThan(2 * 1024 * 1024);
+      expect(big.local.tooLarge).toBeUndefined();
+      expect(big.local.image?.mime).toBe('image/png');
+      expect(big.remote.image?.mime).toBe('image/png');
+      expect(big.remote.size).toBe(bigPng.length);
+      // 对端回传的字节与来源侧一致(3 MiB 的 base64 也一路带回来了,没被上限截断)
+      expect(big.remote.image?.data).toBe(big.local.image?.data);
+
+      // ---- 同样大的非图片:仍按文本上限降级为「整文件覆盖」,一个字节都不回传 ----
+      const bin = await getFilePair(a, 'main', b.deviceId, 'big.bin');
+      expect(bin.local.size).toBe(bigBin.length);
+      expect(bin.local.tooLarge).toBe(true);
+      expect(bin.local.image).toBeUndefined();
+      expect(bin.local.text).toBeUndefined();
+
+      await stopChildren();
+      rmDir(a.dir);
+      rmDir(b.dir);
     },
     120000,
   );

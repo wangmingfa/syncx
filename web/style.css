@@ -2071,6 +2071,31 @@ tbody tr:last-child td {
   stroke-width: 1.7;
 }
 
+/* Rust 的实心齿轮:整块吃 currentColor,R 靠 evenodd 镂空(见 FileIcon.vue) */
+.cmp-svg__rust {
+  fill: currentColor;
+  stroke: none;
+}
+
+/* 整块实心的自定义轮廓(MoonBit 吉祥物):形状由 mask 决定,本身只负责染色 */
+.cmp-svg__solid {
+  fill: currentColor;
+  stroke: none;
+}
+
+/* JSON 的花括号:比默认笔画粗一档(1.4 → 1.7)。要写在这里而不是元素上的
+   stroke-width 属性 —— 呈现属性斗不过 .cmp-svg 的元素选择器。 */
+.cmp-svg__brace {
+  stroke-width: 1.7;
+}
+
+/* Markdown:实心方块 + 白字。方块用 .cmp-svg__badge(吃 currentColor),
+   字母比 js/ts 的单个字母细一点 —— M 加下箭头在小尺寸下笔画会挨在一起。 */
+.cmp-icon--markdown .cmp-svg__badge-letter {
+  stroke: #fff;
+  stroke-width: 1.3;
+}
+
 /* JS:黄底 + 深字,再补一圈深色细边(纯黄块在浅底上太飘,加边才有轮廓) */
 .cmp-icon--js .cmp-svg__badge {
   stroke: #6b6350;
@@ -2088,7 +2113,9 @@ tbody tr:last-child td {
 /* 文件类型图标配色:同一类别同色,便于扫读;取中间明度,浅底上清晰且不抢正文。
    代码按语言取品牌色(整体压暗一档),色相相近的靠图形区分(rust 齿轮 / react 原子 /
    python 蛇 / go 地鼠 / java 咖啡杯 / c 字母 C / sql 圆柱)。 */
-.cmp-icon--rust { color: #b7410e; }
+.cmp-icon--rust { color: #c1440e; }
+/* MoonBit:官方 logo 的品牌洋红。比 media 的 #c0488a 再深一档,免得两枚粉紫图标撞色 */
+.cmp-icon--moonbit { color: #b3367f; }
 .cmp-icon--js { color: #f0c808; }
 .cmp-icon--ts { color: #2f74c0; }
 .cmp-icon--react { color: #0891b2; }
@@ -2103,7 +2130,12 @@ tbody tr:last-child td {
 .cmp-icon--shell { color: #2f9e8f; }
 /* 通用源码(没有专属图形的语言):比 TS 徽标浅一档的蓝,别和 ts 撞色 */
 .cmp-icon--code { color: #4a83cb; }
+/* JSON:琥珀金,与编辑器里 json 的常见配色一致 */
+.cmp-icon--json { color: #c98a12; }
+/* 通用配置(yaml/toml/ini/.env):同色系但暗一档,与 json 靠图形区分 */
 .cmp-icon--data { color: #b07a1f; }
+/* Markdown:官方方块的蓝,比 ts 的亮蓝略深,免得两块实心蓝徽标分不出 */
+.cmp-icon--markdown { color: #3f6ea8; }
 .cmp-icon--doc { color: #5b6b7f; }
 .cmp-icon--image { color: #7a5cc0; }
 .cmp-icon--archive { color: #c0762a; }
@@ -2175,10 +2207,21 @@ tbody tr:last-child td {
 /* ---------- 文件内容对比弹窗 ---------- */
 
 .fd-modal {
-  width: min(1100px, 94vw);
+  /* 百分比宽度:随窗口伸缩,不再被固定上限卡住 —— 并排差异要尽量铺开才好读。
+     .modal-overlay 两侧各有 20px 内边距,该百分比是相对那个内容盒算的。 */
+  width: 96%;
   max-width: none;
   display: flex;
   flex-direction: column;
+}
+
+/* 能逐行对比时,高度也按百分比撑开(同为相对 overlay 内容盒),
+   并解除 .modal 的 88vh 上限:长文件一屏能多看十几行。
+   只有「有内容可比」时才挂这个类 —— 二进制/一侧缺失的降级态内容很少,
+   强撑满屏只会留一片空白。 */
+.fd-modal--tall {
+  height: 94%;
+  max-height: none;
 }
 
 .fd-legend__role {
@@ -2200,9 +2243,12 @@ tbody tr:last-child td {
   font-size: 13px;
 }
 
+/* 对比区吃掉弹窗里除标题/图例/操作区之外的全部高度(高度由 .fd-modal--tall 给定),
+   而不是靠给窗格写死 max-height —— 后者跟弹窗高度是两套数,改一处就漂。 */
 .fd-body {
   display: flex;
   flex-direction: column;
+  flex: 1 1 auto;
   min-height: 0;
 }
 
@@ -2230,10 +2276,112 @@ tbody tr:last-child td {
   letter-spacing: 0;
 }
 
-/* 左右各一个独立滚动区:横向滚动互不干扰,行号/按钮用 sticky 钉在窗格边上 */
-.fd-rows {
+/* 表头中间那格:摘要(几行有差异 / 图片是否一致)+ 可选的视图切换 */
+.fd-head__mid {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+
+/* 「预览 / 逐行」切换:今天只有 svg 两种视图都可用时才出现 */
+.fd-view {
+  display: inline-flex;
+  border: 1px solid var(--border-strong);
+  border-radius: 6px;
+  overflow: hidden;
+}
+
+.fd-view__tab {
+  padding: 1px 8px;
+  border: 0;
+  background: #fff;
+  color: var(--muted-strong);
+  font-size: 11px;
+  font-weight: 600;
+  letter-spacing: 0;
+  cursor: pointer;
+}
+
+.fd-view__tab + .fd-view__tab {
+  border-left: 1px solid var(--border-strong);
+}
+
+.fd-view__tab.is-active {
+  background: var(--accent-soft);
+  color: var(--accent);
+}
+
+/* 图片视图:并排两张,高度由 .fd-body 撑满(能预览时弹窗已是 --tall) */
+.fd-images {
   display: grid;
   grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
+  gap: 10px;
+  flex: 1 1 auto;
+  min-height: 0;
+}
+
+.fd-image {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+  min-height: 0;
+  border: 1px solid var(--border);
+  border-radius: 9px;
+  overflow: hidden;
+  background: #fff;
+}
+
+/* 图片框:透明像素透出棋盘格,窗格空白处保持干净 ——
+   棋盘格若铺在整块 stage 上,空白区也全是格子,反而分不清图里哪块是透明的。 */
+.fd-image__stage {
+  display: flex;
+  flex: 1 1 auto;
+  align-items: center;
+  justify-content: center;
+  min-height: 0;
+  padding: 10px;
+  overflow: hidden;
+  background: #fff;
+}
+
+/* 只缩不放:比窗格小的图(图标、小截图)按原始像素显示 —— 拉大只会糊,
+   而「它本来是多大」正是下面 meta 要报的信息。
+   `border-box` 是全局的,这条 1px 边框不会让图超出 stage;
+   它是给「白底图压在白底窗格上」留一个边界,否则图片范围看不出来。 */
+.fd-image__stage img {
+  max-width: 100%;
+  max-height: 100%;
+  border: 1px solid var(--border);
+  background-color: #fff;
+  background-image: repeating-conic-gradient(#f1f3f6 0% 25%, #fff 0% 50%);
+  background-size: 16px 16px;
+}
+
+.fd-image__nil {
+  padding: 8px 6px;
+  color: var(--muted);
+  font-size: 12px;
+  text-align: center;
+}
+
+/* 一侧的单行说明:尺寸 · 大小。尺寸要等 <img> 解码完才填(先只有大小)。
+   窗格里没有图时这行留空但保留高度,两侧窗格才不会一高一矮。 */
+.fd-image__meta {
+  flex: 0 0 auto;
+  min-height: 21px;
+  padding: 4px 8px;
+  border-top: 1px solid var(--border);
+  background: var(--bg-soft);
+  color: var(--muted-strong);
+  font-size: 11px;
+}
+
+/* 左右各一个独立滚动区:横向同步滚动位置,行号/按钮用 sticky 钉在窗格边上 */
+.fd-rows {
+  --fd-line-height: 1.55;
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
+  flex: 1 1 auto;
   min-height: 220px;
   background: #fff;
   border: 1px solid var(--border);
@@ -2241,13 +2389,14 @@ tbody tr:last-child td {
   overflow: hidden;
   font-family: var(--mono);
   font-size: 12px;
-  line-height: 1.55;
+  line-height: var(--fd-line-height);
 }
 
-/* 每个窗格自己滚(横+纵);纵向由组件同步 scrollTop,保证同一行左右对齐 */
+/* 每个窗格自己滚(横+纵);纵向由组件同步 scrollTop,保证同一行左右对齐。
+   高度由 .fd-rows 的栅格行撑满(grid 单行默认 stretch),不再写死 max-height。 */
 .fd-pane {
   min-width: 0;
-  max-height: 54vh;
+  min-height: 0;
   overflow: auto;
   scrollbar-gutter: stable;
 }
@@ -2268,16 +2417,24 @@ tbody tr:last-child td {
 }
 
 .fd-row {
+  /* 该行的「底色」:行号、差异块按钮这些必须不透明的格子都跟随它 ——
+     否则它们永远白底,横向滚过来的文本被它们切掉的同时,悬停高亮也盖不上去。 */
+  --fd-surface: #fff;
   display: grid;
   align-items: stretch;
+  background: var(--fd-surface);
+  /* 每行至少一行文本高。一侧为空的行(仅对端新增 / 仅本机删除)若没有这层兜底,
+     空 <pre> 与空行号都会塌成 0,行高就只剩左侧的差异块按钮(17px < 18.6px 文本行)
+     → 从该行起两个窗格整体错位。用与 line-height 同源的变量,避免两处漂移。 */
+  min-height: calc(var(--fd-line-height) * 1em);
 }
 
-/* 行号随横向滚动钉在窗格左侧;背景不透明,滚过来的文本从下面穿过 */
+/* 行号随横向滚动钉在窗格左侧;背景不透明(吃行底色),滚过来的文本从下面穿过 */
 .fd-no {
   position: sticky;
   left: 0;
   z-index: 1;
-  background: #fff;
+  background: var(--fd-surface);
   padding: 0 8px;
   color: #a7b0c0;
   text-align: right;
@@ -2299,7 +2456,7 @@ tbody tr:last-child td {
   position: sticky;
   right: 0;
   z-index: 1;
-  background: #fff;
+  background: var(--fd-surface);
   display: flex;
   align-items: center;
   gap: 3px;
@@ -2325,17 +2482,19 @@ tbody tr:last-child td {
   color: var(--accent);
 }
 
-.fd-row.is-change .fd-text {
-  background: #fff6e8;
-}
+/* 差异底色落在「行」上(不是文本格上):这样行号/按钮那类不透明格子跟着一起变,
+   横滚时不会切出一道白缝。 */
+.fd-row.is-change { --fd-surface: #fff6e8; }
+.fd-row.is-del { --fd-surface: #fdeeee; }
+.fd-row.is-add { --fd-surface: #eaf7ee; }
 
-.fd-row.is-del .fd-text {
-  background: #fdeeee;
-}
-
-.fd-row.is-add .fd-text {
-  background: #eaf7ee;
-}
+/* 悬停整行:两个窗格共用同一个行下标(见 FileDiffModal.vue 的 hoverIndex),鼠标停在
+   任意一侧,同行的左右两块一起点亮,方便横向对照。
+   差异行保留各自色相、只压深一档 —— 不然悬停会把「新增/删除」的信息抹掉。 */
+.fd-row.is-hover { --fd-surface: #e9f0fb; }
+.fd-row.is-change.is-hover { --fd-surface: #fbe4c6; }
+.fd-row.is-del.is-hover { --fd-surface: #f9d9d9; }
+.fd-row.is-add.is-hover { --fd-surface: #d3eedd; }
 
 .fd-blocked {
   padding: 18px 12px;

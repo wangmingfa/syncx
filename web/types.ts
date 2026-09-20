@@ -189,6 +189,11 @@ export interface FileSideData {
   text?: string;
   size?: number;
   binary?: boolean;
+  /**
+   * 图片预览:该侧是可解码的图片且未超上限时给出(data 为 base64,mime 由后端按后缀判定)。
+   * 与 text 不互斥 —— `.svg` 两者都有,弹窗据此给出「预览 / 逐行」切换。
+   */
+  image?: { mime: string; data: string };
   /** 超过体积上限:只给大小不回传内容。 */
   tooLarge?: boolean;
   version?: Array<[string, number]>;

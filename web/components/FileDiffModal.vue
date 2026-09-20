@@ -1,15 +1,19 @@
 <script setup lang="ts">
-import { computed, nextTick, ref, watch } from 'vue';
+import { computed, nextTick, onMounted, onUnmounted, ref, watch } from 'vue';
 import { NButton } from 'naive-ui';
 import { applyHunk, countChanged, diffText, type DiffHunk } from '../utils/text-diff';
+import { formatBytes } from '../utils/bytes';
+import { fileIconKind } from '../utils/file-icon';
 import type { FileCompareData, FileSideData } from '../types';
 
 /**
  * 文件内容对比弹窗(IDEA 风格的并排差异)。
  *
- * 三个状态各自有明确的降级路径 —— 不做「假装能比」:
+ * 四个状态各自有明确的降级路径 —— 不做「假装能比」:
  *  - 两侧都是文本 → 逐行并排,每个差异块可单独 ← / → 应用;
- *  - 任一侧是二进制 / 超过 2MB → 不回传内容,只提供整文件覆盖;
+ *  - 任一侧是图片(后端按后缀给了 image 字节)→ 并排看图,只提供整文件覆盖
+ *    (图片没有「第几行」这回事,挑不出可单独应用的块);
+ *  - 任一侧是二进制 / 超过体积上限 → 不回传内容,只提供整文件覆盖;
  *  - 任一侧缺失(文件只在一边存在)→ 只能从存在的那侧覆盖过去。
  */
 const props = defineProps<{
@@ -41,6 +45,76 @@ const diff = computed(() =>
   canDiff.value ? diffText(left.value.text ?? '', right.value.text ?? '') : { rows: [], hunks: [] },
 );
 
+/**
+ * 图片预览:任一(可预览的)侧有 image 字节就切到看图视图。
+ *
+ * 只要**一侧**是图片就够 —— 另一侧缺失(文件只在一边存在)时,那半边的图恰恰是用户
+ * 这趟想看的;对端离线也一样,至少能确认本机这张是什么。
+ */
+const canPreview = computed<boolean>(() => !!(left.value.image || right.value.image));
+
+/**
+ * 视图模式。默认预览:今天只有 `.svg` 会两种视图都可用(既是图片又是可读文本),
+ * 那种文件先看「长什么样」通常比先看「哪一行改了」更符合直觉,要逐行再切。
+ * 换文件/关窗时重置回预览。
+ */
+const viewMode = ref<'preview' | 'text'>('preview');
+const showImages = computed<boolean>(
+  () => canPreview.value && (viewMode.value === 'preview' || !canDiff.value),
+);
+const showText = computed<boolean>(() => canDiff.value && !showImages.value);
+/** 两种视图都可用时才给切换按钮(今天只会出现在 svg 上)。 */
+const canSwitchView = computed<boolean>(() => canPreview.value && canDiff.value);
+
+/**
+ * data URL 一律走 computed、不在模板里拼:`props.data` 没变时的重渲染(悬停换行、
+ * 滚动同步都在触发)不该每次重新拼一个几 MB 的字符串。
+ */
+function toDataUrl(side: FileSideData): string {
+  return side.image ? `data:${side.image.mime};base64,${side.image.data}` : '';
+}
+const leftSrc = computed<string>(() => toDataUrl(left.value));
+const rightSrc = computed<string>(() => toDataUrl(right.value));
+
+/**
+ * 图片原始像素尺寸:由 <img> 解码后回填(后端不去解析图片头,那是浏览器的活)。
+ *
+ * 每侧记着「这个尺寸是哪个 src 解出来的」:内容一变(同步后重取、切到另一个文件),
+ * 旧尺寸立刻失效 —— 否则一张图不在了,它那行还留着上一张的 120×90。
+ * 不能靠「数据变了就清空」——同 src 时不会再有 load 事件,清了就再也填不回来。
+ */
+const dims = ref<{ left: { src: string; text: string }; right: { src: string; text: string } }>({
+  left: { src: '', text: '' },
+  right: { src: '', text: '' },
+});
+function onImgLoad(which: 'left' | 'right', e: Event): void {
+  const el = e.target as HTMLImageElement;
+  dims.value[which] = {
+    src: el.currentSrc || el.src,
+    text: `${el.naturalWidth}×${el.naturalHeight}`,
+  };
+}
+
+/** 一侧图片下方的单行说明:尺寸 · 大小(尺寸要等图解码完才有,先只显示大小)。 */
+function metaOf(side: FileSideData, which: 'left' | 'right', src: string): string {
+  const parts: string[] = [];
+  const dim = dims.value[which];
+  if (dim.src !== '' && dim.src === src) parts.push(dim.text);
+  if (side.size !== undefined) parts.push(formatBytes(side.size));
+  return parts.join(' · ');
+}
+
+/** 两侧图片字节是否逐字节相同(看的是内容,不是版本 —— 标签也就写「图片一致」)。 */
+const imagesIdentical = computed<boolean>(
+  () => !!left.value.image && !!right.value.image && left.value.image.data === right.value.image.data,
+);
+
+/** 只有一侧有可预览的图(另一侧缺失 / 超限 / 不是图片)。 */
+const oneSided = computed<boolean>(() => !!left.value.image !== !!right.value.image);
+
+/** 按后缀看这是不是图片:降级态据此说「无法预览」而不是「无法逐行对比」。 */
+const looksLikeImage = computed<boolean>(() => fileIconKind(props.path) === 'image');
+
 /** 每个差异块的首行下标 → 块,用于在该行渲染 ← / → 按钮。 */
 const hunkAtStart = computed<Map<number, DiffHunk>>(() => {
   const map = new Map<number, DiffHunk>();
@@ -50,11 +124,18 @@ const hunkAtStart = computed<Map<number, DiffHunk>>(() => {
 
 const changedCount = computed<number>(() => countChanged(diff.value.rows));
 
-/** 二进制 / 过大 / 取不到时,说明为什么看不了内容。 */
+/**
+ * 二进制 / 过大 / 取不到时,说明为什么看不了内容。
+ *
+ * 过大一律带上实际大小:上限按类型分档(图片 8 MiB / 文本 2 MiB),写死一个数字
+ * 迟早与现实不符,而「这张图 12.4 MB」才是用户要的信息。
+ */
 function reasonOf(side: FileSideData, role: string): string {
   if (!side.exists) return `${role}没有这个文件${side.error ? `（${side.error}）` : ''}`;
+  if (side.tooLarge) {
+    return `${role}文件过大${side.size !== undefined ? `（${formatBytes(side.size)}）` : ''}`;
+  }
   if (side.binary) return `${role}是二进制文件`;
-  if (side.tooLarge) return `${role}超过 2MB`;
   return `${role}内容不可用`;
 }
 
@@ -82,32 +163,48 @@ function confirmOverwrite(): void {
   if (dir) emit('sync', dir);
 }
 /**
- * 左右各是一个独立滚动区:横向滚动互不干扰(各看各的,超宽行不会压到对面行号上),
- * 但纵向必须锁死 —— 同一行左右两块要水平对齐,否则对比失去意义。
+ * 左右是两个独立滚动区,但滚动位置必须锁死:同一行左右两块要水平对齐,否则
+ * 对比失去意义 —— 纵向如此,横向同理(两栏是同一份内容的两侧,横向错开就没法
+ * 逐字符比对)。
  *
- * 两排行数/行高完全一致(每个 row 左右两侧各占一格),所以 scrollTop 可以精确同步。
+ * 两排行数/行高完全一致(每个 row 左右两侧各占一格),滚动位置可以精确同步。
+ * 防回环用 `lockSource` 记住「正被我们程序化滚动的窗格」,忽略它随后的那个
+ * scroll 事件 —— 比布尔锁稳:布尔锁在 rAF 解锁前会把同源的连续滚动事件一并吞掉。
  */
 const paneLeftEl = ref<HTMLElement | null>(null);
 const paneRightEl = ref<HTMLElement | null>(null);
-let paneLock = false;
+/** 正在被程序化滚动的窗格;它随之触发的 scroll 事件要忽略(否则两边互推成环)。 */
+let lockSource: HTMLElement | null = null;
 
 function onPaneScroll(which: 'left' | 'right'): void {
-  if (paneLock) return; // 防止两边互相触发形成回环
   const src = which === 'left' ? paneLeftEl.value : paneRightEl.value;
   const dst = which === 'left' ? paneRightEl.value : paneLeftEl.value;
   if (!src || !dst) return;
-  paneLock = true;
+  if (lockSource === src) return; // 这是上一步同步带给 src 的联动事件,不是用户滚动
+  lockSource = dst;
   dst.scrollTop = src.scrollTop;
+  dst.scrollLeft = src.scrollLeft;
   requestAnimationFrame(() => {
-    paneLock = false;
+    lockSource = null;
   });
 }
 
-// 关窗或换文件时,清掉进行中的覆盖确认,并把两个窗格滚回左上角
+/**
+ * 鼠标悬停的行下标。两个窗格共用它,所以停在任意一侧都能同时点亮两侧的同一行 ——
+ * 看长行/对齐差异时不用来回找「刚才看的是哪一行」。
+ * 靠 mouseleave 挂在窗格上(而不是每一行上)清空:行与行之间、以及左右窗格之间
+ * 移动时不会闪一下。
+ */
+const hoverIndex = ref<number | null>(null);
+
+// 关窗或换文件时,清掉进行中的覆盖确认、回到预览视图,并把两个窗格滚回左上角
+// (图片尺寸不用在这里清:它按 src 记账,内容一变就自动失效)
 watch(
   () => [props.open, props.path],
   () => {
     overwriteConfirm.value = null;
+    hoverIndex.value = null;
+    viewMode.value = 'preview';
     void nextTick(() => {
       for (const el of [paneLeftEl.value, paneRightEl.value]) {
         if (!el) continue;
@@ -117,6 +214,24 @@ watch(
     });
   },
 );
+
+/**
+ * Esc 关窗。挂在 window 而不是弹窗元素上:焦点通常在窗格里的滚动区,或者压根没进过
+ * 弹窗(点遮罩打开后直接按键),挂元素上会漏掉。
+ *
+ * 正在等待「整文件覆盖」二次确认时,Esc 先撤掉那一步(等价于点「取消」),不关窗:
+ * 那一按键的语义是「打消这次危险操作」,若顺手把弹窗也收了,用户反而丢了上下文。
+ */
+function onKeydown(e: KeyboardEvent): void {
+  if (e.key !== 'Escape' || !props.open) return;
+  if (overwriteConfirm.value) {
+    overwriteConfirm.value = null;
+    return;
+  }
+  emit('close');
+}
+onMounted(() => window.addEventListener('keydown', onKeydown));
+onUnmounted(() => window.removeEventListener('keydown', onKeydown));
 
 /**
  * 把某个差异块应用到目标侧。
@@ -131,7 +246,13 @@ function apply(hunk: DiffHunk, target: 'left' | 'right'): void {
 <template>
   <Transition name="guide">
     <div v-if="open" class="modal-overlay" @click.self="emit('close')">
-      <div class="modal fd-modal" role="dialog" aria-modal="true" aria-labelledby="fd-title">
+      <div
+        class="modal fd-modal"
+        :class="{ 'fd-modal--tall': canDiff || canPreview }"
+        role="dialog"
+        aria-modal="true"
+        aria-labelledby="fd-title"
+      >
         <n-button quaternary circle class="modal-close" aria-label="关闭" @click="emit('close')">×</n-button>
         <div class="modal-title-row">
           <h2 id="fd-title" class="modal-title">文件内容对比</h2>
@@ -153,29 +274,87 @@ function apply(hunk: DiffHunk, target: 'left' | 'right'): void {
             <span class="fd-legend__id">{{ deviceId }}</span>
           </div>
 
-          <!-- 逐行对比区 -->
-          <div v-if="canDiff" class="fd-body">
+          <!-- 对比区。表头(本机 / 中间摘要 / 对端)两种视图共用一份 —— 中间那格换内容,
+               免得两套表头各写一遍、宽窄对不齐。 -->
+          <div v-if="showText || showImages" class="fd-body">
             <div class="fd-head">
               <span class="fd-head__role">本机</span>
-              <span v-if="changedCount === 0" class="fd-head__clean">两侧内容一致</span>
-              <span v-else class="fd-head__count">{{ changedCount }} 行有差异</span>
+              <span class="fd-head__mid">
+                <template v-if="showText">
+                  <span v-if="changedCount === 0" class="fd-head__clean">两侧内容一致</span>
+                  <span v-else class="fd-head__count">{{ changedCount }} 行有差异</span>
+                </template>
+                <template v-else>
+                  <span v-if="oneSided" class="fd-head__count">仅一侧有图片</span>
+                  <span v-else-if="imagesIdentical" class="fd-head__clean">两侧图片一致</span>
+                  <span v-else class="fd-head__count">两侧图片不同</span>
+                </template>
+                <!-- 两种视图都可用(今天只有 svg:既是图片又是文本)时才出现 -->
+                <span v-if="canSwitchView" class="fd-view">
+                  <button
+                    type="button"
+                    class="fd-view__tab"
+                    :class="{ 'is-active': showImages }"
+                    :aria-pressed="showImages"
+                    @click="viewMode = 'preview'"
+                  >预览</button>
+                  <button
+                    type="button"
+                    class="fd-view__tab"
+                    :class="{ 'is-active': showText }"
+                    :aria-pressed="showText"
+                    @click="viewMode = 'text'"
+                  >逐行</button>
+                </span>
+              </span>
               <span class="fd-head__role">对端（{{ deviceId }}）</span>
             </div>
 
-            <!-- 左右各一个独立滚动区:超宽行只在**自己这侧**横向滚动,
-                 行号(sticky left)与差异块按钮(sticky right)始终钉在窗格边上,
-                 不会再出现「本侧超长文本压到另一侧行号上」。 -->
-            <div class="fd-rows">
+            <!-- 图片视图:并排各看一张,没有逐块应用(图片没有「第几行」)。
+                 透明背景铺棋盘格,不然透明 PNG 两边全白,差异看不出来。 -->
+            <div v-if="showImages" class="fd-images">
+              <div class="fd-image">
+                <div class="fd-image__stage">
+                  <img
+                    v-if="leftSrc"
+                    :src="leftSrc"
+                    alt="本机图片预览"
+                    @load="onImgLoad('left', $event)"
+                  />
+                  <span v-else class="fd-image__nil">{{ reasonOf(left, '本机') }}</span>
+                </div>
+                <div class="fd-image__meta mono">{{ metaOf(left, 'left', leftSrc) }}</div>
+              </div>
+              <div class="fd-image">
+                <div class="fd-image__stage">
+                  <img
+                    v-if="rightSrc"
+                    :src="rightSrc"
+                    alt="对端图片预览"
+                    @load="onImgLoad('right', $event)"
+                  />
+                  <span v-else class="fd-image__nil">{{ reasonOf(right, '对端') }}</span>
+                </div>
+                <div class="fd-image__meta mono">{{ metaOf(right, 'right', rightSrc) }}</div>
+              </div>
+            </div>
+
+            <!-- 文本视图:左右各一个滚动区,滚动位置由 onPaneScroll 双向同步(横向+纵向):
+                 超宽行不会被压到对面行号上,行号(sticky left)与差异块按钮
+                 (sticky right)始终钉在各自窗格边上。 -->
+            <div v-else class="fd-rows">
               <div
                 ref="paneLeftEl"
                 class="fd-pane fd-pane--left"
                 @scroll.passive="onPaneScroll('left')"
+                @mouseleave="hoverIndex = null"
               >
                 <div
                   v-for="(row, i) in diff.rows"
                   :key="i"
                   class="fd-row"
-                  :class="rowClass(row.type)"
+                  :class="[rowClass(row.type), { 'is-hover': hoverIndex === i }]"
+                  @mouseenter="hoverIndex = i"
                 >
                   <span class="fd-no">{{ row.leftNo ?? '' }}</span>
                   <pre class="fd-text">{{ row.leftText ?? '' }}</pre>
@@ -202,12 +381,14 @@ function apply(hunk: DiffHunk, target: 'left' | 'right'): void {
                 ref="paneRightEl"
                 class="fd-pane fd-pane--right"
                 @scroll.passive="onPaneScroll('right')"
+                @mouseleave="hoverIndex = null"
               >
                 <div
                   v-for="(row, i) in diff.rows"
                   :key="i"
                   class="fd-row"
-                  :class="rowClass(row.type)"
+                  :class="[rowClass(row.type), { 'is-hover': hoverIndex === i }]"
+                  @mouseenter="hoverIndex = i"
                 >
                   <span class="fd-no">{{ row.rightNo ?? '' }}</span>
                   <pre class="fd-text">{{ row.rightText ?? '' }}</pre>
@@ -216,9 +397,11 @@ function apply(hunk: DiffHunk, target: 'left' | 'right'): void {
             </div>
           </div>
 
-          <!-- 降级:不能逐行比时,至少要能整文件覆盖 -->
+          <!-- 降级:既不能逐行比、也没有图片可预览时,至少要能整文件覆盖 -->
           <div v-else class="fd-blocked">
-            <p class="fd-blocked__msg">{{ blocked }}，无法逐行对比。</p>
+            <p class="fd-blocked__msg">
+              {{ blocked }}，{{ looksLikeImage ? '无法预览' : '无法逐行对比' }}。
+            </p>
             <p class="fd-blocked__hint">仍可整文件覆盖（以一侧内容为准替换另一侧）。</p>
           </div>
 

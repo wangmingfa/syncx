@@ -34,6 +34,7 @@ import { encodeSnapshot, decodeSnapshot } from './messages.js';
 import { buildFolderDiff, checkDiffAgainstDisk, toSnapshotEntry, type FolderDiff, type SnapshotEntry } from './diff.js';
 import { broadcastFolderUpdates } from './broadcast.js';
 import { relayToSiblings } from './relay.js';
+import { compareContentLimit, imageMimeOf, TEXT_COMPARE_MAX_BYTES } from './file-kind.js';
 import { connectPeer } from './net/client.js';
 import { makePeerTransport, attachPeerMessages, sendControlMessage, type ControlMessage } from './net/wire.js';
 import { learnPeerUrl, learnPeerIp, getLanAddresses } from './net/addresses.js';
@@ -171,6 +172,13 @@ export interface FileSideState {
   text?: string;
   size?: number;
   binary?: boolean;
+  /**
+   * 图片预览:该侧是浏览器能解码的图片后缀、且没超图片上限时给出(data 为 base64)。
+   *
+   * 与 text 并不互斥 —— `.svg` 既是图片又是可读文本,两侧都给,前端在「预览 / 逐行」
+   * 之间切换。raster 图片只给 image(`binary` 同时为 true,那是事实)。
+   */
+  image?: { mime: string; data: string };
   /** 超过体积上限:不回传内容,只给大小(弹窗降级为整文件覆盖)。 */
   tooLarge?: boolean;
   /** 该侧条目的版本向量。 */
@@ -1367,9 +1375,10 @@ export class SyncSessionManager {
         reply({ error: '该路径不是文件' });
         return;
       }
-      if (st.size > FILE_COMPARE_MAX_BYTES) {
+      if (st.size > compareContentLimit(path)) {
+        const limit = Math.round(compareContentLimit(path) / 1024);
         reply({
-          error: `文件过大(${Math.round(st.size / 1024)}KB,上限 ${Math.round(FILE_COMPARE_MAX_BYTES / 1024)}KB),不支持内容对比`,
+          error: `文件过大(${Math.round(st.size / 1024)}KB,上限 ${limit}KB),不支持内容对比`,
         });
         return;
       }
@@ -1511,35 +1520,56 @@ export class SyncSessionManager {
     };
   }
 
+  /**
+   * 字节 → 一侧的内容状态(本机读取与对端回传共用同一条判据,避免两侧对「能不能预览」
+   * 各有一套说法)。图片给预览、文本给内容,**两者可以同时成立**:`.svg` 既是图片又是
+   * 可读文本,前端在两种视图间切换;raster 图片只给 image(同时 binary=true,那是事实)。
+   *
+   * 文本只在文本上限内附上:一张 5 MiB 的图不该顺带跑一次 UTF-8 往返校验、再让浏览器
+   * 拿它去逐行差异。空文件不给 image —— `data:` 空串只会渲染成一个坏图标。
+   */
+  private describeBytes(
+    path: string,
+    bytes: Buffer,
+  ): { text?: string; binary?: boolean; image?: { mime: string; data: string } } {
+    const out: { text?: string; binary?: boolean; image?: { mime: string; data: string } } = {};
+    const mime = imageMimeOf(path);
+    if (mime && bytes.length > 0) out.image = { mime, data: bytes.toString('base64') };
+    const text = bytes.length <= TEXT_COMPARE_MAX_BYTES ? decodeText(bytes) : undefined;
+    if (text === undefined) out.binary = true;
+    else out.text = text;
+    return out;
+  }
+
   /** 读本机某文件在对比弹窗里的一侧状态(越界 / 缺失 / 二进制 / 过大都如实标记)。 */
   private readLocalFileForCompare(folder: FolderState, path: string): FileSideState {
     const v = folder.localIndex.get(path);
     const version = v ? [...v.version.entries()] : undefined;
+    const withVersion = (state: FileSideState): FileSideState =>
+      version ? { ...state, version } : state;
     try {
       const abs = resolveSharePath(folder.path, path);
       const st = statSync(abs);
-      if (!st.isFile()) return { exists: false, ...(version ? { version } : {}) };
-      if (st.size > FILE_COMPARE_MAX_BYTES) {
-        return { exists: true, size: st.size, tooLarge: true, ...(version ? { version } : {}) };
+      if (!st.isFile()) return withVersion({ exists: false });
+      if (st.size > compareContentLimit(path)) {
+        return withVersion({ exists: true, size: st.size, tooLarge: true });
       }
-      const text = decodeText(readFileSync(abs));
-      return {
+      return withVersion({
         exists: true,
         size: st.size,
-        ...(text === undefined ? { binary: true } : { text }),
-        ...(version ? { version } : {}),
-      };
+        ...this.describeBytes(path, readFileSync(abs)),
+      });
     } catch {
-      return { exists: false, ...(version ? { version } : {}) };
+      return withVersion({ exists: false });
     }
   }
 
-  /** 本机文件字节;不存在 / 越界 / 非文件 / 超过上限时返回 undefined。 */
+  /** 本机文件字节;不存在 / 越界 / 非文件 / 超过(按类型的)上限时返回 undefined。 */
   private tryReadLocalBytes(folder: FolderState, path: string): Buffer | undefined {
     try {
       const abs = resolveSharePath(folder.path, path);
       const st = statSync(abs);
-      if (!st.isFile() || st.size > FILE_COMPARE_MAX_BYTES) return undefined;
+      if (!st.isFile() || st.size > compareContentLimit(path)) return undefined;
       return readFileSync(abs);
     } catch {
       return undefined;
@@ -1557,11 +1587,10 @@ export class SyncSessionManager {
     let remote: FileSideState;
     try {
       const r = await this.fetchPeerFile(deviceId, folderId, path);
-      const text = decodeText(r.data);
       remote = {
         exists: true,
         size: r.size,
-        ...(text === undefined ? { binary: true } : { text }),
+        ...this.describeBytes(path, r.data),
         ...(r.version ? { version: r.version } : {}),
       };
     } catch (e) {

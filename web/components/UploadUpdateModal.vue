@@ -2,6 +2,7 @@
 import { computed, ref } from 'vue';
 import { NButton } from 'naive-ui';
 import { useStatusContext } from '../composables/statusContext';
+import { formatBytes } from '../utils/bytes';
 
 const props = defineProps<{ open: boolean }>();
 const emit = defineEmits<{ close: [] }>();
@@ -20,12 +21,6 @@ const {
 const fileInput = ref<HTMLInputElement | null>(null);
 /** 校验/升级期间不接受新的点击:避免误触把正在校验的包换掉。 */
 const busy = computed(() => upgrading.value || uploadInspecting.value);
-
-function fmtSize(bytes: number): string {
-  if (bytes < 1024) return `${bytes} B`;
-  if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(0)} KB`;
-  return `${(bytes / 1024 / 1024).toFixed(1)} MB`;
-}
 
 function pickFile(): void {
   if (busy.value) return;
@@ -76,7 +71,7 @@ function onConfirm(): void {
           <span v-else class="upload-drop__main mono">{{ uploadFile.name }}</span>
           <span class="upload-drop__sub mono">
             <template v-if="!uploadFile">syncx-&lt;版本&gt;.tgz</template>
-            <template v-else>{{ fmtSize(uploadFile.size) }} · 点击可重新选择</template>
+            <template v-else>{{ formatBytes(uploadFile.size) }} · 点击可重新选择</template>
           </span>
         </button>
 

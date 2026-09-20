@@ -18,6 +18,7 @@ describe('extOf', () => {
 describe('fileIconKind:代码按语言细分', () => {
   const byLang: Array<[string, string[]]> = [
     ['rust', ['main.rs', 'build.rs']],
+    ['moonbit', ['main.mbt', 'pkg.generated.mbti']],
     ['js', ['index.js', 'a.mjs', 'b.cjs']],
     ['ts', ['main.ts', 'types.d.mts', 'c.cts']],
     ['react', ['App.jsx', 'Panel.tsx']],
@@ -54,16 +55,33 @@ describe('fileIconKind:代码按语言细分', () => {
 });
 
 describe('fileIconKind:非代码文件', () => {
-  it('配置 / 结构化数据归 data', () => {
-    for (const n of ['package.json', 'pnpm-lock.yaml', 'Cargo.toml', 'tsconfig.json', '.npmrc']) {
+  it('JSON 单独一类(与被它取代的 data 区分开)', () => {
+    for (const n of ['package.json', 'tsconfig.json', 'a.jsonc', 'b.json5']) {
+      expect(fileIconKind(n)).toBe('json');
+    }
+    // MoonBit 项目的配置也是 json(moon.mod.json / moon.pkg.json)
+    expect(fileIconKind('moon.mod.json')).toBe('json');
+    expect(fileIconKind('moon.pkg.json')).toBe('json');
+  });
+
+  it('其余配置 / 结构化数据归 data', () => {
+    for (const n of ['pnpm-lock.yaml', 'Cargo.toml', 'setup.ini', 'app.conf', 'a.cfg', '.npmrc']) {
       expect(fileIconKind(n)).toBe('data');
     }
     expect(fileIconKind('.env')).toBe('data');
     expect(fileIconKind('.env.local')).toBe('data');
+    // 锁文件仍是 data:不是人写的 json,没必要和 json 用同一枚图标
+    expect(fileIconKind('package-lock.json')).toBe('data');
+    expect(fileIconKind('Cargo.lock')).toBe('data');
   });
 
-  it('文档 / 纯文本归 doc', () => {
-    for (const n of ['README.md', 'notes.txt', 'CHANGELOG', 'LICENSE', 'app.log']) {
+  it('Markdown 单独一类,其余纯文本归 doc', () => {
+    for (const n of ['README.md', 'guide.markdown', 'page.mdx']) {
+      expect(fileIconKind(n)).toBe('markdown');
+    }
+    // MoonBit 的 .mbt.md(可执行代码块的 markdown)按最后一个后缀算,是 markdown
+    expect(fileIconKind('README.mbt.md')).toBe('markdown');
+    for (const n of ['notes.txt', 'CHANGELOG', 'LICENSE', 'app.log', 'a.rst']) {
       expect(fileIconKind(n)).toBe('doc');
     }
   });
@@ -98,6 +116,6 @@ describe('fileIconKind:大小写与路径', () => {
   it('只看文件名部分,不看目录名', () => {
     expect(fileIconKind('src/rust/tool.rs')).toBe('rust');
     expect(fileIconKind('a/b/c/app.vue')).toBe('vue');
-    expect(fileIconKind('notes/readme.md')).toBe('doc');
+    expect(fileIconKind('notes/readme.md')).toBe('markdown');
   });
 });

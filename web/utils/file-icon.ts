@@ -2,14 +2,20 @@
  * 文件名 → 图标类别。纯函数,便于单测:对比表按扩展名给常见文件配不同图标。
  *
  * 两级粒度:
- *  - **代码文件按语言细分**(rust / js / ts / react / vue / python / go / java / c / html / css / sql),
- *    一枚图形只对应一种语言,颜色取品牌色偏暗一档(浅底上够清晰);
+ *  - **代码文件按语言细分**(rust / moonbit / js / ts / react / vue / python / go / java / c /
+ *    html / css / sql / shell),一枚图形只对应一种语言,颜色取品牌色偏暗一档(浅底上够清晰);
  *  - 语言图形未覆盖的源码(svelte / rb / php / swift / …)统一归 `code`,
- *    非代码文件按大类(data / doc / image / …),未知扩展名归 `file`。
+ *    非代码文件按大类(json / data / markdown / doc / image / …),未知扩展名归 `file`。
+ *
+ * 两处易混的取舍:
+ *  - **json 与 data 分成两类**:json 用花括号(通用 JSON 图标),yaml/toml/ini/.env 这些
+ *    通用配置用滑杆。两者若同用花括号,一屏里全是同一个图形,反而认不出哪个是 JSON。
+ *  - **markdown 与 doc 分开**:md 用官方 mark(方块 + M + 下箭头),txt/rst/log 才是折角页。
  */
 export type FileIconKind =
   // —— 代码:按语言(后缀)细分
   | 'rust'
+  | 'moonbit'
   | 'js'
   | 'ts'
   | 'react'
@@ -25,7 +31,12 @@ export type FileIconKind =
   /** 通用源码:已知是代码、但没有专属图形的语言 */
   | 'code'
   // —— 非代码
+  /** 一对花括号:JSON / JSONC(其余配置类归 data) */
+  | 'json'
+  /** 通用配置:yaml / toml / ini / .env 等(滑杆图形) */
   | 'data'
+  /** 官方 mark:方块 + M + 下箭头 */
+  | 'markdown'
   | 'doc'
   | 'image'
   | 'archive'
@@ -37,6 +48,8 @@ export type FileIconKind =
 const EXT_KIND: Record<string, FileIconKind> = {
   // —— 代码:有专属图形的语言
   rs: 'rust',
+  // MoonBit:.mbt 源码 / .mbti 接口文件(由 `moon info` 生成,同属这门语言)
+  mbt: 'moonbit', mbti: 'moonbit',
   js: 'js', mjs: 'js', cjs: 'js',
   ts: 'ts', mts: 'ts', cts: 'ts',
   jsx: 'react', tsx: 'react', // React 组件(后缀即 JSX/TSX)
@@ -58,13 +71,14 @@ const EXT_KIND: Record<string, FileIconKind> = {
   clj: 'code', hs: 'code', ml: 'code', elm: 'code', zig: 'code', nim: 'code',
   groovy: 'code', gradle: 'code', proto: 'code',
 
-  // —— 结构化数据 / 配置
-  json: 'data', json5: 'data', jsonc: 'data',
+  // —— 结构化数据:JSON 单独成一类(大括号),其余配置归 data
+  json: 'json', json5: 'json', jsonc: 'json',
   yaml: 'data', yml: 'data', toml: 'data', ini: 'data',
   conf: 'data', cfg: 'data',
 
-  // —— 文档 / 纯文本
-  md: 'doc', markdown: 'doc', mdx: 'doc', txt: 'doc', rst: 'doc', log: 'doc',
+  // —— 文档 / 纯文本（.mbt.md 这类复合后缀也按最后一个后缀算,正好是 markdown）
+  md: 'markdown', markdown: 'markdown', mdx: 'markdown',
+  txt: 'doc', rst: 'doc', log: 'doc',
 
   // —— 图片
   png: 'image', jpg: 'image', jpeg: 'image', gif: 'image', svg: 'image',
