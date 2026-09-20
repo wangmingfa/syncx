@@ -6,7 +6,7 @@ import { formatBytes } from '../utils/bytes';
 import { fileIconKind } from '../utils/file-icon';
 import { escapeHtml, highlightText } from '../utils/syntax';
 import type { FileCompareData, FileSideData } from '../types';
-import ModalCloseButton from './ModalCloseButton.vue';
+import ModalShell from './ModalShell.vue';
 
 /**
  * 文件内容对比弹窗(IDEA 风格的并排差异)。
@@ -35,6 +35,16 @@ const emit = defineEmits<{
 
 const left = computed<FileSideData>(() => props.data?.local ?? { exists: false });
 const right = computed<FileSideData>(() => props.data?.remote ?? { exists: false });
+
+/**
+ * 正文(以及底部那排覆盖按钮)是否展示。
+ *
+ * 注意按钮原先就住在 `v-else-if="data"` 这个分支里,提成 `#footer` 插槽后跟正文分家了 ——
+ * 条件必须抽成一处共享,否则「加载中/出错时不显示覆盖按钮」这条会悄悄失效(拿不到 data 时
+ * 按钮本来就全是禁用态,摆在那里只会让人以为能点)。重新加载时 data 仍留着旧值、loading
+ * 为真,所以这里不能只判 `!!data`,要和正文那条分支完全一致。
+ */
+const showData = computed<boolean>(() => !props.loading && !props.error && !!props.data);
 
 /** 一侧能否用于逐行对比:存在、有文本、且不是二进制/过大。 */
 function comparable(side: FileSideData): boolean {
@@ -316,212 +326,208 @@ function apply(hunk: DiffHunk, target: 'left' | 'right'): void {
 </script>
 
 <template>
-  <Transition name="guide">
-    <div v-if="open" class="modal-overlay" @click.self="emit('close')">
-      <div
-        class="modal fd-modal"
-        :class="{ 'fd-modal--tall': canDiff || canPreview }"
-        role="dialog"
-        aria-modal="true"
-        aria-labelledby="fd-title"
-      >
-        <ModalCloseButton @close="emit('close')" />
-        <div class="modal-title-row">
-          <h2 id="fd-title" class="modal-title">文件内容对比</h2>
-          <span class="modal-title-path mono" :title="path">{{ path }}</span>
-        </div>
+  <!-- fd-modal 是宽度类(96% 宽):外壳设了 inheritAttrs:false,调用方写的 class 会落到
+       dialog(.modal)自己身上,而不是外层遮罩。fd-modal--tall 仍按「任一视图可用」加高。 -->
+  <ModalShell
+    :open="open"
+    title="文件内容对比"
+    :description="path"
+    description-mono
+    :class="['fd-modal', { 'fd-modal--tall': canDiff || canPreview }]"
+    @close="emit('close')"
+  >
 
-        <div v-if="loading" class="fd-state">正在读取两侧内容…</div>
+    <div v-if="loading" class="fd-state">正在读取两侧内容…</div>
 
-        <div v-else-if="error" class="diff-error" role="alert">
-          <div class="diff-error__msg break">{{ error }}</div>
-        </div>
+    <div v-else-if="error" class="diff-error" role="alert">
+      <div class="diff-error__msg break">{{ error }}</div>
+    </div>
 
-        <template v-else-if="data">
-          <div class="fd-legend mono">
-            <span class="fd-legend__role">本机</span>
-            <span class="fd-legend__id">{{ data.folderPath }}</span>
-            <span class="fd-legend__sep">↔</span>
-            <span class="fd-legend__role">对端</span>
-            <span class="fd-legend__id">{{ deviceId }}</span>
-          </div>
+    <!-- `&& data` 是给 vue-tsc 收窄类型用的(data 可空,正文里要取 data.folderPath):
+         条件本身仍是 showData 一处定义,底部按钮那条分支用的是同一个。 -->
+    <template v-if="showData && data">
+      <div class="fd-legend mono">
+        <span class="fd-legend__role">本机</span>
+        <span class="fd-legend__id">{{ data.folderPath }}</span>
+        <span class="fd-legend__sep">↔</span>
+        <span class="fd-legend__role">对端</span>
+        <span class="fd-legend__id">{{ deviceId }}</span>
+      </div>
 
-          <!-- 对比区。表头(本机 / 中间摘要 / 对端)两种视图共用一份 —— 中间那格换内容,
-               免得两套表头各写一遍、宽窄对不齐。 -->
-          <div v-if="showText || showImages" class="fd-body">
-            <div class="fd-head">
-              <span class="fd-head__role">本机</span>
-              <span class="fd-head__mid">
-                <template v-if="showText">
-                  <span v-if="contentIdentical" class="fd-head__clean">两侧内容一致</span>
-                  <!-- 逐行看不出差异、但内容确实不同(CRLF vs LF、结尾换行)→ 说清楚,
-                       否则用户会以为「一致」却又发现覆盖按钮还能点 -->
-                  <span v-else-if="changedCount === 0" class="fd-head__count">行内容相同，换行符或结尾不同</span>
-                  <span v-else class="fd-head__count">{{ changedCount }} 行有差异</span>
-                </template>
-                <template v-else>
-                  <span v-if="oneSided" class="fd-head__count">仅一侧有图片</span>
-                  <span v-else-if="imagesIdentical" class="fd-head__clean">两侧图片一致</span>
-                  <span v-else class="fd-head__count">两侧图片不同</span>
-                </template>
-                <!-- 两种视图都可用(今天只有 svg:既是图片又是文本)时才出现 -->
-                <span v-if="canSwitchView" class="fd-view">
-                  <button
-                    type="button"
-                    class="fd-view__tab"
-                    :class="{ 'is-active': showImages }"
-                    :aria-pressed="showImages"
-                    @click="viewMode = 'preview'"
-                  >预览</button>
-                  <button
-                    type="button"
-                    class="fd-view__tab"
-                    :class="{ 'is-active': showText }"
-                    :aria-pressed="showText"
-                    @click="viewMode = 'text'"
-                  >逐行</button>
-                </span>
-              </span>
-              <span class="fd-head__role">对端（{{ deviceId }}）</span>
-            </div>
-
-            <!-- 图片视图:并排各看一张,没有逐块应用(图片没有「第几行」)。
-                 透明背景铺棋盘格,不然透明 PNG 两边全白,差异看不出来。 -->
-            <div v-if="showImages" class="fd-images">
-              <div class="fd-image">
-                <div class="fd-image__stage">
-                  <img
-                    v-if="leftSrc"
-                    :src="leftSrc"
-                    alt="本机图片预览"
-                    @load="onImgLoad('left', $event)"
-                  />
-                  <span v-else class="fd-image__nil">{{ reasonOf(left, '本机') }}</span>
-                </div>
-                <div class="fd-image__meta mono">{{ metaOf(left, 'left', leftSrc) }}</div>
-              </div>
-              <div class="fd-image">
-                <div class="fd-image__stage">
-                  <img
-                    v-if="rightSrc"
-                    :src="rightSrc"
-                    alt="对端图片预览"
-                    @load="onImgLoad('right', $event)"
-                  />
-                  <span v-else class="fd-image__nil">{{ reasonOf(right, '对端') }}</span>
-                </div>
-                <div class="fd-image__meta mono">{{ metaOf(right, 'right', rightSrc) }}</div>
-              </div>
-            </div>
-
-            <!-- 文本视图:左右各一个滚动区,滚动位置由 onPaneScroll 双向同步(横向+纵向):
-                 超宽行不会被压到对面行号上,行号(sticky left)与差异块按钮
-                 (sticky right)始终钉在各自窗格边上。 -->
-            <div v-else class="fd-rows">
-              <div
-                ref="paneLeftEl"
-                class="fd-pane fd-pane--left"
-                @scroll.passive="onPaneScroll('left')"
-                @mouseleave="hoverIndex = null"
-              >
-                <div
-                  v-for="(row, i) in diff.rows"
-                  :key="i"
-                  class="fd-row"
-                  :class="[rowClass(row.type), { 'is-hover': hoverIndex === i }]"
-                  @mouseenter="hoverIndex = i"
-                >
-                  <span class="fd-no">{{ row.leftNo ?? '' }}</span>
-                  <!-- 语法高亮:内容是 hljs 的输出或 escapeHtml 过的纯文本(见 cell 的说明),
-                       走 v-html 而不是插值。行号仍由 .fd-no 这一格负责。 -->
-                  <pre class="fd-text" v-html="cell(hl.left, row.leftNo, row.leftText)"></pre>
-                  <span class="fd-gutter">
-                    <template v-if="hunkAtStart.get(i)">
-                      <button
-                        type="button"
-                        class="fd-apply"
-                        title="把右边的这块应用到本机（拉取覆盖）"
-                        @click="apply(hunkAtStart.get(i)!, 'left')"
-                      >←</button>
-                      <button
-                        type="button"
-                        class="fd-apply"
-                        title="把左边的这块应用到对端（推送覆盖）"
-                        @click="apply(hunkAtStart.get(i)!, 'right')"
-                      >→</button>
-                    </template>
-                  </span>
-                </div>
-              </div>
-
-              <div
-                ref="paneRightEl"
-                class="fd-pane fd-pane--right"
-                @scroll.passive="onPaneScroll('right')"
-                @mouseleave="hoverIndex = null"
-              >
-                <div
-                  v-for="(row, i) in diff.rows"
-                  :key="i"
-                  class="fd-row"
-                  :class="[rowClass(row.type), { 'is-hover': hoverIndex === i }]"
-                  @mouseenter="hoverIndex = i"
-                >
-                  <span class="fd-no">{{ row.rightNo ?? '' }}</span>
-                  <pre class="fd-text" v-html="cell(hl.right, row.rightNo, row.rightText)"></pre>
-                </div>
-              </div>
-            </div>
-          </div>
-
-          <!-- 降级:既不能逐行比、也没有图片可预览时,至少要能整文件覆盖 -->
-          <div v-else class="fd-blocked">
-            <p class="fd-blocked__msg">
-              {{ blocked }}，{{ looksLikeImage ? '无法预览' : '无法逐行对比' }}。
-            </p>
-            <p class="fd-blocked__hint">仍可整文件覆盖（以一侧内容为准替换另一侧）。</p>
-          </div>
-
-          <div class="modal-actions">
-            <template v-if="overwriteConfirm">
-              <span class="fd-confirm__msg">
-                将用{{ overwriteConfirm === 'pull' ? '对端' : '本机' }}文件完全替换{{ overwriteConfirm === 'pull' ? '本机' : '对端' }}文件，此操作不可撤销。
-              </span>
-              <n-button size="small" type="error" @click="confirmOverwrite">确认覆盖</n-button>
-              <n-button size="small" tertiary @click="overwriteConfirm = null">取消</n-button>
+      <!-- 对比区。表头(本机 / 中间摘要 / 对端)两种视图共用一份 —— 中间那格换内容,
+           免得两套表头各写一遍、宽窄对不齐。 -->
+      <div v-if="showText || showImages" class="fd-body">
+        <div class="fd-head">
+          <span class="fd-head__role">本机</span>
+          <span class="fd-head__mid">
+            <template v-if="showText">
+              <span v-if="contentIdentical" class="fd-head__clean">两侧内容一致</span>
+              <!-- 逐行看不出差异、但内容确实不同(CRLF vs LF、结尾换行)→ 说清楚,
+                   否则用户会以为「一致」却又发现覆盖按钮还能点 -->
+              <span v-else-if="changedCount === 0" class="fd-head__count">行内容相同，换行符或结尾不同</span>
+              <span v-else class="fd-head__count">{{ changedCount }} 行有差异</span>
             </template>
             <template v-else>
-              <!-- tooltip 直接挂在按钮上就够了 —— 实测 Chromium 对 disabled 按钮**照样**
-                   派发 mouseenter(mouseenter 不在被禁用的事件之列)。真正在禁用态静默失效的
-                   是**原生 title 属性**,旧写法 title="…" 在按钮不可点时就永远不显示了,
-                   这才是这里换成 tooltip 的原因。 -->
-              <n-tooltip trigger="hover" :style="{ maxWidth: '320px' }">
-                <template #trigger>
-                  <n-button
-                    size="small"
-                    tertiary
-                    :disabled="pullDisabled"
-                    @click="requestOverwrite('pull')"
-                  >← 用对端覆盖本机</n-button>
-                </template>
-                {{ overwriteHint('pull') }}
-              </n-tooltip>
-              <n-tooltip trigger="hover" :style="{ maxWidth: '320px' }">
-                <template #trigger>
-                  <n-button
-                    size="small"
-                    tertiary
-                    :disabled="pushDisabled"
-                    @click="requestOverwrite('push')"
-                  >用本机覆盖对端 →</n-button>
-                </template>
-                {{ overwriteHint('push') }}
-              </n-tooltip>
+              <span v-if="oneSided" class="fd-head__count">仅一侧有图片</span>
+              <span v-else-if="imagesIdentical" class="fd-head__clean">两侧图片一致</span>
+              <span v-else class="fd-head__count">两侧图片不同</span>
             </template>
-            <n-button type="primary" @click="emit('close')">关闭</n-button>
+            <!-- 两种视图都可用(今天只有 svg:既是图片又是文本)时才出现 -->
+            <span v-if="canSwitchView" class="fd-view">
+              <button
+                type="button"
+                class="fd-view__tab"
+                :class="{ 'is-active': showImages }"
+                :aria-pressed="showImages"
+                @click="viewMode = 'preview'"
+              >预览</button>
+              <button
+                type="button"
+                class="fd-view__tab"
+                :class="{ 'is-active': showText }"
+                :aria-pressed="showText"
+                @click="viewMode = 'text'"
+              >逐行</button>
+            </span>
+          </span>
+          <span class="fd-head__role">对端（{{ deviceId }}）</span>
+        </div>
+
+        <!-- 图片视图:并排各看一张,没有逐块应用(图片没有「第几行」)。
+             透明背景铺棋盘格,不然透明 PNG 两边全白,差异看不出来。 -->
+        <div v-if="showImages" class="fd-images">
+          <div class="fd-image">
+            <div class="fd-image__stage">
+              <img
+                v-if="leftSrc"
+                :src="leftSrc"
+                alt="本机图片预览"
+                @load="onImgLoad('left', $event)"
+              />
+              <span v-else class="fd-image__nil">{{ reasonOf(left, '本机') }}</span>
+            </div>
+            <div class="fd-image__meta mono">{{ metaOf(left, 'left', leftSrc) }}</div>
           </div>
-        </template>
+          <div class="fd-image">
+            <div class="fd-image__stage">
+              <img
+                v-if="rightSrc"
+                :src="rightSrc"
+                alt="对端图片预览"
+                @load="onImgLoad('right', $event)"
+              />
+              <span v-else class="fd-image__nil">{{ reasonOf(right, '对端') }}</span>
+            </div>
+            <div class="fd-image__meta mono">{{ metaOf(right, 'right', rightSrc) }}</div>
+          </div>
+        </div>
+
+        <!-- 文本视图:左右各一个滚动区,滚动位置由 onPaneScroll 双向同步(横向+纵向):
+             超宽行不会被压到对面行号上,行号(sticky left)与差异块按钮
+             (sticky right)始终钉在各自窗格边上。 -->
+        <div v-else class="fd-rows">
+          <div
+            ref="paneLeftEl"
+            class="fd-pane fd-pane--left"
+            @scroll.passive="onPaneScroll('left')"
+            @mouseleave="hoverIndex = null"
+          >
+            <div
+              v-for="(row, i) in diff.rows"
+              :key="i"
+              class="fd-row"
+              :class="[rowClass(row.type), { 'is-hover': hoverIndex === i }]"
+              @mouseenter="hoverIndex = i"
+            >
+              <span class="fd-no">{{ row.leftNo ?? '' }}</span>
+              <!-- 语法高亮:内容是 hljs 的输出或 escapeHtml 过的纯文本(见 cell 的说明),
+                   走 v-html 而不是插值。行号仍由 .fd-no 这一格负责。 -->
+              <pre class="fd-text" v-html="cell(hl.left, row.leftNo, row.leftText)"></pre>
+              <span class="fd-gutter">
+                <template v-if="hunkAtStart.get(i)">
+                  <button
+                    type="button"
+                    class="fd-apply"
+                    title="把右边的这块应用到本机（拉取覆盖）"
+                    @click="apply(hunkAtStart.get(i)!, 'left')"
+                  >←</button>
+                  <button
+                    type="button"
+                    class="fd-apply"
+                    title="把左边的这块应用到对端（推送覆盖）"
+                    @click="apply(hunkAtStart.get(i)!, 'right')"
+                  >→</button>
+                </template>
+              </span>
+            </div>
+          </div>
+
+          <div
+            ref="paneRightEl"
+            class="fd-pane fd-pane--right"
+            @scroll.passive="onPaneScroll('right')"
+            @mouseleave="hoverIndex = null"
+          >
+            <div
+              v-for="(row, i) in diff.rows"
+              :key="i"
+              class="fd-row"
+              :class="[rowClass(row.type), { 'is-hover': hoverIndex === i }]"
+              @mouseenter="hoverIndex = i"
+            >
+              <span class="fd-no">{{ row.rightNo ?? '' }}</span>
+              <pre class="fd-text" v-html="cell(hl.right, row.rightNo, row.rightText)"></pre>
+            </div>
+          </div>
+        </div>
       </div>
-    </div>
-  </Transition>
+
+      <!-- 降级:既不能逐行比、也没有图片可预览时,至少要能整文件覆盖 -->
+      <div v-else class="fd-blocked">
+        <p class="fd-blocked__msg">
+          {{ blocked }}，{{ looksLikeImage ? '无法预览' : '无法逐行对比' }}。
+        </p>
+        <p class="fd-blocked__hint">仍可整文件覆盖（以一侧内容为准替换另一侧）。</p>
+      </div>
+    </template>
+
+    <template v-if="showData" #footer>
+      <template v-if="overwriteConfirm">
+        <span class="fd-confirm__msg">
+          将用{{ overwriteConfirm === 'pull' ? '对端' : '本机' }}文件完全替换{{ overwriteConfirm === 'pull' ? '本机' : '对端' }}文件，此操作不可撤销。
+        </span>
+        <n-button size="small" type="error" @click="confirmOverwrite">确认覆盖</n-button>
+        <n-button size="small" tertiary @click="overwriteConfirm = null">取消</n-button>
+      </template>
+      <template v-else>
+        <!-- tooltip 直接挂在按钮上就够了 —— 实测 Chromium 对 disabled 按钮**照样**
+             派发 mouseenter(mouseenter 不在被禁用的事件之列)。真正在禁用态静默失效的
+             是**原生 title 属性**,旧写法 title="…" 在按钮不可点时就永远不显示了,
+             这才是这里换成 tooltip 的原因。 -->
+        <n-tooltip trigger="hover" :style="{ maxWidth: '320px' }">
+          <template #trigger>
+            <n-button
+              size="small"
+              tertiary
+              :disabled="pullDisabled"
+              @click="requestOverwrite('pull')"
+            >← 用对端覆盖本机</n-button>
+          </template>
+          {{ overwriteHint('pull') }}
+        </n-tooltip>
+        <n-tooltip trigger="hover" :style="{ maxWidth: '320px' }">
+          <template #trigger>
+            <n-button
+              size="small"
+              tertiary
+              :disabled="pushDisabled"
+              @click="requestOverwrite('push')"
+            >用本机覆盖对端 →</n-button>
+          </template>
+          {{ overwriteHint('push') }}
+        </n-tooltip>
+      </template>
+      <n-button type="primary" @click="emit('close')">关闭</n-button>
+    </template>
+  </ModalShell>
 </template>

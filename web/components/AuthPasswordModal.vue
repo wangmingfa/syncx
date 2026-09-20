@@ -1,7 +1,7 @@
 <script setup lang="ts">
 import { ref, watch } from 'vue';
 import { NButton, NInput } from 'naive-ui';
-import ModalCloseButton from './ModalCloseButton.vue';
+import ModalShell from './ModalShell.vue';
 
 const props = defineProps<{
   open: boolean;
@@ -113,73 +113,67 @@ async function removePassword(): Promise<void> {
 </script>
 
 <template>
-  <Transition name="guide">
-    <div v-if="open" class="modal-overlay" @click.self="emit('close')">
-      <div class="modal" role="dialog" aria-modal="true" aria-labelledby="auth-title">
-        <ModalCloseButton @close="emit('close')" />
-        <h2 id="auth-title" class="modal-title">登录密码</h2>
-        <p class="modal-lead">
-          <template v-if="mode === 'password'">
-            已启用账号密码登录。修改用户名请在下方一并输入。
-          </template>
-          <template v-else>
-            当前使用 <span class="mono">control.token</span> 登录。设置后可用账号密码登录,不必再记那串令牌。
-          </template>
-        </p>
+  <ModalShell :open="open" title="登录密码" @close="emit('close')">
+    <p class="modal-lead">
+      <template v-if="mode === 'password'">
+        已启用账号密码登录。修改用户名请在下方一并输入。
+      </template>
+      <template v-else>
+        当前使用 <span class="mono">control.token</span> 登录。设置后可用账号密码登录,不必再记那串令牌。
+      </template>
+    </p>
 
-        <label class="field">
-          <span class="field__label">控制令牌</span>
-          <n-input
-            v-model:value="token"
-            type="password"
-            show-password-on="click"
-            autocomplete="off"
-            placeholder="粘贴 ~/.syncx/control.token 的内容"
-          />
-          <p class="form-hint">设置或清除登录密码都需当场提供控制令牌,防止他人在已登录的机器上顺手改密。</p>
-        </label>
+    <label class="field">
+      <span class="field__label">控制令牌</span>
+      <n-input
+        v-model:value="token"
+        type="password"
+        show-password-on="click"
+        autocomplete="off"
+        placeholder="粘贴 ~/.syncx/control.token 的内容"
+      />
+      <p class="form-hint">设置或清除登录密码都需当场提供控制令牌,防止他人在已登录的机器上顺手改密。</p>
+    </label>
 
-        <label class="field">
-          <span class="field__label">用户名</span>
-          <n-input v-model:value="username" autocomplete="username" placeholder="如 syncx" />
-        </label>
-        <label class="field">
-          <span class="field__label">新密码</span>
-          <n-input
-            v-model:value="password"
-            type="password"
-            show-password-on="click"
-            autocomplete="new-password"
-            placeholder="至少 6 位"
-          />
-        </label>
-        <label class="field">
-          <span class="field__label">确认新密码</span>
-          <n-input
-            v-model:value="confirm"
-            type="password"
-            show-password-on="click"
-            autocomplete="new-password"
-            placeholder="再输入一次"
-          />
-        </label>
+    <label class="field">
+      <span class="field__label">用户名</span>
+      <n-input v-model:value="username" autocomplete="username" placeholder="如 syncx" />
+    </label>
+    <label class="field">
+      <span class="field__label">新密码</span>
+      <n-input
+        v-model:value="password"
+        type="password"
+        show-password-on="click"
+        autocomplete="new-password"
+        placeholder="至少 6 位"
+      />
+    </label>
+    <label class="field">
+      <span class="field__label">确认新密码</span>
+      <n-input
+        v-model:value="confirm"
+        type="password"
+        show-password-on="click"
+        autocomplete="new-password"
+        placeholder="再输入一次"
+      />
+    </label>
 
-        <p class="confirm-note-extra">
-          令牌始终是恢复通道:忘记密码时用 <span class="mono">control.token</span> 登录进来重设即可。
-          修改或清除密码会让所有已登录页面重新登录。
-        </p>
+    <p class="confirm-note-extra">
+      令牌始终是恢复通道:忘记密码时用 <span class="mono">control.token</span> 登录进来重设即可。
+      修改或清除密码会让所有已登录页面重新登录。
+    </p>
 
-        <div class="modal-actions">
-          <n-button
-            v-if="mode === 'password'"
-            class="modal-cancel"
-            :disabled="busy"
-            @click="removePassword"
-          >清除密码</n-button>
-          <n-button class="modal-cancel" :disabled="busy" @click="emit('close')">取消</n-button>
-          <n-button type="primary" :loading="busy" @click="savePassword">保存</n-button>
-        </div>
-      </div>
-    </div>
-  </Transition>
+    <template #footer>
+      <n-button
+        v-if="mode === 'password'"
+        class="modal-cancel"
+        :disabled="busy"
+        @click="removePassword"
+      >清除密码</n-button>
+      <n-button class="modal-cancel" :disabled="busy" @click="emit('close')">取消</n-button>
+      <n-button type="primary" :loading="busy" @click="savePassword">保存</n-button>
+    </template>
+  </ModalShell>
 </template>

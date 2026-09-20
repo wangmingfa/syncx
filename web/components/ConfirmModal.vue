@@ -2,7 +2,7 @@
 import { ref, watch } from 'vue';
 import { NButton } from 'naive-ui';
 import type { ConfirmState } from '../types';
-import ModalCloseButton from './ModalCloseButton.vue';
+import ModalShell from './ModalShell.vue';
 
 const props = defineProps<{
   /** 非空 = 弹出确认弹窗;确认前不触碰任何数据。 */
@@ -39,41 +39,48 @@ async function runConfirm(): Promise<void> {
 </script>
 
 <template>
-  <Transition name="guide">
-    <div v-if="state" class="modal-overlay" @click.self="!busy && emit('closed')">
-      <div class="modal" role="dialog" aria-modal="true" aria-labelledby="confirm-title">
-        <ModalCloseButton :disabled="busy" @close="emit('closed')" />
-        <h2 id="confirm-title" class="modal-title">{{ state.title }}</h2>
-        <p class="modal-lead">{{ state.message }}</p>
-        <div v-if="state.detail" class="confirm-detail mono break">{{ state.detail }}</div>
+  <!-- 「打开」的条件本来就是一个可空对象 —— 投影成布尔交给外壳,内容自己再判一次 state
+       (外壳的 open 只负责显隐,拿不到 state 的类型信息)。
+       busy 期间既禁用 × 也挡住遮罩点击:那正是外壳 closeDisabled 一个开关的两件事。 -->
+  <ModalShell
+    :open="!!state"
+    :title="state?.title ?? ''"
+    :close-disabled="busy"
+    @close="emit('closed')"
+  >
+    <template v-if="state">
+      <p class="modal-lead">{{ state.message }}</p>
+      <div v-if="state.detail" class="confirm-detail mono break">{{ state.detail }}</div>
 
-        <template v-if="state.folders && state.folders.length > 0">
-          <p class="confirm-sub">将从以下 {{ state.folders.length }} 个共享目录中移除它</p>
-          <div class="confirm-list">
-            <div v-for="fd in state.folders" :key="fd.path" class="confirm-row">
-              <div class="confirm-row-main">
-                <span class="confirm-path mono break">{{ fd.path }}</span>
-                <span class="confirm-note">
-                  {{ fd.others > 0 ? `还有 ${fd.others} 个设备 · 其他设备不受影响` : '仅共享给它 · 之后不再同步给任何设备' }}
-                </span>
-              </div>
-              <span v-if="fd.others === 0" class="confirm-tag">变空闲</span>
+      <template v-if="state.folders && state.folders.length > 0">
+        <p class="confirm-sub">将从以下 {{ state.folders.length }} 个共享目录中移除它</p>
+        <div class="confirm-list">
+          <div v-for="fd in state.folders" :key="fd.path" class="confirm-row">
+            <div class="confirm-row-main">
+              <span class="confirm-path mono break">{{ fd.path }}</span>
+              <span class="confirm-note">
+                {{ fd.others > 0 ? `还有 ${fd.others} 个设备 · 其他设备不受影响` : '仅共享给它 · 之后不再同步给任何设备' }}
+              </span>
             </div>
+            <span v-if="fd.others === 0" class="confirm-tag">变空闲</span>
           </div>
-        </template>
-
-        <p v-if="state.note" class="confirm-note-extra">{{ state.note }}</p>
-        <label v-if="state.checkbox" class="confirm-checkbox">
-          <input type="checkbox" v-model="checked" />
-          <span>{{ state.checkbox.label }}</span>
-        </label>
-        <div class="modal-actions">
-          <n-button class="modal-cancel" :disabled="busy" @click="emit('closed')">取消</n-button>
-          <n-button type="error" class="modal-danger" :loading="busy" @click="runConfirm">
-            {{ state.confirmText }}
-          </n-button>
         </div>
-      </div>
-    </div>
-  </Transition>
+      </template>
+
+      <p v-if="state.note" class="confirm-note-extra">{{ state.note }}</p>
+      <label v-if="state.checkbox" class="confirm-checkbox">
+        <input type="checkbox" v-model="checked" />
+        <span>{{ state.checkbox.label }}</span>
+      </label>
+    </template>
+
+    <template #footer>
+      <template v-if="state">
+        <n-button class="modal-cancel" :disabled="busy" @click="emit('closed')">取消</n-button>
+        <n-button type="error" class="modal-danger" :loading="busy" @click="runConfirm">
+          {{ state.confirmText }}
+        </n-button>
+      </template>
+    </template>
+  </ModalShell>
 </template>

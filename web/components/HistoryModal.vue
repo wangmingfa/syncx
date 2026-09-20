@@ -5,7 +5,7 @@ import type { SyncEventItem } from '../types';
 import { apiJson, errText } from '../utils/api';
 import { copyText } from '../utils/clipboard';
 import { useStatusContext } from '../composables/statusContext';
-import ModalCloseButton from './ModalCloseButton.vue';
+import ModalShell from './ModalShell.vue';
 
 const props = defineProps<{
   /** 非空 = 打开该目录的记录弹窗并拉取历史。 */
@@ -101,32 +101,30 @@ function askClearHistory(): void {
 </script>
 
 <template>
-  <Transition name="guide">
-    <div v-if="folder" class="modal-overlay" @click.self="emit('close')">
-      <div class="modal modal-wide" role="dialog" aria-modal="true" aria-labelledby="history-title">
-        <ModalCloseButton @close="emit('close')" />
-        <div class="modal-title-row">
-          <h2 id="history-title" class="modal-title">同步记录</h2>
-          <span class="modal-title-path mono" :title="lastPath">{{ lastPath }}</span>
-        </div>
+  <!-- 打开条件本来就是 folder 非空,这里把它投影成外壳要的布尔(emit 的语义不变) -->
+  <ModalShell
+    :open="!!folder"
+    title="同步记录"
+    :description="lastPath"
+    description-mono
+    wide
+    @close="emit('close')"
+  >
+    <div v-if="loading" class="history-loading">读取中…</div>
+    <div v-else-if="events.length === 0" class="empty">还没有同步记录</div>
+    <ul v-else class="history-list">
+      <li v-for="ev in events" :key="ev.ts + ev.path + ev.action" class="history-row">
+        <span class="history-time">{{ fmtTime(ev.ts) }}</span>
+        <span class="history-action" :class="'act-' + ev.action">{{ actionLabel(ev.action) }}</span>
+        <span class="history-dir" :class="ev.direction === 'local' ? 'dir-local' : 'dir-remote'">{{ directionLabel(ev.direction) }}{{ ev.direction !== 'local' && ev.deviceId ? `：${ev.deviceId}` : '' }}</span>
+        <span class="history-path mono break">{{ ev.path }}</span>
+      </li>
+    </ul>
 
-        <div v-if="loading" class="history-loading">读取中…</div>
-        <div v-else-if="events.length === 0" class="empty">还没有同步记录</div>
-        <ul v-else class="history-list">
-          <li v-for="ev in events" :key="ev.ts + ev.path + ev.action" class="history-row">
-            <span class="history-time">{{ fmtTime(ev.ts) }}</span>
-            <span class="history-action" :class="'act-' + ev.action">{{ actionLabel(ev.action) }}</span>
-            <span class="history-dir" :class="ev.direction === 'local' ? 'dir-local' : 'dir-remote'">{{ directionLabel(ev.direction) }}{{ ev.direction !== 'local' && ev.deviceId ? `：${ev.deviceId}` : '' }}</span>
-            <span class="history-path mono break">{{ ev.path }}</span>
-          </li>
-        </ul>
-
-        <div class="modal-actions">
-          <n-button :disabled="events.length === 0" @click="copyHistory">复制记录</n-button>
-          <n-button :disabled="events.length === 0" @click="askClearHistory">清空记录</n-button>
-          <n-button type="primary" @click="emit('close')">关闭</n-button>
-        </div>
-      </div>
-    </div>
-  </Transition>
+    <template #footer>
+      <n-button :disabled="events.length === 0" @click="copyHistory">复制记录</n-button>
+      <n-button :disabled="events.length === 0" @click="askClearHistory">清空记录</n-button>
+      <n-button type="primary" @click="emit('close')">关闭</n-button>
+    </template>
+  </ModalShell>
 </template>

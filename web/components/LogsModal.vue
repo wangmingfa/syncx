@@ -4,7 +4,7 @@ import { NButton } from 'naive-ui';
 import { apiJson, errText } from '../utils/api';
 import { useToast } from '../composables/useToast';
 import { copyText } from '../utils/clipboard';
-import ModalCloseButton from './ModalCloseButton.vue';
+import ModalShell from './ModalShell.vue';
 
 const props = defineProps<{ open: boolean }>();
 const emit = defineEmits<{ close: [] }>();
@@ -73,31 +73,32 @@ async function copyLogs(): Promise<void> {
 </script>
 
 <template>
-  <Transition name="guide">
-    <div v-if="open" class="modal-overlay" @click.self="emit('close')">
-      <div class="modal modal-wide" role="dialog" aria-modal="true" aria-labelledby="logs-title">
-        <ModalCloseButton @close="emit('close')" />
-        <h2 id="logs-title" class="modal-title">运行日志</h2>
-        <p v-if="file" class="modal-lead mono break">
-          {{ file }}<template v-if="truncated > 0"> · 已省略最早 {{ truncated }} 行</template>
-        </p>
+  <!-- 日志文件路径放标题右侧(和其它弹窗的「标题 + 右侧路径」一致),原先它在正文第一行;
+       截断提示留在正文,那里说的不是「看的是哪个文件」而是「看到的少了一截」。 -->
+  <ModalShell
+    :open="open"
+    title="运行日志"
+    :description="file"
+    description-mono
+    wide
+    @close="emit('close')"
+  >
+    <p v-if="truncated > 0" class="modal-lead">已省略最早 {{ truncated }} 行</p>
 
-        <div v-if="loading" class="history-loading">读取中…</div>
-        <template v-else-if="error">
-          <div class="logs-unavailable" role="alert">{{ error }}</div>
-          <p class="confirm-note-extra">
-            在启动 daemon 时加上 <code class="mono">--log-file &lt;路径&gt;</code> 参数(如
-            <code class="mono">syncx start --log-file ~/.syncx/syncx.log</code>),日志会同步写入该文件,这里即可查看。
-          </p>
-        </template>
-        <pre v-else ref="view" class="logs-view mono">{{ lines.join('\n') }}</pre>
+    <div v-if="loading" class="history-loading">读取中…</div>
+    <template v-else-if="error">
+      <div class="logs-unavailable" role="alert">{{ error }}</div>
+      <p class="confirm-note-extra">
+        在启动 daemon 时加上 <code class="mono">--log-file &lt;路径&gt;</code> 参数(如
+        <code class="mono">syncx start --log-file ~/.syncx/syncx.log</code>),日志会同步写入该文件,这里即可查看。
+      </p>
+    </template>
+    <pre v-else ref="view" class="logs-view mono">{{ lines.join('\n') }}</pre>
 
-        <div class="modal-actions">
-          <n-button :disabled="lines.length === 0" @click="copyLogs">复制日志</n-button>
-          <n-button :loading="loading" @click="fetchLogs">刷新</n-button>
-          <n-button type="primary" @click="emit('close')">关闭</n-button>
-        </div>
-      </div>
-    </div>
-  </Transition>
+    <template #footer>
+      <n-button :disabled="lines.length === 0" @click="copyLogs">复制日志</n-button>
+      <n-button :loading="loading" @click="fetchLogs">刷新</n-button>
+      <n-button type="primary" @click="emit('close')">关闭</n-button>
+    </template>
+  </ModalShell>
 </template>
