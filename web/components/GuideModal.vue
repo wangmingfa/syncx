@@ -53,7 +53,11 @@ const emit = defineEmits<{ close: [] }>();
 
         <div v-if="isDev" class="guide-note">开发提示：本界面当前由控制端口 <code class="mono">{{ controlPort }}</code> 提供；dev 模式请访问 <code class="mono">5173</code>（HMR 实时热更新）。</div>
 
-        <n-button type="primary" block class="modal-ok" @click="emit('close')">我知道了</n-button>
+        <!-- 底部按钮和其它弹窗同款容器:按钮按内容宽度排、整组靠右。
+             原先这里是裸的 `n-button block`(整条 588px 宽),大弹窗下像一根横杠。 -->
+        <div class="modal-actions">
+          <n-button type="primary" @click="emit('close')">我知道了</n-button>
+        </div>
       </div>
     </div>
   </Transition>
