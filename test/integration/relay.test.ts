@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { mkdtempSync, readFileSync, mkdirSync, writeFileSync, readdirSync } from 'node:fs';
+import { mkdtempSync, readFileSync, mkdirSync, writeFileSync, readdirSync, existsSync, unlinkSync } from 'node:fs';
 import { rmDir } from '../helpers.js';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -261,6 +261,37 @@ describe('relay propagation across a chain (ADR-0014)', () => {
 
     await waitFor(() => chain.a.local.get('doc.txt')?.version.get('dev-c') === 2);
     expect(chain.b.local.get('doc.txt')?.version.get('dev-c')).toBe(2);
+
+    await teardown(chain);
+  });
+
+  it('propagates a deletion on C to A through the B hub (remote tombstones must relay)', async () => {
+    // 回归(2026-09-20):hub 应用对端墓碑后不进 landed → 兄弟端在增量通道上
+    // 永远学不到删除,文件残留到下一次 full 交换(重连)才被补删。实测形态:
+    // 三端同步、源头编辑器的 tmp 中间文件在叶子端长期残留。
+    const roots = makeRoots();
+    const seed = (): Map<string, IndexEntry> =>
+      new Map([['app.rs.tmp.1', entry('app.rs.tmp.1', [['dev-c', 1]])]]);
+    const chain = await connectChain(seed(), seed(), seed(), roots);
+    // 三端盘上都放着这个 tmp 文件,让 applyDelete 有东西可删
+    for (const d of [chain.a, chain.b, chain.c]) {
+      writeFileSync(join(d.share, 'app.rs.tmp.1'), 'tmp');
+    }
+
+    // C 侧删除:先移除盘上文件(现实中墓碑正是扫描发现「盘上已无」而生),
+    // 再把墓碑(版本 dev-c:2)作为增量广播给 B
+    const tombstone = entry('app.rs.tmp.1', [['dev-c', 2]], [], 0, true);
+    chain.c.local.set('app.rs.tmp.1', tombstone);
+    unlinkSync(join(chain.c.share, 'app.rs.tmp.1'));
+    sendDeltaToB(chain, [tombstone]);
+
+    // hub(B)先应用删除,再经中转把墓碑送到叶子端 A
+    await waitFor(() => chain.a.local.get('app.rs.tmp.1')?.deleted === true);
+    expect(chain.b.local.get('app.rs.tmp.1')?.deleted).toBe(true);
+    // 三端盘上文件都已消失(进回收站)
+    for (const d of [chain.a, chain.b, chain.c]) {
+      expect(existsSync(join(d.share, 'app.rs.tmp.1'))).toBe(false);
+    }
 
     await teardown(chain);
   });

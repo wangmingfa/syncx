@@ -78,8 +78,9 @@ export interface SyncPeerDeps {
    * 收到并落地远程条目后回调(中转用,见 ADR-0014):上层据此把这批条目转发给
    * 同目录的其它 transport。只在「增量(非 full)接收」时触发——full 交换已经
    * 收敛整张网,无需再中转,否则每次(重)连都会把整份索引爆发式转发给兄弟端。
-   * 仅包含真正进入 receive/conflict 落地的条目(其版本向量已是最终值),
-   * 不含 send/delete 这类本地决策动作。
+   * 包含真正进入 receive/conflict 落地的条目,以及应用对端墓碑的删除(二者的
+   * 版本向量已是最终值);不含 send 与本地墓碑外推——这两类是本机决策动作,
+   * 本机扫描生成它们时已通过 broadcast 广播过,再中转纯属重复。
    */
   onLanded?: (entries: IndexEntry[]) => void;
   /**
@@ -345,7 +346,7 @@ export function createSyncPeer(deps: SyncPeerDeps): SyncPeer {
       const sends: IndexEntry[] = [];
       // 本轮索引实际引用的 pending 路径:仅用于全量轮次清理上一轮遗留的陈旧条目
       const livePending = new Set<string>();
-      // 本轮真正落地(进入 receive/conflict 接收)的远程条目:供 onLanded 中转给兄弟端
+      // 本轮真正落地(receive/conflict 接收、应用对端墓碑)的远程条目:供 onLanded 中转给兄弟端
       const landed: IndexEntry[] = [];
 
       for (const action of actions) {
@@ -367,6 +368,12 @@ export function createSyncPeer(deps: SyncPeerDeps): SyncPeer {
               // 该路径已在对端消失,中止本机在途接收,避免迟到块响应把它复活
               abortPending(action.path);
               onEvent?.({ ts: Date.now(), path: action.path, action: 'delete', direction: 'remote', deviceId: remoteDeviceId });
+              // 应用对端墓碑也要纳入中转(ADR-0014):否则 hub 应用删除后,兄弟端在
+              // 增量通道上永远学不到这条墓碑(本端扫描不会再为它生成事件,索引里已是
+              // 墓碑),文件在兄弟端残留到下一次 full 交换(重连)才被补删——三端拓扑下
+              // 「编辑器 tmp 中间文件」在叶子端长期残留即此形态(2026-09-20)。接收端走
+              // 同一套 plan 机器:并发真改动仍按 conflict 保留冲突副本,不会误删。
+              landed.push(remoteEntry);
             }
             break;
           }
