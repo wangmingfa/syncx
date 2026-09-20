@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import { computed, nextTick, onMounted, onUnmounted, ref, watch } from 'vue';
-import { NButton } from 'naive-ui';
+import { NButton, NTooltip } from 'naive-ui';
 import { applyHunk, countChanged, diffText, type DiffHunk } from '../utils/text-diff';
 import { formatBytes } from '../utils/bytes';
 import { fileIconKind } from '../utils/file-icon';
@@ -125,6 +125,24 @@ const hunkAtStart = computed<Map<number, DiffHunk>>(() => {
 const changedCount = computed<number>(() => countChanged(diff.value.rows));
 
 /**
+ * 两侧内容是否**真的**一模一样 —— 整文件覆盖按钮据此禁用。
+ *
+ * 注意不能拿「0 行差异」当判据:`diffText` 会先把 `\r\n` 规格化成 `\n`、并把结尾
+ * 换行剥掉再比行(`prepare`),所以「CRLF vs LF」「结尾多一个空行」这类差异在逐行
+ * 视图里是**看不见的 0 行差异**,而文件确实不同。跨 macOS/Windows/Linux 同步时这
+ * 恰恰常见 —— 若据此禁用覆盖,用户就被锁死在「明明不一样却点不了」的死角。
+ * 所以文本按**原始字符串**逐字比,图片按字节比。
+ *
+ * 降级态(二进制 / 超限 / 一侧缺失)看不到内容:同样大小不等于同样字节,
+ * 一律不判「一致」,覆盖按钮照旧可用。
+ */
+const contentIdentical = computed<boolean>(() => {
+  if (showText.value) return left.value.text === right.value.text;
+  if (showImages.value) return imagesIdentical.value;
+  return false;
+});
+
+/**
  * 二进制 / 过大 / 取不到时,说明为什么看不了内容。
  *
  * 过大一律带上实际大小:上限按类型分档(图片 8 MiB / 文本 2 MiB),写死一个数字
@@ -161,6 +179,27 @@ function confirmOverwrite(): void {
   const dir = overwriteConfirm.value;
   overwriteConfirm.value = null;
   if (dir) emit('sync', dir);
+}
+
+/**
+ * 两个整文件覆盖按钮能否点:来源侧要有文件,且两侧不是已经一致 —— 内容相同时覆盖
+ * 是纯粹的白跑一趟(还会白写一次对方的磁盘),不如直接禁用。
+ */
+const pullDisabled = computed<boolean>(() => !right.value.exists || contentIdentical.value);
+const pushDisabled = computed<boolean>(() => !left.value.exists || contentIdentical.value);
+
+/**
+ * 覆盖按钮的悬停说明(禁用时也要能看):禁用态讲清「为什么不能点」,可用态讲清
+ * 「这一下会做什么」。文案与 disabled 条件同源,不会出现「说不能点却能点」。
+ */
+function overwriteHint(dir: 'pull' | 'push'): string {
+  const from = dir === 'pull' ? '对端' : '本机';
+  const to = dir === 'pull' ? '本机' : '对端';
+  if (contentIdentical.value) return `两侧内容已经一致，无需用${from}覆盖${to}`;
+  if (dir === 'pull' ? !right.value.exists : !left.value.exists) {
+    return `${from}没有这个文件，无法覆盖${to}`;
+  }
+  return `用${from}文件内容完全替换${to}文件`;
 }
 /**
  * 左右是两个独立滚动区,但滚动位置必须锁死:同一行左右两块要水平对齐,否则
@@ -281,7 +320,10 @@ function apply(hunk: DiffHunk, target: 'left' | 'right'): void {
               <span class="fd-head__role">本机</span>
               <span class="fd-head__mid">
                 <template v-if="showText">
-                  <span v-if="changedCount === 0" class="fd-head__clean">两侧内容一致</span>
+                  <span v-if="contentIdentical" class="fd-head__clean">两侧内容一致</span>
+                  <!-- 逐行看不出差异、但内容确实不同(CRLF vs LF、结尾换行)→ 说清楚,
+                       否则用户会以为「一致」却又发现覆盖按钮还能点 -->
+                  <span v-else-if="changedCount === 0" class="fd-head__count">行内容相同，换行符或结尾不同</span>
                   <span v-else class="fd-head__count">{{ changedCount }} 行有差异</span>
                 </template>
                 <template v-else>
@@ -414,20 +456,32 @@ function apply(hunk: DiffHunk, target: 'left' | 'right'): void {
               <n-button size="small" tertiary @click="overwriteConfirm = null">取消</n-button>
             </template>
             <template v-else>
-              <n-button
-                size="small"
-                tertiary
-                :disabled="!right.exists || loading"
-                title="用对端文件内容覆盖本机文件"
-                @click="requestOverwrite('pull')"
-              >← 用对端覆盖本机</n-button>
-              <n-button
-                size="small"
-                tertiary
-                :disabled="!left.exists || loading"
-                title="用本机文件内容覆盖对端文件"
-                @click="requestOverwrite('push')"
-              >用本机覆盖对端 →</n-button>
+              <!-- tooltip 直接挂在按钮上就够了 —— 实测 Chromium 对 disabled 按钮**照样**
+                   派发 mouseenter(mouseenter 不在被禁用的事件之列)。真正在禁用态静默失效的
+                   是**原生 title 属性**,旧写法 title="…" 在按钮不可点时就永远不显示了,
+                   这才是这里换成 tooltip 的原因。 -->
+              <n-tooltip trigger="hover" :style="{ maxWidth: '320px' }">
+                <template #trigger>
+                  <n-button
+                    size="small"
+                    tertiary
+                    :disabled="pullDisabled"
+                    @click="requestOverwrite('pull')"
+                  >← 用对端覆盖本机</n-button>
+                </template>
+                {{ overwriteHint('pull') }}
+              </n-tooltip>
+              <n-tooltip trigger="hover" :style="{ maxWidth: '320px' }">
+                <template #trigger>
+                  <n-button
+                    size="small"
+                    tertiary
+                    :disabled="pushDisabled"
+                    @click="requestOverwrite('push')"
+                  >用本机覆盖对端 →</n-button>
+                </template>
+                {{ overwriteHint('push') }}
+              </n-tooltip>
             </template>
             <n-button type="primary" @click="emit('close')">关闭</n-button>
           </div>

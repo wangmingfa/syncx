@@ -1121,10 +1121,14 @@ tbody tr:last-child td {
   box-shadow: 0 24px 60px -24px rgb(22 32 52 / 0.45);
 }
 
+/* 右上角关闭按钮。圆(悬停底色)沿用 naive-ui medium 的 34px 不变,只放大里面的
+   「×」字形:naive-ui 的字号与 size 绑定,medium 下只有 14px,视觉上明显偏小。
+   9 个弹窗共用这一个类,改这里即全局生效。 */
 .modal-close {
   position: absolute;
   top: 14px;
   right: 14px;
+  font-size: 28px;
 }
 
 .modal-title {
