@@ -110,7 +110,10 @@ export function buildTreeRows(
 
     for (const dir of dirs) {
       const child = walk(dir, depth + 1);
-      if (!live(dir) && !child.changed) continue; // 空且无差异的目录不占位
+      // 只要目录里有任何条目(哪怕全是 in-sync)就成行,让目录结构本身可见;
+      // 真正空的目录(两侧都没任何条目)才不占位。这样「文件夹」不再只在有差异时才冒出来,
+      // 用户要的「完整的目录结构、树形展示」才有意义。
+      if (child.rows.length === 0) continue;
       out.push({
         path: dir.path,
         name: dir.name,

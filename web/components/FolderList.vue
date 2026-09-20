@@ -1,7 +1,6 @@
 <script setup lang="ts">
 import { NButton, NInput, NCheckbox, NCheckboxGroup, NTooltip } from 'naive-ui';
 import { useStatusContext } from '../composables/statusContext';
-import { navigate } from '../utils/route';
 import type { FolderInfo, TransferFile } from '../types';
 
 /**
@@ -11,7 +10,10 @@ import type { FolderInfo, TransferFile } from '../types';
  * 对比设备到页面上再选(首次进入默认选第一个指派设备)。
  */
 function openCompare(f: FolderInfo): void {
-  navigate(`/compare/${encodeURIComponent(folderKey(f))}`);
+  const url = `/compare/${encodeURIComponent(folderKey(f))}`;
+  // 新窗口打开双栏对比页:同域共享会话 cookie,API 鉴权照常生效;
+  // 对比与状态页互不遮挡,可一边看差异一边在状态页操作。
+  window.open(url, '_blank', 'noopener');
 }
 
 /** 路径取文件名(共享根内的相对路径,用 / 分隔)。 */

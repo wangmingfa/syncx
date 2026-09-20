@@ -6,7 +6,6 @@ import { diffReportText } from './utils/diff-report';
 import { useToast } from './composables/useToast';
 import { copyText } from './utils/clipboard';
 import { fmtTime, stripWs } from './utils/format';
-import { goBack } from './utils/route';
 import type { StatusData } from './types';
 import FileDiffModal from './components/FileDiffModal.vue';
 
@@ -31,9 +30,55 @@ const { showToast } = useToast();
 /** 只看差异:目录大时全量树会很长,这个开关是主要的浏览方式。 */
 const onlyDiff = ref(false);
 
-const visibleRows = computed(() =>
+/** 折叠状态:存「被收起的目录路径」集合。默认全部收起(见下方 watch),逐层展开看子树。 */
+const collapsed = ref<Set<string>>(new Set());
+
+/** onlyDiff 先裁一遍:只留差异行(目录若含差异会被保留,且祖先目录也一并保留)。 */
+const baseRows = computed(() =>
   onlyDiff.value ? rows.value.filter((r) => r.status !== 'same') : rows.value,
 );
+/** 当前可见树里所有目录路径(用于判断某个祖先是否算「目录节点」)。 */
+const dirPaths = computed(() => new Set(baseRows.value.filter((r) => r.isDir).map((r) => r.path)));
+/** 折叠过滤:某行的任一祖先目录处于收起态,则该行不可见。 */
+const visibleRows = computed(() =>
+  baseRows.value.filter((r) => {
+    const parts = r.path.split('/');
+    for (let i = 1; i < parts.length; i++) {
+      const p = parts.slice(0, i).join('/');
+      // 祖先若是目录且处于收起态,整条子树隐藏
+      if (dirPaths.value.has(p) && collapsed.value.has(p)) return false;
+    }
+    return true;
+  }),
+);
+
+/** 完整树里的所有目录路径(用于「全部收起」)。 */
+function allDirPaths(): string[] {
+  return rows.value.filter((r) => r.isDir).map((r) => r.path);
+}
+// 新数据(换设备 / 重跑 / 首次进入)一律默认收起,避免一长串全展开把差异淹没
+watch(rows, () => { collapsed.value = new Set(allDirPaths()); }, { immediate: true });
+
+function toggleDir(path: string): void {
+  const next = new Set(collapsed.value);
+  if (next.has(path)) next.delete(path);
+  else next.add(path);
+  collapsed.value = next;
+}
+/** 一键展开:清空收起集合,整棵树铺开。 */
+function expandAll(): void {
+  collapsed.value = new Set();
+}
+/** 一键收起:把所有目录重新收起(恢复默认)。 */
+function collapseAll(): void {
+  collapsed.value = new Set(allDirPaths());
+}
+
+/** 新窗口里没有「上一页」可退时直接关窗,避免在空白页里打转。 */
+function onBack(): void {
+  if (window.history.length > 1) window.history.back();
+  else window.close();
+}
 
 // 目录刚加载(或刚从路由进来)时拉一次;设备为空(未指派)时不发请求,页面直接提示
 watch(
@@ -96,7 +141,7 @@ async function copyReport(): Promise<void> {
   <div class="cmp-page">
     <header class="cmp-head">
       <div class="cmp-head__left">
-        <n-button size="small" tertiary @click="goBack()">← 返回</n-button>
+        <n-button size="small" tertiary @click="onBack()">← 返回</n-button>
         <h1 class="cmp-title">目录对比</h1>
         <code v-if="folder" class="cmp-path mono break" :title="folder.path">{{ folder.path }}</code>
       </div>
@@ -119,7 +164,7 @@ async function copyReport(): Promise<void> {
       <p class="cmp-error__msg">
         本机没有 id 为 <code class="mono break">{{ folderId }}</code> 的共享目录，可能已被移除，或链接来自另一台机器。
       </p>
-      <n-button size="small" tertiary @click="goBack()">← 返回</n-button>
+      <n-button size="small" tertiary @click="onBack()">← 返回</n-button>
     </div>
 
     <template v-else>
@@ -154,16 +199,22 @@ async function copyReport(): Promise<void> {
         </div>
 
         <div class="cmp-legend mono">
-          <div class="cmp-legend__row">
+          <div class="cmp-legend__col">
             <span class="cmp-legend__role">本机</span>
             <span class="cmp-legend__id">{{ status.deviceId }}</span>
             <span v-if="localWhere" class="cmp-legend__where">{{ localWhere }}</span>
           </div>
-          <div class="cmp-legend__row">
+          <div class="cmp-legend__col">
             <span class="cmp-legend__role">对端</span>
             <span class="cmp-legend__id">{{ data.deviceId }}</span>
             <span v-if="remoteWhere" class="cmp-legend__where">{{ remoteWhere }}</span>
           </div>
+        </div>
+
+        <div class="cmp-treebar">
+          <n-button size="small" tertiary :disabled="!data" @click="expandAll">展开全部</n-button>
+          <n-button size="small" tertiary :disabled="!data" @click="collapseAll">折叠全部</n-button>
+          <span class="cmp-treebar__hint">默认折叠，点目录行可单独展开 / 收起</span>
         </div>
 
         <div class="cmp-table" role="table">
@@ -180,19 +231,20 @@ async function copyReport(): Promise<void> {
             v-for="row in visibleRows"
             :key="row.path"
             class="cmp-row"
-            :class="rowClass(row)"
+            :class="[rowClass(row), { 'is-dir': row.isDir }]"
             role="row"
+            @click="row.isDir && toggleDir(row.path)"
           >
             <div
               class="cmp-cell"
               :title="sideTitle(row.left)"
               @dblclick="onRowDblClick(row)"
             >
-              <template v-if="row.left">
+              <template v-if="row.left || row.isDir">
                 <span class="cmp-pad" :style="{ width: `${row.depth * 14}px` }" aria-hidden="true"></span>
-                <span class="cmp-icon" aria-hidden="true">{{ row.isDir ? '▸' : '·' }}</span>
+                <span class="cmp-icon" aria-hidden="true">{{ row.isDir ? (collapsed.has(row.path) ? '▸' : '▾') : '·' }}</span>
                 <span class="cmp-name break">{{ row.name }}</span>
-                <span v-if="row.left.deleted" class="cmp-tag">已删除</span>
+                <span v-if="row.left?.deleted" class="cmp-tag">已删除</span>
               </template>
             </div>
             <div
@@ -200,11 +252,11 @@ async function copyReport(): Promise<void> {
               :title="sideTitle(row.right)"
               @dblclick="onRowDblClick(row)"
             >
-              <template v-if="row.right">
+              <template v-if="row.right || row.isDir">
                 <span class="cmp-pad" :style="{ width: `${row.depth * 14}px` }" aria-hidden="true"></span>
-                <span class="cmp-icon" aria-hidden="true">{{ row.isDir ? '▸' : '·' }}</span>
+                <span class="cmp-icon" aria-hidden="true">{{ row.isDir ? (collapsed.has(row.path) ? '▸' : '▾') : '·' }}</span>
                 <span class="cmp-name break">{{ row.name }}</span>
-                <span v-if="row.right.deleted" class="cmp-tag">已删除</span>
+                <span v-if="row.right?.deleted" class="cmp-tag">已删除</span>
               </template>
             </div>
           </div>
