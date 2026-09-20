@@ -5,6 +5,7 @@ import type { SyncEventItem } from '../types';
 import { apiJson, errText } from '../utils/api';
 import { copyText } from '../utils/clipboard';
 import { useStatusContext } from '../composables/statusContext';
+import ModalCloseButton from './ModalCloseButton.vue';
 
 const props = defineProps<{
   /** 非空 = 打开该目录的记录弹窗并拉取历史。 */
@@ -103,7 +104,7 @@ function askClearHistory(): void {
   <Transition name="guide">
     <div v-if="folder" class="modal-overlay" @click.self="emit('close')">
       <div class="modal modal-wide" role="dialog" aria-modal="true" aria-labelledby="history-title">
-        <n-button quaternary circle class="modal-close" aria-label="关闭" @click="emit('close')">×</n-button>
+        <ModalCloseButton @close="emit('close')" />
         <div class="modal-title-row">
           <h2 id="history-title" class="modal-title">同步记录</h2>
           <span class="modal-title-path mono" :title="lastPath">{{ lastPath }}</span>

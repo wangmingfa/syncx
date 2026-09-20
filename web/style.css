@@ -1121,14 +1121,30 @@ tbody tr:last-child td {
   box-shadow: 0 24px 60px -24px rgb(22 32 52 / 0.45);
 }
 
-/* 右上角关闭按钮。圆(悬停底色)沿用 naive-ui medium 的 34px 不变,只放大里面的
-   「×」字形:naive-ui 的字号与 size 绑定,medium 下只有 14px,视觉上明显偏小。
-   9 个弹窗共用这一个类,改这里即全局生效。 */
+/* 右上角关闭按钮。圆(悬停底色)沿用 naive-ui medium 的 34px 不变,里面的叉号是内联 SVG 画的。
+   为什么不用文字字符:一个字的墨迹位置由字体度量(baseline 与数学轴)决定,CSS 的 align-items /
+   line-height 只能摆布行盒、摆布不了墨迹。实测同一个「×」,28px 时 macOS 默认字体的墨迹中心比
+   圆心低 2.00px、Helvetica 低 2.75px、Verdana 低 2.12px,而 Arial 反而高 0.88px、Courier New
+   高 1.00px(14px 时这些偏差只有 ~0.5px,所以字号小的时候看不出来) —— 靠 transform / line-height
+   去凑,等于把外观绑死在某款字体上,换个平台就翻车。SVG 的几何与字体无关,34px 盒里 14px 图形
+   左右各留 10px 整数边距。标记本身在 `web/components/ModalCloseButton.vue`(9 个弹窗共用),
+   样式按本项目约定留在全局这里 —— 与 `.modal` 的定位上下文放在一处。 */
 .modal-close {
   position: absolute;
   top: 14px;
   right: 14px;
-  font-size: 28px;
+}
+
+/* 叉号的尺寸只在这里定一处;stroke 走 currentColor,自动跟随按钮文字色(hover / disabled 态一致)。
+   viewBox 是 14x14、path 从 (1,1) 划到 (13,13),加上 round 端帽正好填满 viewBox,
+   即墨迹 14x14、笔画 2 —— 与改造前文字版实测的 1.8~2.1px 同一量级。 */
+.modal-close-x {
+  width: 14px;
+  height: 14px;
+  stroke: currentColor;
+  stroke-width: 2;
+  stroke-linecap: round;
+  fill: none;
 }
 
 .modal-title {

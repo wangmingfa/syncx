@@ -1,6 +1,7 @@
 <script setup lang="ts">
 import { ref, watch } from 'vue';
 import { NButton, NInput } from 'naive-ui';
+import ModalCloseButton from './ModalCloseButton.vue';
 
 const props = defineProps<{
   open: boolean;
@@ -115,7 +116,7 @@ async function removePassword(): Promise<void> {
   <Transition name="guide">
     <div v-if="open" class="modal-overlay" @click.self="emit('close')">
       <div class="modal" role="dialog" aria-modal="true" aria-labelledby="auth-title">
-        <n-button quaternary circle class="modal-close" aria-label="关闭" @click="emit('close')">×</n-button>
+        <ModalCloseButton @close="emit('close')" />
         <h2 id="auth-title" class="modal-title">登录密码</h2>
         <p class="modal-lead">
           <template v-if="mode === 'password'">

@@ -4,6 +4,7 @@ import { NButton } from 'naive-ui';
 import { apiJson, errText } from '../utils/api';
 import { useToast } from '../composables/useToast';
 import { copyText } from '../utils/clipboard';
+import ModalCloseButton from './ModalCloseButton.vue';
 
 const props = defineProps<{ open: boolean }>();
 const emit = defineEmits<{ close: [] }>();
@@ -75,7 +76,7 @@ async function copyLogs(): Promise<void> {
   <Transition name="guide">
     <div v-if="open" class="modal-overlay" @click.self="emit('close')">
       <div class="modal modal-wide" role="dialog" aria-modal="true" aria-labelledby="logs-title">
-        <n-button quaternary circle class="modal-close" aria-label="关闭" @click="emit('close')">×</n-button>
+        <ModalCloseButton @close="emit('close')" />
         <h2 id="logs-title" class="modal-title">运行日志</h2>
         <p v-if="file" class="modal-lead mono break">
           {{ file }}<template v-if="truncated > 0"> · 已省略最早 {{ truncated }} 行</template>

@@ -1,5 +1,6 @@
 <script setup lang="ts">
 import { NButton } from 'naive-ui';
+import ModalCloseButton from './ModalCloseButton.vue';
 
 defineProps<{ open: boolean; isDev: boolean; controlPort: string }>();
 const emit = defineEmits<{ close: [] }>();
@@ -9,7 +10,7 @@ const emit = defineEmits<{ close: [] }>();
   <Transition name="guide">
     <div v-if="open" class="modal-overlay" @click.self="emit('close')">
       <div class="modal" role="dialog" aria-modal="true" aria-labelledby="guide-title">
-        <n-button quaternary circle class="modal-close" aria-label="关闭" @click="emit('close')">×</n-button>
+        <ModalCloseButton @close="emit('close')" />
         <h2 id="guide-title" class="modal-title">首次使用指南</h2>
         <p class="modal-lead">四步把两台设备连起来,开始局域网同步。</p>
 

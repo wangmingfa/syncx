@@ -3,6 +3,7 @@ import { computed } from 'vue';
 import { NButton } from 'naive-ui';
 import type { StatusData } from '../types';
 import { buildTopology, layoutTopology, type TopoNode } from '../utils/topology';
+import ModalCloseButton from './ModalCloseButton.vue';
 
 const props = defineProps<{
   open: boolean;
@@ -54,7 +55,7 @@ function nodeClass(n: TopoNode): string {
   <Transition name="guide">
     <div v-if="open" class="modal-overlay" @click.self="emit('close')">
       <div class="modal modal-wide" role="dialog" aria-modal="true" aria-labelledby="topo-title">
-        <n-button quaternary circle class="modal-close" aria-label="关闭" @click="emit('close')">×</n-button>
+        <ModalCloseButton @close="emit('close')" />
         <div class="modal-title-row">
           <h2 id="topo-title" class="modal-title">设备同步拓扑</h2>
           <span class="modal-title-path">谁和谁在同步哪些目录</span>

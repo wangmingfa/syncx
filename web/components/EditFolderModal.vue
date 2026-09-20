@@ -2,6 +2,7 @@
 import { ref, watch } from 'vue';
 import { NButton, NCheckbox, NCheckboxGroup } from 'naive-ui';
 import type { DeviceInfo, FolderInfo } from '../types';
+import ModalCloseButton from './ModalCloseButton.vue';
 
 const props = defineProps<{
   open: boolean;
@@ -46,7 +47,7 @@ function deviceAddrLine(p: DeviceInfo): string {
   <Transition name="guide">
     <div v-if="open && folder" class="modal-overlay" @click.self="emit('close')">
       <div class="modal" role="dialog" aria-modal="true" aria-labelledby="edit-devices-title">
-        <n-button quaternary circle class="modal-close" aria-label="关闭" @click="emit('close')">×</n-button>
+        <ModalCloseButton @close="emit('close')" />
         <div class="modal-title-row">
           <h2 id="edit-devices-title" class="modal-title">设置</h2>
           <span class="modal-title-path mono" :title="path">{{ path }}</span>

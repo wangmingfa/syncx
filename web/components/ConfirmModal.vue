@@ -2,6 +2,7 @@
 import { ref, watch } from 'vue';
 import { NButton } from 'naive-ui';
 import type { ConfirmState } from '../types';
+import ModalCloseButton from './ModalCloseButton.vue';
 
 const props = defineProps<{
   /** 非空 = 弹出确认弹窗;确认前不触碰任何数据。 */
@@ -41,7 +42,7 @@ async function runConfirm(): Promise<void> {
   <Transition name="guide">
     <div v-if="state" class="modal-overlay" @click.self="!busy && emit('closed')">
       <div class="modal" role="dialog" aria-modal="true" aria-labelledby="confirm-title">
-        <n-button quaternary circle class="modal-close" aria-label="关闭" :disabled="busy" @click="emit('closed')">×</n-button>
+        <ModalCloseButton :disabled="busy" @close="emit('closed')" />
         <h2 id="confirm-title" class="modal-title">{{ state.title }}</h2>
         <p class="modal-lead">{{ state.message }}</p>
         <div v-if="state.detail" class="confirm-detail mono break">{{ state.detail }}</div>

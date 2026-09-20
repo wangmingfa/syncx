@@ -5,6 +5,7 @@ import { applyHunk, countChanged, diffText, type DiffHunk } from '../utils/text-
 import { formatBytes } from '../utils/bytes';
 import { fileIconKind } from '../utils/file-icon';
 import type { FileCompareData, FileSideData } from '../types';
+import ModalCloseButton from './ModalCloseButton.vue';
 
 /**
  * 文件内容对比弹窗(IDEA 风格的并排差异)。
@@ -292,7 +293,7 @@ function apply(hunk: DiffHunk, target: 'left' | 'right'): void {
         aria-modal="true"
         aria-labelledby="fd-title"
       >
-        <n-button quaternary circle class="modal-close" aria-label="关闭" @click="emit('close')">×</n-button>
+        <ModalCloseButton @close="emit('close')" />
         <div class="modal-title-row">
           <h2 id="fd-title" class="modal-title">文件内容对比</h2>
           <span class="modal-title-path mono" :title="path">{{ path }}</span>

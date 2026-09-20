@@ -3,6 +3,7 @@ import { computed, ref } from 'vue';
 import { NButton } from 'naive-ui';
 import { useStatusContext } from '../composables/statusContext';
 import { formatBytes } from '../utils/bytes';
+import ModalCloseButton from './ModalCloseButton.vue';
 
 const props = defineProps<{ open: boolean }>();
 const emit = defineEmits<{ close: [] }>();
@@ -46,7 +47,7 @@ function onConfirm(): void {
   <Transition name="guide">
     <div v-if="props.open" class="modal-overlay" @click.self="emit('close')">
       <div class="modal" role="dialog" aria-modal="true" aria-labelledby="upload-update-title">
-        <n-button quaternary circle class="modal-close" aria-label="关闭" @click="emit('close')">×</n-button>
+        <ModalCloseButton @close="emit('close')" />
         <h2 id="upload-update-title" class="modal-title">上传安装包升级</h2>
         <p class="modal-lead">
           选择本机 <code class="mono">npm run pack:local</code> 打出的 <code class="mono">.tgz</code>，
