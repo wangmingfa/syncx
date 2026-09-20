@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { ref, watch } from 'vue';
+import { computed, ref, watch } from 'vue';
 import { NButton } from 'naive-ui';
 import type { SyncEventItem } from '../types';
 import { apiJson, errText } from '../utils/api';
@@ -14,7 +14,11 @@ const props = defineProps<{
   notify: (msg: string, kind?: 'info' | 'alert') => void;
 }>();
 const emit = defineEmits<{ close: [] }>();
-const { askConfirm } = useStatusContext();
+const { askConfirm, status } = useStatusContext();
+
+/** 本机设备 id。记录里的方向标着「本地 / 对端：<id>」,不给本机 id 的话,
+ *  一串 id 里认不出哪台是自己(与设备卡同源:都取 status.deviceId)。 */
+const deviceId = computed<string>(() => status.value.deviceId);
 
 const events = ref<SyncEventItem[]>([]);
 const loading = ref(false);
@@ -53,17 +57,18 @@ function fmtTime(ts: number): string {
   return new Date(ts).toLocaleString();
 }
 
-// 复制当前展示的全部同步记录到剪贴板
+// 复制当前展示的全部同步记录到剪贴板(首行带上与弹窗一致的本机 id 说明,
+// 否则粘贴出去的一串「对端：<id>」照样认不出哪台是自己)
 async function copyHistory(): Promise<void> {
   if (events.value.length === 0) return;
-  const text = events.value
+  const rows = events.value
     .map((ev) => {
       const dir =
         directionLabel(ev.direction) +
         (ev.direction !== 'local' && ev.deviceId ? `：${ev.deviceId}` : '');
       return `${fmtTime(ev.ts)}\t${actionLabel(ev.action)}\t${dir}\t${ev.path}`;
-    })
-    .join('\n');
+    });
+  const text = `本机 ${deviceId.value} · 记录里的「本地」即本机，「对端」标注了来源设备 id\n\n${rows.join('\n')}`;
   const ok = await copyText(text);
   if (ok) {
     props.notify('已复制全部同步记录到剪贴板', 'info');
@@ -110,6 +115,10 @@ function askClearHistory(): void {
     wide
     @close="emit('close')"
   >
+    <!-- 方向列的「本地 / 对端」与本机 id 成对出现:只标「对端：<id>」而不给本机 id,
+         一串 id 里认不出哪台是自己。id 从注入的 status 取,与设备卡同源。 -->
+    <p class="modal-lead">本机 <code class="mono">{{ deviceId }}</code> · 记录里的「本地」即本机，「对端」标注了来源设备 id</p>
+
     <div v-if="loading" class="history-loading">读取中…</div>
     <div v-else-if="events.length === 0" class="empty">还没有同步记录</div>
     <ul v-else class="history-list">
