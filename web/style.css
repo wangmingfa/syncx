@@ -1793,6 +1793,11 @@ tbody tr:last-child td {
   max-width: 1180px;
   margin: 0 auto;
   padding: 24px 18px 56px;
+  height: 100vh;
+  height: 100dvh;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
 }
 
 .cmp-head {
@@ -1821,6 +1826,9 @@ tbody tr:last-child td {
   font-size: 17px;
   font-weight: 650;
   letter-spacing: 0.01em;
+  /* 全局 h1 带 margin-bottom(16px),在 align-items:center 的 flex 行里会让
+     外边距盒下移、标题整体被顶高约 8px → 与返回按钮/路径标签错位。此处清零。 */
+  margin: 0;
 }
 
 /* 目录路径:单行截断,完整值靠 title 兜底 —— 路径比页面宽度长是常态 */
@@ -1905,18 +1913,19 @@ tbody tr:last-child td {
 
 .cmp-legend {
   display: grid;
-  grid-template-columns: 1fr 1fr;
+  grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
   gap: 0;
   margin-bottom: 10px;
   border: 1px solid var(--border);
   border-radius: var(--radius);
-  overflow: hidden;
 }
 
 .cmp-legend__col {
   display: flex;
   align-items: baseline;
+  flex-wrap: wrap;
   gap: 8px;
+  min-width: 0;
   padding: 6px 12px;
   font-size: 11.5px;
   color: var(--muted-strong);
@@ -1945,7 +1954,11 @@ tbody tr:last-child td {
   border: 1px solid var(--border);
   border-radius: var(--radius);
   box-shadow: var(--shadow);
-  overflow: hidden;
+  overflow-x: hidden;
+  overflow-y: auto;
+  /* 成为页面内唯一的滚动区:占满剩余高度,行超出时只在表格内部滚动 */
+  flex: 1 1 auto;
+  min-height: 0;
 }
 
 .cmp-thead {
@@ -1953,6 +1966,10 @@ tbody tr:last-child td {
   grid-template-columns: 1fr 1fr;
   border-bottom: 1px solid var(--border);
   background: var(--bg-soft);
+  /* 表头随滚动固定在表格顶部,行滚动时始终可见 */
+  position: sticky;
+  top: 0;
+  z-index: 1;
 }
 
 .cmp-th {
@@ -2014,9 +2031,89 @@ tbody tr:last-child td {
 
 .cmp-icon {
   flex: none;
-  width: 10px;
-  font-size: 10px;
+  width: 14px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
   color: var(--muted);
+}
+
+.cmp-svg {
+  width: 13px;
+  height: 13px;
+  fill: none;
+  stroke: currentColor;
+  stroke-width: 1.4;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+}
+
+.cmp-svg--file {
+  width: 12px;
+  height: 12px;
+}
+
+/* 实心小圆(React 核心 / Python 眼 / Go 眼):不吃 .cmp-svg 的 fill:none */
+.cmp-svg__fill {
+  fill: currentColor;
+  stroke: none;
+}
+
+/* JS / TS 的语言徽标:色块吃 currentColor,字母压一层对比色。
+   字母颜色写在各 kind 下(下面),色块本身在浅底/深底都要看得清。 */
+.cmp-svg__badge {
+  fill: currentColor;
+  stroke: none;
+}
+
+.cmp-svg__badge-letter {
+  fill: none;
+  stroke-width: 1.7;
+}
+
+/* JS:黄底 + 深字,再补一圈深色细边(纯黄块在浅底上太飘,加边才有轮廓) */
+.cmp-icon--js .cmp-svg__badge {
+  stroke: #6b6350;
+  stroke-width: 0.9;
+}
+.cmp-icon--js .cmp-svg__badge-letter {
+  stroke: #4a4636;
+}
+
+/* TS:蓝底 + 白字 */
+.cmp-icon--ts .cmp-svg__badge-letter {
+  stroke: #fff;
+}
+
+/* 文件类型图标配色:同一类别同色,便于扫读;取中间明度,浅底上清晰且不抢正文。
+   代码按语言取品牌色(整体压暗一档),色相相近的靠图形区分(rust 齿轮 / react 原子 /
+   python 蛇 / go 地鼠 / java 咖啡杯 / c 字母 C / sql 圆柱)。 */
+.cmp-icon--rust { color: #b7410e; }
+.cmp-icon--js { color: #f0c808; }
+.cmp-icon--ts { color: #2f74c0; }
+.cmp-icon--react { color: #0891b2; }
+.cmp-icon--vue { color: #15a05a; }
+.cmp-icon--python { color: #3776ab; }
+.cmp-icon--go { color: #35a3c4; }
+.cmp-icon--java { color: #b91c1c; }
+.cmp-icon--c { color: #0b5394; }
+.cmp-icon--html { color: #e0761d; }
+.cmp-icon--css { color: #2965f1; }
+.cmp-icon--sql { color: #6d4aa8; }
+.cmp-icon--shell { color: #2f9e8f; }
+/* 通用源码(没有专属图形的语言):比 TS 徽标浅一档的蓝,别和 ts 撞色 */
+.cmp-icon--code { color: #4a83cb; }
+.cmp-icon--data { color: #b07a1f; }
+.cmp-icon--doc { color: #5b6b7f; }
+.cmp-icon--image { color: #7a5cc0; }
+.cmp-icon--archive { color: #c0762a; }
+.cmp-icon--media { color: #c0488a; }
+.cmp-icon--sheet { color: #2f9e6f; }
+.cmp-icon--pdf { color: #c0504d; }
+.cmp-icon--file { color: var(--muted); }
+
+.cmp-row.is-dir .cmp-icon .cmp-svg {
+  transition: transform 0.12s ease;
 }
 
 .cmp-name {
@@ -2133,27 +2230,54 @@ tbody tr:last-child td {
   letter-spacing: 0;
 }
 
+/* 左右各一个独立滚动区:横向滚动互不干扰,行号/按钮用 sticky 钉在窗格边上 */
 .fd-rows {
-  flex: 1;
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
   min-height: 220px;
-  max-height: 54vh;
-  overflow: auto;
   background: #fff;
   border: 1px solid var(--border);
   border-radius: 9px;
+  overflow: hidden;
   font-family: var(--mono);
   font-size: 12px;
   line-height: 1.55;
 }
 
-/* 行号 | 左文本 | 差异块操作区 | 行号 | 右文本 */
+/* 每个窗格自己滚(横+纵);纵向由组件同步 scrollTop,保证同一行左右对齐 */
+.fd-pane {
+  min-width: 0;
+  max-height: 54vh;
+  overflow: auto;
+  scrollbar-gutter: stable;
+}
+
+/* 中缝:左右两半的分界线 */
+.fd-pane--right {
+  border-left: 1px solid var(--border);
+}
+
+/* 行号 | 左文本 | 差异块操作区 */
+.fd-pane--left .fd-row {
+  grid-template-columns: 46px minmax(max-content, 1fr) 46px;
+}
+
+/* 行号 | 右文本 */
+.fd-pane--right .fd-row {
+  grid-template-columns: 46px minmax(max-content, 1fr);
+}
+
 .fd-row {
   display: grid;
-  grid-template-columns: 46px minmax(0, 1fr) 34px 46px minmax(0, 1fr);
   align-items: stretch;
 }
 
+/* 行号随横向滚动钉在窗格左侧;背景不透明,滚过来的文本从下面穿过 */
 .fd-no {
+  position: sticky;
+  left: 0;
+  z-index: 1;
+  background: #fff;
   padding: 0 8px;
   color: #a7b0c0;
   text-align: right;
@@ -2161,19 +2285,25 @@ tbody tr:last-child td {
   user-select: none;
 }
 
-/* pre 保留原始空白(缩进是代码的一部分);超宽由 .fd-rows 横向滚动 */
+/* pre 保留原始空白(缩进是代码的一部分);不换行,超宽由各自窗格横向滚动 */
 .fd-text {
   margin: 0;
   padding: 0 8px;
   white-space: pre;
 }
 
+/* 差异块按钮:钉在左窗格右缘(原先是「两栏之间的中间列」)。
+   必须横排 —— 竖排会把该行撑到两倍高,而右窗格同一行没有这个格子,
+   两个窗格从该行起就会整体错位(行高必须两侧严格相等)。 */
 .fd-gutter {
+  position: sticky;
+  right: 0;
+  z-index: 1;
+  background: #fff;
   display: flex;
-  flex-direction: column;
   align-items: center;
-  gap: 2px;
-  padding-top: 1px;
+  gap: 3px;
+  padding: 0 3px;
 }
 
 .fd-apply {

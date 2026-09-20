@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, ref, watch } from 'vue';
+import { computed, nextTick, ref, watch } from 'vue';
 import { NButton } from 'naive-ui';
 import { applyHunk, countChanged, diffText, type DiffHunk } from '../utils/text-diff';
 import type { FileCompareData, FileSideData } from '../types';
@@ -81,11 +81,40 @@ function confirmOverwrite(): void {
   overwriteConfirm.value = null;
   if (dir) emit('sync', dir);
 }
-// 关窗或换文件时,清掉进行中的覆盖确认,免得下次打开还停在上一步
+/**
+ * 左右各是一个独立滚动区:横向滚动互不干扰(各看各的,超宽行不会压到对面行号上),
+ * 但纵向必须锁死 —— 同一行左右两块要水平对齐,否则对比失去意义。
+ *
+ * 两排行数/行高完全一致(每个 row 左右两侧各占一格),所以 scrollTop 可以精确同步。
+ */
+const paneLeftEl = ref<HTMLElement | null>(null);
+const paneRightEl = ref<HTMLElement | null>(null);
+let paneLock = false;
+
+function onPaneScroll(which: 'left' | 'right'): void {
+  if (paneLock) return; // 防止两边互相触发形成回环
+  const src = which === 'left' ? paneLeftEl.value : paneRightEl.value;
+  const dst = which === 'left' ? paneRightEl.value : paneLeftEl.value;
+  if (!src || !dst) return;
+  paneLock = true;
+  dst.scrollTop = src.scrollTop;
+  requestAnimationFrame(() => {
+    paneLock = false;
+  });
+}
+
+// 关窗或换文件时,清掉进行中的覆盖确认,并把两个窗格滚回左上角
 watch(
   () => [props.open, props.path],
   () => {
     overwriteConfirm.value = null;
+    void nextTick(() => {
+      for (const el of [paneLeftEl.value, paneRightEl.value]) {
+        if (!el) continue;
+        el.scrollTop = 0;
+        el.scrollLeft = 0;
+      }
+    });
   },
 );
 
@@ -133,33 +162,56 @@ function apply(hunk: DiffHunk, target: 'left' | 'right'): void {
               <span class="fd-head__role">对端（{{ deviceId }}）</span>
             </div>
 
+            <!-- 左右各一个独立滚动区:超宽行只在**自己这侧**横向滚动,
+                 行号(sticky left)与差异块按钮(sticky right)始终钉在窗格边上,
+                 不会再出现「本侧超长文本压到另一侧行号上」。 -->
             <div class="fd-rows">
               <div
-                v-for="(row, i) in diff.rows"
-                :key="i"
-                class="fd-row"
-                :class="rowClass(row.type)"
+                ref="paneLeftEl"
+                class="fd-pane fd-pane--left"
+                @scroll.passive="onPaneScroll('left')"
               >
-                <span class="fd-no">{{ row.leftNo ?? '' }}</span>
-                <pre class="fd-text">{{ row.leftText ?? '' }}</pre>
-                <span class="fd-gutter">
-                  <template v-if="hunkAtStart.get(i)">
-                    <button
-                      type="button"
-                      class="fd-apply"
-                      title="把右边的这块应用到本机（拉取覆盖）"
-                      @click="apply(hunkAtStart.get(i)!, 'left')"
-                    >←</button>
-                    <button
-                      type="button"
-                      class="fd-apply"
-                      title="把左边的这块应用到对端（推送覆盖）"
-                      @click="apply(hunkAtStart.get(i)!, 'right')"
-                    >→</button>
-                  </template>
-                </span>
-                <span class="fd-no">{{ row.rightNo ?? '' }}</span>
-                <pre class="fd-text">{{ row.rightText ?? '' }}</pre>
+                <div
+                  v-for="(row, i) in diff.rows"
+                  :key="i"
+                  class="fd-row"
+                  :class="rowClass(row.type)"
+                >
+                  <span class="fd-no">{{ row.leftNo ?? '' }}</span>
+                  <pre class="fd-text">{{ row.leftText ?? '' }}</pre>
+                  <span class="fd-gutter">
+                    <template v-if="hunkAtStart.get(i)">
+                      <button
+                        type="button"
+                        class="fd-apply"
+                        title="把右边的这块应用到本机（拉取覆盖）"
+                        @click="apply(hunkAtStart.get(i)!, 'left')"
+                      >←</button>
+                      <button
+                        type="button"
+                        class="fd-apply"
+                        title="把左边的这块应用到对端（推送覆盖）"
+                        @click="apply(hunkAtStart.get(i)!, 'right')"
+                      >→</button>
+                    </template>
+                  </span>
+                </div>
+              </div>
+
+              <div
+                ref="paneRightEl"
+                class="fd-pane fd-pane--right"
+                @scroll.passive="onPaneScroll('right')"
+              >
+                <div
+                  v-for="(row, i) in diff.rows"
+                  :key="i"
+                  class="fd-row"
+                  :class="rowClass(row.type)"
+                >
+                  <span class="fd-no">{{ row.rightNo ?? '' }}</span>
+                  <pre class="fd-text">{{ row.rightText ?? '' }}</pre>
+                </div>
               </div>
             </div>
           </div>

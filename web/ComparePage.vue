@@ -8,6 +8,7 @@ import { copyText } from './utils/clipboard';
 import { fmtTime, stripWs } from './utils/format';
 import type { StatusData } from './types';
 import FileDiffModal from './components/FileDiffModal.vue';
+import FileIcon from './components/FileIcon.vue';
 
 const props = defineProps<{
   status: StatusData;
@@ -242,7 +243,7 @@ async function copyReport(): Promise<void> {
             >
               <template v-if="row.left || row.isDir">
                 <span class="cmp-pad" :style="{ width: `${row.depth * 14}px` }" aria-hidden="true"></span>
-                <span class="cmp-icon" aria-hidden="true">{{ row.isDir ? (collapsed.has(row.path) ? '▸' : '▾') : '·' }}</span>
+                <FileIcon :name="row.name" :is-dir="row.isDir" :collapsed="collapsed.has(row.path)" />
                 <span class="cmp-name break">{{ row.name }}</span>
                 <span v-if="row.left?.deleted" class="cmp-tag">已删除</span>
               </template>
@@ -254,7 +255,7 @@ async function copyReport(): Promise<void> {
             >
               <template v-if="row.right || row.isDir">
                 <span class="cmp-pad" :style="{ width: `${row.depth * 14}px` }" aria-hidden="true"></span>
-                <span class="cmp-icon" aria-hidden="true">{{ row.isDir ? (collapsed.has(row.path) ? '▸' : '▾') : '·' }}</span>
+                <FileIcon :name="row.name" :is-dir="row.isDir" :collapsed="collapsed.has(row.path)" />
                 <span class="cmp-name break">{{ row.name }}</span>
                 <span v-if="row.right?.deleted" class="cmp-tag">已删除</span>
               </template>
