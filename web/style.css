@@ -1183,7 +1183,95 @@ tbody tr:last-child td {
   margin-bottom: 16px;
 }
 
-/* 同步记录弹窗:更宽,容纳列表 */
+/* 使用指南正文。这几个类名早就写在模板里,却一直没有对应样式:<ol class="guide-steps">
+   的默认序号会和手写的 ①②③④ 叠成「1. ①」,各步之间也没有间距。这里补上基础排版,
+   并去掉默认 marker(编号由正文自带,否则重复)。 */
+.guide-steps {
+  list-style: none;
+  padding-left: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+}
+
+.guide-step-h {
+  font-weight: 600;
+  margin-bottom: 2px;
+}
+
+/* 指南里的「排查说明」(如对端是手机时会卡十几秒):用淡底 + 左竖线与 4 步正文分开,
+   免得被读成第 5 步。正文色取 --muted-strong,视觉上比步骤正文退一档。
+   做成 <details> 默认收起 —— 展开时它比四步正文还高,弹窗会顶满 88vh 并出现滚动条;
+   收起的标题行既保持指南可通读,又让遇到症状的人点得开。 */
+.guide-faq {
+  margin-top: 18px;
+  padding: 12px 14px;
+  background: var(--bg-soft);
+  border-left: 3px solid var(--accent);
+  border-radius: 0 10px 10px 0;
+}
+
+.guide-faq-h {
+  font-weight: 600;
+  margin-bottom: 4px;
+}
+
+/* 折叠标题行:去掉原生三角(各浏览器渲染差异大),改用 border 画一个会转的三角。
+   不用 ▸ 这类字形,理由和关闭按钮的「×」改成 SVG 一样:字形位置/形状由字体决定,
+   而且生成内容里的符号会被读屏念出来。border 画的三角与字体无关、也不发声。 */
+.guide-faq > summary {
+  cursor: pointer;
+  list-style: none;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.guide-faq > summary::-webkit-details-marker {
+  display: none;
+}
+
+.guide-faq > summary::before {
+  content: '';
+  width: 0;
+  height: 0;
+  border-top: 4px solid transparent;
+  border-bottom: 4px solid transparent;
+  border-left: 5px solid var(--accent);
+  transition: transform 0.18s ease;
+}
+
+.guide-faq[open] > summary::before {
+  transform: rotate(90deg);
+}
+
+.guide-faq-h--sub {
+  margin-top: 10px;
+}
+
+.guide-faq-b {
+  color: var(--muted-strong);
+  line-height: 1.7;
+}
+
+.guide-faq-list {
+  /* 下间距是必要的:列表后紧跟一句收尾(改好后…),不留白会与最后一条读成同一段 */
+  margin: 6px 0 8px;
+  padding-left: 18px;
+  color: var(--muted-strong);
+  line-height: 1.7;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+/* 结尾按钮与上方内容留出间距(此前紧贴最后一行) */
+.modal-ok {
+  margin-top: 18px;
+}
+
+/* 需要更宽的弹窗:同步记录(容纳列表)、使用指南(520px 下四步正文被挤成窄长条 ——
+   640 是拐点,再宽各行不再变短、反而行长超过舒适阅读宽度)。 */
 .modal-wide {
   max-width: 640px;
 }
