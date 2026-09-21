@@ -45,6 +45,52 @@ describe('ignore rules', () => {
     expect(isIgnored(rules, 'src/index.js', false)).toBe(false);
   });
 
+  /**
+   * 回归(2026-09-21 用户实测):.gitignore 里写了 `node_modules/`,子目录里的
+   * node_modules 照旧被同步。根因:目录规则分支用的是字面量前缀比较
+   * (`relPath === pattern || relPath.startsWith(pattern + '/')`),只认**根级**目录。
+   * gitignore 里「无斜杠模式匹配任意层级」对目录规则同样成立 —— 期望值经
+   * `git check-ignore` 逐条核对。
+   */
+  it('applies a trailing-slash directory rule at any depth', () => {
+    const rules = parseIgnoreRules(['node_modules/']);
+
+    // 嵌套目录自身与它下面的一切
+    expect(isIgnored(rules, 'admin/node_modules', true)).toBe(true);
+    expect(isIgnored(rules, 'admin/node_modules/estree-walker/package.json', false)).toBe(true);
+    expect(isIgnored(rules, 'admin/node_modules/.vite/deps/vue.js', false)).toBe(true);
+    expect(isIgnored(rules, 'a/b/c/node_modules/pkg/index.js', false)).toBe(true);
+
+    // 目录规则不匹配同名**文件**(git:`node_modules/` 只匹配目录)
+    expect(isIgnored(rules, 'admin/node_modules', false)).toBe(false);
+
+    // 邻名不受牵连:段比较而非子串比较
+    expect(isIgnored(rules, 'admin/node_modules_backup/x.js', false)).toBe(false);
+    expect(isIgnored(rules, 'src/index.js', false)).toBe(false);
+  });
+
+  it('anchors a directory rule containing an internal slash to the shared root', () => {
+    // 含斜杠 ⇒ 相对 .gitignore 所在目录(共享根)定位,更深的同名目录不受影响
+    const rules = parseIgnoreRules(['admin/dist/']);
+    expect(isIgnored(rules, 'admin/dist', true)).toBe(true);
+    expect(isIgnored(rules, 'admin/dist/index.html', false)).toBe(true);
+    expect(isIgnored(rules, 'a/b/admin/dist/x.js', false)).toBe(false);
+  });
+
+  it('supports wildcards inside a directory rule', () => {
+    // 回归:目录分支此前做字面量比较,`**/tmp/` 这类模式永远匹配不上(死路径)
+    const anyTmp = parseIgnoreRules(['**/tmp/']);
+    expect(isIgnored(anyTmp, 'tmp', true)).toBe(true);
+    expect(isIgnored(anyTmp, 'tmp/b.js', false)).toBe(true);
+    expect(isIgnored(anyTmp, 'a/pkg/tmp/b.js', false)).toBe(true);
+    expect(isIgnored(anyTmp, 'a/pkg/tmpfile/b.js', false)).toBe(false);
+
+    const nodePrefix = parseIgnoreRules(['node_*/']);
+    expect(isIgnored(nodePrefix, 'node_tools/x.js', false)).toBe(true);
+    expect(isIgnored(nodePrefix, 'admin/node_tools/y.js', false)).toBe(true);
+    expect(isIgnored(nodePrefix, 'admin/other/y.js', false)).toBe(false);
+  });
+
   it('supports ** across directories', () => {
     const rules = parseIgnoreRules(['build/**']);
     expect(isIgnored(rules, 'build/out/app.js', false)).toBe(true);

@@ -109,41 +109,86 @@ function toRegex(pattern: string): RegExp {
   return built;
 }
 
-/** 单条规则是否命中该相对路径(判定细节与 gitignore 一致,见上方 toRegex 注释)。 */
-function ruleMatches(rule: IgnoreRule, relPath: string): boolean {
+/** 不含通配符的模式:可以走字符串相等,省掉正则调用(目录规则命中率高的常见情形)。 */
+const LITERAL_PATTERN = /^[^*?[\]\\]+$/;
+
+/** 相对路径的目录层:一律以 '/' 与 '\' 双分隔符切分,兼容对端可能传来的反斜杠。 */
+function splitSegments(relPath: string): string[] {
+  return relPath.split(/[\\/]/);
+}
+
+/**
+ * 单条规则是否命中该相对路径(判定细节与 gitignore 一致,见上方 toRegex 注释)。
+ *
+ * `isDir` 只在目录规则下起作用:它决定相对路径的**最后一段**能否被当作
+ * 「被忽略的目录自身」(`node_modules/` 不匹配名为 node_modules 的文件)。
+ */
+function ruleMatches(rule: IgnoreRule, relPath: string, isDir: boolean): boolean {
   const dirOnly = rule.pattern.endsWith('/');
   const anchored = rule.pattern.startsWith('/');
   let pattern = rule.pattern;
   if (dirOnly) pattern = pattern.slice(0, -1);
   if (anchored) pattern = pattern.slice(1);
+  if (pattern === '') return false;
 
   const hasSlash = pattern.includes('/');
   const re = toRegex(pattern);
+  // 含斜杠或锚定的模式相对 .gitignore 所在目录定位,匹配**完整**相对路径;
+  // 无斜杠模式可以匹配**任意层级**的同名条目(这两条是 gitignore 的核心差异)
+  const fullPathMode = anchored || hasSlash;
+  const matchFull = (p: string): boolean =>
+    fullPathMode ? re.test(p) : splitSegments(p).some((segment) => re.test(segment));
 
-  if (dirOnly) {
-    // 目录规则:匹配目录本身及其下所有内容
-    return relPath === pattern || relPath.startsWith(`${pattern}/`);
+  if (!dirOnly) return matchFull(relPath);
+
+  /**
+   * 目录规则:gitignore 里「忽略一个目录」等价于「忽略它下面的全部内容」,
+   * 而这里拿到的是**文件**的相对路径,所以必须逐级回溯目录前缀才能对上 ——
+   * `admin/node_modules/pkg/index.js` 被 `node_modules/` 命中,靠的是前缀
+   * `admin/node_modules`。
+   *
+   * 之前这个分支用的是字面量前缀比较(`relPath === pattern ||
+   * relPath.startsWith(pattern + '/')`),它只认**根级**目录,于是
+   * `node_modules/` 挡不住 `admin/node_modules/**`(2026-09-21 实测:
+   * .gitignore 里明明有 node_modules/,子目录里的 node_modules 照旧被同步),
+   * 顺带也让目录规则里的通配符(如 `**` 加 `/dist/`、`node_` 打头的模式)永远不生效。
+   */
+  const segments = splitSegments(relPath);
+  // 是目录才算「目录自身」;是文件时最后一段不能参与(见函数注释)
+  const dirDepth = isDir ? segments.length : segments.length - 1;
+
+  if (fullPathMode) {
+    for (let i = 1; i <= dirDepth; i++) {
+      if (re.test(segments.slice(0, i).join('/'))) return true;
+    }
+    return false;
   }
-  if (anchored || hasSlash) {
-    // 含斜杠或锚定的模式匹配完整相对路径
-    return re.test(relPath);
+  if (LITERAL_PATTERN.test(pattern)) {
+    for (let i = 0; i < dirDepth; i++) {
+      if (segments[i] === pattern) return true;
+    }
+    return false;
   }
-  // 无斜杠模式匹配任意层级的该文件名
-  return relPath.split('/').some((segment) => re.test(segment));
+  for (let i = 0; i < dirDepth; i++) {
+    if (re.test(segments[i] ?? '')) return true;
+  }
+  return false;
 }
 
 /**
  * Decide whether a relative path is ignored. Later rules override earlier
  * ones; a matching negation rule un-ignores the path.
  *
- * `isDir` 参数保留仅为兼容既有调用点(当前判定只看规则自身是否以 `/` 结尾,
- * 不看目标是不是目录 —— gitignore 里目录规则的语义由模式串表达)。
+ * `isDir` 表示该相对路径指向的是目录还是文件:目录规则(以 `/` 结尾的模式)
+ * 只在「目标确实是目录」时匹配最后一段 —— 即 `node_modules/` 不匹配名为
+ * node_modules 的**文件**,但匹配任意层级名为 node_modules 的**目录**及其下全部内容。
+ * 调用方必须传对(`scanner` 按 dirent 判定、`peer`/索引类入口按文件传 false)。
  */
 export function isIgnored(rules: IgnoreRule[], relPath: string, isDir: boolean): boolean {
   let ignored = false;
 
   for (const rule of rules) {
-    if (ruleMatches(rule, relPath)) ignored = !rule.negated;
+    if (ruleMatches(rule, relPath, isDir)) ignored = !rule.negated;
   }
 
   return ignored;
@@ -158,10 +203,10 @@ export function isIgnored(rules: IgnoreRule[], relPath: string, isDir: boolean):
  * 注意:此函数只覆盖 .gitignore/.syncxignore 语义,硬忽略(见 isHardIgnored)
  * 是独立的、不可解除的闸门,调用方需要时另行判定。
  */
-export function matchIgnoreRule(rules: IgnoreRule[], relPath: string): IgnoreRule | undefined {
+export function matchIgnoreRule(rules: IgnoreRule[], relPath: string, isDir = false): IgnoreRule | undefined {
   let matched: IgnoreRule | undefined;
   for (const rule of rules) {
-    if (ruleMatches(rule, relPath)) matched = rule;
+    if (ruleMatches(rule, relPath, isDir)) matched = rule;
   }
   return matched && !matched.negated ? matched : undefined;
 }

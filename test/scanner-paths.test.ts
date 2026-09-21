@@ -105,4 +105,27 @@ describe('扫描相对路径一律使用 POSIX 分隔符(Windows 回归)', () =>
     expect(tombstones).toEqual([]);
     index.close();
   });
+
+  /**
+   * 回归(2026-09-21 用户实测):`.gitignore` 写了 `node_modules/`,子目录里的
+   * node_modules 仍被同步出去。根因在目录规则的判定只认根级目录(见
+   * `src/ignore.ts` 的 ruleMatches)。这里锁两件事:新文件不得被重新索引上报;
+   * 既有条目即使盘上已无也不得生成墓碑 —— 墓碑会让对端删掉一份并非用户本意的文件。
+   */
+  it('嵌套 node_modules 被目录规则整棵跳过,也不为既有条目生成墓碑', () => {
+    const { root, index } = setup();
+    mkdirSync(join(root, 'admin', 'node_modules', 'pkg'), { recursive: true });
+    // 新文件:修复前会进 changed
+    writeFileSync(join(root, 'admin', 'node_modules', 'pkg', 'fresh.js'), 'x');
+    // 历史遗留条目 + 盘上已无:修复前会生成墓碑并广播删除
+    seed(root, index, 'admin/node_modules/pkg/old.js', 'o');
+    rmSync(join(root, 'admin', 'node_modules', 'pkg', 'old.js'));
+    seed(root, index, 'keep.txt', 'k');
+
+    const { changed, tombstones } = scanFolder(root, index, parseIgnoreRules(['node_modules/']), 'DEV-A');
+
+    expect(changed).toEqual([]);
+    expect(tombstones).toEqual([]);
+    index.close();
+  });
 });
