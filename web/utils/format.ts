@@ -42,6 +42,22 @@ export function deviceAddrLine(p: DeviceInfo): string {
 }
 
 /**
+ * 目录卡里「传输中文件」列表默认最多展示的行数。
+ *
+ * 后端 `files` 没有条数上限(整目录首批同步时可能上千条),全部渲染会把卡片撑得极高、
+ * 把并列的设备列甩到屏幕外。超出部分收进「查看全部」,由用户显式展开。
+ */
+export const XFER_FILE_LIMIT = 5;
+
+/**
+ * 按展开状态截断「传输中文件」列表:展开返回全部,收起只给前 `limit` 条。
+ * 条数不超过 `limit` 时两种状态结果一致(调用方据此决定是否渲染「查看全部」按钮)。
+ */
+export function visibleTransferFiles<T>(files: readonly T[], expanded: boolean, limit = XFER_FILE_LIMIT): T[] {
+  return expanded ? [...files] : files.slice(0, limit);
+}
+
+/**
  * 共享目录输入框的路径示例文案。**必须按 daemon 所在平台给**(后端 status.platform):
  * 控制台经常被从另一台机器打开,用浏览器的 navigator 判断会给出错的示例 ——
  * 在 Windows 上看到 `/home/me/Documents` 正是这类误导。

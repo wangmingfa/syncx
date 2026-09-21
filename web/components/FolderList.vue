@@ -1,8 +1,8 @@
 <script setup lang="ts">
-import { computed } from 'vue';
+import { computed, ref } from 'vue';
 import { NButton, NInput, NCheckbox, NCheckboxGroup, NTooltip } from 'naive-ui';
 import { useStatusContext } from '../composables/statusContext';
-import { folderPathPlaceholder } from '../utils/format';
+import { folderPathPlaceholder, visibleTransferFiles, XFER_FILE_LIMIT } from '../utils/format';
 import type { FolderInfo, TransferFile } from '../types';
 
 /**
@@ -60,6 +60,30 @@ const {
 
 /** 路径示例按 daemon 平台给(Windows 显示 F:\shared\docs),避免在 Windows 上提示 POSIX 路径。 */
 const pathPlaceholder = computed(() => folderPathPlaceholder(status.value.platform));
+
+/**
+ * 「传输中文件」列表的展开状态(按目录)。
+ *
+ * 默认只显示前 5 条:后端 files 无条数上限(整目录首批同步可能上千条),全渲染会把卡片撑得极高、
+ * 把并列的设备列甩到屏幕外。用**替换 Set** 而非原地 add/delete,改动必然触发响应式重渲染。
+ */
+const xferExpanded = ref<Set<string>>(new Set());
+
+function isXferExpanded(f: FolderInfo): boolean {
+  return xferExpanded.value.has(folderKey(f));
+}
+
+function toggleXferExpand(f: FolderInfo): void {
+  const next = new Set(xferExpanded.value);
+  const key = folderKey(f);
+  if (!next.delete(key)) next.add(key);
+  xferExpanded.value = next;
+}
+
+/** 该目录当前要渲染的传输文件:展开时全部,收起时前 5 条。 */
+function visibleFiles(f: FolderInfo): TransferFile[] {
+  return visibleTransferFiles(progressOf(f)?.files ?? [], isXferExpanded(f));
+}
 </script>
 
 <template>
@@ -178,7 +202,7 @@ const pathPlaceholder = computed(() => folderPathPlaceholder(status.value.platfo
         </div>
         <div class="item-sub">{{ progressText(progressOf(f)!) }}</div>
         <ul v-if="progressOf(f)!.files && progressOf(f)!.files!.length" class="xfer-files">
-          <li v-for="tf in progressOf(f)!.files!" :key="tf.path" class="xfer-file">
+          <li v-for="tf in visibleFiles(f)" :key="tf.path" class="xfer-file">
             <span class="xfer-file__dir" :title="tf.direction === 'receive' ? '下载中' : '上传中'">{{ tf.direction === 'receive' ? '↓' : '↑' }}</span>
             <span class="xfer-file__name" :title="tf.path">{{ basename(tf.path) }}</span>
             <span class="xfer-file__pct">{{ filePercent(tf) }}%</span>
@@ -187,6 +211,22 @@ const pathPlaceholder = computed(() => folderPathPlaceholder(status.value.platfo
             </div>
           </li>
         </ul>
+        <!-- 超过 5 条才出现:收起时只展示前 5 条,避免长列表把卡片撑高、把并列的设备列甩出屏幕 -->
+        <n-button
+          v-if="progressOf(f)!.files && progressOf(f)!.files!.length > XFER_FILE_LIMIT"
+          size="tiny"
+          quaternary
+          class="xfer-more"
+          :aria-expanded="isXferExpanded(f)"
+          @click="toggleXferExpand(f)"
+        >
+          {{ isXferExpanded(f) ? '收起' : `查看全部 ${progressOf(f)!.files!.length} 个文件` }}
+          <span class="xfer-more__chev" :class="{ 'is-open': isXferExpanded(f) }" aria-hidden="true">
+            <svg viewBox="0 0 12 12" width="10" height="10" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round">
+              <path d="M2.5 4.5 6 8l3.5-3.5" />
+            </svg>
+          </span>
+        </n-button>
       </div>
     </div>
   </section>
