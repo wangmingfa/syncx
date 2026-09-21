@@ -24,5 +24,8 @@ describe('status aggregation', () => {
     ]);
     expect(status.entries).toBe(42);
     expect(status.tombstones).toBe(3);
+    // 平台要透给前端:共享目录输入框的路径示例按 **daemon 平台** 给(web/utils/format.ts 的
+    // folderPathPlaceholder),浏览器可能跑在另一台机器上,不能用 navigator 判断。
+    expect(status.platform).toBe(process.platform);
   });
 });

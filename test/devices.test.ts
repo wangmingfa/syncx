@@ -57,7 +57,7 @@ describe('shared folder configuration', () => {
     const file = join(dir, 'not-a-dir');
     writeFileSync(file, 'x');
 
-    expect(() => addSharedFolder(configPath, file, ['DEV1234567'])).toThrow('not a directory');
+    expect(() => addSharedFolder(configPath, file, ['DEV1234567'])).toThrow('但不是目录');
 
     rmDir(dir);
   });
@@ -116,8 +116,27 @@ describe('shared folder configuration', () => {
     const dir = tempDir();
     const configPath = join(dir, 'config.json');
 
-    expect(() => addSharedFolder(configPath, 'relative/path', ['DEV1234567'])).toThrow('must be absolute');
-    expect(() => addSharedFolder(configPath, './relative', ['DEV1234567'])).toThrow('must be absolute');
+    // 报错必须说清「本机」与「该填什么」,不能是裸英文 folder path must be absolute
+    expect(() => addSharedFolder(configPath, 'relative/path', ['DEV1234567'])).toThrow(/不是本机绝对路径/);
+    expect(() => addSharedFolder(configPath, './relative', ['DEV1234567'])).toThrow(/共享目录只能填本机目录/);
+
+    rmDir(dir);
+  });
+
+  it('explains a Windows drive path filled in on macOS/Linux', () => {
+    // 真实踩坑:在 macOS 上填了 F:\shared\model-gate。POSIX 的 isAbsolute() 对它恒为 false,
+    // 旧英文报错完全没说清原因 → 报错必须点出「Windows 盘符路径」「本机平台」并给可用示例。
+    if (process.platform === 'win32') return; // Windows 上 F:\ 本就是合法绝对路径,不走这条分支
+    const dir = tempDir();
+    const configPath = join(dir, 'config.json');
+
+    expect(() => addSharedFolder(configPath, 'F:\\shared\\model-gate', ['DEV1234567'])).toThrow(
+      /是 Windows 盘符路径,本机是 (macOS|Linux)/,
+    );
+    // 提示里要给出本机真实可用的绝对路径示例,而不是写死的 /home/me
+    expect(() => addSharedFolder(configPath, 'F:\\shared\\model-gate', ['DEV1234567'])).toThrow(
+      join(homedir(), 'Documents'),
+    );
 
     rmDir(dir);
   });
@@ -151,7 +170,7 @@ describe('shared folder configuration', () => {
             '/home/user/.cache',
           ];
     for (const p of forbidden) {
-      expect(() => addSharedFolder(configPath, p, ['DEV1234567'])).toThrow('not allowed');
+      expect(() => addSharedFolder(configPath, p, ['DEV1234567'])).toThrow('不允许作为共享目录');
     }
     rmDir(dir);
   });
@@ -163,7 +182,7 @@ describe('shared folder configuration', () => {
     // 同 id 不同 path:会导致两个索引库文件同名(版本向量交叉写)且 session-manager 按
     // folderId 建索引后者覆盖前者 → 一条目录静默失效。必须拒绝。
     expect(() => addSharedFolder(configPath, join(dir, 'photos'), ['DEV1234567'], 'fid-1')).toThrow(
-      /already used by another shared folder/,
+      /已被另一个共享目录占用/,
     );
     rmDir(dir);
   });
@@ -313,7 +332,7 @@ describe('manual peer address (addPeer)', () => {
       mkdirSync(C, { recursive: true });
 
       addSharedFolder(configPath, D, ['peer'], 'fd', true);
-      expect(() => addSharedFolder(configPath, C, ['peer'], 'fc', true)).toThrow(/must not nest/);
+      expect(() => addSharedFolder(configPath, C, ['peer'], 'fc', true)).toThrow(/不能互相嵌套/);
 
       rmDir(dir);
     });
@@ -327,7 +346,7 @@ describe('manual peer address (addPeer)', () => {
 
       // 反向顺序:先加内部的 C,再加外层的 D
       addSharedFolder(configPath, C, ['peer'], 'fc', true);
-      expect(() => addSharedFolder(configPath, D, ['peer'], 'fd', true)).toThrow(/must not nest/);
+      expect(() => addSharedFolder(configPath, D, ['peer'], 'fd', true)).toThrow(/不能互相嵌套/);
 
       rmDir(dir);
     });
@@ -342,7 +361,7 @@ describe('manual peer address (addPeer)', () => {
       // 不传 remote(本机自有共享),嵌套父+子目录同样拒绝:共享是双向的,
       // 本机嵌套在对方侧即表现为接收映射嵌套,会产生重复订阅与同步歧义。
       addSharedFolder(configPath, A, ['peer'], 'fa');
-      expect(() => addSharedFolder(configPath, B, ['peer'], 'fb')).toThrow(/must not nest/);
+      expect(() => addSharedFolder(configPath, B, ['peer'], 'fb')).toThrow(/不能互相嵌套/);
 
       rmDir(dir);
     });
@@ -356,7 +375,7 @@ describe('manual peer address (addPeer)', () => {
 
       // 先接收映射 D,再本机 add 内部 C:混合来源嵌套同样拒绝
       addSharedFolder(configPath, D, ['peer'], 'fd', true);
-      expect(() => addSharedFolder(configPath, C, ['peer'], 'fc')).toThrow(/must not nest/);
+      expect(() => addSharedFolder(configPath, C, ['peer'], 'fc')).toThrow(/不能互相嵌套/);
 
       rmDir(dir);
     });
@@ -424,7 +443,7 @@ describe('acceptFolderInvitation', () => {
   it('requires a local path when no matching folder exists', () => {
     const dir = tempDir();
     const configPath = join(dir, 'config.json');
-    expect(() => acceptFolderInvitation(configPath, 'remote-id', 'PEER2')).toThrow(/local path is required/);
+    expect(() => acceptFolderInvitation(configPath, 'remote-id', 'PEER2')).toThrow(/请填写本机落地目录/);
     rmDir(dir);
   });
 

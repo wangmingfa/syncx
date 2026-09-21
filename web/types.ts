@@ -70,6 +70,9 @@ export interface StatusData {
   deviceId: string;
   /** 本机运行版本;dev 态为 'dev'。 */
   version?: string;
+  /** daemon 所在平台(process.platform)。用于按平台给出「本机目录」路径示例;
+   *  undefined = 后端为旧版本未提供,退回 POSIX 示例。 */
+  platform?: string;
   entries: number;
   tombstones: number;
   folders: FolderInfo[];

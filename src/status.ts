@@ -79,6 +79,10 @@ export interface StatusPayload {
   deviceId: string;
   /** 本机运行版本(runtimeVersion 口径):打包态为具体版本号,dev 态为 'dev'。 */
   version: string;
+  /** 本机运行平台(process.platform):'darwin' / 'win32' / 'linux' …
+   *  Web UI 据此给出与平台相符的「本机目录」示例。必须由后端提供而不能读浏览器的
+   *  navigator:控制台常被从**另一台机器**打开,浏览器平台 ≠ 目录所在机器的平台。 */
+  platform: string;
   folders: SharedFolderConfig[];
   entries: number;
   tombstones: number;
@@ -109,6 +113,7 @@ export function buildStatus(
   return {
     deviceId: identity.deviceId,
     version: selfVersion,
+    platform: process.platform,
     folders: config.sharedFolders,
     entries: stats.entries,
     tombstones: stats.tombstones,

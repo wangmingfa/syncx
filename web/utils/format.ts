@@ -1,4 +1,4 @@
-import type { DeviceInfo, SyncProgressItem } from '../types';
+import type { DeviceInfo, SyncProgressItem } from '../types.js';
 
 /** 目录稳定标识(与后端 folderIdFor 一致:id 优先,回退 path),用作列表 key 与进度匹配。 */
 export function folderKey(f: { id?: string; path: string }): string {
@@ -39,4 +39,16 @@ export function progressText(p: SyncProgressItem): string {
 /** 地址(host:port)与主机名合并到一行,避免纵向多占一行;两者都可能缺失。 */
 export function deviceAddrLine(p: DeviceInfo): string {
   return [p.url ? stripWs(p.url) : '', p.hostname].filter(Boolean).join(' · ');
+}
+
+/**
+ * 共享目录输入框的路径示例文案。**必须按 daemon 所在平台给**(后端 status.platform):
+ * 控制台经常被从另一台机器打开,用浏览器的 navigator 判断会给出错的示例 ——
+ * 在 Windows 上看到 `/home/me/Documents` 正是这类误导。
+ * platform 缺省(旧版后端未提供)时退回 POSIX 示例。
+ */
+export function folderPathPlaceholder(platform?: string): string {
+  return platform === 'win32'
+    ? '本机目录绝对路径,如 F:\\shared\\docs'
+    : '本机目录绝对路径,如 /home/me/Documents';
 }

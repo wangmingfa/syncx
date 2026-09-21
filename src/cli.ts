@@ -190,7 +190,7 @@ export async function run(args: ParsedArgs): Promise<void> {
       throw new Error('usage: syncx invite <folder-path>');
     }
     if (!config.sharedFolders.some((f) => resolve(f.path) === resolve(folderPath))) {
-      throw new Error(`folder not configured: ${folderPath}`);
+      throw new Error(`该目录尚未配置为共享目录:「${folderPath}」`);
     }
     console.log(createInviteCode(identity, folderPath));
     return;

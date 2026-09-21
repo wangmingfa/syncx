@@ -1,5 +1,5 @@
 import { existsSync, mkdirSync, statSync } from 'node:fs';
-import { resolve, isAbsolute, sep, dirname } from 'node:path';
+import { resolve, isAbsolute, sep, dirname, join } from 'node:path';
 import { homedir } from 'node:os';
 import { randomBytes } from 'node:crypto';
 import { loadConfig, saveConfig, mutateConfig, normalizePeerUrl, DEFAULT_CONFIG, folderIdFor, folderIndexKey, generateFolderInstanceId, purgeFolderIndex, type Config, type FolderIdentity, type SharedFolderConfig, type DeviceConfig } from './config.js';
@@ -44,21 +44,58 @@ function buildForbiddenPatterns(): RegExp[] {
 
 const FORBIDDEN_PATTERNS = buildForbiddenPatterns();
 
+/** 本机平台的中文名,用在路径类报错里,让用户一眼看出「本机是哪个平台」。 */
+function platformLabel(): string {
+  switch (process.platform) {
+    case 'win32':
+      return 'Windows';
+    case 'darwin':
+      return 'macOS';
+    default:
+      return 'Linux';
+  }
+}
+
+/** 按本机平台给一个真实可用的绝对路径示例(比写死 /home/me 更有指引性)。 */
+function localPathExample(): string {
+  return process.platform === 'win32' ? 'F:\\shared\\docs' : join(homedir(), 'Documents');
+}
+
+/** Windows 盘符路径(F:\x / F:/x)—— 只在 Windows 上算绝对路径。 */
+const WINDOWS_DRIVE_PATH = /^[A-Za-z]:[\\/]/;
+
+/**
+ * 「不是本机绝对路径」的友好报错。
+ *
+ * 最高频的踩坑:在 macOS / Linux 上填了 Windows 盘符路径(如 `F:\shared\docs`)——
+ * POSIX 的 isAbsolute() 对它恒为 false,原来的英文报错完全没说清「本机」「该填什么」。
+ * 这里把最常见的两种情况分开说,并点明「共享目录永远指本机目录」这条设计前提。
+ */
+function absolutePathError(input: string): Error {
+  const head =
+    process.platform !== 'win32' && WINDOWS_DRIVE_PATH.test(input)
+      ? `「${input}」是 Windows 盘符路径,本机是 ${platformLabel()},不认这种写法`
+      : `「${input}」不是本机绝对路径`;
+  return new Error(
+    `${head}。共享目录只能填本机目录(每台设备各填各的,不填其它设备的路径),如 ${localPathExample()}`,
+  );
+}
+
 /**
  * 校验共享目录路径:必须是绝对路径,不得指向系统敏感目录或用户隐私目录。
  * 相对路径会被 resolve 到当前工作目录,这通常不是用户想要的。
  */
 function validateFolderPath(path: string): void {
   if (!path || typeof path !== 'string') {
-    throw new Error('folder path is required');
+    throw new Error('请填写共享目录路径');
   }
   if (!isAbsolute(path)) {
-    throw new Error(`folder path must be absolute: ${path}`);
+    throw absolutePathError(path);
   }
   const resolved = resolve(path);
   for (const pattern of FORBIDDEN_PATTERNS) {
     if (pattern.test(resolved)) {
-      throw new Error(`folder path not allowed: ${resolved}`);
+      throw new Error(`该目录不允许作为共享目录(系统目录或用户隐私目录,如 .ssh):「${resolved}」`);
     }
   }
 }
@@ -105,7 +142,7 @@ function addSharedFolderTo(
     if (ep === resolved) continue; // 完全重复交给下方去重合并,不在此报错
     if (resolved.startsWith(ep + sep) || ep.startsWith(resolved + sep)) {
       throw new Error(
-        `shared folder must not nest inside or contain another shared folder: ${resolved} overlaps ${ep}`,
+        `共享目录之间不能互相嵌套:「${resolved}」与「${ep}」存在包含关系(任一方向都不允许)`,
       );
     }
   }
@@ -118,8 +155,8 @@ function addSharedFolderTo(
     // 直接拒绝,让调用方改用既有 id 或另选路径。
     if (id !== undefined && folderIdFor(existing) !== id) {
       throw new Error(
-        `path ${resolved} is already shared under folder id ${folderIdFor(existing)}; ` +
-          `cannot accept a different folder id ${id} at the same path`,
+        `「${resolved}」已经是共享目录(目录 ID 为 ${folderIdFor(existing)}),` +
+          `不能在同一路径上改用另一个目录 ID(${id})`,
       );
     }
     existing.devices = [...new Set([...existing.devices, ...devices])];
@@ -130,7 +167,7 @@ function addSharedFolderTo(
   // folderId 建 Map 时后者覆盖前者,导致其中一条目录静默不参与同步且无任何报错。
   const finalId = id ?? generateFolderId();
   if (config.sharedFolders.some((f) => folderIdFor(f) === finalId)) {
-    throw new Error(`folder id ${finalId} is already used by another shared folder`);
+    throw new Error(`目录 ID「${finalId}」已被另一个共享目录占用`);
   }
   config.sharedFolders.push({
     path: resolved,
@@ -166,7 +203,7 @@ export function addSharedFolder(
   // 归一化前先拒绝相对路径:resolve 会把相对路径拼到 cwd 变成绝对路径,绕过 isAbsolute 校验,
   // 导致此前「rejects a relative path」的语义失效。必须在 resolve 之前判定。
   if (!isAbsolute(path)) {
-    throw new Error(`folder path must be absolute: ${path}`);
+    throw absolutePathError(path);
   }
   // 归一化:尾斜杠、大小写(Windows)、./ 段等写法差异都收敛为同一个绝对路径,
   // 避免同一物理目录因输入字符串不同而被登记成两个共享条目(导致双扫双同步、设备去重失效)。
@@ -175,7 +212,7 @@ export function addSharedFolder(
   let created = false;
   if (existsSync(resolved)) {
     if (!statSync(resolved).isDirectory()) {
-      throw new Error(`path exists and is not a directory: ${resolved}`);
+      throw new Error(`该路径已存在,但不是目录(无法作为共享目录):「${resolved}」`);
     }
   } else {
     mkdirSync(resolved, { recursive: true });
@@ -224,10 +261,10 @@ export function acceptFolderInvitation(
     }
     const target = localPath?.trim();
     if (!target) {
-      throw new Error('local path is required to accept a folder invitation');
+      throw new Error('请填写本机落地目录,用于接受这个共享邀请');
     }
     if (!isAbsolute(target)) {
-      throw new Error(`folder path must be absolute: ${target}`);
+      throw absolutePathError(target);
     }
     const resolved = resolve(target);
     validateFolderPath(resolved);
@@ -235,7 +272,7 @@ export function acceptFolderInvitation(
     const byPath = config.sharedFolders.find((f) => resolve(f.path) === resolved);
     if (byPath) {
       if (config.sharedFolders.some((f) => f !== byPath && folderIdFor(f) === folderId)) {
-        throw new Error(`folder id ${folderId} is already used by another shared folder`);
+        throw new Error(`目录 ID「${folderId}」已被另一个共享目录占用`);
       }
       byPath.id = folderId;
       byPath.devices = [...new Set([...byPath.devices, deviceId])];
@@ -260,7 +297,7 @@ export function acceptFolderInvitation(
 export function setFolderDevices(configPath: string, path: string, devices: string[]): void {
   mutateConfig(configPath, (config) => {
     const existing = config.sharedFolders.find((f) => resolve(f.path) === resolve(path));
-    if (!existing) throw new Error(`folder not configured: ${path}`);
+    if (!existing) throw new Error(`该目录尚未配置为共享目录:「${path}」`);
     existing.devices = [...new Set(devices)];
   });
 }
@@ -269,7 +306,7 @@ export function setFolderDevices(configPath: string, path: string, devices: stri
 export function setFolderGitignore(configPath: string, path: string, enabled: boolean): void {
   mutateConfig(configPath, (config) => {
     const existing = config.sharedFolders.find((f) => resolve(f.path) === resolve(path));
-    if (!existing) throw new Error(`folder not configured: ${path}`);
+    if (!existing) throw new Error(`该目录尚未配置为共享目录:「${path}」`);
     existing.useGitignore = enabled;
   });
 }
@@ -303,7 +340,7 @@ export function listKnownDevices(configPath: string): DeviceConfig[] {
 
 /** 添加一个已知设备 ID(已存在则幂等)。 */
 export function addKnownDevice(configPath: string, deviceId: string): void {
-  if (!deviceId) throw new Error('device id is required');
+  if (!deviceId) throw new Error('请填写设备 ID');
   if (listKnownDevices(configPath).some((d) => d.id === deviceId)) return; // 幂等
   mutateConfig(configPath, (config) => {
     config.knownDevices.push({ id: deviceId });
@@ -314,7 +351,7 @@ export function addKnownDevice(configPath: string, deviceId: string): void {
  *  入库前规范化(::ffff: 剥离、host 小写),使 [::ffff:10.0.0.2]:22000 与 10.0.0.2:22000 视为同一条。 */
 export function addPeer(configPath: string, address: string): void {
   if (!/^ws:\/\//i.test(address)) {
-    throw new Error('peer address must start with ws://');
+    throw new Error(`对端地址必须以 ws:// 开头:「${address}」`);
   }
   const normalized = normalizePeerUrl(address);
   if (loadConfig(configPath).peers.includes(normalized)) return; // 幂等

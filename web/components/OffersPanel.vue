@@ -1,6 +1,8 @@
 <script setup lang="ts">
+import { computed } from 'vue';
 import { NButton, NInput, NCheckbox } from 'naive-ui';
 import { useStatusContext } from '../composables/statusContext';
+import { folderPathPlaceholder } from '../utils/format';
 
 const {
   status,
@@ -15,6 +17,9 @@ const {
   declineOffer,
   restoreOffer,
 } = useStatusContext();
+
+/** 路径示例按 daemon 平台给(Windows 显示 F:\shared\docs),避免在 Windows 上提示 POSIX 路径。 */
+const pathPlaceholder = computed(() => folderPathPlaceholder(status.value.platform));
 </script>
 
 <template>
@@ -45,7 +50,7 @@ const {
           <p class="form-hint offer-reuse-hint">本机已有同 ID 目录,确认后直接复用它:<span class="mono">{{ reusedFolderPath(o) }}</span></p>
         </template>
         <template v-else>
-          <n-input v-model:value="offerPaths[o.id]" placeholder="本机目录绝对路径,如 /home/me/Documents" />
+          <n-input v-model:value="offerPaths[o.id]" :placeholder="pathPlaceholder" />
           <p class="form-hint">目录不存在时会自动创建</p>
           <n-checkbox v-model:checked="offerReceiveOnly[o.id]" class="ro-check">
             接收模式(只拉不推):只从对方拉取变更,不把本机改动同步出去
