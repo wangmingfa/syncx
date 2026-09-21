@@ -5,6 +5,7 @@ import { applyHunk, countChanged, diffText, type DiffHunk } from '../utils/text-
 import { formatBytes } from '../utils/bytes';
 import { fileIconKind } from '../utils/file-icon';
 import { escapeHtml, highlightText } from '../utils/syntax';
+import { useToast } from '../composables/useToast';
 import type { FileCompareData, FileSideData } from '../types';
 import ModalShell from './ModalShell.vue';
 
@@ -136,6 +137,85 @@ const hunkAtStart = computed<Map<number, DiffHunk>>(() => {
 
 const changedCount = computed<number>(() => countChanged(diff.value.rows));
 
+const { showToast } = useToast();
+
+/**
+ * ↑/↓ 差异块跳转:在差异块(hunk)之间滚动定位。
+ *
+ * 锚点取「第一条还没完全滚出窗格顶部」的差异块(= 视线当前所在的块);若它已贴着
+ * 窗格顶(说明正看着它),↓ 就取下一块、↑ 取上一块 —— 连按会逐块走,不会卡在同一块上。
+ * 到头了给 toast,不禁用:禁用态没法表达「再按一下就到头」。
+ *
+ * 只滚左窗格即可:programmatic scrollTop 变化会触发 scroll 事件,由既有的
+ * onPaneScroll 双向同步把右窗格带到同一行。
+ */
+const hunkCursor = ref(0);
+
+/** 每个差异块首行元素(左窗格的第 h.start 个子节点 —— 窗格里只有 v-for 的行)。 */
+function hunkRowEl(pane: HTMLElement, start: number): HTMLElement | undefined {
+  return pane.children[start] as HTMLElement | undefined;
+}
+
+/** 依据左窗格滚动位置重算当前差异块(驱动 n/m 计数)。 */
+function syncHunkCursor(): void {
+  const pane = paneLeftEl.value;
+  const hs = diff.value.hunks;
+  if (!pane || hs.length === 0) {
+    hunkCursor.value = 0;
+    return;
+  }
+  const paneTop = pane.getBoundingClientRect().top;
+  const y = pane.scrollTop;
+  const idx = hs.findIndex((h) => {
+    const rowEl = hunkRowEl(pane, h.start);
+    // 底边还没完全滚出顶部(部分可见也算「还在看」)
+    return !!rowEl && rowEl.getBoundingClientRect().top - paneTop + y + rowEl.offsetHeight > y + 1;
+  });
+  hunkCursor.value = idx < 0 ? hs.length - 1 : idx;
+}
+
+function jumpHunk(dir: 1 | -1): void {
+  const pane = paneLeftEl.value;
+  const hs = diff.value.hunks;
+  if (!pane || hs.length === 0) return;
+  const paneTop = pane.getBoundingClientRect().top;
+  const y = pane.scrollTop;
+  // 是否已滚到窗格底部:底部钳制下差异块永远到不了顶,「贴顶」按成立处理,↓ 才能继续前进
+  const atBottom = y >= pane.scrollHeight - pane.clientHeight - 1;
+  // 差异块首行顶边相对窗格内容顶部的坐标(不依赖 offsetParent)
+  const tops = hs.map((h) => {
+    const rowEl = hunkRowEl(pane, h.start);
+    return rowEl ? rowEl.getBoundingClientRect().top - paneTop + y : Number.POSITIVE_INFINITY;
+  });
+  // 贴顶判定容差 6px:scrollTop 赋值会被取整,落点带亚像素偏差(~0.1px),太紧会把
+  // 「已贴顶」误判成「还没到」,连按 ↓ 就会原地不动。落点定格为顶下 4px(TOP_PAD)。
+  const TOP_PAD = 4;
+  const NEAR = 6;
+  // 锚点:第一条底边还没完全滚出顶部的差异块
+  const idx = hs.findIndex((h) => {
+    const rowEl = hunkRowEl(pane, h.start);
+    return !!rowEl && rowEl.getBoundingClientRect().top - paneTop + y + rowEl.offsetHeight > y + 1;
+  });
+  let target = -1;
+  if (dir > 0) {
+    if (idx < 0) { showToast('已经是最后一个差异'); return; }
+    if (atBottom || tops[idx]! <= y + NEAR) target = idx + 1;
+    else target = idx;
+    if (target >= hs.length) { showToast('已经是最后一个差异'); return; }
+  } else {
+    if (idx < 0) target = hs.length - 1; // 差异块全在顶部上方:回到最后一块
+    else if (tops[idx]! <= y + NEAR) {
+      if (idx === 0) { showToast('已经是第一个差异'); return; }
+      target = idx - 1;
+    } else target = idx;
+  }
+  const rowEl = hunkRowEl(pane, hs[target]!.start);
+  if (!rowEl) return;
+  // 差异块首行顶边停在窗格顶往下 4px;滚左窗格,右窗格由 scroll 同步跟上
+  pane.scrollTop = Math.max(0, tops[target]! - TOP_PAD);
+  hunkCursor.value = target;
+}
+
 /**
  * 语法高亮:两侧各算一次,内容完全一致时直接共用同一份结果(大文件省一半高亮时间)。
  *
@@ -259,6 +339,9 @@ const paneRightEl = ref<HTMLElement | null>(null);
 let lockSource: HTMLElement | null = null;
 
 function onPaneScroll(which: 'left' | 'right'): void {
+  // 光标(当前差异块)只由左窗格的实际滚动位置决定,与同步锁无关 —— 先于锁检查更新,
+  // 否则「右窗格滚动带动左窗格」的那次联动会被锁吞掉、计数停在旧位置
+  syncHunkCursor();
   const src = which === 'left' ? paneLeftEl.value : paneRightEl.value;
   const dst = which === 'left' ? paneRightEl.value : paneLeftEl.value;
   if (!src || !dst) return;
@@ -288,6 +371,7 @@ watch(
     hoverIndex.value = null;
     viewMode.value = 'preview';
     void nextTick(() => {
+      hunkCursor.value = 0;
       for (const el of [paneLeftEl.value, paneRightEl.value]) {
         if (!el) continue;
         el.scrollTop = 0;
@@ -366,6 +450,28 @@ function apply(hunk: DiffHunk, target: 'left' | 'right'): void {
                    否则用户会以为「一致」却又发现覆盖按钮还能点 -->
               <span v-else-if="changedCount === 0" class="fd-head__count">行内容相同，换行符或结尾不同</span>
               <span v-else class="fd-head__count">{{ changedCount }} 行有差异</span>
+              <!-- ↑/↓ 在差异块之间跳;n/m 计数随滚动更新,给出「看第几处 / 共几处」的位置感 -->
+              <span v-if="diff.hunks.length > 0" class="fd-jump">
+                <button
+                  type="button"
+                  class="fd-jump__btn"
+                  title="跳到下一处差异"
+                  aria-label="跳到下一处差异"
+                  @click="jumpHunk(1)"
+                >
+                  <svg viewBox="0 0 12 12" width="11" height="11" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><path d="M6 2v8M2.5 6.5 6 10l3.5-3.5" /></svg>
+                </button>
+                <span class="fd-jump__pos mono">{{ hunkCursor + 1 }}/{{ diff.hunks.length }}</span>
+                <button
+                  type="button"
+                  class="fd-jump__btn"
+                  title="跳到上一处差异"
+                  aria-label="跳到上一处差异"
+                  @click="jumpHunk(-1)"
+                >
+                  <svg viewBox="0 0 12 12" width="11" height="11" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><path d="M6 10V2M2.5 5.5 6 2l3.5 3.5" /></svg>
+                </button>
+              </span>
             </template>
             <template v-else>
               <span v-if="oneSided" class="fd-head__count">仅一侧有图片</span>

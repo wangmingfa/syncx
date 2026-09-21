@@ -2335,6 +2335,43 @@ tbody tr:last-child td {
   color: var(--muted);
 }
 
+/* ↑/↓ 差异跳转按钮与展开/折叠之间的一根细分隔线:两组操作不是一类,别挤在一起 */
+.cmp-treebar__sep {
+  flex: none;
+  width: 1px;
+  height: 18px;
+  background: var(--border);
+  margin: 0 3px;
+}
+
+/* 跳转按钮里的箭头:inline SVG 而不是「↓」字形 —— 字形基线随字体漂,SVG 稳 */
+.cmp-nav-arrow {
+  display: inline-flex;
+  align-items: center;
+  margin-right: 3px;
+}
+
+/* 两个跳转按钮之间的「n/m」计数:当前视线所在的差异行序号 / 可见差异行总数,
+   随滚动与跳转实时更新。tabular-nums 防止数字跳动时按钮组左右晃。 */
+.cmp-nav-count {
+  flex: none;
+  font-size: 11.5px;
+  color: var(--muted-strong);
+  font-variant-numeric: tabular-nums;
+  margin: 0 2px;
+}
+
+/* 跳转落点的短促高亮:琥珀色底闪一遍再让位给状态底色(组件 1.4s 后摘类)。
+   动画期间盖过 .is-diff 等状态底色,结束后自然回落。 */
+@keyframes cmp-jump-flash {
+  0%, 45% { background: #ffe3b3; }
+  100% { background: transparent; }
+}
+
+.cmp-row.is-jump {
+  animation: cmp-jump-flash 1.4s ease;
+}
+
 /* 目录行可点击展开/收起整棵子树 */
 .cmp-row.is-dir {
   cursor: pointer;
@@ -2449,6 +2486,41 @@ tbody tr:last-child td {
 .fd-view__tab.is-active {
   background: var(--accent-soft);
   color: var(--accent);
+}
+
+/* ↑/↓ 差异块跳转:住在表头中间那格,紧挨「N 行有差异」;计数随滚动更新 */
+.fd-jump {
+  display: inline-flex;
+  align-items: center;
+  gap: 2px;
+  margin-left: 8px;
+}
+
+.fd-jump__btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 22px;
+  height: 20px;
+  border: 1px solid var(--border-strong);
+  border-radius: 6px;
+  background: #fff;
+  color: var(--muted-strong);
+  cursor: pointer;
+  padding: 0;
+}
+
+.fd-jump__btn:hover {
+  color: var(--accent);
+  border-color: var(--accent);
+}
+
+.fd-jump__pos {
+  min-width: 34px;
+  text-align: center;
+  font-size: 11px;
+  color: var(--muted-strong);
+  font-variant-numeric: tabular-nums;
 }
 
 /* 图片视图:并排两张,高度由 .fd-body 撑满(能预览时弹窗已是 --tall) */
