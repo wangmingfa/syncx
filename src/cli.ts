@@ -1,6 +1,6 @@
 import type { ParsedArgs } from './args.js';
 import { basename, dirname, join, resolve } from 'node:path';
-import { homedir } from 'node:os';
+import { homedir, hostname as osHostname } from 'node:os';
 import { loadOrCreateIdentity } from './identity.js';
 import { loadConfig, saveConfig, mutateConfig, folderTrashPath, folderVersionsPath } from './config.js';
 import { readFolderIdentity, removeLegacyFolderMarker } from './folder-identity.js';
@@ -558,9 +558,12 @@ export async function run(args: ParsedArgs): Promise<void> {
         updateChecker?.available(),
         relayActivity,
         // 扩展口径:目录卡冲突徽标计数 + 传输统计(采样环在 manager 内维护)
+        // + 本机主机名/局域网地址(顶栏 chip;地址每次现取,网卡热插拔也能跟上)
         {
           conflictCounts: manager.folderConflictCounts(),
           traffic: manager.getTrafficStats(),
+          hostname: osHostname(),
+          localAddresses: getLanAddresses().map((a) => a.address),
         },
       );
     },

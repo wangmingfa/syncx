@@ -109,6 +109,9 @@ export interface StatusPayload {
   conflictCounts?: Record<string, number>;
   /** 传输统计:累计字节 + 采样序列(daemon 重启清零)。缺省 = 旧后端未提供。 */
   traffic?: TrafficStats;
+  /** 本机主机名 / 局域网地址(顶栏 chip;旧后端缺省)。 */
+  hostname?: string;
+  localAddresses?: string[];
 }
 
 /** 一个采样窗口的流量增量(窗口内发/收的字节数)。 */
@@ -132,6 +135,10 @@ export interface StatusExtras {
   conflictCounts?: Record<string, number>;
   /** 传输统计累计 + 采样(流量面板)。 */
   traffic?: TrafficStats;
+  /** daemon 所在机器的操作系统主机名(顶栏本机 chip 展示)。 */
+  hostname?: string;
+  /** daemon 所在机器的局域网 IPv4 地址列表(排除回环;多网卡则多条)。 */
+  localAddresses?: string[];
 }
 
 export function buildStatus(
@@ -163,5 +170,7 @@ export function buildStatus(
     relayActivity,
     conflictCounts: extras.conflictCounts,
     traffic: extras.traffic,
+    hostname: extras.hostname,
+    localAddresses: extras.localAddresses,
   };
 }

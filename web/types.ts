@@ -96,6 +96,10 @@ export interface StatusData {
   conflictCounts?: Record<string, number>;
   /** 传输统计:累计字节 + 最近 24h 逐 5 分钟采样(daemon 重启清零);旧后端缺省。 */
   traffic?: TrafficData;
+  /** daemon 所在机器的操作系统主机名(顶栏本机 chip);旧后端缺省。 */
+  hostname?: string;
+  /** daemon 所在机器的局域网 IPv4 列表(顶栏本机 chip;多网卡则多条)。 */
+  localAddresses?: string[];
 }
 
 /** 一个采样窗口的流量增量。 */

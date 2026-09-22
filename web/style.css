@@ -373,6 +373,46 @@ tbody tr:last-child td {
   color: var(--muted);
 }
 
+/* chip 右侧小箭头:提示「悬停有本机网络明细」 */
+.chip-caret {
+  margin-left: 2px;
+  color: var(--muted);
+  opacity: 0.7;
+  flex: none;
+}
+
+/* hover 浮层里的明细行:标签弱化 + 值等宽 */
+.chip-info {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  font-size: 12.5px;
+  padding: 2px 0;
+}
+
+.chip-info-row {
+  display: flex;
+  align-items: baseline;
+  gap: 10px;
+}
+
+.chip-info-label {
+  color: var(--muted);
+  flex: none;
+}
+
+/* chip 是顶栏的锚点:自身可收缩,绝不换行挤走按钮 */
+.device-chip {
+  min-width: 0;
+}
+
+@media (max-width: 860px) {
+  /* 小屏:副标语让位,保住按钮行不换行 */
+  .brand__sub {
+    display: none;
+  }
+}
+
 /* 区块标题栏里的操作按钮统一推到最右 */
 .col-head .n-button:first-of-type {
   margin-left: auto;
