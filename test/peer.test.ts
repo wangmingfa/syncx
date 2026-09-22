@@ -403,6 +403,44 @@ describe('sync peer session', () => {
     vi.useRealTimers();
   });
 
+  it('gives up a pending receive entirely when block retries exhaust (~10 min)', async () => {
+    const { transport, requests } = fakeTransport();
+    const onStallDrop = vi.fn();
+    const peer = createSyncPeer({
+      transport,
+      localIndex: new Map(),
+      executor: null as never,
+      readLocalBlock: () => Buffer.from(''),
+      deviceId: 'DEV-A',
+      onStallDrop,
+    });
+
+    vi.useFakeTimers();
+    // 单块文件,块请求永远无响应:对端索引声明有这个文件,但磁盘上早已没有
+    // (2026-09-22 事故:对端编辑器 tmp 中间文件进索引后随即被改名)
+    const content = Buffer.from('ghost');
+    await peer.onPeerIndex([entry('ghost.txt', [['dev-b', 1]], [hashBlock(content)], content.length)]);
+    expect(peer.getSyncProgress().receiving).toBe(1);
+
+    // 推进越过总重试上限:3×5s 快速 + 20×30s 长间隔 = 615s
+    await vi.advanceTimersByTimeAsync(620_000);
+
+    // 放弃后:进度归零(UI 不再挂「接收中」)、回调带缺失块数触发、不再发新请求
+    expect(onStallDrop).toHaveBeenCalledWith('ghost.txt', 1);
+    expect(peer.getSyncProgress().pending).toBe(0);
+    expect(peer.getSyncProgress().receiving).toBe(0);
+    const atGiveUp = requests.length;
+    await vi.advanceTimersByTimeAsync(120_000);
+    expect(requests.length).toBe(atGiveUp);
+
+    // 自愈路径:对端稍后重推同一文件(新版本增量)→ 重新排队接收,重试从零开始
+    await peer.onPeerIndex([entry('ghost.txt', [['dev-b', 2]], [hashBlock(content)], content.length)]);
+    expect(peer.getSyncProgress().receiving).toBe(1);
+    expect(requests.length).toBeGreaterThan(atGiveUp);
+
+    vi.useRealTimers();
+  });
+
   it.skipIf(!canCreateSymlinks())('does not serve blocks for paths escaping the root via a symlink', () => {
     const dir = mkdtempSync(join(tmpdir(), 'syncx-peer-'));
     const root = join(dir, 'share');

@@ -84,6 +84,13 @@ export interface SyncPeerDeps {
    */
   onLanded?: (entries: IndexEntry[]) => void;
   /**
+   * 一条待接收因块请求长期无响应而被放弃时回调(路径, 缺失块数)。这是
+   * 「对端索引声明有、但内容长期供不出」的兜底出口 —— 典型是对端编辑器的
+   * tmp 中间文件进了索引随即被改名。上层据此打 WARN 日志并刷新状态推送,
+   * 否则用户只能对着一条永不消失的「接收中」进度条(2026-09-22 事故)。
+   */
+  onStallDrop?: (path: string, missingBlocks: number) => void;
+  /**
    * 接收模式(只拉不推):本机只从对端拉取变更、应用对端删除,但**绝不**把本机
    * 的本地新增/修改/删除反灌给对端。开启后:本地较新/本地墓碑不再外推,冲突
    * 直接以对端版本覆盖本地。缺省 false = 双向同步。
@@ -116,8 +123,16 @@ interface PendingBlockRequest {
 
 const BLOCK_REQUEST_TIMEOUT_MS = 5000;
 const MAX_BLOCK_RETRIES = 3;
-/** 快速重试耗尽后的长间隔退避:继续重试而非丢弃条目。 */
+/** 快速重试耗尽后的长间隔退避:继续重试而非立即丢弃条目。 */
 const BLOCK_RETRY_LONG_MS = 30_000;
+/**
+ * 块重试总上限(发送次数):3 次快速(5s)+ 20 次长间隔(30s)≈ 10 分钟。
+ * 耗尽后放弃该块;某路径的全部在途块都放弃时,整条待接收一并放弃(见
+ * dropIfUnservable)。无限重试的代价是「对端文件已消失时进度条永久虚报」
+ * (2026-09-22 事故:对端编辑器 tmp 中间文件进索引后随即被改名,块请求永远
+ * 无人应答,UI 挂着「接收 1 · 0%」十几小时),有界重试 + 下游自愈更划算。
+ */
+const MAX_BLOCK_RETRIES_TOTAL = 23;
 
 /**
  * 「发送中」的租约时长:对端每来一个块请求,就给该路径续一次期;超过这个时长
@@ -140,7 +155,7 @@ const SERVE_LEASE_MS = 15_000;
  * complete, then apply it via the executor.
  */
 export function createSyncPeer(deps: SyncPeerDeps): SyncPeer {
-  const { transport, localIndex, executor, readLocalBlock, deviceId, remoteDeviceId, root, onEvent, readIgnoreLines, receiveOnly, onHardIgnoredDropped, onLanded } = deps;
+  const { transport, localIndex, executor, readLocalBlock, deviceId, remoteDeviceId, root, onEvent, readIgnoreLines, receiveOnly, onHardIgnoredDropped, onLanded, onStallDrop } = deps;
   const pending = new Map<string, PendingEntry>();
   // 逐块跟踪超时重试:块响应丢失/丢弃时自动重发,避免文件永远收不齐
   const pendingBlocks = new Map<string, PendingBlockRequest>();
@@ -180,31 +195,47 @@ export function createSyncPeer(deps: SyncPeerDeps): SyncPeer {
     }
   }
 
+  /**
+   * 某路径最后一个在途块请求被放弃时调用:条目仍未收齐 → 整条放弃接收。
+   * 放弃是安全的,自愈路径有三 —— ①对端扫描器发现文件消失后推墓碑(delete
+   * 分支本就会清 pending);②对端文件回来后推新版本增量(onPeerIndex 重新
+   * 规划 receive,从零重排);③任何重连都会互发全量索引(full 轮重建)。
+   * 反之留着只会让「接收中」永久虚报,误导用户以为传输卡死。
+   */
+  function dropIfUnservable(path: string): void {
+    const item = pending.get(path);
+    if (!item) return;
+    for (const key of pendingBlocks.keys()) {
+      if (key.slice(0, key.lastIndexOf(':')) === path) return; // 还有别的块在途
+    }
+    pending.delete(path);
+    onStallDrop?.(path, item.entry.blocks.length - item.received);
+  }
+
   /** 发送单个块请求并设置超时重试。 */
   function requestBlock(path: string, blockIndex: number, hash: string): void {
     const key = blockKey(path, blockIndex);
     const existing = pendingBlocks.get(key);
     const retries = existing?.retries ?? 0;
+    if (existing) clearTimeout(existing.timeout);
 
-    if (existing) {
-      clearTimeout(existing.timeout);
-      if (retries >= MAX_BLOCK_RETRIES) {
-        // 快速重试(5s×3)耗尽后退避到 30s 长间隔继续重试,绝不丢弃条目:
-        // 丢弃依赖"下一轮对端索引重建",但 onPeerIndex 只在对端发索引时触发,
-        // 连接保持且对端无变化时条目会永久丢失、文件静默不同步。
-        transport.sendBlockRequest({ deviceId, path, blockIndex, hash });
-        const timeout = setTimeout(
-          () => requestBlock(path, blockIndex, hash),
-          BLOCK_RETRY_LONG_MS,
-        );
-        pendingBlocks.set(key, { retries, timeout });
-        return;
-      }
+    // 总重试耗尽:对端长期供不出这块(索引声明有,磁盘上多半已没有 ——
+    // 典型如编辑器 tmp 中间文件)。不再发送,放弃该块;若这是该路径最后一个
+    // 在途块,整条待接收一并放弃,进度条随之归零。
+    if (existing && retries >= MAX_BLOCK_RETRIES_TOTAL) {
+      pendingBlocks.delete(key);
+      dropIfUnservable(path);
+      return;
     }
 
     transport.sendBlockRequest({ deviceId, path, blockIndex, hash });
     const nextRetries = retries + 1;
-    const timeout = setTimeout(() => requestBlock(path, blockIndex, hash), BLOCK_REQUEST_TIMEOUT_MS);
+    // 快速重试(5s×3)覆盖瞬时故障(丢包/对端短暂忙碌),之后退避到 30s 长间隔,
+    // 给对端较长故障(重启、文件被锁)留恢复窗口;超过总上限才放弃。
+    const timeout = setTimeout(
+      () => requestBlock(path, blockIndex, hash),
+      nextRetries > MAX_BLOCK_RETRIES ? BLOCK_RETRY_LONG_MS : BLOCK_REQUEST_TIMEOUT_MS,
+    );
     pendingBlocks.set(key, { retries: nextRetries, timeout });
   }
 

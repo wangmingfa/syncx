@@ -890,6 +890,15 @@ export class SyncSessionManager {
           this.logger.warn(`relay telemetry recording failed for folder ${folder.id}`);
         }
       },
+      // 块请求长期无响应而放弃一条待接收(对端索引声明有、内容却供不出 —— 典型是
+      // 对端编辑器 tmp 中间文件进索引后随即被改名)。放弃即进度归零,必须 notifyStatus
+      // 把「接收中消失」推给 UI,否则用户对着一条永不消停的传输卡;WARN 留痕便于回溯。
+      onStallDrop: (path, missingBlocks) => {
+        this.logger.warn(
+          `folder ${folder.id}: gave up receiving ${path} from ${session.remoteDeviceId} after block retries exhausted (${missingBlocks} block(s) never arrived); waiting for peer's next index update`,
+        );
+        this.notifyStatus();
+      },
     });
     session.peers.set(folder.id, peer);
     folder.peers.set(session.remoteDeviceId, peer);
