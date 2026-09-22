@@ -172,7 +172,7 @@ export function renderControlFallback(data: {
       <tbody>${progressRows}</tbody></table>
     </div>
     <div class="card">
-      <h2>共享目录</h2>
+      <h2>共享目录 <a class="btn-sm" href="/history">全局同步记录</a></h2>
       <table><thead><tr><th>路径</th><th>设备</th><th>操作</th></tr></thead>
       <tbody>${folders || '<tr><td colspan="3" class="muted">暂无共享目录</td></tr>'}</tbody></table>
       <form method="post" action="/folders">

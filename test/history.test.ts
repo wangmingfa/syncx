@@ -3,7 +3,7 @@ import { mkdtempSync, existsSync } from 'node:fs';
 import { rmDir } from './helpers.js';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { recordSyncEvent, listSyncHistory, getSyncHistory, flushSyncHistory, type SyncEvent } from '../src/history.js';
+import { recordSyncEvent, listSyncHistory, getSyncHistory, getGlobalSyncHistory, flushSyncHistory, type SyncEvent } from '../src/history.js';
 
 function tmpConfig(): string {
   const dir = mkdtempSync(join(tmpdir(), 'syncx-hist-'));
@@ -121,5 +121,63 @@ describe('sync history filter & stats', () => {
     expect(r.matched).toBe(0);
     expect(r.oldestTs).toBeNull();
     expect(r.events).toEqual([]);
+  });
+});
+
+describe('global sync history aggregation', () => {
+  it('merges folders newest-first with folderPath attached', () => {
+    const config = tmpConfig();
+    created.push(join(config, '..'));
+    recordSyncEvent(config, ev({ folderId: 'main', ts: 100, path: 'a.txt' }));
+    recordSyncEvent(config, ev({ folderId: 'other', ts: 300, path: 'b.txt', action: 'delete' }));
+    recordSyncEvent(config, ev({ folderId: 'main', ts: 200, path: 'c.txt', direction: 'remote', deviceId: 'devX' }));
+    const folders = [
+      { id: 'main', path: 'D:/share/main' },
+      { id: 'other', path: 'D:/share/other' },
+    ];
+    const r = getGlobalSyncHistory(config, folders);
+    expect(r.total).toBe(3);
+    expect(r.matched).toBe(3);
+    expect(r.oldestTs).toBe(100);
+    expect(r.events.map((e) => e.path)).toEqual(['b.txt', 'c.txt', 'a.txt']);
+    expect(r.events[0]!.folderPath).toBe('D:/share/other');
+    expect(r.events[1]!.folderPath).toBe('D:/share/main');
+  });
+
+  it('per-folder top-limit truncation stays exact for the global top-limit', () => {
+    const config = tmpConfig();
+    created.push(join(config, '..'));
+    // main 目录 5 条时间戳 500..900,other 一条 100:limit=2 的全局结果必然是 main 的两条最新
+    for (let i = 0; i < 5; i++) recordSyncEvent(config, ev({ folderId: 'main', ts: 500 + i * 100, path: `m${i}.txt` }));
+    recordSyncEvent(config, ev({ folderId: 'other', ts: 100, path: 'old.txt' }));
+    const r = getGlobalSyncHistory(
+      config,
+      [
+        { id: 'main', path: 'main' },
+        { id: 'other', path: 'other' },
+      ],
+      2,
+    );
+    expect(r.events.map((e) => e.path)).toEqual(['m4.txt', 'm3.txt']);
+    // total/matched 仍是各目录全貌之和(与截断无关)
+    expect(r.total).toBe(6);
+  });
+
+  it('global view honours filters', () => {
+    const config = tmpConfig();
+    created.push(join(config, '..'));
+    recordSyncEvent(config, ev({ folderId: 'main', ts: 100, path: 'a.txt', direction: 'remote', deviceId: 'devX' }));
+    recordSyncEvent(config, ev({ folderId: 'other', ts: 200, path: 'b.txt', action: 'conflict' }));
+    const folders = [
+      { id: 'main', path: 'main' },
+      { id: 'other', path: 'other' },
+    ];
+    const conflicts = getGlobalSyncHistory(config, folders, 200, { action: 'conflict' });
+    expect(conflicts.matched).toBe(1);
+    expect(conflicts.events[0]!.path).toBe('b.txt');
+    // total 不因筛选缩水:提示行要说清「筛出 X / 共 N」
+    expect(conflicts.total).toBe(2);
+    const remote = getGlobalSyncHistory(config, folders, 200, { deviceId: 'devX' });
+    expect(remote.matched).toBe(1);
   });
 });

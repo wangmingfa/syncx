@@ -92,6 +92,25 @@ export interface StatusData {
   updateAvailable?: { latest: string; current: string } | null;
   /** 最近的中转活动(ADR-0014):本机把来源设备的目录变更转发给其他对端时记录。无中转则缺省。 */
   relayActivity?: RelayActivity[];
+  /** 每目录残留冲突副本数(键 = 目录 id ?? path);缺省/空 = 都没有冲突。 */
+  conflictCounts?: Record<string, number>;
+  /** 传输统计:累计字节 + 最近 24h 逐 5 分钟采样(daemon 重启清零);旧后端缺省。 */
+  traffic?: TrafficData;
+}
+
+/** 一个采样窗口的流量增量。 */
+export interface TrafficSampleItem {
+  /** 窗口结束时刻(毫秒时间戳)。 */
+  at: number;
+  sent: number;
+  received: number;
+}
+
+/** 传输统计载荷(与 src/status.ts 的 TrafficStats 同形)。 */
+export interface TrafficData {
+  sent: number;
+  received: number;
+  samples: TrafficSampleItem[];
 }
 
 /** 一次中转活动(与后端 RelayActivity 同形):本机作为枢纽,把 from 的变更中转给 to。 */
@@ -124,6 +143,8 @@ export interface SyncEventItem {
   action: 'add' | 'update' | 'delete' | 'conflict';
   direction: 'local' | 'remote';
   deviceId?: string;
+  /** 所属目录的共享路径(仅全局时间线 /api/history 补;单目录查询无此字段)。 */
+  folderPath?: string;
 }
 
 /**

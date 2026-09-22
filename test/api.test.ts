@@ -497,6 +497,94 @@ describe('control api hardening', () => {
     server.close();
   });
 
+  it('GET /api/history passes limit/filters and returns the aggregated window', async () => {
+    const calls: Array<{ limit?: number; filter?: unknown }> = [];
+    const server = createControlServer({
+      token: 'secret',
+      getStatus: () => ({}),
+      getGlobalHistory: (limit, filter) => {
+        calls.push({ limit, filter });
+        return {
+          events: [{ ts: 5, folderId: 'f1', folderPath: '/s', path: 'a.txt', action: 'add', direction: 'local' }],
+          total: 2,
+          matched: 1,
+          oldestTs: 1,
+          maxRetention: 2000,
+        };
+      },
+    });
+    server.listen(0, '127.0.0.1');
+    await once(server, 'listening');
+    const port = (server.address() as AddressInfo).port;
+
+    const res = await fetchJson(port, '/api/history?limit=99999&action=conflict&q=x', 'secret');
+    expect(res.status).toBe(200);
+    expect(res.body).toMatchObject({ total: 2, matched: 1, maxRetention: 2000 });
+    expect(calls[0]!.limit).toBe(2000);
+    expect(calls[0]!.filter).toEqual({ action: 'conflict', query: 'x' });
+
+    const bad = await fetchJson(port, '/api/history?direction=nope', 'secret');
+    expect(bad.status).toBe(400);
+
+    // fallback 无 JS 页:同数据源渲染 HTML
+    const page = await new Promise<{ status: number; body: string }>((resolve) => {
+      request(
+        { host: '127.0.0.1', port, path: '/history', method: 'GET', headers: { Authorization: 'Bearer secret' } },
+        (r) => {
+          let data = '';
+          r.on('data', (c) => (data += c));
+          r.on('end', () => resolve({ status: r.statusCode ?? 0, body: data }));
+        },
+      ).end();
+    });
+    expect(page.status).toBe(200);
+    expect(page.body).toContain('同步记录 · 全部目录');
+    expect(page.body).toContain('a.txt');
+
+    server.close();
+  });
+
+  it('conflicts endpoints validate input and delegate to the backend', async () => {
+    const resolveCalls: Array<[string, string, string]> = [];
+    const server = createControlServer({
+      token: 'secret',
+      getStatus: () => ({}),
+      listFolderConflicts: (folderId) => ({ conflicts: [{ copyPath: `a.sync-conflict-lxq8-ABCDEFGH23.txt`, originalPath: 'a.txt', deviceId: 'ABCDEFGH23', size: 3, mtime: 1 }], truncated: false, seen: folderId }),
+      resolveFolderConflict: (folderId, copyPath, choice) => {
+        resolveCalls.push([folderId, copyPath, choice]);
+      },
+    });
+    server.listen(0, '127.0.0.1');
+    await once(server, 'listening');
+    const port = (server.address() as AddressInfo).port;
+
+    const list = await fetchJson(port, '/api/folders/conflicts?folderId=f1', 'secret');
+    expect(list.status).toBe(200);
+    expect(list.body).toMatchObject({ truncated: false, seen: 'f1' });
+
+    const ok = await fetchJson(port, '/api/folders/conflicts/resolve', 'secret', {
+      method: 'POST',
+      body: { folderId: 'f1', copyPath: 'a.sync-conflict-lxq8-ABCDEFGH23.txt', choice: 'discard' },
+    });
+    expect(ok.status).toBe(200);
+    expect(resolveCalls).toEqual([['f1', 'a.sync-conflict-lxq8-ABCDEFGH23.txt', 'discard']]);
+
+    // choice 枚举/必填项校验:不进后端
+    const badChoice = await fetchJson(port, '/api/folders/conflicts/resolve', 'secret', {
+      method: 'POST',
+      body: { folderId: 'f1', copyPath: 'x', choice: 'smash' },
+    });
+    expect(badChoice.status).toBe(400);
+    const missing = await fetchJson(port, '/api/folders/conflicts/resolve', 'secret', {
+      method: 'POST',
+      body: { folderId: 'f1' },
+    });
+    expect(missing.status).toBe(400);
+    expect(resolveCalls).toHaveLength(1);
+
+    server.close();
+  });
+
   it('sets an HttpOnly, Path=/ session cookie on successful login', async () => {
     // 会话 cookie 存的是**签名串**,不再是把 token 原文塞进去:
     // 原文含分号/空格/非 ASCII 时会破坏 cookie 语法(后者还会让 writeHead 抛错)。

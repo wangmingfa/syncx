@@ -7,7 +7,8 @@ import { readFolderIdentity, removeLegacyFolderMarker } from './folder-identity.
 import { migrateLegacyTrash } from './trash.js';
 import { openIndexStore } from './indexstore.js';
 
-import { getSyncHistory, clearSyncHistory } from './history.js';
+import { getSyncHistory, getGlobalSyncHistory, clearSyncHistory } from './history.js';
+import { listConflictCopies, resolveConflictCopy } from './conflicts.js';
 import { readFileSync, readdirSync, existsSync, statSync, writeFileSync, watch, unlinkSync, copyFileSync, mkdirSync, rmSync } from 'node:fs';
 import { relative, isAbsolute } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -556,6 +557,11 @@ export async function run(args: ParsedArgs): Promise<void> {
         // npm 检查到的可用更新:仅打包态有检查器,发现更高版本才非空
         updateChecker?.available(),
         relayActivity,
+        // 扩展口径:目录卡冲突徽标计数 + 传输统计(采样环在 manager 内维护)
+        {
+          conflictCounts: manager.folderConflictCounts(),
+          traffic: manager.getTrafficStats(),
+        },
       );
     },
     rescan: () => {
@@ -642,7 +648,28 @@ export async function run(args: ParsedArgs): Promise<void> {
     // 待确认区下发 pending + declined:已忽略项灰显供「恢复」,兜住手误忽略
     getOffers: () => listOpenOffers(configPath),
     getFolderHistory: (folderId, limit, filter) => getSyncHistory(configPath, folderId, limit, filter),
+    // 全局时间线:遍历配置里的目录(wire id 兜 path),逐目录取前 limit 条归并
+    getGlobalHistory: (limit, filter) =>
+      getGlobalSyncHistory(
+        configPath,
+        loadConfig(configPath).sharedFolders.map((f) => ({ id: folderIdFor(f), path: f.path })),
+        limit,
+        filter,
+      ),
     clearFolderHistory: (folderId) => clearSyncHistory(configPath, folderId),
+    // 冲突收件箱:列举走实时扫盘(权威口径,手动删掉的副本不会误报);处理做完
+    // 追一轮扫描 —— 「保留本地版」写回原路径、两版收尾移入回收站,都改变了盘面,
+    // 要沿正常同步路径广播给对端收敛。
+    listFolderConflicts: (folderId) => {
+      const folder = findConfigFolder(configPath, folderId);
+      return listConflictCopies(folder.path);
+    },
+    resolveFolderConflict: (folderId, copyPath, choice) => {
+      const folder = findConfigFolder(configPath, folderId);
+      const key = folderIndexKey(folder);
+      resolveConflictCopy(folder.path, folderTrashPath(configDir, key), folderVersionsPath(configDir, key), copyPath, choice);
+      void manager.runScan();
+    },
     // 文件版本:列出 / 恢复 / 删除。恢复 = 把旧版本拷回共享目录原路径,
     // 恢复前把当前内容也拷一份进版本目录(操作可逆),随后触发一轮扫描让恢复
     // 产生的「本地修改」尽快广播给对端。

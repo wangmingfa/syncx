@@ -63,8 +63,17 @@ export interface ControlServerDeps {
    * 返回 SyncHistoryResult:{ events, total, matched, oldestTs, maxRetention }。
    */
   getFolderHistory?: (folderId: string, limit?: number, filter?: SyncHistoryFilter) => unknown;
+  /**
+   * 全局时间线:汇总所有共享目录的同步记录按时间归并(条目带 folderPath)。
+   * limit/filter 语义与 getFolderHistory 一致;total/matched 为各目录之和。
+   */
+  getGlobalHistory?: (limit?: number, filter?: SyncHistoryFilter) => unknown;
   /** 清空某共享目录的同步记录(不可逆)。参数为目录 ID。 */
   clearFolderHistory?: (folderId: string) => unknown;
+  /** 冲突收件箱:实时扫描共享目录内残留的 .sync-conflict-* 副本,返回 { conflicts, truncated }。 */
+  listFolderConflicts?: (folderId: string) => unknown;
+  /** 处理一条冲突副本:keep-local=副本覆盖回原路径(原内容留档);discard=副本进回收站。 */
+  resolveFolderConflict?: (folderId: string, copyPath: string, choice: 'keep-local' | 'discard') => void;
   /**
    * 文件版本:被对端覆盖修改前,旧内容由 executor 自动快照进版本目录
    * (`<configDir>/versions/<index key>`,见 folderVersionsPath)。这里提供

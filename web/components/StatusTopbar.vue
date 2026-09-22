@@ -1,8 +1,17 @@
 <script setup lang="ts">
+import { computed } from 'vue';
 import { NButton } from 'naive-ui';
 import { useStatusContext } from '../composables/statusContext';
+import { formatBytes } from '../utils/bytes';
 
-const { status, busy, checkForUpdate, openUpload, openLogs, openTopology, openGuide, openAuth, logout } = useStatusContext();
+const { status, busy, checkForUpdate, openUpload, openLogs, openTopology, openTraffic, openGuide, openAuth, logout } = useStatusContext();
+
+/** 累计收发(流量按钮直接把这组数当标签用:不点开也扫一眼可见)。 */
+const trafficText = computed<string>(() => {
+  const t = status.value.traffic;
+  if (!t || (t.sent === 0 && t.received === 0)) return '流量';
+  return `↑${formatBytes(t.sent)} · ↓${formatBytes(t.received)}`;
+});
 </script>
 
 <template>
@@ -71,6 +80,16 @@ const { status, busy, checkForUpdate, openUpload, openLogs, openTopology, openGu
         </svg>
       </template>
       拓扑
+    </n-button>
+
+    <n-button tertiary @click="openTraffic" title="传输统计:累计收发与最近 24 小时曲线(daemon 重启清零)">
+      <template #icon>
+        <svg viewBox="0 0 24 24" width="15" height="15" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+          <path d="M4 17 9 11l3.5 3.5L20 6" />
+          <path d="M4 21h16" />
+        </svg>
+      </template>
+      {{ trafficText }}
     </n-button>
 
     <n-button tertiary @click="openGuide">使用指南</n-button>

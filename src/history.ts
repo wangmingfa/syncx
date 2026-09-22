@@ -199,6 +199,50 @@ export function listSyncHistory(configPath: string, folderId: string, limit = 20
   return getSyncHistory(configPath, folderId, limit).events;
 }
 
+/** 全局时间线里的一条记录:事件 + 所属目录的展示路径(聚合层补,不落盘)。 */
+export interface GlobalSyncHistoryEntry extends SyncEvent {
+  folderPath: string;
+}
+
+/** 全局时间线聚合结果(与单目录同口径;total/matched 为各目录之和)。 */
+export interface GlobalSyncHistoryResult {
+  events: GlobalSyncHistoryEntry[];
+  total: number;
+  matched: number;
+  oldestTs: number | null;
+  /** 每目录各自的保留上限(全局视图是「各目录分别保留 M 条」的并集)。 */
+  maxRetention: number;
+}
+
+/**
+ * 汇总各目录的同步记录,按时间归并(全局时间线)。
+ *
+ * 每目录各取筛选后的前 `limit` 条再归并 —— 这是正确而非取巧的截断:
+ * 某条事件若要进入全局前 limit,它在自己目录里必然也位于前 limit
+ * (目录内若已有 ≥limit 条更新,全局只会更多)。所以单目录截掉的部分
+ * 永远不可能挤进全局结果,归并后取前 limit 即精确的全局前 limit。
+ */
+export function getGlobalSyncHistory(
+  configPath: string,
+  folders: Array<{ id: string; path: string }>,
+  limit = 200,
+  filter?: SyncHistoryFilter,
+): GlobalSyncHistoryResult {
+  let total = 0;
+  let matched = 0;
+  let oldestTs: number | null = null;
+  const merged: GlobalSyncHistoryEntry[] = [];
+  for (const f of folders) {
+    const r = getSyncHistory(configPath, f.id, limit, filter);
+    total += r.total;
+    matched += r.matched;
+    if (r.oldestTs !== null) oldestTs = oldestTs === null ? r.oldestTs : Math.min(oldestTs, r.oldestTs);
+    for (const ev of r.events) merged.push({ ...ev, folderPath: f.path });
+  }
+  merged.sort((a, b) => b.ts - a.ts);
+  return { events: merged.slice(0, limit), total, matched, oldestTs, maxRetention: MAX_EVENTS };
+}
+
 /** 清空某目录的同步记录:移除内存态、取消未落盘的攒批定时器,并截断磁盘文件。 */
 export function clearSyncHistory(configPath: string, folderId: string): void {
   const file = historyFileFor(configPath, folderId);

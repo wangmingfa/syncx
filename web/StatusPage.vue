@@ -24,6 +24,8 @@ import UpdateBanner from './components/UpdateBanner.vue';
 import GuideModal from './components/GuideModal.vue';
 import HistoryModal from './components/HistoryModal.vue';
 import VersionsModal from './components/VersionsModal.vue';
+import ConflictModal from './components/ConflictModal.vue';
+import TrafficModal from './components/TrafficModal.vue';
 import ConfirmModal from './components/ConfirmModal.vue';
 import EditFolderModal from './components/EditFolderModal.vue';
 import AuthPasswordModal from './components/AuthPasswordModal.vue';
@@ -56,7 +58,7 @@ const selfUpdate = useSelfUpdate(deps);
 const fmt = useFormat(status);
 
 // 需要本页模板双向绑定的模态状态:必须提到顶层,否则 <script setup> 模板不会自动拆包 Ref
-const { historyFolder, versionsFolder, editDevicesOpen, editFolder, saveEditDevices } = folders;
+const { historyFolder, historyGlobal, versionsFolder, conflictsFolder, editDevicesOpen, editFolder, saveEditDevices } = folders;
 const { upgrading, askSelfUpdate, uploadOpen, openUpload, selectUploadFile } = selfUpdate;
 const { showToast } = useToast();
 
@@ -64,6 +66,7 @@ const { showToast } = useToast();
 const showGuide = ref(false);
 const logsOpen = ref(false);
 const topoOpen = ref(false);
+const trafficOpen = ref(false);
 const authOpen = ref(false);
 function openGuide(): void {
   showGuide.value = true;
@@ -73,6 +76,9 @@ function openLogs(): void {
 }
 function openTopology(): void {
   topoOpen.value = true;
+}
+function openTraffic(): void {
+  trafficOpen.value = true;
 }
 function openAuth(): void {
   authOpen.value = true;
@@ -89,6 +95,12 @@ function onPackageDrop(file: File): void {
   }
   openUpload();
   void selectUploadFile(file);
+}
+
+/** 关同步记录弹窗:目录模式与全局模式一起复位(两入口互斥,关闭也一并清)。 */
+function closeHistoryModal(): void {
+  historyFolder.value = null;
+  historyGlobal.value = false;
 }
 
 // Esc 关闭使用指南 / 日志弹窗(其余弹窗自行处理 Esc)
@@ -129,9 +141,11 @@ provide(StatusContextKey, {
   showGuide,
   logsOpen,
   topoOpen,
+  trafficOpen,
   openGuide,
   openLogs,
   openTopology,
+  openTraffic,
   openAuth,
   authOpen,
 });
@@ -167,10 +181,16 @@ provide(StatusContextKey, {
     <GuideModal :open="showGuide" :is-dev="isDev" :control-port="controlPort" @close="showGuide = false" />
 
     <!-- 同步记录弹窗 -->
-    <HistoryModal :folder="historyFolder" :notify="showToast" @close="historyFolder = null" />
+    <HistoryModal :folder="historyFolder" :global="historyGlobal" :notify="showToast" @close="closeHistoryModal" />
 
     <!-- 文件版本弹窗 -->
     <VersionsModal :folder="versionsFolder" :notify="showToast" :changed="refreshStatus" @close="versionsFolder = null" />
+
+    <!-- 冲突收件箱弹窗 -->
+    <ConflictModal :folder="conflictsFolder" :notify="showToast" :changed="refreshStatus" @close="conflictsFolder = null" />
+
+    <!-- 传输统计弹窗 -->
+    <TrafficModal :open="trafficOpen" @close="trafficOpen = false" />
 
     <!-- 通用二次确认弹窗 -->
     <ConfirmModal :state="confirmState" :notify="showToast" @closed="confirmState = null" />

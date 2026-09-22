@@ -24,6 +24,12 @@ export interface IndexStore {
    * 「全表 SELECT + 逐行反序列化 version/blocks」,在目录大时是纯粹的浪费。
    */
   countEntries(): IndexCounts;
+  /**
+   * 「存活且路径含 .sync-conflict- 标记」的冲突副本快捷计数(LIKE 聚合,不逐条反解命名)。
+   * 只用于目录卡的冲突角标量级提示;精确列表以冲突收件箱接口的实时扫盘为准。
+   * 可选:测试 fake 等自定义存储可缺席,状态层按「无冲突提示」降级。
+   */
+  countConflictEntries?(): number;
   removeEntry(path: string): void;
   close(): void;
 }
@@ -88,6 +94,8 @@ export function openIndexStore(dbPath: string): IndexStore {
     const listEntries = db.prepare('SELECT path, version, size, deleted, blocks, mtime FROM entries');
     const countLive = db.prepare('SELECT COUNT(*) AS n FROM entries WHERE deleted = 0');
     const countTombstones = db.prepare('SELECT COUNT(*) AS n FROM entries WHERE deleted = 1');
+    // 冲突副本的 LIKE 计数:.sync-conflict- 里 LIKE 的两个通配符都用不上(dot/hyphen 皆字面量)
+    const countConflicts = db.prepare("SELECT COUNT(*) AS n FROM entries WHERE deleted = 0 AND path LIKE '%.sync-conflict-%'");
     const removeEntry = db.prepare('DELETE FROM entries WHERE path = ?');
 
     return {
@@ -135,6 +143,10 @@ export function openIndexStore(dbPath: string): IndexStore {
         const live = countLive.get() as { n?: number } | undefined;
         const dead = countTombstones.get() as { n?: number } | undefined;
         return { entries: live?.n ?? 0, tombstones: dead?.n ?? 0 };
+      },
+      countConflictEntries(): number {
+        const n = countConflicts.get() as { n?: number } | undefined;
+        return n?.n ?? 0;
       },
       removeEntry(path: string): void {
         removeEntry.run(path);

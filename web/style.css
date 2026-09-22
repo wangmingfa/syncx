@@ -1412,6 +1412,20 @@ tbody tr:last-child td {
   font-size: 13px;
 }
 
+/* 全局时间线多一列「目录」:网格变五列,目录与路径各占一份可截断的弹性宽度。 */
+.history-list.is-global .history-row {
+  grid-template-columns: auto auto auto minmax(0, 1fr) minmax(0, 1.4fr);
+}
+
+.history-folder {
+  color: var(--muted);
+  font-size: 12px;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
 .history-row:nth-child(odd) {
   background: rgb(127 140 170 / 0.06);
 }
@@ -1545,6 +1559,84 @@ li.history-row.row-conflict {
 
 .history-filter select:disabled {
   cursor: not-allowed;
+}
+
+/* —— 冲突收件箱 —— */
+
+/* 目录卡冲突入口:橙调,和普通 quaternary 图标按钮区分 */
+.conflict-btn {
+  color: #c47c14 !important;
+  font-weight: 600;
+}
+
+/* 冲突行是「四段式」:时间/徽标/路径块/操作。路径块自己纵向排两行 */
+.conflict-list .history-row {
+  grid-template-columns: auto auto minmax(0, 1fr) auto;
+}
+
+.conflict-paths {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 0;
+}
+
+.conflict-from {
+  font-size: 12px;
+}
+
+.conflict-ops {
+  display: inline-flex;
+  gap: 4px;
+  justify-self: end;
+}
+
+/* —— 流量统计弹窗 —— */
+.traffic-summary {
+  display: flex;
+  gap: 24px;
+  flex-wrap: wrap;
+  margin: 4px 0 12px;
+}
+
+.traffic-total {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  font-size: 13px;
+}
+
+.traffic-total b {
+  font-size: 17px;
+  font-variant-numeric: tabular-nums;
+}
+
+.traffic-dir {
+  font-weight: 600;
+  font-size: 12px;
+}
+
+.traffic-dir.up { color: var(--accent); }
+.traffic-dir.down { color: var(--accent-2); }
+
+.traffic-chart-wrap {
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  padding: 10px 12px 8px;
+  background: var(--bg-soft);
+}
+
+.traffic-chart {
+  display: block;
+  width: 100%;
+  height: 136px;
+}
+
+.traffic-axis {
+  display: flex;
+  justify-content: space-between;
+  font-size: 11px;
+  padding-top: 4px;
 }
 
 /* ---------- 二次确认弹窗 ---------- */

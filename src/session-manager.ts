@@ -30,6 +30,8 @@ import type { IndexEntry } from './index.js';
 import { hashBlock, splitIntoBlocks, readBlockAt } from './blockstore.js';
 import { createVersionVector, incrementVersion, mergeVersions, type VersionVector } from './version.js';
 import { recordSyncEvent } from './history.js';
+import { TrafficLedger } from './traffic.js';
+import type { TrafficStats } from './status.js';
 import { encodeSnapshot, decodeSnapshot } from './messages.js';
 import { buildFolderDiff, checkDiffAgainstDisk, toSnapshotEntry, type FolderDiff, type SnapshotEntry } from './diff.js';
 import { broadcastFolderUpdates } from './broadcast.js';
@@ -273,6 +275,8 @@ export class SyncSessionManager {
   // 记录每个目录最近一次同步失败的错误信息(内存态,不落盘);同一目录再次出错覆盖,
   // 一轮完整扫描无新错误则清除(问题自愈后提示自动消失)。
   private readonly folderErrorsState = new Map<string, { message: string; ts: number }>();
+  // --- 传输流量统计(流量面板:累计字节 + 5min 窗口采样环,内存态、重启清零)---
+  private readonly traffic = new TrafficLedger();
   // 待清理索引库:removeFolder 时登记「目录实例 key」,等配置热重载关闭该目录的
   // 索引连接后再删文件,规避 Windows 下 unlink 打开中的库报 EBUSY。
   // 注:这只是「尽早清理」的优化,正确性不依赖它 —— 目录实例化(instanceId)保证新实例
@@ -879,6 +883,12 @@ export class SyncSessionManager {
         recordSyncEvent(this.configPath, { ...ev, folderId: folder.id });
         // 远端变更落地即改变了索引统计,立即刷新(这是「对端在同步」最直观的反馈)
         this.notifyStatus();
+      },
+      // 网络字节喂进全局流量账本(累计 + 采样环,供流量面板)。纯内存计数,不触发推送
+      // (速率刷新已随 notifyStatus/进度轮询带走,这里再加推是每块一次的风暴)。
+      onTraffic: (sent, received) => {
+        if (sent > 0) this.traffic.add('send', sent);
+        if (received > 0) this.traffic.add('receive', received);
       },
       // 接收模式:本机只收不推(对端索引规划时跳过 send / 本地墓碑外推,
       // 冲突以对端版本覆盖本地)
@@ -2012,6 +2022,26 @@ export class SyncSessionManager {
       tombstones += counts.tombstones;
     }
     return { entries, tombstones };
+  }
+
+  /**
+   * 每目录的冲突副本残留数(目录卡「冲突 N」徽标)。
+   * 走索引的 LIKE COUNT —— status 是高频推送,不能在这里扫盘或反序列化全表;
+   * 徽标只是入口提示,精确列表以冲突收件箱的实时扫盘(listConflictCopies)为准。
+   * 键为 wire 目录 id,与前端 folderKey(f.id ?? f.path) 对齐。
+   */
+  folderConflictCounts(): Record<string, number> {
+    const out: Record<string, number> = {};
+    for (const folder of this.folderStates) {
+      const n = folder.index.countConflictEntries?.() ?? 0;
+      if (n > 0) out[folder.id] = n;
+    }
+    return out;
+  }
+
+  /** 传输统计累计 + 采样序列(buildStatus extras.traffic;重启清零)。 */
+  getTrafficStats(): TrafficStats {
+    return this.traffic.snapshot();
   }
 
   /* ==================== 暂停同步 ==================== */

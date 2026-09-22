@@ -105,6 +105,33 @@ export interface StatusPayload {
   updateAvailable?: { latest: string; current: string };
   /** 最近的中转活动(ADR-0014);本机把来源设备的目录变更转发给其他对端时记录。无中转则缺省。 */
   relayActivity?: RelayActivity[];
+  /** 每目录残留冲突副本数(目录卡徽标)。空/缺省 = 全都没有冲突。 */
+  conflictCounts?: Record<string, number>;
+  /** 传输统计:累计字节 + 采样序列(daemon 重启清零)。缺省 = 旧后端未提供。 */
+  traffic?: TrafficStats;
+}
+
+/** 一个采样窗口的流量增量(窗口内发/收的字节数)。 */
+export interface TrafficSample {
+  /** 窗口结束时刻(毫秒时间戳)。 */
+  at: number;
+  sent: number;
+  received: number;
+}
+
+/** 传输统计:daemon 启动以来的累计字节 + 最近窗口的采样序列(流量面板画曲线用)。 */
+export interface TrafficStats {
+  sent: number;
+  received: number;
+  samples: TrafficSample[];
+}
+
+/** buildStatus 的扩展口径:新功能统计一律进这里,不再膨胀位置参数。 */
+export interface StatusExtras {
+  /** 每目录残留冲突副本数(目录卡徽标)。 */
+  conflictCounts?: Record<string, number>;
+  /** 传输统计累计 + 采样(流量面板)。 */
+  traffic?: TrafficStats;
 }
 
 export function buildStatus(
@@ -118,6 +145,7 @@ export function buildStatus(
   selfVersion = 'unknown',
   updateAvailable?: { latest: string; current: string },
   relayActivity?: RelayActivity[],
+  extras: StatusExtras = {},
 ): StatusPayload {
   return {
     deviceId: identity.deviceId,
@@ -133,5 +161,7 @@ export function buildStatus(
     folderErrors,
     updateAvailable,
     relayActivity,
+    conflictCounts: extras.conflictCounts,
+    traffic: extras.traffic,
   };
 }

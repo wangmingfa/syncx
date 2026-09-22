@@ -10,6 +10,8 @@ import ModalShell from './ModalShell.vue';
 const props = defineProps<{
   /** 非空 = 打开该目录的记录弹窗并拉取历史。 */
   folder: { id?: string; path: string } | null;
+  /** 为真 = 全局时间线模式(与 folder 互斥;拉 /api/history,多一列「目录」)。 */
+  global?: boolean;
   /** 轻提示(父级 useToast 提供)。 */
   notify: (msg: string, kind?: 'info' | 'alert') => void;
 }>();
@@ -54,12 +56,13 @@ const hasFilter = computed(
   () => filterDir.value !== 'all' || filterAction.value !== 'all' || appliedQuery.value !== '',
 );
 
-/** 设备下拉候选:已加载记录里出现过的 ∪ 该目录已指派的已知设备
- *  (后者让「设备在列但还没有记录」也能被筛出来确认,而不是凭空消失)。 */
+/** 设备下拉候选:已加载记录里出现过的 ∪ 已知设备。
+ *  目录模式只算该目录已指派的(「设备在列但没记录」也能筛出确认);
+ *  全局模式所有已知设备都可能出现在别的目录里,直接并入。 */
 const deviceOptions = computed<string[]>(() => {
   const ids = new Set(seenDevices.value);
   for (const d of status.value.devices) {
-    if (d.folders.includes(lastFolderId.value)) ids.add(d.deviceId);
+    if (props.global || d.folders.includes(lastFolderId.value)) ids.add(d.deviceId);
   }
   return [...ids].sort();
 });
@@ -85,12 +88,12 @@ watch(
 onBeforeUnmount(() => clearTimeout(queryTimer));
 
 watch(
-  () => props.folder,
-  (f) => {
-    if (!f) return;
-    lastPath.value = f.path;
-    lastFolderId.value = f.id ?? f.path;
-    // 换目录 = 换上下文:筛选、防抖、统计全部归零,不带旧目录的条件去查新目录
+  [() => props.folder, () => props.global],
+  ([f, g]) => {
+    if (!f && !g) return;
+    lastPath.value = f?.path ?? '';
+    lastFolderId.value = f ? f.id ?? f.path : '';
+    // 换目标(目录/全局)= 换上下文:筛选、防抖、统计全部归零,不带旧条件去查新目标
     clearTimeout(queryTimer);
     filterDir.value = 'all';
     filterDevice.value = 'all';
@@ -115,12 +118,15 @@ async function fetchHistory(lim: number, append: boolean): Promise<void> {
   if (append) loadingMore.value = true;
   else loading.value = true;
   try {
-    const params = new URLSearchParams({ folderId: lastFolderId.value, limit: String(lim) });
+    const params = new URLSearchParams({ limit: String(lim) });
+    if (!props.global) params.set('folderId', lastFolderId.value);
     if (filterDir.value !== 'all') params.set('direction', filterDir.value);
     if (filterDir.value === 'remote' && filterDevice.value !== 'all') params.set('device', filterDevice.value);
     if (filterAction.value !== 'all') params.set('action', filterAction.value);
     if (appliedQuery.value) params.set('q', appliedQuery.value);
-    const data = await apiJson<SyncHistoryData>(`/api/folders/history?${params.toString()}`);
+    const data = await apiJson<SyncHistoryData>(
+      props.global ? `/api/history?${params.toString()}` : `/api/folders/history?${params.toString()}`,
+    );
     if (seq !== requestSeq) return;
     events.value = data.events ?? [];
     total.value = data.total ?? events.value.length;
@@ -200,9 +206,11 @@ async function copyHistory(): Promise<void> {
       const dir =
         directionLabel(ev.direction) +
         (ev.direction !== 'local' && ev.deviceId ? `：${ev.deviceId}` : '');
-      return `${fmtTime(ev.ts)}\t${actionLabel(ev.action)}\t${dir}\t${ev.path}`;
+      const folderCol = props.global ? `${ev.folderPath ?? ev.folderId}\t` : '';
+      return `${folderCol}${fmtTime(ev.ts)}\t${actionLabel(ev.action)}\t${dir}\t${ev.path}`;
     });
-  const text = `本机 ${deviceId.value} · 记录里的「本地」即本机，「对端」标注了来源设备 id\n\n${rows.join('\n')}`;
+  const header = props.global ? '目录\t' : '';
+  const text = `本机 ${deviceId.value} · 记录里的「本地」即本机，「对端」标注了来源设备 id\n\n${header}时间\t动作\t方向\t路径\n${rows.join('\n')}`;
   const ok = await copyText(text);
   if (ok) {
     props.notify('已复制全部同步记录到剪贴板', 'info');
@@ -218,12 +226,14 @@ function csvEscape(v: string): string {
 }
 
 function historyCsv(rows: SyncEventItem[]): string {
-  const header = ['时间', '动作', '方向', '设备ID', '路径'];
-  const lines = rows.map((ev) =>
-    [fmtTime(ev.ts), actionLabel(ev.action), directionLabel(ev.direction), ev.deviceId || deviceId.value, ev.path]
-      .map(csvEscape)
-      .join(','),
-  );
+  const header = props.global
+    ? ['目录', '时间', '动作', '方向', '设备ID', '路径']
+    : ['时间', '动作', '方向', '设备ID', '路径'];
+  const lines = rows.map((ev) => {
+    const base = [fmtTime(ev.ts), actionLabel(ev.action), directionLabel(ev.direction), ev.deviceId || deviceId.value, ev.path];
+    const cells = props.global ? [ev.folderPath ?? ev.folderId, ...base] : base;
+    return cells.map(csvEscape).join(',');
+  });
   // BOM + CRLF:Excel 缺 BOM 会把 UTF-8 中文当本地码页(乱码),CRLF 兼容记事本
   return '\uFEFF' + [header.join(','), ...lines].join('\r\n') + '\r\n';
 }
@@ -239,7 +249,7 @@ async function copyCsv(): Promise<void> {
 
 function downloadCsv(): void {
   if (events.value.length === 0) return;
-  const safeId = lastFolderId.value.replace(/[^A-Za-z0-9._-]/g, '_');
+  const safeId = (props.global ? 'all' : lastFolderId.value).replace(/[^A-Za-z0-9._-]/g, '_');
   const now = new Date();
   const pad = (n: number) => String(n).padStart(2, '0');
   const stamp = `${now.getFullYear()}${pad(now.getMonth() + 1)}${pad(now.getDate())}-${pad(now.getHours())}${pad(now.getMinutes())}${pad(now.getSeconds())}`;
@@ -281,11 +291,11 @@ function askClearHistory(): void {
 </script>
 
 <template>
-  <!-- 打开条件本来就是 folder 非空,这里把它投影成外壳要的布尔(emit 的语义不变) -->
+  <!-- 目录非空 = 单目录模式;global = 跨目录时间线(两者互斥,父级保证) -->
   <ModalShell
-    :open="!!folder"
-    title="同步记录"
-    :description="lastPath"
+    :open="!!folder || !!global"
+    :title="global ? '同步记录 · 全部目录' : '同步记录'"
+    :description="global ? '' : lastPath"
     description-mono
     wide
     @close="emit('close')"
@@ -337,7 +347,7 @@ function askClearHistory(): void {
     <p v-if="total > 0" class="history-scope">
       <template v-if="hasFilter">筛选出 {{ matched }} 条 · 窗口内共 {{ total }} 条</template>
       <template v-else>共 {{ total }} 条</template>
-      · 仅保留最近 {{ maxRetention }} 条<template v-if="oldestTs !== null"> · 最早记录 {{ fmtTime(oldestTs) }}</template>
+      · {{ global ? '各目录分别保留最近' : '仅保留最近' }} {{ maxRetention }} 条<template v-if="oldestTs !== null"> · 最早记录 {{ fmtTime(oldestTs) }}</template>
     </p>
 
     <!-- 高度防抖:「读取中…」只挡首次加载;已有数据时旧列表原地变暗(is-refreshing),
@@ -346,13 +356,14 @@ function askClearHistory(): void {
     <div v-else-if="events.length === 0" class="empty history-empty">
       {{ hasFilter ? '当前筛选条件下没有记录(服务端已检索保留窗口内全部记录,清空筛选即可看回)' : '还没有同步记录' }}
     </div>
-    <ul v-else class="history-list" :class="{ 'is-refreshing': loading }" :aria-busy="loading || undefined">
+    <ul v-else class="history-list" :class="{ 'is-refreshing': loading, 'is-global': global }" :aria-busy="loading || undefined">
       <li
         v-for="ev in events"
-        :key="`${ev.ts}|${ev.path}|${ev.action}|${ev.deviceId ?? ''}`"
+        :key="`${ev.folderId}|${ev.ts}|${ev.path}|${ev.action}|${ev.deviceId ?? ''}`"
         class="history-row"
         :class="{ 'row-conflict': ev.action === 'conflict' }"
       >
+        <span v-if="global" class="history-folder mono break" :title="ev.folderPath ?? ev.folderId">{{ ev.folderPath ?? ev.folderId }}</span>
         <span class="history-time">{{ fmtTime(ev.ts) }}</span>
         <span class="history-action" :class="'act-' + ev.action">{{ actionLabel(ev.action) }}</span>
         <span class="history-dir" :class="ev.direction === 'local' ? 'dir-local' : 'dir-remote'">{{ directionLabel(ev.direction) }}{{ ev.direction !== 'local' && ev.deviceId ? `：${ev.deviceId}` : '' }}</span>
@@ -372,7 +383,8 @@ function askClearHistory(): void {
       <n-button :disabled="events.length === 0" @click="copyHistory">复制记录</n-button>
       <n-button :disabled="events.length === 0" @click="copyCsv">复制 CSV</n-button>
       <n-button :disabled="events.length === 0" @click="downloadCsv">下载 CSV</n-button>
-      <n-button :disabled="events.length === 0" @click="askClearHistory">清空记录</n-button>
+      <!-- 清空是对「当前这个目录」的记录操作,全局时间线不做跨目录批量清空 -->
+      <n-button v-if="!global" :disabled="events.length === 0" @click="askClearHistory">清空记录</n-button>
       <n-button type="primary" @click="emit('close')">关闭</n-button>
     </template>
   </ModalShell>

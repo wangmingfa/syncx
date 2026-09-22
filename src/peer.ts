@@ -75,6 +75,11 @@ export interface SyncPeerDeps {
   /** 记录一次同步变更(新增/修改/删除/冲突),由上层写入历史存储。 */
   onEvent?: (ev: SyncEventInput) => void;
   /**
+   * 网络字节计数(流量统计):每发出一块/收下一块回调一次增量。
+   * 与瞬时速率共用 recordBytes 通道 —— 本地预填的块(磁盘读)不走这里,口径是网络量。
+   */
+  onTraffic?: (sent: number, received: number) => void;
+  /**
    * 收到并落地远程条目后回调(中转用,见 ADR-0014):上层据此把这批条目转发给
    * 同目录的其它 transport。只在「增量(非 full)接收」时触发——full 交换已经
    * 收敛整张网,无需再中转,否则每次(重)连都会把整份索引爆发式转发给兄弟端。
@@ -166,7 +171,7 @@ const RATE_SPAN_FLOOR_MS = 1000;
  * complete, then apply it via the executor.
  */
 export function createSyncPeer(deps: SyncPeerDeps): SyncPeer {
-  const { transport, localIndex, executor, readLocalBlock, deviceId, remoteDeviceId, root, onEvent, readIgnoreLines, receiveOnly, onHardIgnoredDropped, onLanded, onStallDrop } = deps;
+  const { transport, localIndex, executor, readLocalBlock, deviceId, remoteDeviceId, root, onEvent, onTraffic, readIgnoreLines, receiveOnly, onHardIgnoredDropped, onLanded, onStallDrop } = deps;
   const pending = new Map<string, PendingEntry>();
   // 逐块跟踪超时重试:块响应丢失/丢弃时自动重发,避免文件永远收不齐
   const pendingBlocks = new Map<string, PendingBlockRequest>();
@@ -187,6 +192,8 @@ export function createSyncPeer(deps: SyncPeerDeps): SyncPeer {
     const now = Date.now();
     rateSamples.push({ t: now, sent, recv });
     pruneRateSamples(now);
+    // 同一口径喂给全局流量账本(累计 + 采样环);本地预填不走这里,记的都是网络量
+    if (onTraffic && (sent > 0 || recv > 0)) onTraffic(sent, recv);
   }
   /** 窗口内的平均速率(字节/秒);窗口里没有该方向的字节时返回 0(上层据此省略字段)。 */
   function bytesPerSecond(kind: 'sent' | 'recv'): number {

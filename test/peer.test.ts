@@ -992,6 +992,33 @@ describe('transfer rate(传输速率统计)', () => {
 
     vi.useRealTimers();
   });
+
+  it('feeds the traffic ledger on both sides (served block, accepted block)', async () => {
+    const { transport } = fakeTransport();
+    const calls: Array<[number, number]> = [];
+    const peer = createSyncPeer({
+      transport,
+      localIndex: new Map(),
+      executor: null as never,
+      readLocalBlock: () => Buffer.alloc(4096, 7),
+      deviceId: 'DEV-A',
+      onTraffic: (sent, received) => calls.push([sent, received]),
+    });
+
+    // 供出一块 → 记 (块字节, 0);与瞬时速率同通道(本地预填不走这里)
+    peer.onBlockRequest({ deviceId: 'DEV-B', path: 'a.bin', blockIndex: 0, hash: 'h0' });
+    expect(calls).toEqual([[4096, 0]]);
+
+    // 真正收下才计:声明 2 块只回第 1 块(不落地,executor 是 null)
+    const b0 = Buffer.from('first block');
+    const b1 = Buffer.from('second block');
+    await peer.onPeerIndex([
+      entry('in.bin', [['dev-b', 1]], [hashBlock(b0), hashBlock(b1)], b0.length + b1.length),
+    ]);
+    calls.length = 0;
+    peer.onBlockResponse({ deviceId: 'DEV-B', path: 'in.bin', blockIndex: 0, hash: hashBlock(b0), data: b0 });
+    expect(calls).toEqual([[0, b0.length]]);
+  });
 });
 
 /**

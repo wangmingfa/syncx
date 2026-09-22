@@ -23,6 +23,10 @@ function basename(p: string): string {
   const i = p.lastIndexOf('/');
   return i >= 0 ? p.slice(i + 1) : p;
 }
+/** 该目录残留冲突副本数(索引 LIKE 计数,徽标只做量级提示;以收件箱实时扫盘为准)。 */
+function conflictCountOf(f: FolderInfo): number {
+  return status.value.conflictCounts?.[folderKey(f)] ?? 0;
+}
 /** 传输百分比(0–100);总字节未知或 0 时记 0。 */
 function filePercent(f: TransferFile): number {
   if (!f.bytesTotal) return 0;
@@ -43,6 +47,8 @@ const {
   askRemoveFolder,
   openEditDevices,
   openHistory,
+  openGlobalHistory,
+  openConflicts,
   openVersions,
   toggleFolderPaused,
   toggleGlobalPaused,
@@ -95,6 +101,8 @@ function visibleFiles(f: FolderInfo): TransferFile[] {
       <span>共享目录</span>
       <span class="badge">{{ status.folders.length }}</span>
       <n-button :disabled="busy" @click="rescan">扫描全部</n-button>
+      <!-- 全局时间线入口:跨目录的同步记录归并视图(同一 HistoryModal 的全局模式) -->
+      <n-button size="small" tertiary @click="openGlobalHistory">全局记录</n-button>
       <!-- 全局开关:所有目录一起停摆;各目录自己的暂停状态独立保留,恢复全局后仍生效 -->
       <n-button v-if="status.folders.length > 0" size="small" tertiary :type="status.paused ? 'primary' : 'default'" :disabled="busy"
         :title="status.paused ? '恢复所有目录的同步' : '暂停所有目录的同步(连接保持在线)'"
@@ -222,6 +230,17 @@ function visibleFiles(f: FolderInfo): TransferFile[] {
             </span>
           </template>
           查看文件版本:被对端覆盖修改前的旧内容会自动留档,可恢复或删除
+        </n-tooltip>
+        <!-- 冲突入口:仅在真有残留时出现(计数来自索引聚合,点开以实时扫盘为准) -->
+        <n-tooltip v-if="conflictCountOf(f) > 0" trigger="hover" :style="{ maxWidth: '280px' }">
+          <template #trigger>
+            <span class="icon-btn">
+              <n-button size="small" quaternary class="conflict-btn" :disabled="busy" @click="openConflicts(f)">
+                冲突 {{ conflictCountOf(f) }}
+              </n-button>
+            </span>
+          </template>
+          {{ conflictCountOf(f) }} 个冲突副本待处理:两边都改过同一文件,点开逐条选保留哪版
         </n-tooltip>
         <n-tooltip trigger="hover" :style="{ maxWidth: '280px' }">
           <template #trigger>

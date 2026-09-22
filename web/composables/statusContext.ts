@@ -54,6 +54,12 @@ export interface StatusContext {
   askRemoveFolder: (path: string) => void;
   openEditDevices: (f: FolderInfo) => void;
   openHistory: (f: FolderInfo) => void;
+  /** 打开全局时间线(跨目录同步记录归并视图;与 openHistory 共用弹窗,互斥打开)。 */
+  openGlobalHistory: () => void;
+  /** 打开某目录的冲突收件箱(残留 .sync-conflict-* 副本的列表面板)。 */
+  openConflicts: (f: FolderInfo) => void;
+  /** 非空 = 打开该目录的冲突收件箱(StatusPage 挂 ConflictModal 用)。 */
+  conflictsFolder: Ref<FolderInfo | null>;
   /** 打开某目录的文件版本弹窗(拉取与展示在 VersionsModal 内)。 */
   openVersions: (f: FolderInfo) => void;
   copy: (text: string) => Promise<void>;
@@ -114,9 +120,12 @@ export interface StatusContext {
   showGuide: Ref<boolean>;
   logsOpen: Ref<boolean>;
   topoOpen: Ref<boolean>;
+  /** 传输统计弹窗开关(顶栏「流量」按钮触发)。 */
+  trafficOpen: Ref<boolean>;
   openGuide: () => void;
   openLogs: () => void;
   openTopology: () => void;
+  openTraffic: () => void;
   openAuth: () => void;
 }
 

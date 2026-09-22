@@ -14,13 +14,49 @@ function escapeHtml(value: string): string {
     .replace(/'/g, '&#39;');
 }
 
+/**
+ * 解析历史查询的公共参数(GET /api/folders/history 与 GET /api/history 共用):
+ * limit(clamp 到保留上限)、direction、device、action、q。
+ * 非法取值返回 { error } 而不是默默忽略 —— 参数打错时静默等于全量,比报错更难查。
+ */
+function parseHistoryQuery(
+  url: URL,
+): { error: string } | { limit?: number; filter: SyncHistoryFilter } {
+  let limit: number | undefined;
+  const rawLimit = url.searchParams.get('limit');
+  if (rawLimit !== null && rawLimit !== '') {
+    const n = Number(rawLimit);
+    if (!Number.isFinite(n) || n < 1) {
+      return { error: 'limit must be a positive integer' };
+    }
+    limit = Math.min(Math.floor(n), HISTORY_MAX_EVENTS);
+  }
+  const directionRaw = url.searchParams.get('direction');
+  const actionRaw = url.searchParams.get('action');
+  const bad: string[] = [];
+  if (directionRaw && directionRaw !== 'local' && directionRaw !== 'remote') bad.push('direction');
+  if (actionRaw && !['add', 'update', 'delete', 'conflict'].includes(actionRaw)) bad.push('action');
+  if (bad.length > 0) {
+    return { error: `invalid ${bad.join(', ')} parameter` };
+  }
+  return {
+    limit,
+    filter: {
+      direction: (directionRaw || undefined) as SyncDirection | undefined,
+      action: (actionRaw || undefined) as SyncAction | undefined,
+      deviceId: url.searchParams.get('device') || undefined,
+      query: url.searchParams.get('q') || undefined,
+    },
+  };
+}
+
 /** 目录域:目录增删(表单 + JSON API)、设备指派、gitignore 开关、同步记录查询。 */
 export async function tryFolderRoutes(
   req: IncomingMessage,
   res: ServerResponse,
   deps: ControlServerDeps,
 ): Promise<boolean> {
-  const { addFolder, removeFolder, setFolderDevices, setFolderUseGitignore, setFolderPaused, getFolderHistory, clearFolderHistory, diffFolder, compareFolder, readFilePair, applyFileSync, listFolderVersions, restoreFolderVersion, deleteFolderVersion } = deps;
+  const { addFolder, removeFolder, setFolderDevices, setFolderUseGitignore, setFolderPaused, getFolderHistory, getGlobalHistory, clearFolderHistory, listFolderConflicts, resolveFolderConflict, diffFolder, compareFolder, readFilePair, applyFileSync, listFolderVersions, restoreFolderVersion, deleteFolderVersion } = deps;
   const path = req.url ? pathname(req.url) : '/';
 
   // Form POST /folders : add or (via _method=DELETE) remove a folder
@@ -130,32 +166,68 @@ export async function tryFolderRoutes(
       sendJson(res, 400, { error: 'folderId is required' });
       return true;
     }
-    let limit: number | undefined;
-    const rawLimit = url.searchParams.get('limit');
-    if (rawLimit !== null && rawLimit !== '') {
-      const n = Number(rawLimit);
-      if (!Number.isFinite(n) || n < 1) {
-        sendJson(res, 400, { error: 'limit must be a positive integer' });
-        return true;
-      }
-      limit = Math.min(Math.floor(n), HISTORY_MAX_EVENTS);
-    }
-    const directionRaw = url.searchParams.get('direction');
-    const actionRaw = url.searchParams.get('action');
-    const bad: string[] = [];
-    if (directionRaw && directionRaw !== 'local' && directionRaw !== 'remote') bad.push('direction');
-    if (actionRaw && !['add', 'update', 'delete', 'conflict'].includes(actionRaw)) bad.push('action');
-    if (bad.length > 0) {
-      sendJson(res, 400, { error: `invalid ${bad.join(', ')} parameter` });
+    const parsed = parseHistoryQuery(url);
+    if ('error' in parsed) {
+      sendJson(res, 400, { error: parsed.error });
       return true;
     }
-    const filter: SyncHistoryFilter = {
-      direction: (directionRaw || undefined) as SyncDirection | undefined,
-      action: (actionRaw || undefined) as SyncAction | undefined,
-      deviceId: url.searchParams.get('device') || undefined,
-      query: url.searchParams.get('q') || undefined,
-    };
-    sendJson(res, 200, getFolderHistory(folderId, limit, filter));
+    sendJson(res, 200, getFolderHistory(folderId, parsed.limit, parsed.filter));
+    return true;
+  }
+
+  // GET /api/history[&limit=..&direction=..&device=..&action=..&q=..]
+  // : 全局时间线 —— 汇总各目录记录按时间归并(条目带 folderPath)。参数与单目录查询同义。
+  if (req.method === 'GET' && req.url && path === '/api/history' && getGlobalHistory) {
+    const url = new URL(req.url, 'http://localhost');
+    const parsed = parseHistoryQuery(url);
+    if ('error' in parsed) {
+      sendJson(res, 400, { error: parsed.error });
+      return true;
+    }
+    sendJson(res, 200, getGlobalHistory(parsed.limit, parsed.filter));
+    return true;
+  }
+
+  // GET /history : 全局时间线页(fallback UI,服务端渲染、无 JS;只读,无表单动作)。
+  if (req.method === 'GET' && req.url && path === '/history' && getGlobalHistory) {
+    interface HistoryRow {
+      ts: number;
+      folderPath?: string;
+      path: string;
+      action: string;
+      direction: string;
+      deviceId?: string;
+    }
+    let events: HistoryRow[] = [];
+    let errorText = '';
+    try {
+      const result = getGlobalHistory(200, {}) as { events?: HistoryRow[] };
+      events = result.events ?? [];
+    } catch (e) {
+      errorText = e instanceof Error ? e.message : '读取同步记录失败';
+    }
+    const actionZh: Record<string, string> = { add: '新增', update: '修改', delete: '删除', conflict: '冲突' };
+    const rows = events
+      .map((ev) => {
+        const dir = ev.direction === 'local' ? '本地' : `对端${ev.deviceId ? `:${escapeHtml(ev.deviceId)}` : ''}`;
+        const conflict = ev.action === 'conflict' ? ' class="conflict"' : '';
+        return (
+          `<tr${conflict}><td>${escapeHtml(new Date(ev.ts).toLocaleString())}</td>` +
+          `<td>${escapeHtml(ev.folderPath ?? '')}</td>` +
+          `<td>${escapeHtml(actionZh[ev.action] ?? ev.action)}</td>` +
+          `<td>${dir}</td>` +
+          `<td>${escapeHtml(ev.path)}</td></tr>`
+        );
+      })
+      .join('');
+    const body = errorText
+      ? `<p class="error">${escapeHtml(errorText)}</p>`
+      : events.length === 0
+        ? '<p class="muted">还没有同步记录</p>'
+        : `<p class="muted">仅展示最近 200 条 · 各目录分别保留最近 2000 条</p>` +
+          `<table><tr><th>时间</th><th>目录</th><th>动作</th><th>方向</th><th>路径</th></tr>${rows}</table>`;
+    res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8' });
+    res.end(`<h1>同步记录 · 全部目录</h1>${body}<p><a href="/">← 返回</a></p>`);
     return true;
   }
 
@@ -377,6 +449,50 @@ export async function tryFolderRoutes(
       sendJson(res, 200, { ok: true });
     } catch {
       sendJson(res, 400, { error: 'invalid json body' });
+    }
+    return true;
+  }
+
+  // GET /api/folders/conflicts?folderId=xxx : 冲突收件箱 —— 实时扫描目录内残留的
+  // .sync-conflict-* 副本,返回 { conflicts: [...], truncated }。
+  if (req.method === 'GET' && req.url && path === '/api/folders/conflicts' && listFolderConflicts) {
+    const url = new URL(req.url, 'http://localhost');
+    const folderId = url.searchParams.get('folderId');
+    if (!folderId) {
+      sendJson(res, 400, { error: 'folderId is required' });
+      return true;
+    }
+    try {
+      sendJson(res, 200, listFolderConflicts(folderId));
+    } catch (e) {
+      sendJson(res, 400, { error: e instanceof Error ? e.message : '读取冲突列表失败' });
+    }
+    return true;
+  }
+
+  // POST /api/folders/conflicts/resolve { folderId, copyPath, choice }
+  // : 处理一条冲突副本。choice=keep-local(副本覆盖回原路径,当前内容先留档)/ discard(副本进回收站)。
+  if (req.method === 'POST' && path === '/api/folders/conflicts/resolve' && resolveFolderConflict) {
+    try {
+      const raw = await readBody(req);
+      const body = raw === '' ? {} : JSON.parse(raw);
+      const { folderId, copyPath, choice } = body as { folderId?: unknown; copyPath?: unknown; choice?: unknown };
+      if (typeof folderId !== 'string' || folderId === '') {
+        sendJson(res, 400, { error: 'folderId is required' });
+        return true;
+      }
+      if (typeof copyPath !== 'string' || copyPath === '') {
+        sendJson(res, 400, { error: 'copyPath is required' });
+        return true;
+      }
+      if (choice !== 'keep-local' && choice !== 'discard') {
+        sendJson(res, 400, { error: 'choice must be keep-local or discard' });
+        return true;
+      }
+      resolveFolderConflict(folderId, copyPath, choice);
+      sendJson(res, 200, { ok: true });
+    } catch (e) {
+      sendJson(res, 400, { error: e instanceof Error ? e.message : '处理冲突失败' });
     }
     return true;
   }

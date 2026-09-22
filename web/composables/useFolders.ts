@@ -21,11 +21,19 @@ export function useFolders(deps: CoreDeps): {
   askRemoveFolder: (path: string) => void;
   openEditDevices: (f: FolderInfo) => void;
   openHistory: (f: FolderInfo) => void;
+  /** 打开全局时间线(HistoryModal 的全局模式,跨目录归并视图)。 */
+  openGlobalHistory: () => void;
+  /** 打开某目录的冲突收件箱(ConflictModal;列残留冲突副本并提供处理动作)。 */
+  openConflicts: (f: FolderInfo) => void;
   /** 打开某目录的文件版本弹窗(拉取与展示在 VersionsModal 内)。 */
   openVersions: (f: FolderInfo) => void;
   editDevicesOpen: Ref<boolean>;
   editFolder: Ref<FolderInfo | null>;
   historyFolder: Ref<FolderInfo | null>;
+  /** 为真 = 以全局模式打开同步记录弹窗(与 historyFolder 互斥)。 */
+  historyGlobal: Ref<boolean>;
+  /** 非空 = 打开该目录的冲突收件箱。 */
+  conflictsFolder: Ref<FolderInfo | null>;
   /** 非空 = 打开该目录的文件版本弹窗。 */
   versionsFolder: Ref<FolderInfo | null>;
   saveEditDevices: (payload: { path: string; devices: string[]; gitignore: boolean }) => Promise<void>;
@@ -169,10 +177,23 @@ export function useFolders(deps: CoreDeps): {
     }
   }
 
-  // 同步记录弹窗:非空 = 打开该目录的记录(拉取与展示在 HistoryModal 内)
+  // 同步记录弹窗:非空 = 打开该目录的记录;historyGlobal = 打开跨目录全局时间线。
+  // 两者互斥(开一个必关另一个),同一个 HistoryModal 靠 mode 区分数据源与「目录」列。
   const historyFolder = ref<FolderInfo | null>(null);
+  const historyGlobal = ref(false);
   function openHistory(f: FolderInfo): void {
+    historyGlobal.value = false;
     historyFolder.value = f;
+  }
+  function openGlobalHistory(): void {
+    historyFolder.value = null;
+    historyGlobal.value = true;
+  }
+
+  // 冲突收件箱:非空 = 打开该目录的冲突副本处理面板
+  const conflictsFolder = ref<FolderInfo | null>(null);
+  function openConflicts(f: FolderInfo): void {
+    conflictsFolder.value = f;
   }
 
   // 文件版本弹窗:非空 = 打开该目录的版本留档(拉取与展示在 VersionsModal 内)
@@ -230,11 +251,15 @@ export function useFolders(deps: CoreDeps): {
     askRemoveFolder,
     openEditDevices,
     openHistory,
+    openGlobalHistory,
+    openConflicts,
     openVersions,
     editDevicesOpen,
     editFolder,
     saveEditDevices,
     historyFolder,
+    historyGlobal,
+    conflictsFolder,
     versionsFolder,
     toggleFolderPaused,
     toggleGlobalPaused,
