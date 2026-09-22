@@ -294,7 +294,9 @@ function askClearHistory(): void {
          一串 id 里认不出哪台是自己。id 从注入的 status 取,与设备卡同源。 -->
     <p class="modal-lead">本机 <code class="mono">{{ deviceId }}</code> · 记录里的「本地」即本机，「对端」标注了来源设备 id</p>
 
-    <!-- 筛选工具栏:条件是请求参数(服务端筛),改动即重查;搜索防抖 350ms -->
+    <!-- 筛选工具栏:条件是请求参数(服务端筛),改动即重查;搜索防抖 350ms。
+         设备下拉**常驻**、非对端时禁用置灰 —— 动态插拔会撑出工具栏换行,
+         每切一次方向弹窗高度抖一截,常驻则占位恒定。 -->
     <div class="history-filters">
       <label class="history-filter">
         方向
@@ -304,9 +306,9 @@ function askClearHistory(): void {
           <option value="remote">对端</option>
         </select>
       </label>
-      <label v-if="filterDir === 'remote'" class="history-filter">
+      <label class="history-filter" :class="{ 'history-filter-off': filterDir !== 'remote' }">
         设备
-        <select v-model="filterDevice" @change="applyFilter">
+        <select v-model="filterDevice" :disabled="filterDir !== 'remote'" @change="applyFilter">
           <option value="all">全部设备</option>
           <option v-for="id in deviceOptions" :key="id" :value="id">{{ deviceLabel(id) }}</option>
         </select>
@@ -330,18 +332,21 @@ function askClearHistory(): void {
       />
     </div>
 
-    <!-- 记录范围提示:看到的只是保留窗口内的历史,窗口大小/最早时间都来自后端统计 -->
-    <p v-if="!loading && total > 0" class="history-scope">
+    <!-- 记录范围提示:看到的只是保留窗口内的历史,窗口大小/最早时间都来自后端统计。
+         不再挂 !loading —— 筛选刷新期间数字短暂是旧的,换来少一次整行拆装的高度跳变。 -->
+    <p v-if="total > 0" class="history-scope">
       <template v-if="hasFilter">筛选出 {{ matched }} 条 · 窗口内共 {{ total }} 条</template>
       <template v-else>共 {{ total }} 条</template>
       · 仅保留最近 {{ maxRetention }} 条<template v-if="oldestTs !== null"> · 最早记录 {{ fmtTime(oldestTs) }}</template>
     </p>
 
-    <div v-if="loading" class="history-loading">读取中…</div>
-    <div v-else-if="events.length === 0" class="empty">
+    <!-- 高度防抖:「读取中…」只挡首次加载;已有数据时旧列表原地变暗(is-refreshing),
+         响应到达才整体换页 —— 弹窗高度不再随每次输入筛选塌一截再弹回。 -->
+    <div v-if="loading && events.length === 0" class="history-loading">读取中…</div>
+    <div v-else-if="events.length === 0" class="empty history-empty">
       {{ hasFilter ? '当前筛选条件下没有记录(服务端已检索保留窗口内全部记录,清空筛选即可看回)' : '还没有同步记录' }}
     </div>
-    <ul v-else class="history-list">
+    <ul v-else class="history-list" :class="{ 'is-refreshing': loading }" :aria-busy="loading || undefined">
       <li
         v-for="ev in events"
         :key="`${ev.ts}|${ev.path}|${ev.action}|${ev.deviceId ?? ''}`"
@@ -355,7 +360,8 @@ function askClearHistory(): void {
       </li>
     </ul>
 
-    <div v-if="!loading && events.length > 0" class="history-more">
+    <!-- 加载更多区:刷新期用 visibility 保位而非拆走,避免又一处高度跳变 -->
+    <div v-if="events.length > 0" class="history-more" :class="{ 'is-busy': loading }">
       <n-button v-if="canLoadMore" size="small" :disabled="loadingMore" @click="loadMore">
         {{ loadingMore ? '加载中…' : `加载更多(已显示 ${events.length} / ${matched})` }}
       </n-button>

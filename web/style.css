@@ -1495,6 +1495,40 @@ li.history-row.row-conflict {
   color: var(--muted);
 }
 
+/* —— 搜索/筛选时的高度防抖(方案 A) ——
+   刷新不再拆走列表换占位(那会让弹窗「高→塌→高」逐键弹跳),
+   而是旧数据原地变暗等换页;透明度过渡去掉开关的突兀感。 */
+.history-list {
+  transition: opacity 0.15s ease;
+}
+
+.history-list.is-refreshing {
+  opacity: 0.55;
+  pointer-events: none;
+}
+
+/* 加载更多区刷新中只隐藏不拆走,保住这一块的高度 */
+.history-more.is-busy {
+  visibility: hidden;
+}
+
+/* 空结果占位:给到约两行列表的高度,「有数据 → 无匹配」切换不塌缩 */
+.history-empty {
+  min-height: 96px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+
+/* 设备下拉常驻:非对端时整组置灰,和真正消失区分开 */
+.history-filter-off {
+  opacity: 0.5;
+}
+
+.history-filter select:disabled {
+  cursor: not-allowed;
+}
+
 /* ---------- 二次确认弹窗 ---------- */
 /* 被操作对象(目录路径 / 设备 ID):等宽展示,长路径自动换行,便于确认前核对 */
 .confirm-detail {
