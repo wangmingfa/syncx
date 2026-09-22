@@ -1,4 +1,5 @@
 import type { IncomingMessage, ServerResponse } from 'node:http';
+import type { SyncHistoryFilter } from '../history.js';
 
 export interface ControlServerDeps {
   token: string;
@@ -56,8 +57,12 @@ export interface ControlServerDeps {
   setGlobalPaused?: (paused: boolean) => void;
   /** 列出待确认项(对方推送的配对 / 目录共享邀请)。 */
   getOffers?: () => unknown;
-  /** 读取某共享目录的同步记录(最近变更,倒序)。参数为目录 ID。 */
-  getFolderHistory?: (folderId: string) => unknown;
+  /**
+   * 读取某共享目录的同步记录(倒序)。limit 为展示条数(路由已 clamp 到 1..HISTORY_MAX_EVENTS);
+   * filter 为服务端筛选条件(direction/device/action/q)。
+   * 返回 SyncHistoryResult:{ events, total, matched, oldestTs, maxRetention }。
+   */
+  getFolderHistory?: (folderId: string, limit?: number, filter?: SyncHistoryFilter) => unknown;
   /** 清空某共享目录的同步记录(不可逆)。参数为目录 ID。 */
   clearFolderHistory?: (folderId: string) => unknown;
   /**

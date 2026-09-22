@@ -21,6 +21,35 @@ export interface SyncEvent {
 /** 单个目录保留的最大记录条数(超出后整文件轮转,仅保留最近 MAX_EVENTS 条)。 */
 const MAX_EVENTS = 2000;
 
+/** 对外导出的保留上限:API 层用它 clamp limit、响应里回填 maxRetention,避免 2000 散落两处。 */
+export const HISTORY_MAX_EVENTS = MAX_EVENTS;
+
+/** 同步记录读取的筛选条件(服务端筛选;缺省字段 = 该维度不筛)。 */
+export interface SyncHistoryFilter {
+  /** 变更方向。 */
+  direction?: SyncDirection;
+  /** 对端设备 ID:事件必须携带相同 deviceId(local 事件没有 deviceId,自然被排除)。 */
+  deviceId?: string;
+  /** 变更动作。 */
+  action?: SyncAction;
+  /** 路径关键词(不区分大小写的子串匹配)。 */
+  query?: string;
+}
+
+/** 一次历史查询的完整结果:展示窗口内的事件 + 前端统计所需口径。 */
+export interface SyncHistoryResult {
+  /** 命中筛选、按 limit 截断后的事件,倒序(最新在前)。 */
+  events: SyncEvent[];
+  /** 保留窗口内的全部记录条数(筛选前)。 */
+  total: number;
+  /** 命中筛选条件的条数(截断前);前端据此决定「加载更多」是否出现。 */
+  matched: number;
+  /** 保留窗口内最早一条记录的时间戳;无记录为 null。 */
+  oldestTs: number | null;
+  /** 保留上限(= HISTORY_MAX_EVENTS)。 */
+  maxRetention: number;
+}
+
 // 内存缓存:键为历史文件路径,事件在内存累积、攒批落盘,
 // 避免大批量同步时每条变更都触发一次同步文件 IO(慢设备上会明显拖慢同步)。
 interface HistoryState {
@@ -122,8 +151,8 @@ export function flushSyncHistory(configPath: string, folderId?: string): void {
   for (const [file, state] of cache) flushHistory(file, state);
 }
 
-/** 读取某目录的同步记录,默认最近 200 条,倒序(最新在前)。 */
-export function listSyncHistory(configPath: string, folderId: string, limit = 200): SyncEvent[] {
+/** 取某目录的历史内存态(冷启动则从盘加载;有未落盘变更先写盘,保证读到的内容一致)。 */
+function stateForRead(configPath: string, folderId: string): HistoryState {
   const file = historyFileFor(configPath, folderId);
   let state = cache.get(file);
   if (!state) {
@@ -133,7 +162,41 @@ export function listSyncHistory(configPath: string, folderId: string, limit = 20
     // 有未落盘的变更时先写盘,使外部读取者(如 tail 文件)看到一致内容
     if (state.events.length !== state.persisted) flushHistory(file, state);
   }
-  return state.events.slice(-limit).reverse();
+  return state;
+}
+
+/** 一条事件是否命中筛选条件(缺省维度一律放行)。 */
+function matchesFilter(ev: SyncEvent, f: SyncHistoryFilter): boolean {
+  if (f.direction && ev.direction !== f.direction) return false;
+  if (f.deviceId && ev.deviceId !== f.deviceId) return false;
+  if (f.action && ev.action !== f.action) return false;
+  if (f.query && !ev.path.toLowerCase().includes(f.query.toLowerCase())) return false;
+  return true;
+}
+
+/** 读取某目录的同步记录 + 统计(供 API 层:筛选、共 N 条、最早记录、加载更多都靠这个口径)。 */
+export function getSyncHistory(
+  configPath: string,
+  folderId: string,
+  limit = 200,
+  filter?: SyncHistoryFilter,
+): SyncHistoryResult {
+  const all = stateForRead(configPath, folderId).events;
+  const filtered = filter && (filter.direction || filter.deviceId || filter.action || filter.query)
+    ? all.filter((ev) => matchesFilter(ev, filter))
+    : all;
+  return {
+    events: filtered.slice(-limit).reverse(),
+    total: all.length,
+    matched: filtered.length,
+    oldestTs: all.length > 0 ? all[0]!.ts : null,
+    maxRetention: MAX_EVENTS,
+  };
+}
+
+/** 读取某目录的同步记录,默认最近 200 条,倒序(最新在前)。 */
+export function listSyncHistory(configPath: string, folderId: string, limit = 200): SyncEvent[] {
+  return getSyncHistory(configPath, folderId, limit).events;
 }
 
 /** 清空某目录的同步记录:移除内存态、取消未落盘的攒批定时器,并截断磁盘文件。 */

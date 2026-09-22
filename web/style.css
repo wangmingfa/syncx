@@ -1434,6 +1434,67 @@ tbody tr:last-child td {
   text-overflow: ellipsis;
 }
 
+/* 冲突行强化标记:「该看一眼」的事件不该混在斑马纹里 —— 橙描边 + 左侧重色导引条,
+   底色比 act-conflict 胶囊略深一档。写在 nth-child(odd) 之后并用 li 提高一级特异度,
+   保证奇数行的斑马底色不会把它盖掉。 */
+li.history-row.row-conflict {
+  background: rgb(196 127 0 / 0.1);
+  box-shadow: inset 3px 0 0 #c47f00, inset 0 0 0 1px rgb(196 127 0 / 0.45);
+}
+
+/* 筛选工具栏:方向/设备/动作原生下拉 + 路径搜索。改动即重查(服务端筛选),不放「应用」按钮。 */
+.history-filters {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px 12px;
+  margin: 4px 0 8px;
+}
+
+.history-filter {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 12px;
+  color: var(--muted);
+  white-space: nowrap;
+}
+
+.history-filter select {
+  font: inherit;
+  color: var(--text);
+  background: var(--card-hi);
+  border: 1px solid var(--border-strong);
+  border-radius: 8px;
+  padding: 3px 6px;
+  max-width: 220px;
+}
+
+.history-search {
+  flex: 1 1 180px;
+  min-width: 160px;
+}
+
+/* 记录范围提示:「共 N 条 / 仅保留最近 M 条 / 最早记录 xxx」—— 明说看到的是窗口内历史 */
+.history-scope {
+  margin: 0 0 10px;
+  font-size: 12px;
+  color: var(--muted);
+  font-variant-numeric: tabular-nums;
+}
+
+/* 加载更多:列表末尾居中一条,按钮自带「已显示 x / y」进度 */
+.history-more {
+  display: flex;
+  justify-content: center;
+  padding: 10px 0 2px;
+}
+
+.history-more-done {
+  font-size: 12px;
+  color: var(--muted);
+}
+
 /* ---------- 二次确认弹窗 ---------- */
 /* 被操作对象(目录路径 / 设备 ID):等宽展示,长路径自动换行,便于确认前核对 */
 .confirm-detail {

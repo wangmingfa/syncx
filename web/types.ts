@@ -126,6 +126,23 @@ export interface SyncEventItem {
   deviceId?: string;
 }
 
+/**
+ * GET /api/folders/history 的响应:当前筛选下窗口内的事件 + 统计口径。
+ * 「共 N 条 / 最早记录 / 加载更多」都取自这里的 total/matched/oldestTs/maxRetention,
+ * 前端不再靠"加载到的条数"去猜(默认只拉 200 条时,事件数组撑死 200,窗口全貌看不见)。
+ */
+export interface SyncHistoryData {
+  events: SyncEventItem[];
+  /** 保留窗口内的全部记录条数(筛选前)。 */
+  total: number;
+  /** 命中当前筛选条件的条数(截断前);> events.length 时出现「加载更多」。 */
+  matched: number;
+  /** 保留窗口内最早一条记录的时间戳;无记录为 null。 */
+  oldestTs: number | null;
+  /** 后端保留上限(= HISTORY_MAX_EVENTS),提示文案用它,不硬编码。 */
+  maxRetention: number;
+}
+
 /** 内容对比:单侧状态(版本向量保持 wire 形态)。 */
 export interface FolderDiffSide {
   version: Array<[string, number]>;

@@ -3,7 +3,7 @@ import { mkdtempSync, existsSync } from 'node:fs';
 import { rmDir } from './helpers.js';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { recordSyncEvent, listSyncHistory, flushSyncHistory, type SyncEvent } from '../src/history.js';
+import { recordSyncEvent, listSyncHistory, getSyncHistory, flushSyncHistory, type SyncEvent } from '../src/history.js';
 
 function tmpConfig(): string {
   const dir = mkdtempSync(join(tmpdir(), 'syncx-hist-'));
@@ -67,5 +67,59 @@ describe('sync history', () => {
     // 最旧的事件已被轮转丢弃,最新保留
     expect(list[0]!.path).toBe(`f${N - 1}.txt`);
     expect(list.some((e) => e.path === 'f0.txt')).toBe(false);
+  });
+});
+
+describe('sync history filter & stats', () => {
+  // 固定样本:2 local + 2 remote(devX update / devY conflict),时间戳 100..400
+  function seeded(): string {
+    const config = tmpConfig();
+    created.push(join(config, '..'));
+    recordSyncEvent(config, ev({ ts: 100, path: 'a.txt', action: 'add', direction: 'local' }));
+    recordSyncEvent(config, ev({ ts: 200, path: 'b.txt', action: 'update', direction: 'remote', deviceId: 'devX' }));
+    recordSyncEvent(config, ev({ ts: 300, path: 'docs/c.TXT', action: 'conflict', direction: 'remote', deviceId: 'devY' }));
+    recordSyncEvent(config, ev({ ts: 400, path: 'd.txt', action: 'delete', direction: 'local' }));
+    return config;
+  }
+
+  it('returns total/matched/oldestTs/maxRetention for the UI window', () => {
+    const r = getSyncHistory(seeded(), 'main');
+    expect(r.total).toBe(4);
+    expect(r.matched).toBe(4);
+    // 最早记录 = 窗口内第一条(存储序最旧),供「最早记录 xxx」提示
+    expect(r.oldestTs).toBe(100);
+    expect(r.maxRetention).toBe(2000);
+    expect(r.events[0]!.path).toBe('d.txt');
+  });
+
+  it('filters by direction / action / device / query', () => {
+    const config = seeded();
+    expect(getSyncHistory(config, 'main', 200, { direction: 'remote' }).matched).toBe(2);
+    expect(getSyncHistory(config, 'main', 200, { direction: 'local' }).matched).toBe(2);
+    expect(getSyncHistory(config, 'main', 200, { action: 'conflict' }).events[0]!.path).toBe('docs/c.TXT');
+    const dev = getSyncHistory(config, 'main', 200, { deviceId: 'devY' });
+    expect(dev.matched).toBe(1);
+    expect(dev.events[0]!.deviceId).toBe('devY');
+    // 关键词不区分大小写,子串匹配路径
+    expect(getSyncHistory(config, 'main', 200, { query: 'c.txt' }).matched).toBe(1);
+    expect(getSyncHistory(config, 'main', 200, { query: '.txt' }).matched).toBe(4);
+  });
+
+  it('matched counts before limit truncates events', () => {
+    const r = getSyncHistory(seeded(), 'main', 1, { direction: 'remote' });
+    expect(r.matched).toBe(2);
+    expect(r.events).toHaveLength(1);
+    // total 始终是筛选前的窗口全貌,前端据此显示「筛选出 X / 共 N」
+    expect(r.total).toBe(4);
+  });
+
+  it('empty window reports zero counts and null oldestTs', () => {
+    const config = tmpConfig();
+    created.push(join(config, '..'));
+    const r = getSyncHistory(config, 'main');
+    expect(r.total).toBe(0);
+    expect(r.matched).toBe(0);
+    expect(r.oldestTs).toBeNull();
+    expect(r.events).toEqual([]);
   });
 });

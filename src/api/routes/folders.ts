@@ -1,5 +1,7 @@
 import type { IncomingMessage, ServerResponse } from 'node:http';
 import type { ControlServerDeps } from '../deps.js';
+import type { SyncAction, SyncDirection, SyncHistoryFilter } from '../../history.js';
+import { HISTORY_MAX_EVENTS } from '../../history.js';
 import { pathname, readBody, redirect, sendJson } from '../helpers.js';
 
 /** fallback 版本页的 HTML 转义(与 ui-fallback 的 escapeHtml 同款)。 */
@@ -117,7 +119,10 @@ export async function tryFolderRoutes(
     return true;
   }
 
-  // GET /api/folders/history?folderId=xxx : 读取某目录的同步记录(倒序)
+  // GET /api/folders/history?folderId=xxx[&limit=N][&direction=local|remote][&device=ID]
+  //     [&action=add|update|delete|conflict][&q=关键词]
+  // : 读取某目录的同步记录(服务端筛选,倒序)。响应除事件外还带 total/matched/oldestTs/
+  // maxRetention,前端「共 N 条 / 最早记录 / 加载更多」全靠这几个口径,不再靠猜加载长度。
   if (req.method === 'GET' && req.url && path === '/api/folders/history' && getFolderHistory) {
     const url = new URL(req.url, 'http://localhost');
     const folderId = url.searchParams.get('folderId');
@@ -125,7 +130,32 @@ export async function tryFolderRoutes(
       sendJson(res, 400, { error: 'folderId is required' });
       return true;
     }
-    sendJson(res, 200, { events: getFolderHistory(folderId) });
+    let limit: number | undefined;
+    const rawLimit = url.searchParams.get('limit');
+    if (rawLimit !== null && rawLimit !== '') {
+      const n = Number(rawLimit);
+      if (!Number.isFinite(n) || n < 1) {
+        sendJson(res, 400, { error: 'limit must be a positive integer' });
+        return true;
+      }
+      limit = Math.min(Math.floor(n), HISTORY_MAX_EVENTS);
+    }
+    const directionRaw = url.searchParams.get('direction');
+    const actionRaw = url.searchParams.get('action');
+    const bad: string[] = [];
+    if (directionRaw && directionRaw !== 'local' && directionRaw !== 'remote') bad.push('direction');
+    if (actionRaw && !['add', 'update', 'delete', 'conflict'].includes(actionRaw)) bad.push('action');
+    if (bad.length > 0) {
+      sendJson(res, 400, { error: `invalid ${bad.join(', ')} parameter` });
+      return true;
+    }
+    const filter: SyncHistoryFilter = {
+      direction: (directionRaw || undefined) as SyncDirection | undefined,
+      action: (actionRaw || undefined) as SyncAction | undefined,
+      deviceId: url.searchParams.get('device') || undefined,
+      query: url.searchParams.get('q') || undefined,
+    };
+    sendJson(res, 200, getFolderHistory(folderId, limit, filter));
     return true;
   }
 

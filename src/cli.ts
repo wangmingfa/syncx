@@ -7,7 +7,7 @@ import { readFolderIdentity, removeLegacyFolderMarker } from './folder-identity.
 import { migrateLegacyTrash } from './trash.js';
 import { openIndexStore } from './indexstore.js';
 
-import { listSyncHistory, clearSyncHistory } from './history.js';
+import { getSyncHistory, clearSyncHistory } from './history.js';
 import { readFileSync, readdirSync, existsSync, statSync, writeFileSync, watch, unlinkSync, copyFileSync, mkdirSync, rmSync } from 'node:fs';
 import { relative, isAbsolute } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -641,7 +641,7 @@ export async function run(args: ParsedArgs): Promise<void> {
     },
     // 待确认区下发 pending + declined:已忽略项灰显供「恢复」,兜住手误忽略
     getOffers: () => listOpenOffers(configPath),
-    getFolderHistory: (folderId) => listSyncHistory(configPath, folderId),
+    getFolderHistory: (folderId, limit, filter) => getSyncHistory(configPath, folderId, limit, filter),
     clearFolderHistory: (folderId) => clearSyncHistory(configPath, folderId),
     // 文件版本:列出 / 恢复 / 删除。恢复 = 把旧版本拷回共享目录原路径,
     // 恢复前把当前内容也拷一份进版本目录(操作可逆),随后触发一轮扫描让恢复

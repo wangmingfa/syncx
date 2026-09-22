@@ -438,6 +438,65 @@ describe('control api hardening', () => {
     server.close();
   });
 
+  it('GET /api/folders/history passes limit (clamped) and filters down to the backend', async () => {
+    const calls: Array<{ folderId: string; limit?: number; filter?: unknown }> = [];
+    const server = createControlServer({
+      token: 'secret',
+      getStatus: () => ({ ok: true }),
+      getFolderHistory: (folderId, limit, filter) => {
+        calls.push({ folderId, limit, filter });
+        return { events: [], total: 0, matched: 0, oldestTs: null, maxRetention: 2000 };
+      },
+    });
+    server.listen(0, '127.0.0.1');
+    await once(server, 'listening');
+    const port = (server.address() as AddressInfo).port;
+
+    const res = await fetchJson(
+      port,
+      '/api/folders/history?folderId=f1&limit=5000&direction=remote&device=devX&action=conflict&q=a.txt',
+      'secret',
+    );
+    expect(res.status).toBe(200);
+    // 响应体即后端结果(含 total/matched/oldestTs/maxRetention 统计),路由不再自行包 { events }
+    expect(res.body).toMatchObject({ total: 0, matched: 0, maxRetention: 2000 });
+    expect(calls).toHaveLength(1);
+    expect(calls[0]!.folderId).toBe('f1');
+    expect(calls[0]!.limit).toBe(2000); // limit clamp 到保留上限
+    expect(calls[0]!.filter).toEqual({ direction: 'remote', deviceId: 'devX', action: 'conflict', query: 'a.txt' });
+
+    // 缺省参数:limit 不传(后端按默认 200),筛选各维度 undefined
+    await fetchJson(port, '/api/folders/history?folderId=f2', 'secret');
+    expect(calls[1]!.limit).toBeUndefined();
+    expect(calls[1]!.filter).toEqual({});
+
+    server.close();
+  });
+
+  it('rejects invalid history query params with 400 before hitting the backend', async () => {
+    let called = 0;
+    const server = createControlServer({
+      token: 'secret',
+      getStatus: () => ({ ok: true }),
+      getFolderHistory: () => {
+        called += 1;
+        return { events: [] };
+      },
+    });
+    server.listen(0, '127.0.0.1');
+    await once(server, 'listening');
+    const port = (server.address() as AddressInfo).port;
+
+    for (const qs of ['action=bogus', 'direction=sideways', 'limit=0', 'limit=abc']) {
+      const res = await fetchJson(port, `/api/folders/history?folderId=f1&${qs}`, 'secret');
+      expect(res.status).toBe(400);
+      expect((res.body as { error?: string }).error).toBeTruthy();
+    }
+    expect(called).toBe(0);
+
+    server.close();
+  });
+
   it('sets an HttpOnly, Path=/ session cookie on successful login', async () => {
     // 会话 cookie 存的是**签名串**,不再是把 token 原文塞进去:
     // 原文含分号/空格/非 ASCII 时会破坏 cookie 语法(后者还会让 writeHead 抛错)。
