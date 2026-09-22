@@ -44,6 +44,13 @@ export interface ProgressCounts {
   pending: number;
   sending: number;
   receiving: number;
+  /**
+   * 瞬时发送速率(字节/秒):本机向该对端供块的实测平均值,按最近的滚动窗口计算。
+   * 窗口内没有字节发出时不带该字段(空闲快照保持最小,差异驱动推送也不会多推帧)。
+   */
+  sendRate?: number;
+  /** 瞬时接收速率(字节/秒):本机从该对端收块的实测平均值。窗口内没有收块时不带。 */
+  receiveRate?: number;
   /** 文件级进度(可选):每个正在传输的文件一条。无传输时不带,避免状态快照凭空变大。 */
   files?: TransferFile[];
 }

@@ -13,6 +13,19 @@ function escapeHtml(value: string): string {
     .replace(/'/g, '&#39;');
 }
 
+/** 速率的人类可读形式(B/s 自适应到 GB/s);无速率(0/undefined)返回空串。 */
+function fmtRate(bps?: number): string {
+  if (!bps || bps <= 0) return '';
+  const units = ['B/s', 'KB/s', 'MB/s', 'GB/s'];
+  let v = bps;
+  let u = 0;
+  while (v >= 1024 && u < units.length - 1) {
+    v /= 1024;
+    u += 1;
+  }
+  return `${v >= 10 || u === 0 ? Math.round(v) : v.toFixed(1)} ${units[u]}`;
+}
+
 const STYLE = `
   :root { --bg:#f4f6f9; --bg-soft:#eaeef3; --card:#ffffff; --card-hi:#ffffff; --text:#1e2630; --muted:#7e8aa0; --muted-strong:#55606f; --accent:#4a7fc0; --accent-2:#2bb6ac; --accent-3:#2fa56f; --flow:linear-gradient(90deg,var(--accent),var(--accent-2)); --border:#e5e9f0; --border-strong:#d4dae4; --online:#2fa56f; --offline:#d96b6b; }
   * { box-sizing: border-box; margin: 0; padding: 0; }
@@ -55,7 +68,7 @@ interface FallbackStatus {
   entries?: number;
   tombstones?: number;
   devices?: Array<{ deviceId: string; online: boolean; url?: string; folders?: string[] }>;
-  syncProgress?: Array<{ folder: string; pending: number; sending: number; receiving: number }>;
+  syncProgress?: Array<{ folder: string; pending: number; sending: number; receiving: number; sendRate?: number; receiveRate?: number }>;
 }
 
 export function renderControlFallback(data: {
@@ -110,13 +123,15 @@ export function renderControlFallback(data: {
       }).join('')
     : '<tr><td colspan="3" class="muted">暂无对端</td></tr>';
 
-  // 同步进度列表
+  // 同步进度列表(速率有值才显示,空闲时不占列宽)
   const syncProgress = (status.syncProgress ?? []);
   const progressRows = syncProgress.length > 0
     ? syncProgress.map((p) => {
         const total = p.pending + p.sending + p.receiving;
         const pct = total > 0 ? Math.round((p.receiving / total) * 100) : 0;
-        return `<tr><td>${escapeHtml(p.folder)}</td><td>${p.pending}</td><td>${p.sending}</td><td>${p.receiving}</td><td><div class="progress-bar"><div class="progress-fill" style="width:${pct}%"></div></div></td></tr>`;
+        const sendRate = fmtRate(p.sendRate);
+        const recvRate = fmtRate(p.receiveRate);
+        return `<tr><td>${escapeHtml(p.folder)}</td><td>${p.pending}</td><td>${p.sending}${sendRate ? `<span class="muted"> · ${sendRate}</span>` : ''}</td><td>${p.receiving}${recvRate ? `<span class="muted"> · ${recvRate}</span>` : ''}</td><td><div class="progress-bar"><div class="progress-fill" style="width:${pct}%"></div></div></td></tr>`;
       }).join('')
     : '<tr><td colspan="5" class="muted">同步中无待处理任务</td></tr>';
 

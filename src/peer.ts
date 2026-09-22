@@ -149,6 +149,17 @@ const MAX_BLOCK_RETRIES_TOTAL = 23;
 const SERVE_LEASE_MS = Number(process.env.SYNCX_SERVE_LEASE_MS) || 15_000;
 
 /**
+ * 速率采样窗口:瞬时速率 = 最近这段时间内实测字节的平均值。
+ * 与兜底状态推送周期(5s)同阶,保证每次快照都能看到窗口内的新鲜数据。
+ */
+const RATE_WINDOW_MS = 5000;
+/**
+ * 窗口时间跨度的下限:刚开传的第一帧,分母若取真实跨度(可能只有几毫秒)
+ * 会冒出离谱的瞬时峰值;按至少 1s 平滑。
+ */
+const RATE_SPAN_FLOOR_MS = 1000;
+
+/**
  * Wire one sync round over an injected transport: on receiving the peer's
  * index, send newer local entries, request missing blocks, apply deletions
  * and prepare conflict copies; collect block responses until a file is
@@ -165,6 +176,27 @@ export function createSyncPeer(deps: SyncPeerDeps): SyncPeer {
   // 对端重试同一块时不重复计入(否则进度会虚高)。总字节取本地索引的 size,缺则回退 0。
   const servingBytes = new Map<string, { done: number; total: number }>();
   const servedBlocks = new Map<string, Set<number>>();
+  // 速率采样:每个块「真正发出 / 真正收下」时记一笔(t + 字节数),读取时按滚动窗口
+  // 平均。放在 peer 级(每对端一份)而非全局:速率天然按「目录 × 对端」隔离,join 后
+  // 的 ProgressCounts 就各自带各的速率。本地预填的块不记 —— 那是磁盘读,不是网络传输。
+  const rateSamples: Array<{ t: number; sent: number; recv: number }> = [];
+  function pruneRateSamples(now: number): void {
+    while (rateSamples.length > 0 && now - rateSamples[0]!.t > RATE_WINDOW_MS) rateSamples.shift();
+  }
+  function recordBytes(sent: number, recv: number): void {
+    const now = Date.now();
+    rateSamples.push({ t: now, sent, recv });
+    pruneRateSamples(now);
+  }
+  /** 窗口内的平均速率(字节/秒);窗口里没有该方向的字节时返回 0(上层据此省略字段)。 */
+  function bytesPerSecond(kind: 'sent' | 'recv'): number {
+    pruneRateSamples(Date.now());
+    if (rateSamples.length === 0) return 0;
+    let sum = 0;
+    for (const s of rateSamples) sum += s[kind];
+    const spanMs = Math.max(Date.now() - rateSamples[0]!.t, RATE_SPAN_FLOOR_MS);
+    return Math.round(sum / (spanMs / 1000));
+  }
 
   // 忽略规则的解析结果按「数组实例」缓存:readIgnoreLines 每次扫描返回全新数组,
   // 引用变化即失效。这样一条索引消息只解析一次规则,而不是每个条目解析一遍
@@ -529,6 +561,8 @@ export function createSyncPeer(deps: SyncPeerDeps): SyncPeer {
         rec.done += data.length;
         servingBytes.set(request.path, rec);
       }
+      // 块确实发出去了:记一笔发送字节,供瞬时速率统计
+      recordBytes(data.length, 0);
       transport.sendBlockResponse({
         deviceId,
         path: request.path,
@@ -559,6 +593,8 @@ export function createSyncPeer(deps: SyncPeerDeps): SyncPeer {
 
       item.blocks[response.blockIndex] = response.data;
       item.received += 1;
+      // 块真的收下了(重复响应在上面已被挡掉):记一笔接收字节,供瞬时速率统计
+      recordBytes(0, response.data.length);
 
       // 块已收到,清除对应的超时重试
       const bKey = blockKey(response.path, response.blockIndex);
@@ -604,6 +640,11 @@ export function createSyncPeer(deps: SyncPeerDeps): SyncPeer {
         sending: servingCount,
         receiving,
       };
+      // 速率按需携带:窗口内没有该方向的字节时省略字段,空闲快照保持与旧版同形
+      const sendRate = bytesPerSecond('sent');
+      if (sendRate > 0) result.sendRate = sendRate;
+      const receiveRate = bytesPerSecond('recv');
+      if (receiveRate > 0) result.receiveRate = receiveRate;
       if (files.length) result.files = files;
       return result;
     },

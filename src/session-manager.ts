@@ -27,7 +27,7 @@ import { filterIndexedEntries, HARD_IGNORE_NAMES, isHardIgnored, parseIgnoreRule
 import { createSyncPeer, type PeerTransport, type SyncPeer } from './peer.js';
 import { scanFolder } from './scanner.js';
 import type { IndexEntry } from './index.js';
-import { hashBlock, splitIntoBlocks } from './blockstore.js';
+import { hashBlock, splitIntoBlocks, readBlockAt } from './blockstore.js';
 import { createVersionVector, incrementVersion, mergeVersions, type VersionVector } from './version.js';
 import { recordSyncEvent } from './history.js';
 import { encodeSnapshot, decodeSnapshot } from './messages.js';
@@ -850,14 +850,11 @@ export class SyncSessionManager {
       localIndex: folder.localIndex,
       executor: folder.executor,
       readLocalBlock: (path, blockIndex) => {
-        // 与写入侧同一守卫:拒绝经符号链接/../ 越过共享目录的读取
-        const abs = resolveSharePath(folder.path, path);
-        const blocks = splitIntoBlocks(readFileSync(abs));
-        const block = blocks[blockIndex];
-        if (!block) {
-          throw new Error(`block ${blockIndex} out of range for ${path}`);
-        }
-        return block;
+        // 与写入侧同一守卫:拒绝经符号链接/../ 越过共享目录的读取。
+        // 读取必须是「按偏移只读一块」:这里是对端拉块的最热路径,整读文件再切片
+        // 会让每个 1MB 块请求都付出整个文件的 IO(大文件同步时事件循环被饿死,
+        // 控制面网页假死),见 readBlockAt 的注释。
+        return readBlockAt(resolveSharePath(folder.path, path), blockIndex);
       },
       deviceId: this.identity.deviceId,
       remoteDeviceId: session.remoteDeviceId,

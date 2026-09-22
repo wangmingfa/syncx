@@ -29,9 +29,33 @@ export function isActive(p: SyncProgressItem): boolean {
   return p.sending + p.receiving > 0;
 }
 
+/**
+ * 瞬时速率的人类可读形式,自适应 B/s → GB/s。
+ * 0 / undefined 返回空串(调用方决定整体省略,而不是显示「0 B/s」)。
+ */
+export function fmtRate(bps?: number): string {
+  if (!bps || bps <= 0) return '';
+  let v = bps;
+  if (v < 1024) return `${Math.round(v)} B/s`;
+  v /= 1024;
+  const kb = v;
+  if (kb < 1024) return `${kb >= 10 ? Math.round(kb) : kb.toFixed(1)} KB/s`;
+  const mb = kb / 1024;
+  if (mb < 1024) return `${mb >= 10 ? Math.round(mb) : mb.toFixed(1)} MB/s`;
+  return `${(mb / 1024).toFixed(1)} GB/s`;
+}
+
+/** 发送/接收段的小标签:有速率时附在计数后面,如「发送 2 · 1.2 MB/s」。 */
+function rateSegment(label: string, count: number, bps?: number): string {
+  const rate = fmtRate(bps);
+  return rate ? `${label} ${count} · ${rate}` : `${label} ${count}`;
+}
+
 /** 进度区文案:用用户能看懂的语言,而非 pending/sending/receiving 系统术语。 */
 export function progressText(p: SyncProgressItem): string {
-  if (isActive(p)) return `传输中 · 发送 ${p.sending} · 接收 ${p.receiving}`;
+  if (isActive(p)) {
+    return ['传输中', rateSegment('发送', p.sending, p.sendRate), rateSegment('接收', p.receiving, p.receiveRate)].join(' · ');
+  }
   if (p.pending > 0) return `已排队 ${p.pending} 项,等待同步`;
   return '已同步';
 }

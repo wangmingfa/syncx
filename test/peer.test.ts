@@ -914,6 +914,86 @@ describe('sync progress: 「发送中」以租约自愈', () => {
   });
 });
 
+describe('transfer rate(传输速率统计)', () => {
+  function fakeTransport() {
+    return {
+      transport: {
+        sendEntries(): void {},
+        sendBlockRequest(): void {},
+        sendBlockResponse(): void {},
+      } satisfies PeerTransport,
+    };
+  }
+
+  it('reports rolling-window send/receive rates and drops them once the window slides past', async () => {
+    const { transport } = fakeTransport();
+    const peer = createSyncPeer({
+      transport,
+      localIndex: new Map(),
+      executor: null as never,
+      readLocalBlock: () => Buffer.alloc(4096, 7),
+      deviceId: 'DEV-A',
+    });
+
+    vi.useFakeTimers();
+
+    // 发送侧:对端拉两个块 → sendRate 按窗口内实际字节数平均
+    peer.onBlockRequest({ deviceId: 'DEV-B', path: 'a.bin', blockIndex: 0, hash: 'h0' });
+    await vi.advanceTimersByTimeAsync(1000);
+    peer.onBlockRequest({ deviceId: 'DEV-B', path: 'a.bin', blockIndex: 1, hash: 'h1' });
+    const sending = peer.getSyncProgress();
+    expect(sending.sendRate).toBeGreaterThan(0);
+    expect(sending.receiveRate).toBeUndefined(); // 没收过字节就不带字段,保持快照最小
+
+    // 接收侧:对端声明一个 2 块文件,收下第一块(第二块不回,避免经 executor 落地)
+    const b0 = Buffer.from('first block');
+    const b1 = Buffer.from('second block');
+    await peer.onPeerIndex([
+      entry('in.bin', [['dev-b', 1]], [hashBlock(b0), hashBlock(b1)], b0.length + b1.length),
+    ]);
+    peer.onBlockResponse({ deviceId: 'DEV-B', path: 'in.bin', blockIndex: 0, hash: hashBlock(b0), data: b0 });
+    const both = peer.getSyncProgress();
+    expect(both.sendRate).toBeGreaterThan(0);
+    expect(both.receiveRate).toBeGreaterThan(0);
+
+    // 速率随窗口滑动衰减:窗口(5s)滑过、不再有字节进出后字段应消失
+    await vi.advanceTimersByTimeAsync(5100);
+    const idle = peer.getSyncProgress();
+    expect(idle.sendRate).toBeUndefined();
+    expect(idle.receiveRate).toBeUndefined();
+
+    vi.useRealTimers();
+  });
+
+  it('does not count duplicate or rejected block responses into the receive rate', async () => {
+    const { transport } = fakeTransport();
+    const peer = createSyncPeer({
+      transport,
+      localIndex: new Map(),
+      executor: null as never,
+      readLocalBlock: () => Buffer.from(''),
+      deviceId: 'DEV-A',
+    });
+
+    vi.useFakeTimers();
+    const content = Buffer.from('rate dup');
+    const hash = hashBlock(content);
+    await peer.onPeerIndex([
+      entry('dup.bin', [['dev-b', 1]], [hash, hash], content.length * 2),
+    ]);
+    peer.onBlockResponse({ deviceId: 'DEV-B', path: 'dup.bin', blockIndex: 0, hash, data: content });
+
+    // 同一块的重复响应、哈希不符的伪造块:都不计入接收字节
+    peer.onBlockResponse({ deviceId: 'DEV-B', path: 'dup.bin', blockIndex: 0, hash, data: content });
+    peer.onBlockResponse({ deviceId: 'DEV-B', path: 'dup.bin', blockIndex: 1, hash: 'forged', data: content });
+
+    // 窗口内只有第一笔合法块(content.length 字节),按 ≥1s 的跨度下限平均
+    expect(peer.getSyncProgress().receiveRate).toBe(content.length);
+
+    vi.useRealTimers();
+  });
+});
+
 /**
  * 硬忽略闸门(见 docs/adr/0008):对端推来的 .git 一类条目一条都不收,本机也一条都不发。
  * 这组用例针对的正是「本机规则管不住对端规则」的实际场景——对端版本旧、或对端把忽略

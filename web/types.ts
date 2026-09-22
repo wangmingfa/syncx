@@ -14,6 +14,10 @@ export interface SyncProgressItem {
   pending: number;
   sending: number;
   receiving: number;
+  /** 瞬时发送速率(字节/秒,滚动窗口平均);窗口内没有发送字节时缺省。 */
+  sendRate?: number;
+  /** 瞬时接收速率(字节/秒,滚动窗口平均);窗口内没有接收字节时缺省。 */
+  receiveRate?: number;
   /** 文件级进度(可选):每个正在传输的文件一条。 */
   files?: TransferFile[];
 }
