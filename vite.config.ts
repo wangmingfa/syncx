@@ -71,6 +71,12 @@ export default defineConfig(({ mode }: { mode: string }) => {
     // 写 '..' 会抬到仓库上级(如 D:/code),连带扫描 wmfx 等兄弟仓库的测试;
     // 仓库根应为 '.'。
     root: '.',
+    // 单测默认超时 5s,对「真 socket + 真监听」的集成用例偏紧:CI 的 2 核 runner
+    // 上文件并行叠加磁盘慢,folder-diff.test.ts 曾因种子索引逐条 autocommit fsync
+    // (每条一次)超到 5s 开外(后改为单事务批量写,本机 11s -> 258ms)。这里放宽
+    // 到 30s 作兜底,仅拖慢真正挂死的失败场景,不影响正常用例速度。
+    // 测试内部 waitFor 的 8s 等待也应低于此值。
+    testTimeout: 30_000,
     // 测试文件默认并行执行(vitest 默认 fileParallelism: true)。集成测试端口已由
     // test/integration/ports.ts 的 allocatePort() 动态分配(listen(0)),文件间并行
     // 不会 EADDRINUSE,无需全局串行。实测提速约 38%(本机 28s -> 17s)且无失败。

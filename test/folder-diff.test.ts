@@ -75,7 +75,9 @@ function bootDevice(opts: {
 /** 直接往索引库里塞条目(必须在 manager 构造**之前**——它启动时就把库读成内存索引)。 */
 function seedIndex(dir: string, entries: IndexEntry[]): void {
   const store = openIndexStore(folderIndexPath(dir, 'main'));
-  for (const entry of entries) store.saveEntry(entry);
+  // 单事务批量写:逐条 saveEntry 是逐条 autocommit(每条一次 fsync),2050 条
+  // 在 CI 上能把用例拖过 vitest 的超时线
+  store.saveEntries(entries);
   store.close();
 }
 

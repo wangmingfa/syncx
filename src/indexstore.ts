@@ -10,6 +10,12 @@ export interface IndexCounts {
 
 export interface IndexStore {
   saveEntry(entry: IndexEntry): void;
+  /**
+   * 批量写入(单事务提交)。逐条 saveEntry 是逐条 autocommit —— 每条一次
+   * fsync,两千条就是两千次,在 CI/机械盘上能拖到十秒级;种子导入、全量
+   * 重建这类一次性大批量场景必须走这里。
+   */
+  saveEntries(entries: IndexEntry[]): void;
   getEntry(path: string): IndexEntry | undefined;
   listEntries(): IndexEntry[];
   /**
@@ -94,6 +100,29 @@ export function openIndexStore(dbPath: string): IndexStore {
           JSON.stringify(entry.blocks),
           entry.mtime ?? 0,
         );
+      },
+      saveEntries(entries: IndexEntry[]): void {
+        db.exec('BEGIN');
+        try {
+          for (const entry of entries) {
+            saveEntry.run(
+              entry.path,
+              serializeVersion(entry.version),
+              entry.size,
+              entry.deleted ? 1 : 0,
+              JSON.stringify(entry.blocks),
+              entry.mtime ?? 0,
+            );
+          }
+          db.exec('COMMIT');
+        } catch (error) {
+          try {
+            db.exec('ROLLBACK');
+          } catch {
+            /* 回滚失败不影响向上抛原始错误 */
+          }
+          throw error;
+        }
       },
       getEntry(path: string): IndexEntry | undefined {
         const row = getEntry.get(path) as Record<string, unknown> | undefined;
