@@ -61,6 +61,16 @@ export interface ControlServerDeps {
   /** 清空某共享目录的同步记录(不可逆)。参数为目录 ID。 */
   clearFolderHistory?: (folderId: string) => unknown;
   /**
+   * 文件版本:被对端覆盖修改前,旧内容由 executor 自动快照进版本目录
+   * (`<configDir>/versions/<index key>`,见 folderVersionsPath)。这里提供
+   * 列表 / 恢复 / 删除。file 为版本文件相对版本目录的路径(含 `.syncx-v-` 时间戳后缀)。
+   */
+  listFolderVersions?: (folderId: string) => unknown;
+  /** 把某个版本恢复回共享目录原路径(覆盖前当前内容也会留档一份)。 */
+  restoreFolderVersion?: (folderId: string, file: string) => void;
+  /** 删除单个版本文件(不可逆)。 */
+  deleteFolderVersion?: (folderId: string, file: string) => void;
+  /**
    * 内容对比(诊断):把本机某共享目录与指定对端的**同一目录 id** 逐条比对,
    * 返回分类后的差异报告(见 diff.ts)。全程只读,不改动任何一端的状态。
    * 设备离线 / 该目录未共享给对端 / 对端版本过旧时抛错,路由转成 400。

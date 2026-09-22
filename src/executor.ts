@@ -1,5 +1,5 @@
-import { mkdirSync, renameSync, writeFileSync, rmSync, existsSync, statSync, readFileSync, realpathSync, copyFileSync } from 'node:fs';
-import { dirname, join, relative, isAbsolute, extname, sep } from 'node:path';
+import { mkdirSync, renameSync, writeFileSync, rmSync, existsSync, statSync, readFileSync, realpathSync, copyFileSync, readdirSync } from 'node:fs';
+import { dirname, basename, join, relative, isAbsolute, extname, sep } from 'node:path';
 import type { IndexEntry } from './index.js';
 import type { IndexStore } from './indexstore.js';
 import { verifyBlock, splitIntoBlocks, hashBlock } from './blockstore.js';
@@ -99,8 +99,14 @@ export function preserveLocalAsConflict(root: string, path: string, remoteDevice
  * @param trashDir 删除回收站目录的绝对路径。**刻意由调用方传入而不是在共享根下现算**:
  *   回收站放在共享目录里会在用户目录中留下常驻痕迹(并被 `git status` 报成未跟踪文件),
  *   故生产路径一律传 `<configDir>/trash/<index key>`(见 config.folderTrashPath)。
+ * @param versionsDir 文件版本目录的绝对路径,生产路径传 `<configDir>/versions/<index key>`
+ *   (见 config.folderVersionsPath)。本机文件被对端版本**覆盖**前,旧内容快照一份到这里:
+ *   回收站保护「删除」,版本目录保护「修改」。缺省(旧调用方/测试)不做版本快照。
  */
-export function createLocalExecutor(root: string, index: IndexStore, trashDir: string): LocalExecutor {
+export function createLocalExecutor(root: string, index: IndexStore, trashDir: string, versionsDir?: string): LocalExecutor {
+  /** 每个路径保留的版本份数上限:超出删最旧。版本目录是安全网而非归档,无界增长不合适。 */
+  const MAX_VERSIONS_PER_PATH = 10;
+
   /** 共享目录内相对路径解析:复用模块级守卫(含符号链接越界校验)。 */
   function resolvePath(relPath: string): string {
     return resolveSharePath(root, relPath);
@@ -134,6 +140,63 @@ export function createLocalExecutor(root: string, index: IndexStore, trashDir: s
     }
   }
 
+  /**
+   * 把待覆盖文件的当前内容快照进版本目录(共享目录之外),再由 landRemote 覆盖:
+   * 回收站保护「删除」,这里保护「修改」——对端推送覆盖本机现存文件时,旧内容
+   * 不再直接丢失。命名 `<relPath>.syncx-v-<stamp>`(碰撞加序号):`.syncx-v-`
+   * 后缀是显式标记,恢复时据此无歧义地反推原始相对路径。
+   * 快照动作绝不能让原文件消失:rename 失败(跨文件系统/文件被占用)退化为
+   * 拷贝,原文件保持原样,随后照常被覆盖。
+   */
+  function snapshotVersion(relPath: string): void {
+    if (versionsDir === undefined) return;
+    const target = resolvePath(relPath);
+    if (!existsSync(target) || !statSync(target).isFile()) return;
+    mkdirSync(versionsDir, { recursive: true });
+    const stamp = Date.now().toString(36);
+    let dest = join(versionsDir, `${relPath}.syncx-v-${stamp}`);
+    let n = 0;
+    while (existsSync(dest)) {
+      n += 1;
+      dest = join(versionsDir, `${relPath}.syncx-v-${stamp}.${n}`);
+    }
+    mkdirSync(dirname(dest), { recursive: true });
+    try {
+      renameSync(target, dest);
+    } catch {
+      copyFileSync(target, dest);
+    }
+  }
+
+  /**
+   * 快照后修剪:同一路径的版本超过上限时删最旧。
+   * 按文件名排序近似按时间排序 —— stamp 是单调递增的 base36 时间戳,同一路径下
+   * 字典序即时间序;碰撞序号(.n)也在同一文件名内,不影响比较。
+   * 版本文件保留了原相对路径的目录结构(docs/plan.md 的留档在 <versionsDir>/docs/),
+   * 所以必须在「relPath 的父目录」里按 basename 前缀筛——只扫顶层会漏掉所有嵌套
+   * 路径,每路径上限对它们失效(无界增长)。
+   */
+  function pruneVersions(relPath: string): void {
+    if (versionsDir === undefined) return;
+    const dir = dirname(join(versionsDir, relPath));
+    const prefix = `${basename(relPath)}.syncx-v-`;
+    let names: string[];
+    try {
+      names = readdirSync(dir).filter((n) => n.startsWith(prefix));
+    } catch {
+      return; // 版本目录还没建等异常:修剪是 best-effort,不阻塞落地
+    }
+    if (names.length <= MAX_VERSIONS_PER_PATH) return;
+    names.sort();
+    for (const name of names.slice(0, names.length - MAX_VERSIONS_PER_PATH)) {
+      try {
+        rmSync(join(dir, name));
+      } catch {
+        // 单个删除失败(占用等):留给下一次快照再试
+      }
+    }
+  }
+
   /** 校验块完整性并原子落地一个条目:写临时文件 + rename,返回落盘后的 mtime。 */
   async function landRemote(entry: IndexEntry, blocks: Buffer[]): Promise<number> {
     if (blocks.length !== entry.blocks.length) {
@@ -146,6 +209,10 @@ export function createLocalExecutor(root: string, index: IndexStore, trashDir: s
     }
 
     const target = resolvePath(entry.path);
+    // 覆盖现存文件前先留存旧内容(全新文件接收不产生版本)。applyConflict 路径
+    // 的本地文件已 rename 成 .sync-conflict- 副本让出原路径,天然不会重复快照。
+    snapshotVersion(entry.path);
+    pruneVersions(entry.path);
     mkdirSync(dirname(target), { recursive: true });
 
     const tmp = `${target}.syncx-tmp`;

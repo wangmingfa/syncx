@@ -43,6 +43,7 @@ const {
   askRemoveFolder,
   openEditDevices,
   openHistory,
+  openVersions,
   toggleFolderPaused,
   toggleGlobalPaused,
   copy,
@@ -198,6 +199,22 @@ function visibleFiles(f: FolderInfo): TransferFile[] {
             </span>
           </template>
           查看该目录的同步记录
+        </n-tooltip>
+        <n-tooltip trigger="hover" :style="{ maxWidth: '280px' }">
+          <template #trigger>
+            <span class="icon-btn">
+              <n-button size="small" quaternary circle :disabled="busy" @click="openVersions(f)">
+                <template #icon>
+                  <svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+                    <path d="M4 8.5 12 4.5l8 4" />
+                    <path d="M4 13 12 9l8 4" />
+                    <path d="M4 17.5 12 13.5l8 4" />
+                  </svg>
+                </template>
+              </n-button>
+            </span>
+          </template>
+          查看文件版本:被对端覆盖修改前的旧内容会自动留档,可恢复或删除
         </n-tooltip>
         <n-tooltip trigger="hover" :style="{ maxWidth: '280px' }">
           <template #trigger>

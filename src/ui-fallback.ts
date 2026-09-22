@@ -102,8 +102,10 @@ export function renderControlFallback(data: {
         `<input type="hidden" name="folderId" value="${escapeHtml(folderId)}">` +
         `<input type="hidden" name="paused" value="${f.paused ? '0' : '1'}">` +
         `<button type="submit" class="btn-sm">${f.paused ? '恢复' : '暂停'}</button></form>`;
+      // 版本入口:被对端覆盖修改前的旧内容自动留档,可在此查看/恢复/删除
+      const versionsLink = `<a class="btn-sm" href="/versions?folder=${encodeURIComponent(folderId)}">版本</a>`;
       const state = f.paused ? ' <span class="offline">已暂停</span>' : '';
-      return `<tr><td>${escapeHtml(f.path)}${state}</td><td>${escapeHtml((f.devices ?? []).join(', '))}</td><td>${pauseBtn}</td></tr>`;
+      return `<tr><td>${escapeHtml(f.path)}${state}</td><td>${escapeHtml((f.devices ?? []).join(', '))}</td><td>${pauseBtn} ${versionsLink}</td></tr>`;
     })
     .join('');
   const message = data.message ? `<p class="message">${escapeHtml(data.message)}</p>` : '';

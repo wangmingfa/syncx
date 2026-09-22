@@ -125,6 +125,19 @@ export function folderTrashPath(configDir: string, key: string): string {
 }
 
 /**
+ * 某个共享目录的文件版本目录:`<configDir>/versions/<index key 哈希>`。
+ *
+ * 与回收站同一设计哲学、同一命名规则(同 key、同哈希):本机文件被对端版本**覆盖**前,
+ * 旧内容快照一份到这里(见 executor 的 snapshotVersion)——回收站只保护「删除」,
+ * 这里保护「修改」,被覆盖的旧内容不再直接丢失。
+ * 同样刻意放在共享目录之外,不在用户目录留痕迹;跨文件系统时快照退化为拷贝。
+ */
+export function folderVersionsPath(configDir: string, key: string): string {
+  const hash = createHash('sha1').update(key).digest('hex').slice(0, 16);
+  return join(configDir, 'versions', hash);
+}
+
+/**
  * 删除某共享目录的索引库文件(按 folderId 哈希定位的 index-<hash>.db)。
  * best-effort:文件不存在时返回 false;被运行中的 daemon 持有连接时(尤其 Windows
  * 下 unlink 打开中的文件会 EBUSY/EPERM)也返回 false 且不抛错——daemon 场景交由

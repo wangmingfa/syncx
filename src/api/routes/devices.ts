@@ -8,7 +8,7 @@ export async function tryDeviceRoutes(
   res: ServerResponse,
   deps: ControlServerDeps,
 ): Promise<boolean> {
-  const { addDevice, removeDevice, selfUpdate, shutdown, rescan, reconnect, setFolderPaused, setGlobalPaused } = deps;
+  const { addDevice, removeDevice, selfUpdate, shutdown, rescan, reconnect, setFolderPaused, setGlobalPaused, restoreFolderVersion, deleteFolderVersion } = deps;
   const path = req.url ? pathname(req.url) : '/';
 
   // POST /api/devices : 添加一个已知对端设备 ID
@@ -101,6 +101,33 @@ export async function tryDeviceRoutes(
       setGlobalPaused(params.get('paused') === '1');
       redirect(res, '/?msg=' + encodeURIComponent(params.get('paused') === '1' ? '已全局暂停同步' : '已恢复同步'));
       return true;
+    }
+    // 文件版本:恢复 / 删除(fallback 版本页的行内按钮)
+    if (action === 'restore-version' && restoreFolderVersion) {
+      const folderId = params.get('folderId');
+      const file = params.get('file');
+      if (folderId && file) {
+        try {
+          restoreFolderVersion(folderId, file);
+          redirect(res, (params.get('back') || '/') + '&msg=' + encodeURIComponent('版本已恢复到原路径'));
+        } catch (e) {
+          redirect(res, (params.get('back') || '/') + '&msg=' + encodeURIComponent(e instanceof Error ? e.message : '恢复失败'));
+        }
+        return true;
+      }
+    }
+    if (action === 'delete-version' && deleteFolderVersion) {
+      const folderId = params.get('folderId');
+      const file = params.get('file');
+      if (folderId && file) {
+        try {
+          deleteFolderVersion(folderId, file);
+          redirect(res, (params.get('back') || '/') + '&msg=' + encodeURIComponent('版本已删除'));
+        } catch (e) {
+          redirect(res, (params.get('back') || '/') + '&msg=' + encodeURIComponent(e instanceof Error ? e.message : '删除失败'));
+        }
+        return true;
+      }
     }
     redirect(res, '/');
     return true;

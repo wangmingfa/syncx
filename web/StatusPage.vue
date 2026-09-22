@@ -23,6 +23,7 @@ import {
 import UpdateBanner from './components/UpdateBanner.vue';
 import GuideModal from './components/GuideModal.vue';
 import HistoryModal from './components/HistoryModal.vue';
+import VersionsModal from './components/VersionsModal.vue';
 import ConfirmModal from './components/ConfirmModal.vue';
 import EditFolderModal from './components/EditFolderModal.vue';
 import AuthPasswordModal from './components/AuthPasswordModal.vue';
@@ -55,7 +56,7 @@ const selfUpdate = useSelfUpdate(deps);
 const fmt = useFormat(status);
 
 // 需要本页模板双向绑定的模态状态:必须提到顶层,否则 <script setup> 模板不会自动拆包 Ref
-const { historyFolder, editDevicesOpen, editFolder, saveEditDevices } = folders;
+const { historyFolder, versionsFolder, editDevicesOpen, editFolder, saveEditDevices } = folders;
 const { upgrading, askSelfUpdate, uploadOpen, openUpload, selectUploadFile } = selfUpdate;
 const { showToast } = useToast();
 
@@ -167,6 +168,9 @@ provide(StatusContextKey, {
 
     <!-- 同步记录弹窗 -->
     <HistoryModal :folder="historyFolder" :notify="showToast" @close="historyFolder = null" />
+
+    <!-- 文件版本弹窗 -->
+    <VersionsModal :folder="versionsFolder" :notify="showToast" :changed="refreshStatus" @close="versionsFolder = null" />
 
     <!-- 通用二次确认弹窗 -->
     <ConfirmModal :state="confirmState" :notify="showToast" @closed="confirmState = null" />

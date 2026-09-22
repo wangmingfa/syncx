@@ -2,13 +2,14 @@ import type { ParsedArgs } from './args.js';
 import { basename, dirname, join, resolve } from 'node:path';
 import { homedir } from 'node:os';
 import { loadOrCreateIdentity } from './identity.js';
-import { loadConfig, saveConfig, mutateConfig, folderTrashPath } from './config.js';
+import { loadConfig, saveConfig, mutateConfig, folderTrashPath, folderVersionsPath } from './config.js';
 import { readFolderIdentity, removeLegacyFolderMarker } from './folder-identity.js';
 import { migrateLegacyTrash } from './trash.js';
 import { openIndexStore } from './indexstore.js';
 
 import { listSyncHistory, clearSyncHistory } from './history.js';
-import { readFileSync, readdirSync, existsSync, statSync, writeFileSync, watch, unlinkSync } from 'node:fs';
+import { readFileSync, readdirSync, existsSync, statSync, writeFileSync, watch, unlinkSync, copyFileSync, mkdirSync, rmSync } from 'node:fs';
+import { relative, isAbsolute } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { startPeerServer } from './net/server.js';
 
@@ -21,6 +22,7 @@ import { addSharedFolder, removeSharedFolder, isPeerAllowed, addKnownDevice, rem
 import { markOfferAccepted, markOfferDeclined, restoreDeclinedOffer, listOpenOffers, findPendingOffer } from './offers.js';
 import { createInviteCode, parseInviteCode, revokeInviteCode } from './invite.js';
 import { folderIdFor, folderIndexKey, folderIndexPath, purgeOrphanIndexFiles, type SharedFolderConfig } from './config.js';
+import { resolveSharePath } from './executor.js';
 import { renderSystemdUnit, renderLaunchdPlist, renderWindowsService } from './install.js';
 import { createLogger } from './logger.js';
 import { runUpgrade } from './upgrade.js';
@@ -47,6 +49,54 @@ function indexHasLiveEntries(configDir: string, folder: SharedFolderConfig): boo
   } catch {
     return false;
   }
+}
+
+/**
+ * 文件版本控制(控制 API 侧):版本目录由 executor 写入(见 snapshotVersion),
+ * 这里提供列表 / 恢复 / 删除。版本文件命名 `<relPath>.syncx-v-<stamp>[.<n>]`,
+ * 后缀是显式标记,恢复时据此无歧义反推原始相对路径。
+ */
+
+/** 版本文件名 → 原始共享目录内相对路径。 */
+function versionOriginalPath(versionFile: string): string {
+  return versionFile.replace(/\.syncx-v-[0-9a-z]+(\.[0-9]+)?$/, '');
+}
+
+/** 按 folderId 在配置里找目录条目;找不到抛错(路由层转 400)。 */
+function findConfigFolder(configPath: string, folderId: string): SharedFolderConfig {
+  const folder = loadConfig(configPath).sharedFolders.find((f) => folderIdFor(f) === folderId);
+  if (!folder) throw new Error('folder not found');
+  return folder;
+}
+
+/**
+ * 递归列出版本目录下的全部版本文件(相对 versionsDir,协议 '/' 分隔)。
+ * 版本文件保留了原相对路径的目录结构,所以必须递归;目录不存在视为无版本。
+ */
+function listVersionFiles(dir: string, prefix = ''): string[] {
+  const out: string[] = [];
+  try {
+    const entries = readdirSync(dir, { withFileTypes: true });
+    for (const e of entries) {
+      const rel = prefix ? `${prefix}/${e.name}` : e.name;
+      if (e.isDirectory()) out.push(...listVersionFiles(join(dir, e.name), rel));
+      else if (e.isFile()) out.push(rel);
+    }
+  } catch {
+    // 目录不存在(尚无任何版本留档):视为空列表
+  }
+  return out;
+}
+
+/** 版本文件的定位与越界校验(join 后必须仍在 versionsDir 内)。返回绝对路径。 */
+function locateVersionFile(versionsDir: string, versionFile: string): string {
+  if (typeof versionFile !== 'string' || versionFile === '' || !versionFile.includes('.syncx-v-')) {
+    throw new Error('invalid version file');
+  }
+  const abs = join(versionsDir, versionFile);
+  const rel = relative(versionsDir, abs);
+  if (rel.startsWith('..') || isAbsolute(rel)) throw new Error('unsafe version file');
+  return abs;
 }
 
 /**
@@ -593,6 +643,48 @@ export async function run(args: ParsedArgs): Promise<void> {
     getOffers: () => listOpenOffers(configPath),
     getFolderHistory: (folderId) => listSyncHistory(configPath, folderId),
     clearFolderHistory: (folderId) => clearSyncHistory(configPath, folderId),
+    // 文件版本:列出 / 恢复 / 删除。恢复 = 把旧版本拷回共享目录原路径,
+    // 恢复前把当前内容也拷一份进版本目录(操作可逆),随后触发一轮扫描让恢复
+    // 产生的「本地修改」尽快广播给对端。
+    listFolderVersions: (folderId) => {
+      const folder = findConfigFolder(configPath, folderId);
+      const versionsDir = folderVersionsPath(configDir, folderIndexKey(folder));
+      const versions = listVersionFiles(versionsDir)
+        .map((file) => {
+          const st = statSync(join(versionsDir, file));
+          return { file, path: versionOriginalPath(file), size: st.size, mtime: st.mtimeMs };
+        })
+        .sort((a, b) => a.path.localeCompare(b.path) || a.file.localeCompare(b.file));
+      return { versions };
+    },
+    restoreFolderVersion: (folderId, file) => {
+      const folder = findConfigFolder(configPath, folderId);
+      const versionsDir = folderVersionsPath(configDir, folderIndexKey(folder));
+      const src = locateVersionFile(versionsDir, file);
+      if (!existsSync(src) || !statSync(src).isFile()) throw new Error('version not found');
+      const relPath = versionOriginalPath(file);
+      const dest = resolveSharePath(folder.path, relPath);
+      if (existsSync(dest) && statSync(dest).isFile()) {
+        // 当前内容留档,恢复动作本身可逆
+        mkdirSync(versionsDir, { recursive: true });
+        const stamp = Date.now().toString(36);
+        let backup = join(versionsDir, `${relPath}.syncx-v-${stamp}`);
+        let n = 0;
+        while (existsSync(backup)) {
+          n += 1;
+          backup = join(versionsDir, `${relPath}.syncx-v-${stamp}.${n}`);
+        }
+        copyFileSync(dest, backup);
+      }
+      mkdirSync(dirname(dest), { recursive: true });
+      copyFileSync(src, dest);
+      void manager.runScan();
+    },
+    deleteFolderVersion: (folderId, file) => {
+      const folder = findConfigFolder(configPath, folderId);
+      const versionsDir = folderVersionsPath(configDir, folderIndexKey(folder));
+      rmSync(locateVersionFile(versionsDir, file));
+    },
     // 内容对比(诊断,只读):向对端索取同一目录 id 的索引快照并分类差异
     diffFolder: (folderId, deviceId) => manager.diffFolder(folderId, deviceId),
     // 双栏对比页:同一份只读数据再带上两侧条目清单

@@ -481,6 +481,179 @@ describe('local executor conflict', () => {
   });
 });
 
+describe('local executor file versions', () => {
+  it('snapshots the previous content before a remote overwrite', async () => {
+    const dir = mkdtempSync(join(tmpdir(), 'syncx-exec-'));
+    const root = join(dir, 'share');
+    mkdirSync(root, { recursive: true });
+    const index = openIndexStore(join(dir, 'index.db'));
+    const versionsDir = join(dir, 'versions');
+
+    const executor = createLocalExecutor(root, index, join(dir, 'trash'), versionsDir);
+    const target = join(root, 'doc.txt');
+    const oldContent = Buffer.from('old content');
+    writeFileSync(target, oldContent);
+
+    const newContent = Buffer.from('new content');
+    await executor.applyReceive(
+      entry('doc.txt', [['dev-b', 1]], [hashBlock(newContent)], newContent.length),
+      { getBlocks: async (): Promise<Buffer[]> => [newContent] },
+    );
+
+    // 原路径已是对端新内容;旧内容留存于版本目录(带 .syncx-v- 时间戳后缀)
+    expect(readFileSync(target)).toEqual(newContent);
+    const versions = readdirSync(versionsDir);
+    expect(versions).toHaveLength(1);
+    const v = versions[0]!;
+    expect(v.startsWith('doc.txt.syncx-v-')).toBe(true);
+    expect(readFileSync(join(versionsDir, v))).toEqual(oldContent);
+
+    index.close();
+    rmDir(dir);
+  });
+
+  it('does not snapshot when the file is brand new (nothing being overwritten)', async () => {
+    const dir = mkdtempSync(join(tmpdir(), 'syncx-exec-'));
+    const root = join(dir, 'share');
+    mkdirSync(root, { recursive: true });
+    const index = openIndexStore(join(dir, 'index.db'));
+    const versionsDir = join(dir, 'versions');
+
+    const executor = createLocalExecutor(root, index, join(dir, 'trash'), versionsDir);
+    const content = Buffer.from('first arrival');
+    await executor.applyReceive(
+      entry('fresh.txt', [['dev-b', 1]], [hashBlock(content)], content.length),
+      { getBlocks: async (): Promise<Buffer[]> => [content] },
+    );
+
+    expect(existsSync(versionsDir)).toBe(false);
+
+    index.close();
+    rmDir(dir);
+  });
+
+  it('keeps the nested relative path structure for versions', async () => {
+    const dir = mkdtempSync(join(tmpdir(), 'syncx-exec-'));
+    const root = join(dir, 'share');
+    mkdirSync(root, { recursive: true });
+    const index = openIndexStore(join(dir, 'index.db'));
+    const versionsDir = join(dir, 'versions');
+
+    const executor = createLocalExecutor(root, index, join(dir, 'trash'), versionsDir);
+    const oldContent = Buffer.from('v1');
+    mkdirSync(join(root, 'docs'), { recursive: true });
+    writeFileSync(join(root, 'docs', 'plan.md'), oldContent);
+
+    const newContent = Buffer.from('v2');
+    await executor.applyReceive(
+      entry('docs/plan.md', [['dev-b', 1]], [hashBlock(newContent)], newContent.length),
+      { getBlocks: async (): Promise<Buffer[]> => [newContent] },
+    );
+
+    const versions = readdirSync(join(versionsDir, 'docs'));
+    expect(versions).toHaveLength(1);
+    expect(versions[0]!.startsWith('plan.md.syncx-v-')).toBe(true);
+    expect(readFileSync(join(versionsDir, 'docs', versions[0]!))).toEqual(oldContent);
+
+    index.close();
+    rmDir(dir);
+  });
+
+  it('prunes per-path versions beyond the cap, dropping the oldest', async () => {
+    const dir = mkdtempSync(join(tmpdir(), 'syncx-exec-'));
+    const root = join(dir, 'share');
+    mkdirSync(root, { recursive: true });
+    const index = openIndexStore(join(dir, 'index.db'));
+    const versionsDir = join(dir, 'versions');
+
+    const executor = createLocalExecutor(root, index, join(dir, 'trash'), versionsDir);
+    const target = join(root, 'doc.txt');
+    writeFileSync(target, 'seed');
+
+    // 覆盖 12 次:每次的旧内容都会留档,超出上限的最旧版本应被清理
+    for (let i = 0; i < 12; i++) {
+      const content = Buffer.from(`content-${i}`);
+      await executor.applyReceive(
+        entry('doc.txt', [['dev-b', i + 1]], [hashBlock(content)], content.length),
+        { getBlocks: async (): Promise<Buffer[]> => [content] },
+      );
+    }
+
+    const versions = readdirSync(versionsDir).sort();
+    expect(versions).toHaveLength(10);
+    // 最早的两份(content-0、content-1 的旧内容)应已被裁掉;
+    // 最新的留档是 content-11 落地前的 content-10
+    expect(versions[0]!.startsWith('doc.txt.syncx-v-')).toBe(true);
+    const last = versions[versions.length - 1]!;
+    expect(readFileSync(join(versionsDir, last))).toEqual(Buffer.from('content-10'));
+    expect(readFileSync(target)).toEqual(Buffer.from('content-11'));
+
+    index.close();
+    rmDir(dir);
+  });
+
+  it('prunes nested-path versions beyond the cap (parent dir, not just the top level)', async () => {
+    const dir = mkdtempSync(join(tmpdir(), 'syncx-exec-'));
+    const root = join(dir, 'share');
+    mkdirSync(root, { recursive: true });
+    const index = openIndexStore(join(dir, 'index.db'));
+    const versionsDir = join(dir, 'versions');
+
+    const executor = createLocalExecutor(root, index, join(dir, 'trash'), versionsDir);
+    const target = join(root, 'docs', 'plan.md');
+    mkdirSync(join(root, 'docs'), { recursive: true });
+    writeFileSync(target, 'seed');
+
+    // 嵌套路径的版本留档在 <versionsDir>/docs/ 子目录里,修剪必须扫到这一层
+    for (let i = 0; i < 12; i++) {
+      const content = Buffer.from(`content-${i}`);
+      await executor.applyReceive(
+        entry('docs/plan.md', [['dev-b', i + 1]], [hashBlock(content)], content.length),
+        { getBlocks: async (): Promise<Buffer[]> => [content] },
+      );
+    }
+
+    const versions = readdirSync(join(versionsDir, 'docs')).sort();
+    expect(versions).toHaveLength(10);
+    // 最新的留档是 content-11 落地前的 content-10
+    const last = versions[versions.length - 1]!;
+    expect(readFileSync(join(versionsDir, 'docs', last))).toEqual(Buffer.from('content-10'));
+    expect(readFileSync(target)).toEqual(Buffer.from('content-11'));
+
+    index.close();
+    rmDir(dir);
+  });
+
+  it('does not double-snapshot during a conflict (local file already moved to a conflict copy)', async () => {
+    const dir = mkdtempSync(join(tmpdir(), 'syncx-exec-'));
+    const root = join(dir, 'share');
+    mkdirSync(root, { recursive: true });
+    const index = openIndexStore(join(dir, 'index.db'));
+    const versionsDir = join(dir, 'versions');
+
+    const executor = createLocalExecutor(root, index, join(dir, 'trash'), versionsDir);
+    const localContent = Buffer.from('local edit');
+    writeFileSync(join(root, 'doc.txt'), localContent);
+    index.saveEntry(entry('doc.txt', [['dev-a', 2]], [hashBlock(localContent)], localContent.length));
+
+    const remoteContent = Buffer.from('remote edit');
+    await executor.applyConflict(
+      'doc.txt',
+      index.getEntry('doc.txt')!,
+      entry('doc.txt', [['dev-a', 1], ['dev-b', 2]], [hashBlock(remoteContent)], remoteContent.length),
+      { getBlocks: async (): Promise<Buffer[]> => [remoteContent] },
+      'dev-b',
+    );
+
+    // 冲突副本已保留本地内容,版本目录不应重复留档
+    expect(existsSync(versionsDir)).toBe(false);
+    expect(readdirSync(root).filter((n) => n.startsWith('doc.sync-conflict-'))).toHaveLength(1);
+
+    index.close();
+    rmDir(dir);
+  });
+});
+
 describe('preserveLocalAsConflict', () => {
   it('renames an existing un-indexed local file to a .sync-conflict copy and frees the original path', () => {
     const dir = mkdtempSync(join(tmpdir(), 'syncx-exec-'));

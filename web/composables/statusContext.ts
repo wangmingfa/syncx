@@ -54,6 +54,8 @@ export interface StatusContext {
   askRemoveFolder: (path: string) => void;
   openEditDevices: (f: FolderInfo) => void;
   openHistory: (f: FolderInfo) => void;
+  /** 打开某目录的文件版本弹窗(拉取与展示在 VersionsModal 内)。 */
+  openVersions: (f: FolderInfo) => void;
   copy: (text: string) => Promise<void>;
   hoverFolderKey: Ref<string>;
   onFolderEnter: (f: { id?: string; path: string; devices: string[] }) => void;

@@ -18,7 +18,7 @@ import { spawn, type ChildProcess } from 'node:child_process';
 import { loadOrCreateIdentity } from '../../src/identity.js';
 import { openIndexStore } from '../../src/indexstore.js';
 import { hashBlock, splitIntoBlocks } from '../../src/blockstore.js';
-import { folderIdFor, folderIndexPath } from '../../src/config.js';
+import { folderIdFor, folderIndexPath, folderVersionsPath } from '../../src/config.js';
 import { allocatePort, cleanDaemonEnv } from './ports.js';
 
 const children: ChildProcess[] = [];
@@ -343,6 +343,71 @@ describe('two real daemons sync over peers config', () => {
   );
 
   it(
+    'keeps a file version on remote overwrite and restores it via control api',
+    async () => {
+      const a = await setupDaemon('a', [{ path: 'a.txt', content: Buffer.from('v1') }]);
+      const b = await setupDaemon('b', []);
+
+      startDaemon(a, [`ws://127.0.0.1:${b.peerPort}`], [b.deviceId]);
+      await waitForDaemonReady(a);
+      startDaemon(b, [`ws://127.0.0.1:${a.peerPort}`], [a.deviceId]);
+      await waitFor(() => existsSync(join(b.share, 'a.txt')), 45000);
+
+      // A 修改 → B 接收覆盖:B 的旧内容(v1)应自动留档为文件版本。
+      // 条件函数必须容错 ENOENT:覆盖走「rename 进版本目录 → 写回」的原子窗口,
+      // 轮询可能恰好撞上文件短暂不存在的一刻
+      writeFileSync(join(a.share, 'a.txt'), 'v2 from A');
+      await waitFor(() => {
+        try {
+          return readFileSync(join(b.share, 'a.txt')).toString() === 'v2 from A';
+        } catch {
+          return false;
+        }
+      }, 45000);
+
+      // 先暂停 B 的目录同步再验版本:250ms 扫描节奏下 A↔B 会因版本向量不同而
+      // 互相覆盖多轮,每轮都产生留档并修剪,版本列表不稳定、旧留档可能被裁
+      await postControl(b, '/api/folders/pause', { folderId: 'main', paused: true });
+
+      const list = await getVersions(b, 'main');
+      // pause 前的窗口里 A↔B 可能互相重发几轮(版本向量不同即触发覆盖),留档份数
+      // 不定;pause 后不再有新覆盖,列表稳定 —— 按内容找「v1 的 a.txt 留档」
+      const bVersionsDir = folderVersionsPath(b.dir, 'main');
+      const v1Backup = list.versions.find((v) => {
+        try {
+          return v.path === 'a.txt' && readFileSync(join(bVersionsDir, v.file)).toString() === 'v1';
+        } catch {
+          return false;
+        }
+      });
+      expect(v1Backup).toBeDefined();
+
+      // 恢复旧版本:原路径回到 v1,恢复前的 v2 也会留档一份(操作可逆,份数恰好 +1)
+      await postControl(b, '/api/folders/versions/restore', { folderId: 'main', file: v1Backup!.file });
+      await waitFor(() => readFileSync(join(b.share, 'a.txt')).toString() === 'v1', 20000);
+      const afterRestore = await getVersions(b, 'main');
+      expect(afterRestore.versions).toHaveLength(list.versions.length + 1);
+
+      // 恢复同步:恢复产生的「本地修改」沿正常同步路径回传 A
+      await postControl(b, '/api/folders/pause', { folderId: 'main', paused: false });
+
+      // 恢复产生的「本地修改」沿正常同步路径回传 A(同样容错覆盖窗口的 ENOENT)
+      await waitFor(() => {
+        try {
+          return readFileSync(join(a.share, 'a.txt')).toString() === 'v1';
+        } catch {
+          return false;
+        }
+      }, 45000);
+
+      await stopChildren();
+      rmDir(a.dir);
+      rmDir(b.dir);
+    },
+    90000,
+  );
+
+  it(
     'returns to「已同步」after a local change instead of echoing indexes forever',
     async () => {
       // 2026-09-16 事故的真进程回归。双方各有对方没有的存量文件 —— 这正是回声环的
@@ -600,6 +665,20 @@ async function postControl(setup: DaemonSetup, path: string, body: unknown): Pro
     body: JSON.stringify(body),
   });
   if (!res.ok) throw new Error(`POST ${path} returned ${res.status}: ${await res.text()}`);
+}
+
+/** 携带落盘令牌读取 daemon 控制 API 的某目录文件版本列表。 */
+async function getVersions(
+  setup: DaemonSetup,
+  folderId: string,
+): Promise<{ versions: Array<{ file: string; path: string; size: number; mtime: number }> }> {
+  const token = readFileSync(join(setup.dir, 'control.token'), 'utf8').trim();
+  const res = await fetch(
+    `http://127.0.0.1:${setup.controlPort}/api/folders/versions?folderId=${encodeURIComponent(folderId)}`,
+    { headers: { Authorization: `Bearer ${token}` } },
+  );
+  if (!res.ok) throw new Error(`GET /api/folders/versions returned ${res.status}: ${await res.text()}`);
+  return (await res.json()) as { versions: Array<{ file: string; path: string; size: number; mtime: number }> };
 }
 
 /** 携带落盘令牌读取 daemon 控制 API 的 /api/status(dev 运行态 version 为 'dev')。 */

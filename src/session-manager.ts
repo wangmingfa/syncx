@@ -19,7 +19,7 @@ import { randomBytes } from 'node:crypto';
 import type { Logger } from 'pino';
 import { WebSocket } from 'ws';
 
-import { loadConfig, mutateConfig, folderIdFor, folderIndexKey, folderIndexPath, folderTrashPath, purgeFolderIndex, type SharedFolderConfig } from './config.js';
+import { loadConfig, mutateConfig, folderIdFor, folderIndexKey, folderIndexPath, folderTrashPath, folderVersionsPath, purgeFolderIndex, type SharedFolderConfig } from './config.js';
 import { checkFolderIdentity, readFolderIdentity } from './folder-identity.js';
 import { openIndexStore, type IndexStore } from './indexstore.js';
 import { createLocalExecutor, resolveSharePath, type LocalExecutor } from './executor.js';
@@ -441,7 +441,12 @@ export class SyncSessionManager {
     // 留下常驻痕迹(并被 git status 报成未跟踪文件),见 config.folderTrashPath。
     const executor = this.captureFolderErrors(
       id,
-      createLocalExecutor(f.path, index, folderTrashPath(this.configDir, indexKey)),
+      createLocalExecutor(
+        f.path,
+        index,
+        folderTrashPath(this.configDir, indexKey),
+        folderVersionsPath(this.configDir, indexKey),
+      ),
     );
     // 索引快照只取一次:下面三处(硬忽略断根 / 本地索引 / 基线判定)都要用,
     // 而 listEntries 是全表扫描,启动时对每个目录重复调用不划算。
@@ -2155,6 +2160,7 @@ export class SyncSessionManager {
               f.path,
               existing.index,
               folderTrashPath(this.configDir, existing.indexKey),
+              folderVersionsPath(this.configDir, existing.indexKey),
             );
             existing.localIndex = new Map(
               filterIndexedEntries(parseIgnoreRules(existing.ignoreLines), existing.index.listEntries()).map((e) => [e.path, e]),

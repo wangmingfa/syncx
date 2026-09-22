@@ -21,9 +21,13 @@ export function useFolders(deps: CoreDeps): {
   askRemoveFolder: (path: string) => void;
   openEditDevices: (f: FolderInfo) => void;
   openHistory: (f: FolderInfo) => void;
+  /** 打开某目录的文件版本弹窗(拉取与展示在 VersionsModal 内)。 */
+  openVersions: (f: FolderInfo) => void;
   editDevicesOpen: Ref<boolean>;
   editFolder: Ref<FolderInfo | null>;
   historyFolder: Ref<FolderInfo | null>;
+  /** 非空 = 打开该目录的文件版本弹窗。 */
+  versionsFolder: Ref<FolderInfo | null>;
   saveEditDevices: (payload: { path: string; devices: string[]; gitignore: boolean }) => Promise<void>;
   toggleFolderPaused: (f: FolderInfo, paused: boolean) => Promise<void>;
   toggleGlobalPaused: (paused: boolean) => Promise<void>;
@@ -171,6 +175,12 @@ export function useFolders(deps: CoreDeps): {
     historyFolder.value = f;
   }
 
+  // 文件版本弹窗:非空 = 打开该目录的版本留档(拉取与展示在 VersionsModal 内)
+  const versionsFolder = ref<FolderInfo | null>(null);
+  function openVersions(f: FolderInfo): void {
+    versionsFolder.value = f;
+  }
+
   // ---- 暂停同步(目录卡开关 + 全局开关):数据面停摆,控制面照常 ----
   /** 暂停/恢复单个目录的同步。暂停 = 不扫描、不广播、不接收;连接与配对不受影响。 */
   async function toggleFolderPaused(f: FolderInfo, paused: boolean): Promise<void> {
@@ -220,10 +230,12 @@ export function useFolders(deps: CoreDeps): {
     askRemoveFolder,
     openEditDevices,
     openHistory,
+    openVersions,
     editDevicesOpen,
     editFolder,
     saveEditDevices,
     historyFolder,
+    versionsFolder,
     toggleFolderPaused,
     toggleGlobalPaused,
   };
