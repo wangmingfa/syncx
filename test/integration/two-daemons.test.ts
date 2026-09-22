@@ -263,6 +263,86 @@ describe('two real daemons sync over peers config', () => {
   );
 
   it(
+    'pauses folder sync via control api and resumes',
+    async () => {
+      const a = await setupDaemon('a', [
+        { path: 'a.txt', content: Buffer.from('content from A') },
+      ]);
+      const b = await setupDaemon('b', []);
+
+      startDaemon(a, [`ws://127.0.0.1:${b.peerPort}`], [b.deviceId]);
+      await waitForDaemonReady(a);
+      startDaemon(b, [`ws://127.0.0.1:${a.peerPort}`], [a.deviceId]);
+      await waitFor(() => existsSync(join(b.share, 'a.txt')), 45000);
+
+      // 通过控制 API 暂停 A 的目录:数据面停摆,连接保持在线
+      await postControl(a, '/api/folders/pause', { folderId: 'main', paused: true });
+      // 暂停立即落盘(config.json 的目录 paused 字段)
+      const pausedConfig = JSON.parse(readFileSync(a.configPath, 'utf8')) as {
+        sharedFolders: Array<{ paused?: boolean }>;
+      };
+      expect(pausedConfig.sharedFolders[0]?.paused).toBe(true);
+
+      // 暂停期间 A 的新改动不应传播(约四轮扫描节奏 250ms/轮)
+      writeFileSync(join(a.share, 'paused.txt'), 'written while paused');
+      await new Promise((r) => setTimeout(r, 1200));
+      expect(existsSync(join(b.share, 'paused.txt'))).toBe(false);
+      // 控制面照常:对端连接仍在线
+      const pausedStatus = await getStatus(a);
+      expect(pausedStatus.devices.some((d) => d.deviceId === b.deviceId && d.online)).toBe(true);
+
+      // 恢复后传播(含暂停期间积压的改动)
+      await postControl(a, '/api/folders/pause', { folderId: 'main', paused: false });
+      await waitFor(() => existsSync(join(b.share, 'paused.txt')), 45000);
+      expect(readFileSync(join(b.share, 'paused.txt'))).toEqual(Buffer.from('written while paused'));
+
+      await stopChildren();
+      rmDir(a.dir);
+      rmDir(b.dir);
+    },
+    90000,
+  );
+
+  it(
+    'pauses sync globally via control api and resumes',
+    async () => {
+      const a = await setupDaemon('a', [
+        { path: 'a.txt', content: Buffer.from('content from A') },
+      ]);
+      const b = await setupDaemon('b', []);
+
+      startDaemon(a, [`ws://127.0.0.1:${b.peerPort}`], [b.deviceId]);
+      await waitForDaemonReady(a);
+      startDaemon(b, [`ws://127.0.0.1:${a.peerPort}`], [a.deviceId]);
+      await waitFor(() => existsSync(join(b.share, 'a.txt')), 45000);
+
+      // 全局暂停:状态接口的顶层 paused 置位,配置落盘
+      await postControl(a, '/api/pause', { paused: true });
+      expect((await getStatus(a)).paused).toBe(true);
+      const pausedConfig = JSON.parse(readFileSync(a.configPath, 'utf8')) as { paused?: boolean };
+      expect(pausedConfig.paused).toBe(true);
+
+      // 全局暂停期间改动不传播
+      writeFileSync(join(a.share, 'global-paused.txt'), 'written while globally paused');
+      await new Promise((r) => setTimeout(r, 1200));
+      expect(existsSync(join(b.share, 'global-paused.txt'))).toBe(false);
+
+      // 恢复全局后传播
+      await postControl(a, '/api/pause', { paused: false });
+      expect((await getStatus(a)).paused).toBe(false);
+      await waitFor(() => existsSync(join(b.share, 'global-paused.txt')), 45000);
+      expect(readFileSync(join(b.share, 'global-paused.txt'))).toEqual(
+        Buffer.from('written while globally paused'),
+      );
+
+      await stopChildren();
+      rmDir(a.dir);
+      rmDir(b.dir);
+    },
+    90000,
+  );
+
+  it(
     'returns to「已同步」after a local change instead of echoing indexes forever',
     async () => {
       // 2026-09-16 事故的真进程回归。双方各有对方没有的存量文件 —— 这正是回声环的
@@ -507,6 +587,19 @@ interface StatusResponse {
   devices: StatusDevice[];
   /** 仅含非零进度的目录(卡片据此显示「传输中」);全部静置时为空数组。 */
   syncProgress?: Array<{ folder: string; pending: number; sending: number; receiving: number }>;
+  /** 全局暂停同步开关(未暂停时为 false)。 */
+  paused?: boolean;
+}
+
+/** 携带落盘令牌调用 daemon 控制 API 的 POST 端点(JSON body)。 */
+async function postControl(setup: DaemonSetup, path: string, body: unknown): Promise<void> {
+  const token = readFileSync(join(setup.dir, 'control.token'), 'utf8').trim();
+  const res = await fetch(`http://127.0.0.1:${setup.controlPort}${path}`, {
+    method: 'POST',
+    headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' },
+    body: JSON.stringify(body),
+  });
+  if (!res.ok) throw new Error(`POST ${path} returned ${res.status}: ${await res.text()}`);
 }
 
 /** 携带落盘令牌读取 daemon 控制 API 的 /api/status(dev 运行态 version 为 'dev')。 */

@@ -58,6 +58,10 @@ export interface StatusContext {
   hoverFolderKey: Ref<string>;
   onFolderEnter: (f: { id?: string; path: string; devices: string[] }) => void;
   onFolderLeave: () => void;
+  /** 暂停/恢复单个目录的同步(目录卡开关);全局开关见 toggleGlobalPaused。 */
+  toggleFolderPaused: (f: FolderInfo, paused: boolean) => Promise<void>;
+  /** 全局暂停/恢复同步:所有目录一起停摆,各目录自己的暂停状态独立保留。 */
+  toggleGlobalPaused: (paused: boolean) => Promise<void>;
 
   // 邀请
   offerPaths: Record<string, string>;

@@ -25,6 +25,8 @@ export function useFolders(deps: CoreDeps): {
   editFolder: Ref<FolderInfo | null>;
   historyFolder: Ref<FolderInfo | null>;
   saveEditDevices: (payload: { path: string; devices: string[]; gitignore: boolean }) => Promise<void>;
+  toggleFolderPaused: (f: FolderInfo, paused: boolean) => Promise<void>;
+  toggleGlobalPaused: (paused: boolean) => Promise<void>;
 } {
   const { status, busy, refreshStatus, post, askConfirm } = deps;
   const { showToast } = useToast();
@@ -169,6 +171,40 @@ export function useFolders(deps: CoreDeps): {
     historyFolder.value = f;
   }
 
+  // ---- 暂停同步(目录卡开关 + 全局开关):数据面停摆,控制面照常 ----
+  /** 暂停/恢复单个目录的同步。暂停 = 不扫描、不广播、不接收;连接与配对不受影响。 */
+  async function toggleFolderPaused(f: FolderInfo, paused: boolean): Promise<void> {
+    try {
+      await apiJson('/api/folders/pause', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ folderId: f.id ?? f.path, paused }),
+      });
+      f.paused = paused;
+      showToast(paused ? '已暂停该目录同步(连接保持在线)' : '已恢复该目录同步');
+      await refreshStatus();
+    } catch (e) {
+      showToast(errText(e, '操作失败,请重试'), 'alert');
+      await refreshStatus(); // 回读后端真实状态,避免按钮与配置不一致
+    }
+  }
+
+  /** 全局暂停/恢复:所有目录一起停摆;各目录自己的暂停状态独立保留,恢复全局后仍生效。 */
+  async function toggleGlobalPaused(paused: boolean): Promise<void> {
+    try {
+      await apiJson('/api/pause', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ paused }),
+      });
+      showToast(paused ? '已全局暂停同步' : '已恢复同步');
+      await refreshStatus();
+    } catch (e) {
+      showToast(errText(e, '操作失败,请重试'), 'alert');
+      await refreshStatus();
+    }
+  }
+
   return {
     hoverDevices,
     hoverFolderKey,
@@ -188,5 +224,7 @@ export function useFolders(deps: CoreDeps): {
     editFolder,
     saveEditDevices,
     historyFolder,
+    toggleFolderPaused,
+    toggleGlobalPaused,
   };
 }

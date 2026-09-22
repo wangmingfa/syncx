@@ -582,6 +582,13 @@ export async function run(args: ParsedArgs): Promise<void> {
       manager.refreshFolderIgnoreRules(path);
       statusHub.notify();
     },
+    setFolderPaused: (folderId, paused) => {
+      // 落盘 + 对账存活会话 + notifyStatus 都在 manager 内完成
+      manager.setFolderPaused(folderId, paused);
+    },
+    setGlobalPaused: (paused) => {
+      manager.setGlobalPaused(paused);
+    },
     // 待确认区下发 pending + declined:已忽略项灰显供「恢复」,兜住手误忽略
     getOffers: () => listOpenOffers(configPath),
     getFolderHistory: (folderId) => listSyncHistory(configPath, folderId),

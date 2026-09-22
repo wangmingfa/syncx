@@ -1,7 +1,7 @@
 import { readFileSync } from 'node:fs';
 import type { IncomingMessage, ServerResponse } from 'node:http';
 import type { ControlServerDeps } from '../deps.js';
-import { pathname, readBodyBuffer, sendJson } from '../helpers.js';
+import { pathname, readBody, readBodyBuffer, sendJson } from '../helpers.js';
 
 /** 系统域:状态查询、日志尾部、优雅关闭、手动扫描与 npm 自更新。 */
 export async function trySystemRoutes(
@@ -9,7 +9,7 @@ export async function trySystemRoutes(
   res: ServerResponse,
   deps: ControlServerDeps,
 ): Promise<boolean> {
-  const { getStatus, logFile, shutdown, rescan, checkForUpdate, selfUpdateNpm, inspectLocalPackage, selfUpdateUpload } =
+  const { getStatus, logFile, shutdown, rescan, checkForUpdate, selfUpdateNpm, inspectLocalPackage, selfUpdateUpload, setGlobalPaused } =
     deps;
   const path = req.url ? pathname(req.url) : '/';
 
@@ -140,6 +140,19 @@ export async function trySystemRoutes(
   if (req.method === 'POST' && path === '/api/rescan' && rescan) {
     rescan();
     sendJson(res, 200, { ok: true });
+    return true;
+  }
+
+  // POST /api/pause : 全局暂停/恢复同步(所有目录一起停;各目录 paused 独立保留)
+  if (req.method === 'POST' && path === '/api/pause' && setGlobalPaused) {
+    try {
+      const raw = await readBody(req);
+      const body = raw === '' ? {} : JSON.parse(raw);
+      setGlobalPaused((body as any).paused === true);
+      sendJson(res, 200, { ok: true });
+    } catch (e) {
+      sendJson(res, 400, { error: e instanceof Error ? e.message : 'invalid json body' });
+    }
     return true;
   }
 

@@ -654,6 +654,19 @@ tbody tr:last-child td {
   white-space: nowrap;
 }
 
+/* 目录卡「已暂停」徽标:橙底,区别于蓝色的「接收」徽标 */
+.paused-badge {
+  background: rgb(234 162 60 / 0.16);
+  color: #c47c14;
+  border-color: rgb(234 162 60 / 0.45);
+}
+
+/* 目录卡图标按钮的 tooltip 触发包裹:禁用态按钮不派发鼠标事件,由外层 span 承接 hover */
+.icon-btn {
+  display: inline-flex;
+  flex: 0 0 auto;
+}
+
 /* 添加目录表单里的「接收模式」勾选项:与设备复选框组视觉分离 */
 .ro-check {
   margin-top: 2px;

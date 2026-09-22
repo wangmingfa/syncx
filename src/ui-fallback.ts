@@ -50,7 +50,8 @@ function shell(content: string): string {
 
 interface FallbackStatus {
   deviceId?: string;
-  folders?: Array<{ path: string; devices?: string[]; id?: string }>;
+  paused?: boolean;
+  folders?: Array<{ path: string; devices?: string[]; id?: string; paused?: boolean }>;
   entries?: number;
   tombstones?: number;
   devices?: Array<{ deviceId: string; online: boolean; url?: string; folders?: string[] }>;
@@ -78,10 +79,19 @@ export function renderControlFallback(data: {
   }
 
   const folders = (status.folders ?? [])
-    .map(
-      (f) =>
-        `<tr><td>${escapeHtml(f.path)}</td><td>${escapeHtml((f.devices ?? []).join(', '))}</td></tr>`,
-    )
+    .map((f) => {
+      const folderId = f.id ?? f.path;
+      // 操作列:暂停/恢复开关(paused 取反提交)。路径回退形态的 folderId 含特殊字符
+      // 也没关系:hidden input 走表单编码,不经过 URL。
+      const pauseBtn =
+        `<form method="post" action="/actions" style="display:inline">` +
+        `<input type="hidden" name="action" value="pause-folder">` +
+        `<input type="hidden" name="folderId" value="${escapeHtml(folderId)}">` +
+        `<input type="hidden" name="paused" value="${f.paused ? '0' : '1'}">` +
+        `<button type="submit" class="btn-sm">${f.paused ? '恢复' : '暂停'}</button></form>`;
+      const state = f.paused ? ' <span class="offline">已暂停</span>' : '';
+      return `<tr><td>${escapeHtml(f.path)}${state}</td><td>${escapeHtml((f.devices ?? []).join(', '))}</td><td>${pauseBtn}</td></tr>`;
+    })
     .join('');
   const message = data.message ? `<p class="message">${escapeHtml(data.message)}</p>` : '';
   const error = data.error ? `<p class="error">${escapeHtml(data.error)}</p>` : '';
@@ -125,6 +135,12 @@ export function renderControlFallback(data: {
           <input type="hidden" name="action" value="rescan">
           <button type="submit">手动扫描</button>
         </form>
+        <form method="post" action="/actions" style="display:inline">
+          <input type="hidden" name="action" value="pause-global">
+          <input type="hidden" name="paused" value="${status.paused ? '0' : '1'}">
+          <button type="submit">${status.paused ? '恢复全部同步' : '暂停全部同步'}</button>
+        </form>
+        ${status.paused ? '<span class="offline">已全局暂停同步</span>' : ''}
       </div>
     </div>
     ${message}${error}
@@ -140,8 +156,8 @@ export function renderControlFallback(data: {
     </div>
     <div class="card">
       <h2>共享目录</h2>
-      <table><thead><tr><th>路径</th><th>设备</th></tr></thead>
-      <tbody>${folders || '<tr><td colspan="2" class="muted">暂无共享目录</td></tr>'}</tbody></table>
+      <table><thead><tr><th>路径</th><th>设备</th><th>操作</th></tr></thead>
+      <tbody>${folders || '<tr><td colspan="3" class="muted">暂无共享目录</td></tr>'}</tbody></table>
       <form method="post" action="/folders">
         <input name="path" placeholder="目录路径" />
         <input name="devices" placeholder="设备 ID(逗号分隔,可选)" />

@@ -43,6 +43,8 @@ const {
   askRemoveFolder,
   openEditDevices,
   openHistory,
+  toggleFolderPaused,
+  toggleGlobalPaused,
   copy,
   hoverFolderKey,
   onFolderEnter,
@@ -92,6 +94,11 @@ function visibleFiles(f: FolderInfo): TransferFile[] {
       <span>共享目录</span>
       <span class="badge">{{ status.folders.length }}</span>
       <n-button :disabled="busy" @click="rescan">扫描全部</n-button>
+      <!-- 全局开关:所有目录一起停摆;各目录自己的暂停状态独立保留,恢复全局后仍生效 -->
+      <n-button v-if="status.folders.length > 0" size="small" tertiary :type="status.paused ? 'primary' : 'default'" :disabled="busy"
+        :title="status.paused ? '恢复所有目录的同步' : '暂停所有目录的同步(连接保持在线)'"
+        @click="toggleGlobalPaused(!status.paused)"
+      >{{ status.paused ? '恢复全部同步' : '暂停全部同步' }}</n-button>
       <n-button v-if="status.folders.length > 0" class="add-toggle" :class="{ 'is-invisible': addFolderOpen }" :disabled="busy" :tabindex="addFolderOpen ? -1 : 0" @click="toggleAddFolder">＋ 添加</n-button>
     </div>
 
@@ -141,28 +148,96 @@ function visibleFiles(f: FolderInfo): TransferFile[] {
         </span>
         <span class="item-title">{{ f.path }}</span>
         <span v-if="f.receiveOnly" class="ro-badge" title="接收模式:只拉不推,本机改动不会同步出去">接收</span>
-        <n-button
-          size="small"
-          tertiary
-          :disabled="busy || f.devices.length === 0"
-          :title="f.devices.length === 0 ? '该目录还没有指派设备,无从对比' : '打开双栏对比:左右目录结构对齐,双击文件可看内容差异'"
-          @click="openCompare(f)"
-        >对比</n-button>
-        <n-button size="small" tertiary :disabled="busy" @click="openHistory(f)">记录</n-button>
-        <n-button
-          size="small"
-          type="error"
-          tertiary
-          :disabled="busy"
-          @click="askRemoveFolder(f.path)"
-        >移除</n-button>
+        <span v-if="f.paused" class="ro-badge paused-badge" title="已暂停:不扫描、不广播、不接收;连接与配对照常">已暂停</span>
+        <!-- 操作按钮:图标 + hover tooltip(禁用态按钮不派发鼠标事件,由外层 span 承接 hover) -->
+        <n-tooltip trigger="hover" :style="{ maxWidth: '280px' }">
+          <template #trigger>
+            <span class="icon-btn">
+              <n-button size="small" quaternary circle :type="f.paused ? 'primary' : 'default'" :disabled="busy"
+                @click="toggleFolderPaused(f, !f.paused)">
+                <template #icon>
+                  <svg v-if="!f.paused" viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+                    <line x1="9" y1="5.5" x2="9" y2="18.5" />
+                    <line x1="15" y1="5.5" x2="15" y2="18.5" />
+                  </svg>
+                  <svg v-else viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+                    <path d="M8 5.5 18 12 8 18.5Z" />
+                  </svg>
+                </template>
+              </n-button>
+            </span>
+          </template>
+          {{ f.paused ? '恢复该目录的同步' : '暂停该目录的同步(连接保持在线)' }}
+        </n-tooltip>
+        <n-tooltip trigger="hover" :style="{ maxWidth: '280px' }">
+          <template #trigger>
+            <span class="icon-btn">
+              <n-button size="small" quaternary circle :disabled="busy || f.devices.length === 0" @click="openCompare(f)">
+                <template #icon>
+                  <svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+                    <rect x="3.5" y="4.5" width="17" height="15" rx="2" />
+                    <line x1="12" y1="4.5" x2="12" y2="19.5" />
+                  </svg>
+                </template>
+              </n-button>
+            </span>
+          </template>
+          {{ f.devices.length === 0 ? '该目录还没有指派设备,无从对比' : '打开双栏对比:左右目录结构对齐,双击文件可看内容差异' }}
+        </n-tooltip>
+        <n-tooltip trigger="hover" :style="{ maxWidth: '280px' }">
+          <template #trigger>
+            <span class="icon-btn">
+              <n-button size="small" quaternary circle :disabled="busy" @click="openHistory(f)">
+                <template #icon>
+                  <svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+                    <circle cx="12" cy="12" r="8.5" />
+                    <path d="M12 7.5V12l3 2" />
+                  </svg>
+                </template>
+              </n-button>
+            </span>
+          </template>
+          查看该目录的同步记录
+        </n-tooltip>
+        <n-tooltip trigger="hover" :style="{ maxWidth: '280px' }">
+          <template #trigger>
+            <span class="icon-btn">
+              <n-button size="small" type="error" quaternary circle :disabled="busy" @click="askRemoveFolder(f.path)">
+                <template #icon>
+                  <svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+                    <path d="M4.5 7h15" />
+                    <path d="M9.5 7V4.5h5V7" />
+                    <path d="M6.5 7l.8 12a2 2 0 0 0 2 1.8h5.4a2 2 0 0 0 2-1.8l.8-12" />
+                    <path d="M10 11v6" />
+                    <path d="M14 11v6" />
+                  </svg>
+                </template>
+              </n-button>
+            </span>
+          </template>
+          移除共享目录(磁盘文件不会被删除)
+        </n-tooltip>
       </div>
 
       <!-- 目录 ID:跨机同步需两边配置同一 ID 才能对上 -->
       <div class="fid-row">
         <span class="fid-label">目录 ID</span>
         <code class="fid-code break">{{ f.id ?? f.path }}</code>
-        <n-button size="small" tertiary @click="copy(f.id ?? f.path)">复制</n-button>
+        <n-tooltip trigger="hover" :style="{ maxWidth: '280px' }">
+          <template #trigger>
+            <span class="icon-btn">
+              <n-button size="small" quaternary circle @click="copy(f.id ?? f.path)">
+                <template #icon>
+                  <svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+                    <rect x="9" y="9" width="11" height="11" rx="2" />
+                    <path d="M5 15V5a2 2 0 0 1 2-2h10" />
+                  </svg>
+                </template>
+              </n-button>
+            </span>
+          </template>
+          复制目录 ID
+        </n-tooltip>
       </div>
 
       <!-- 同步错误横幅:该目录最近一次同步失败的原因(扫描干净后自动消失) -->
@@ -189,7 +264,23 @@ function visibleFiles(f: FolderInfo): TransferFile[] {
           </n-tooltip>
           <span v-if="f.devices.length === 0" class="device-tag device-tag-empty">未指派设备</span>
         </div>
-        <n-button size="small" tertiary :disabled="busy" @click="openEditDevices(f)">设置</n-button>
+        <n-tooltip trigger="hover" :style="{ maxWidth: '280px' }">
+          <template #trigger>
+            <span class="icon-btn">
+              <n-button size="small" quaternary circle :disabled="busy" @click="openEditDevices(f)">
+                <template #icon>
+                  <svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+                    <line x1="4" y1="8" x2="20" y2="8" />
+                    <circle cx="9" cy="8" r="2" />
+                    <line x1="4" y1="16" x2="20" y2="16" />
+                    <circle cx="15" cy="16" r="2" />
+                  </svg>
+                </template>
+              </n-button>
+            </span>
+          </template>
+          编辑设备指派
+        </n-tooltip>
       </div>
 
       <div v-if="progressOf(f)" class="item-progress">

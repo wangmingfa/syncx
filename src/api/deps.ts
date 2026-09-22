@@ -50,6 +50,10 @@ export interface ControlServerDeps {
   setFolderDevices?: (path: string, devices: string[]) => void;
   /** 设置某目录是否遵循 .gitignore 忽略规则(缺省 true)。 */
   setFolderUseGitignore?: (path: string, enabled: boolean) => void;
+  /** 设置某共享目录是否暂停同步(按 folderId;暂停 = 数据面停摆,控制面照常)。 */
+  setFolderPaused?: (folderId: string, paused: boolean) => void;
+  /** 全局暂停/恢复同步(所有目录一起停;各目录自己的 paused 独立保留)。 */
+  setGlobalPaused?: (paused: boolean) => void;
   /** 列出待确认项(对方推送的配对 / 目录共享邀请)。 */
   getOffers?: () => unknown;
   /** 读取某共享目录的同步记录(最近变更,倒序)。参数为目录 ID。 */

@@ -8,7 +8,7 @@ export async function tryDeviceRoutes(
   res: ServerResponse,
   deps: ControlServerDeps,
 ): Promise<boolean> {
-  const { addDevice, removeDevice, selfUpdate, shutdown, rescan, reconnect } = deps;
+  const { addDevice, removeDevice, selfUpdate, shutdown, rescan, reconnect, setFolderPaused, setGlobalPaused } = deps;
   const path = req.url ? pathname(req.url) : '/';
 
   // POST /api/devices : 添加一个已知对端设备 ID
@@ -87,6 +87,19 @@ export async function tryDeviceRoutes(
       const deviceId = params.get('deviceId');
       if (deviceId) reconnect(deviceId);
       redirect(res, '/?msg=' + encodeURIComponent('重连已触发'));
+      return true;
+    }
+    // 暂停/恢复某目录的同步(fallback UI 的目录卡开关)
+    if (action === 'pause-folder' && setFolderPaused) {
+      const folderId = params.get('folderId');
+      if (folderId) setFolderPaused(folderId, params.get('paused') === '1');
+      redirect(res, '/?msg=' + encodeURIComponent(params.get('paused') === '1' ? '目录同步已暂停' : '目录同步已恢复'));
+      return true;
+    }
+    // 全局暂停/恢复同步(fallback UI 的总开关)
+    if (action === 'pause-global' && setGlobalPaused) {
+      setGlobalPaused(params.get('paused') === '1');
+      redirect(res, '/?msg=' + encodeURIComponent(params.get('paused') === '1' ? '已全局暂停同步' : '已恢复同步'));
       return true;
     }
     redirect(res, '/');

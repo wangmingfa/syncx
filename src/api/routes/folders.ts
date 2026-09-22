@@ -8,7 +8,7 @@ export async function tryFolderRoutes(
   res: ServerResponse,
   deps: ControlServerDeps,
 ): Promise<boolean> {
-  const { addFolder, removeFolder, setFolderDevices, setFolderUseGitignore, getFolderHistory, clearFolderHistory, diffFolder, compareFolder, readFilePair, applyFileSync } = deps;
+  const { addFolder, removeFolder, setFolderDevices, setFolderUseGitignore, setFolderPaused, getFolderHistory, clearFolderHistory, diffFolder, compareFolder, readFilePair, applyFileSync } = deps;
   const path = req.url ? pathname(req.url) : '/';
 
   // Form POST /folders : add or (via _method=DELETE) remove a folder
@@ -83,6 +83,23 @@ export async function tryFolderRoutes(
         return true;
       }
       setFolderUseGitignore((body as any).path, (body as any).enabled !== false);
+      sendJson(res, 200, { ok: true });
+    } catch (e) {
+      sendJson(res, 400, { error: e instanceof Error ? e.message : 'invalid json body' });
+    }
+    return true;
+  }
+
+  // POST /api/folders/pause : 设置某目录是否暂停同步(数据面停摆,控制面照常)
+  if (req.method === 'POST' && path === '/api/folders/pause' && setFolderPaused) {
+    try {
+      const raw = await readBody(req);
+      const body = raw === '' ? {} : JSON.parse(raw);
+      if (typeof (body as any).folderId !== 'string' || (body as any).folderId === '') {
+        sendJson(res, 400, { error: 'folderId is required' });
+        return true;
+      }
+      setFolderPaused((body as any).folderId, (body as any).paused === true);
       sendJson(res, 200, { ok: true });
     } catch (e) {
       sendJson(res, 400, { error: e instanceof Error ? e.message : 'invalid json body' });

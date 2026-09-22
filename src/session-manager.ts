@@ -40,7 +40,7 @@ import { makePeerTransport, attachPeerMessages, sendControlMessage, type Control
 import { learnPeerUrl, learnPeerIp, getLanAddresses } from './net/addresses.js';
 import { hostname as osHostname } from 'node:os';
 import { RateLimiter } from './ratelimit.js';
-import { isPeerAllowed, addPeer } from './devices.js';
+import { isPeerAllowed, addPeer, setFolderPaused, setGlobalPaused } from './devices.js';
 import { receiveOffer, makeOfferId, pruneRevokedOffers } from './offers.js';
 import type { DeviceIdentity } from './identity.js';
 import type { ProgressCounts, RelayActivity, TransferFile } from './status.js';
@@ -367,6 +367,12 @@ export class SyncSessionManager {
   /** 扫描重入保护(见 runScan)。 */
   private scanning = false;
   /**
+   * 全局暂停开关(config.paused 的内存镜像):为 true 时所有目录的数据面停摆。
+   * 构造时从配置读取,热重载 / setGlobalPaused 时同步;各目录自己的 paused
+   * 存在 folder.config 上,两者任一生效即视为暂停(见 folderPausedNow)。
+   */
+  private globalPaused = false;
+  /**
    * close() 之后置位:随后 socket 的 close 事件**不得再排定重连**。
    * 优雅关闭时 close() 会 terminate 所有 peer socket,而 terminate 触发的 close
    * 事件是异步到达的 —— 那时 close() 早已清空 reconnectTimers 并返回,于是关闭
@@ -383,6 +389,8 @@ export class SyncSessionManager {
     this.peerPort = deps.peerPort;
     this.logger = deps.logger;
     this.notifyStatus = deps.onStatusChanged ?? ((): void => {});
+    // 全局暂停是 config.json 的顶层字段,不在 initialFolders 里:构造时读一次
+    this.globalPaused = loadConfig(deps.configPath).paused === true;
     this.folderStates = initialFolders.map((f) => this.createFolderState(f));
     this.startHeartbeat();
   }
@@ -581,6 +589,9 @@ export class SyncSessionManager {
     // (含 baselinePending 的新建目录——父目录在其基线扫描期间也不应重复索引子目录文件)
     const otherRoots = this.folderStates.map((f) => resolve(f.path));
     for (const folder of this.folderStates) {
+      // 暂停的目录(目录级或全局):数据面整体停摆 —— 不扫描、不广播、不应用变更。
+      // 控制面照常(连接保持在线),恢复后由下一轮扫描 / reconcile 继续同步。
+      if (this.folderPausedNow(folder)) continue;
       // 一轮扫描走到这里且后续无错误即视为「干净」:清除该目录上一次的错误提示,
       // 让问题自愈后目录卡上的错误横幅自动消失
       this.clearFolderError(folder.id);
@@ -931,7 +942,10 @@ export class SyncSessionManager {
    */
   private reconcileSessionFolders(session: ActiveSession): void {
     for (const folder of this.folderStates) {
-      const allowed = (folder.config.devices ?? []).includes(session.remoteDeviceId);
+      // 暂停的目录视为「不参与同步」:摘除数据通道(入站变更随之被忽略),
+      // 恢复后这里会自动重挂并发送全量索引(attachFolderToSession)。
+      const allowed =
+        (folder.config.devices ?? []).includes(session.remoteDeviceId) && !this.folderPausedNow(folder);
       if (allowed && !session.peers.has(folder.id)) {
         this.attachFolderToSession(session, folder);
       } else if (!allowed && session.peers.has(folder.id)) {
@@ -1998,6 +2012,42 @@ export class SyncSessionManager {
     return { entries, tombstones };
   }
 
+  /* ==================== 暂停同步 ==================== */
+
+  /** 某目录此刻是否处于暂停:目录自己的 paused 或全局 paused,任一生效即暂停。 */
+  private folderPausedNow(folder: FolderState): boolean {
+    return this.globalPaused || folder.config.paused === true;
+  }
+
+  /**
+   * 暂停状态变化的统一生效点:对所有存活会话重新对账目录通道 ——
+   * 暂停即摘除数据通道(出站不再广播、入站被忽略),恢复即重挂并发送全量索引。
+   * 控制面不受影响:连接保持在线,配对 / 邀请 / 版本宣告照常。
+   */
+  private applyPausedState(): void {
+    for (const session of this.activeSessions) {
+      this.reconcileSessionFolders(session);
+    }
+    this.notifyStatus();
+  }
+
+  /** 设置某目录的暂停状态:落盘 + 立即生效(对存活会话对账)。 */
+  setFolderPaused(folderId: string, paused: boolean): void {
+    setFolderPaused(this.configPath, folderId, paused);
+    const folder = this.folderStates.find((f) => f.id === folderId);
+    if (folder) folder.config.paused = paused;
+    this.applyPausedState();
+    this.logger.info(`folder sync ${paused ? 'paused' : 'resumed'}: ${folderId}`);
+  }
+
+  /** 设置全局暂停:所有目录一起停摆;各目录自己的 paused 独立保留,恢复全局后仍生效。 */
+  setGlobalPaused(paused: boolean): void {
+    setGlobalPaused(this.configPath, paused);
+    this.globalPaused = paused;
+    this.applyPausedState();
+    this.logger.info(`global sync ${paused ? 'paused' : 'resumed'}`);
+  }
+
   /* ==================== 配置热重载与关闭 ==================== */
 
   /**
@@ -2007,6 +2057,8 @@ export class SyncSessionManager {
   reloadConfig(): ReturnType<typeof loadConfig> | undefined {
     try {
       const newConfig = loadConfig(this.configPath);
+      // 全局暂停随重载同步:手改 config.json 的 paused 也能实时生效(下方 reconcile 统一摘挂)
+      this.globalPaused = newConfig.paused === true;
 
       // 共享目录变更:新增/移除/更新
       const newFolderById = new Map(newConfig.sharedFolders.map((f) => [folderIdFor(f), f]));

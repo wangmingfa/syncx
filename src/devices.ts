@@ -311,6 +311,22 @@ export function setFolderGitignore(configPath: string, path: string, enabled: bo
   });
 }
 
+/** 设置某共享目录是否暂停同步(目录卡片开关;按 folderId 定位,id 缺省回退 path)。 */
+export function setFolderPaused(configPath: string, folderId: string, paused: boolean): void {
+  mutateConfig(configPath, (config) => {
+    const existing = config.sharedFolders.find((f) => folderIdFor(f) === folderId);
+    if (!existing) throw new Error(`未找到共享目录:「${folderId}」`);
+    existing.paused = paused;
+  });
+}
+
+/** 设置全局暂停同步(所有目录一起停摆;各目录自己的 paused 独立保留,恢复全局后仍生效)。 */
+export function setGlobalPaused(configPath: string, paused: boolean): void {
+  mutateConfig(configPath, (config) => {
+    config.paused = paused;
+  });
+}
+
 /** 按路径移除一个共享目录。 */
 /**
  * 移除一个共享目录(从 config.sharedFolders 滤除)。

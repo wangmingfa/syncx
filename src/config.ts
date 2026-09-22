@@ -77,6 +77,12 @@ export interface SharedFolderConfig {
   folderIdentity?: FolderIdentity;
   /** @deprecated 旧版的「`.syncx-folder` 标记已建立」标志,已被 folderIdentity 取代;仅在迁移时清理。 */
   markerChecked?: boolean;
+  /**
+   * 该目录是否暂停同步(目录卡片开关)。暂停 = 数据面停摆:不扫描、不广播、
+   * 不挂对端传输通道(入站变更也因此被忽略);控制面照常 —— 连接保持在线,
+   * 配对 / 邀请 / 版本宣告不受影响。全局恢复后目录自己的 paused 仍独立生效。
+   */
+  paused?: boolean;
 }
 
 /** 目录的 wire 标识:优先 id,缺省用 path。 */
@@ -216,6 +222,8 @@ export interface Config {
   knownDevices: DeviceConfig[];
   /** 对方推送过来的待确认项(配对 / 目录共享),确认或忽略后移出 pending。 */
   pendingOffers: PendingOffer[];
+  /** 全局暂停同步:所有目录的数据面一起停摆;各目录自己的 paused 独立保留。 */
+  paused?: boolean;
 }
 
 export const DEFAULT_CONFIG: Config = {
@@ -276,6 +284,7 @@ export function loadConfig(configPath: string): Config {
     peers: normalizePeerList(parsed.peers),
     knownDevices: parsed.knownDevices ?? [],
     pendingOffers: parsed.pendingOffers ?? [],
+    paused: parsed.paused === true ? true : undefined,
   };
 }
 

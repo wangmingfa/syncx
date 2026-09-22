@@ -26,6 +26,8 @@ export interface FolderInfo {
   useGitignore?: boolean;
   /** 接收模式(只拉不推):本机只从对端拉取变更、应用对端删除,绝不把本地变更反灌对端。 */
   receiveOnly?: boolean;
+  /** 该目录是否暂停同步:数据面停摆(不扫描/不广播/不接收),连接与配对照常。 */
+  paused?: boolean;
 }
 
 export interface DeviceInfo {
@@ -76,6 +78,8 @@ export interface StatusData {
   entries: number;
   tombstones: number;
   folders: FolderInfo[];
+  /** 全局暂停同步:为 true 时所有目录的数据面停摆(各目录自己的 paused 独立生效)。 */
+  paused?: boolean;
   devices: DeviceInfo[];
   syncProgress: SyncProgressItem[];
   offers: OfferInfo[];

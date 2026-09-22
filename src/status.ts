@@ -84,6 +84,8 @@ export interface StatusPayload {
    *  navigator:控制台常被从**另一台机器**打开,浏览器平台 ≠ 目录所在机器的平台。 */
   platform: string;
   folders: SharedFolderConfig[];
+  /** 全局暂停同步:为 true 时所有目录的数据面停摆(各目录自己的 paused 仍独立生效)。 */
+  paused?: boolean;
   entries: number;
   tombstones: number;
   devices: DeviceStatus[];
@@ -115,6 +117,7 @@ export function buildStatus(
     version: selfVersion,
     platform: process.platform,
     folders: config.sharedFolders,
+    paused: config.paused === true,
     entries: stats.entries,
     tombstones: stats.tombstones,
     devices,
