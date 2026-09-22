@@ -144,9 +144,9 @@ const MAX_BLOCK_RETRIES_TOTAL = 23;
  * 两端卡片转圈不停的事故形态之一)。租约天然自愈,不需要任何外部事件来清零。
  *
  * 取 15s:块请求的超时是 5s,正常的块流至少每 5s 会来一波(超时后的重试本身也续期),
- * 所以只有真正停下来不传了,租约才会过期。
+ * 所以只有真正停下来不传了,租约才会过期。集成测试可用 SYNCX_SERVE_LEASE_MS 调短。
  */
-const SERVE_LEASE_MS = 15_000;
+const SERVE_LEASE_MS = Number(process.env.SYNCX_SERVE_LEASE_MS) || 15_000;
 
 /**
  * Wire one sync round over an injected transport: on receiving the peer's

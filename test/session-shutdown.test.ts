@@ -61,13 +61,19 @@ describe('session manager shutdown', () => {
     const aDir = mkdtempSync(join(tmpdir(), 'syncx-shutdown-a-'));
     const bDir = mkdtempSync(join(tmpdir(), 'syncx-shutdown-b-'));
     let inbound = 0;
+    // 提升到 try 外:finally 里必须先收掉 daemon 再删目录 —— 测试若在 close()
+    // 之前失败,仍活的会话收到在途消息会去碰已删除的 config 目录
+    // (锁文件 ENOENT → 空转 5s → unhandled exception)
+    let managerA: SyncSessionManager | undefined;
+    let managerB: SyncSessionManager | undefined;
+    let serverB: ReturnType<typeof startPeerServer> | undefined;
     try {
       const aId = loadOrCreateIdentity(aDir);
       const bId = loadOrCreateIdentity(bDir);
       writeFileSync(join(aDir, 'config.json'), JSON.stringify({ sharedFolders: [], peers: [] }));
       writeFileSync(join(bDir, 'config.json'), JSON.stringify({ sharedFolders: [], peers: [] }));
 
-      const managerA = new SyncSessionManager(
+      managerA = new SyncSessionManager(
         {
           identity: aId,
           configPath: join(aDir, 'config.json'),
@@ -77,7 +83,7 @@ describe('session manager shutdown', () => {
         },
         [],
       );
-      const managerB = new SyncSessionManager(
+      managerB = new SyncSessionManager(
         {
           identity: bId,
           configPath: join(bDir, 'config.json'),
@@ -87,12 +93,12 @@ describe('session manager shutdown', () => {
         },
         [],
       );
-      const serverB = startPeerServer(
+      serverB = startPeerServer(
         bId,
         {
           onPeerConnected(socket, remoteDeviceId, key, listenPort) {
             inbound += 1;
-            managerB.onInboundPeer(socket, remoteDeviceId, key, listenPort);
+            managerB!.onInboundPeer(socket, remoteDeviceId, key, listenPort);
           },
           onError() {},
         },
@@ -102,8 +108,10 @@ describe('session manager shutdown', () => {
       const url = `ws://127.0.0.1:${serverB.port}`;
       managerA.connectTo(url);
       await waitFor(() => inbound === 1);
-      // 前提:A 确实学到了对端地址(否则重连本就会被「没有地址」挡掉,用例会空过)
-      expect(managerA.getLearnedUrl(bId.deviceId)).toBe(url);
+      // 前提:A 确实学到了对端地址(否则重连本就会被「没有地址」挡掉,用例会空过)。
+      // registerPeer 在 connectPeer().then() 里才写入,慢机器上会晚于对端的 accept
+      // 回调 —— 必须条件等待而不是立即断言。
+      await waitFor(() => managerA!.getLearnedUrl(bId.deviceId) === url);
 
       managerA.close();
       await new Promise((r) => setTimeout(r, 1000));
@@ -113,6 +121,9 @@ describe('session manager shutdown', () => {
       managerB.close();
       serverB.close();
     } finally {
+      managerA?.close();
+      managerB?.close();
+      serverB?.close();
       rmDir(aDir);
       rmDir(bDir);
     }

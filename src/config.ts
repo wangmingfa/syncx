@@ -323,7 +323,10 @@ function acquireConfigLock(configPath: string): void {
       closeSync(fd);
       configLockDepth.set(configPath, 1);
       return;
-    } catch {
+    } catch (err) {
+      // 只有「已被占用」值得重试;目录被删(ENOENT)/句柄耗尽等错误重试也不可能
+      // 成功,立即抛出 —— 否则 microSleep 会阻塞事件循环空转满 5s 才报错
+      if ((err as NodeJS.ErrnoException).code !== 'EEXIST') throw err;
       // 陈旧锁回收:持有者崩溃未释放且超过 30s,直接删除后重试
       try {
         if (existsSync(lockPath) && Date.now() - statSync(lockPath).mtimeMs > 30000) {

@@ -239,13 +239,9 @@ describe('two real daemons sync over peers config', () => {
       await waitForDaemonReady(a);
       startDaemon(b, [`ws://127.0.0.1:${a.peerPort}`], [a.deviceId]);
 
-      // 等连接建立(握手 + 加密会话 + 初始索引交换)
-      await new Promise((r) => setTimeout(r, 2000));
-      console.log('[test] after initial wait, writing live.txt');
-
-      // daemon 运行中在 A 侧新建文件:周期扫描应发现并传播到 B
+      // 无需预留「连接建立」窗口:waitFor 文件落地本身就覆盖了握手 + 索引交换 +
+      // 扫描传播的全过程(测试下扫描节奏 250ms,无须固定 sleep)
       writeFileSync(join(a.share, 'live.txt'), 'created while running');
-      console.log('[test] live.txt written, entering waitFor');
 
       try {
         await waitFor(() => existsSync(join(b.share, 'live.txt')), 20000);
@@ -364,14 +360,27 @@ describe('two real daemons sync over peers config', () => {
       startDaemon(a, [`ws://127.0.0.1:${b.peerPort}`], [b.deviceId]);
       startDaemon(b, [`ws://127.0.0.1:${a.peerPort}`], []);
 
-      // 留足时间:握手 + A 侧扫描(5s) + B 侧处理连接
-      await new Promise((r) => setTimeout(r, 6000));
+      // 条件等待代替固定 sleep,只看 B 侧日志:连接方向不定(A 先启动仍可能
+      // ECONNREFUSED 后由 B 反向发现补连,此时 A 不打 outbound 日志)。B 日志出现
+      // 「已连上但未授权」闸门行 + 收到 A 的目录清单(1 个文件夹),说明 A 确实
+      // 有数据要传但被拒 ——「不同步」的判定才非空洞。
+      const bLog = (): string => {
+        try {
+          return readFileSync(join(b.dir, 'daemon.out.log'), 'utf8');
+        } catch {
+          return '';
+        }
+      };
+      await waitFor(() => bLog().includes('not authorized for any shared folder'), 20000);
+      await waitFor(() => /folder sync list from .+: 1 folder/.test(bLog()), 20000);
+      // 再给 A 约三轮扫描(测试节奏 250ms):确认「连上后扫描过、但一个字节都过不去」
+      await new Promise((r) => setTimeout(r, 750));
 
       // 核心不变量:未授权对端拿不到任何文件内容
       expect(existsSync(join(b.share, 'secret.txt'))).toBe(false);
 
-      const bLog = readFileSync(join(b.dir, 'daemon.out.log'), 'utf8');
-      expect(bLog).toContain('not authorized for any shared folder');
+      const bLogText = readFileSync(join(b.dir, 'daemon.out.log'), 'utf8');
+      expect(bLogText).toContain('not authorized for any shared folder');
 
       await stopChildren();
       rmDir(a.dir);

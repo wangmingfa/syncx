@@ -739,8 +739,9 @@ export async function run(args: ParsedArgs): Promise<void> {
     logger.info(`  ws://${formatHost(lan.address, lan.family)}:${server.port}`);
   }
 
-  // 本地变更检测:周期扫描所有共享目录,把变化(新增/修改/删除)传播给已连接对端
-  const SCAN_INTERVAL_MS = 5000;
+  // 本地变更检测:周期扫描所有共享目录,把变化(新增/修改/删除)传播给已连接对端。
+  // 集成测试用 SYNCX_SCAN_INTERVAL_MS 调快节奏(250ms),生产默认 5s。
+  const SCAN_INTERVAL_MS = Number(process.env.SYNCX_SCAN_INTERVAL_MS) || 5000;
   const scanTimer = setInterval(() => {
     void manager.runScan();
   }, SCAN_INTERVAL_MS);
