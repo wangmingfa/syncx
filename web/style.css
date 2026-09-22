@@ -640,25 +640,43 @@ tbody tr:last-child td {
   letter-spacing: 0.03em;
 }
 
-/* 目录卡「接收」徽标:接收模式(只拉不推)的视觉标记,蓝底强调其只读同步语义 */
-.ro-badge {
-  flex: 0 0 auto;
-  font-size: 11.5px;
+/* 目录卡状态悬浮标签:整组贴在卡片顶缘、外探 8px(列表卡间距 12px,不蹭上一张),
+   从标题行抽出 → 接收/暂停开关切换时标题与操作按钮不再整行横移。
+   容器 pointer-events:none 让徽标之间的空隙鼠标穿透;单个徽标自开 auto 承接 hover
+   (「接收」无专属按钮,只能靠徽标自身 title 解释)。底色用不透明 --card-hi 压住
+   穿过的卡缘描边(半透明底会让边框线从胶囊中间显形)。 */
+.card-floats {
+  position: absolute;
+  top: -8px;
+  right: 22px;
+  z-index: 1;
+  display: flex;
+  gap: 6px;
+  pointer-events: none;
+}
+
+.float-badge {
+  pointer-events: auto;
+  font-size: 11px;
   font-weight: 600;
   line-height: 1;
-  padding: 3px 8px;
+  padding: 4px 9px;
   border-radius: 999px;
-  background: rgb(56 132 232 / 0.14);
-  color: #2f6fd0;
-  border: 1px solid rgb(56 132 232 / 0.4);
+  background: var(--card-hi);
+  border: 1px solid transparent;
   white-space: nowrap;
 }
 
-/* 目录卡「已暂停」徽标:橙底,区别于蓝色的「接收」徽标 */
+/* 接收模式(只拉不推):蓝,承接原内联徽标的语义色 */
+.receive-badge {
+  color: #2f6fd0;
+  border-color: rgb(56 132 232 / 0.6);
+}
+
+/* 已暂停:橙,区别于蓝色「接收」 */
 .paused-badge {
-  background: rgb(234 162 60 / 0.16);
   color: #c47c14;
-  border-color: rgb(234 162 60 / 0.45);
+  border-color: rgb(234 162 60 / 0.7);
 }
 
 /* 目录卡图标按钮的 tooltip 触发包裹:禁用态按钮不派发鼠标事件,由外层 span 承接 hover */

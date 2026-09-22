@@ -141,6 +141,15 @@ function visibleFiles(f: FolderInfo): TransferFile[] {
       @mouseenter="onFolderEnter(f)"
       @mouseleave="onFolderLeave"
     >
+      <!-- 状态悬浮标签:贴在卡片顶缘外侧,不占标题行空间(内联徽标会让标题与按钮
+           整行横移,切换时卡片内容左右跳)。两个共用一个容器 → 同时「接收 + 已暂停」
+           时并排而不打架;容器 pointer-events:none 让空隙鼠标穿透到下方按钮,单个徽标
+           可命中以显示 title 说明(「接收」没有专属操作按钮,只能靠徽标自身的 tooltip 解释)。 -->
+      <div v-if="f.receiveOnly || f.paused" class="card-floats">
+        <span v-if="f.receiveOnly" class="float-badge receive-badge" title="接收模式:只拉不推,本机改动不会同步出去">接收</span>
+        <span v-if="f.paused" class="float-badge paused-badge" title="已暂停:不扫描、不广播、不接收;连接与配对照常">已暂停</span>
+      </div>
+
       <div class="item-top">
         <span class="avatar" aria-hidden="true">
           <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
@@ -148,8 +157,6 @@ function visibleFiles(f: FolderInfo): TransferFile[] {
           </svg>
         </span>
         <span class="item-title">{{ f.path }}</span>
-        <span v-if="f.receiveOnly" class="ro-badge" title="接收模式:只拉不推,本机改动不会同步出去">接收</span>
-        <span v-if="f.paused" class="ro-badge paused-badge" title="已暂停:不扫描、不广播、不接收;连接与配对照常">已暂停</span>
         <!-- 操作按钮:图标 + hover tooltip(禁用态按钮不派发鼠标事件,由外层 span 承接 hover) -->
         <n-tooltip trigger="hover" :style="{ maxWidth: '280px' }">
           <template #trigger>
