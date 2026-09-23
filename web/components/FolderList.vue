@@ -121,8 +121,12 @@ function visibleFiles(f: FolderInfo): TransferFile[] {
 <template>
   <section class="col col--folders">
     <div class="col-head">
-      <span>共享目录</span>
-      <span class="badge">{{ status.folders.length }}</span>
+      <!-- 标题+徽标绑成一组(.col-head__lead):窄屏 wrap 时两者同进退,
+           徽标不会单独掉进按钮行;手机上 lead 整行独占,按钮组落到第二行(见 style.css) -->
+      <div class="col-head__lead">
+        <span>共享目录</span>
+        <span class="badge">{{ status.folders.length }}</span>
+      </div>
       <n-button :disabled="busy" @click="rescan">扫描全部</n-button>
       <!-- 全局时间线入口:跨目录的同步记录归并视图(同一 HistoryModal 的全局模式) -->
       <n-button size="small" tertiary @click="openGlobalHistory">全局记录</n-button>

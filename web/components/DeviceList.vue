@@ -24,8 +24,11 @@ const {
 <template>
   <section class="col col--devices">
     <div class="col-head">
-      <span>设备</span>
-      <span class="badge">{{ status.devices.length }}</span>
+      <!-- 标题+徽标绑成一组(.col-head__lead):与 FolderList 同构,窄屏 wrap 时同进退 -->
+      <div class="col-head__lead">
+        <span>设备</span>
+        <span class="badge">{{ status.devices.length }}</span>
+      </div>
       <n-button v-if="status.devices.length > 0" class="add-toggle" :class="{ 'is-invisible': addDeviceOpen }" :disabled="busy" :tabindex="addDeviceOpen ? -1 : 0" @click="toggleAddDevice">＋ 添加</n-button>
     </div>
 
