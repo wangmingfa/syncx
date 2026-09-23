@@ -7,7 +7,7 @@ import { readFolderIdentity, removeLegacyFolderMarker } from './folder-identity.
 import { migrateLegacyTrash } from './trash.js';
 import { openIndexStore } from './indexstore.js';
 
-import { getSyncHistory, getGlobalSyncHistory, clearSyncHistory } from './history.js';
+import { getSyncHistory, getGlobalSyncHistory, clearSyncHistory, getHistoryMaxEvents } from './history.js';
 import { listConflictCopies, resolveConflictCopy, applyConflictMerge } from './conflicts.js';
 import { readFileSync, readdirSync, existsSync, statSync, writeFileSync, watch, unlinkSync, copyFileSync, mkdirSync, rmSync } from 'node:fs';
 import { relative, isAbsolute } from 'node:path';
@@ -19,7 +19,7 @@ import { getLanAddresses, formatHost } from './net/addresses.js';
 import { createControlServer, type ControlServerDeps } from './api.js';
 import { createStatusHub } from './status-hub.js';
 import { buildStatus, type DeviceStatus, type SyncProgress, type FolderErrorStatus } from './status.js';
-import { addSharedFolder, removeSharedFolder, isPeerAllowed, addKnownDevice, removeKnownDevice, addPeer, removePeer, setFolderDevices, setFolderGitignore, acceptFolderInvitation } from './devices.js';
+import { addSharedFolder, removeSharedFolder, isPeerAllowed, addKnownDevice, removeKnownDevice, addPeer, removePeer, setFolderDevices, setFolderGitignore, setGlobalSettings, acceptFolderInvitation } from './devices.js';
 import { markOfferAccepted, markOfferDeclined, restoreDeclinedOffer, listOpenOffers, findPendingOffer } from './offers.js';
 import { createInviteCode, parseInviteCode, revokeInviteCode } from './invite.js';
 import { folderIdFor, folderIndexKey, folderIndexPath, purgeOrphanIndexFiles, type SharedFolderConfig } from './config.js';
@@ -564,6 +564,12 @@ export async function run(args: ParsedArgs): Promise<void> {
           traffic: manager.getTrafficStats(),
           hostname: osHostname(),
           localAddresses: getLanAddresses().map((a) => a.address),
+          // 全局设置当前值:设置弹窗预填(historyMaxEvents 取运行期生效值,含默认兜底)
+          settings: {
+            maxSendKbps: config.maxSendKbps,
+            versionsPerPath: config.versionsPerPath,
+            historyMaxEvents: getHistoryMaxEvents(),
+          },
         },
       );
     },
@@ -644,6 +650,14 @@ export async function run(args: ParsedArgs): Promise<void> {
     setFolderPaused: (folderId, paused) => {
       // 落盘 + 对账存活会话 + notifyStatus 都在 manager 内完成
       manager.setFolderPaused(folderId, paused);
+    },
+    setFolderSchedule: (folderId, schedule) => {
+      // 校验(非法格式 400)+ 落盘 + 立即对账都在 manager 内完成
+      manager.setFolderSchedule(folderId, schedule);
+    },
+    setGlobalSettings: (patch) => {
+      // 落盘 + 按需热生效(重建通道/执行器/历史上限)都在 manager 内完成
+      manager.setGlobalSettings(patch);
     },
     setGlobalPaused: (paused) => {
       manager.setGlobalPaused(paused);

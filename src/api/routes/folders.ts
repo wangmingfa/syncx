@@ -1,7 +1,7 @@
 import type { IncomingMessage, ServerResponse } from 'node:http';
 import type { ControlServerDeps } from '../deps.js';
 import type { SyncAction, SyncDirection, SyncHistoryFilter } from '../../history.js';
-import { HISTORY_MAX_EVENTS } from '../../history.js';
+import { getHistoryMaxEvents } from '../../history.js';
 import { pathname, readBody, redirect, sendJson } from '../helpers.js';
 
 /** fallback 版本页的 HTML 转义(与 ui-fallback 的 escapeHtml 同款)。 */
@@ -29,7 +29,7 @@ function parseHistoryQuery(
     if (!Number.isFinite(n) || n < 1) {
       return { error: 'limit must be a positive integer' };
     }
-    limit = Math.min(Math.floor(n), HISTORY_MAX_EVENTS);
+    limit = Math.min(Math.floor(n), getHistoryMaxEvents());
   }
   const directionRaw = url.searchParams.get('direction');
   const actionRaw = url.searchParams.get('action');
@@ -56,7 +56,7 @@ export async function tryFolderRoutes(
   res: ServerResponse,
   deps: ControlServerDeps,
 ): Promise<boolean> {
-  const { addFolder, removeFolder, setFolderDevices, setFolderUseGitignore, setFolderPaused, reAdoptFolderIdentity, getFolderHistory, getGlobalHistory, clearFolderHistory, listFolderConflicts, resolveFolderConflict, conflictFilePair, applyConflictMerge, cleanIdenticalConflicts, diffFolder, compareFolder, readFilePair, applyFileSync, listFolderVersions, restoreFolderVersion, deleteFolderVersion } = deps;
+  const { addFolder, removeFolder, setFolderDevices, setFolderUseGitignore, setFolderPaused, setFolderSchedule, reAdoptFolderIdentity, getFolderHistory, getGlobalHistory, clearFolderHistory, listFolderConflicts, resolveFolderConflict, conflictFilePair, applyConflictMerge, cleanIdenticalConflicts, diffFolder, compareFolder, readFilePair, applyFileSync, listFolderVersions, restoreFolderVersion, deleteFolderVersion } = deps;
   const path = req.url ? pathname(req.url) : '/';
 
   // Form POST /folders : add or (via _method=DELETE) remove a folder
@@ -151,6 +151,30 @@ export async function tryFolderRoutes(
       sendJson(res, 200, { ok: true });
     } catch (e) {
       sendJson(res, 400, { error: e instanceof Error ? e.message : 'invalid json body' });
+    }
+    return true;
+  }
+
+  // POST /api/folders/schedule { folderId, schedule } : 设置某目录的同步时段。
+  // schedule 形如 HH:MM-HH:MM(支持跨午夜);空串 = 清除(全天同步);非法格式 400。
+  if (req.method === 'POST' && path === '/api/folders/schedule' && setFolderSchedule) {
+    try {
+      const raw = await readBody(req);
+      const body = raw === '' ? {} : JSON.parse(raw);
+      const folderId = (body as { folderId?: unknown }).folderId;
+      const schedule = (body as { schedule?: unknown }).schedule;
+      if (typeof folderId !== 'string' || folderId === '') {
+        sendJson(res, 400, { error: 'folderId is required' });
+        return true;
+      }
+      if (typeof schedule !== 'string') {
+        sendJson(res, 400, { error: 'schedule must be a string (HH:MM-HH:MM, or empty to clear)' });
+        return true;
+      }
+      setFolderSchedule(folderId, schedule);
+      sendJson(res, 200, { ok: true });
+    } catch (e) {
+      sendJson(res, 400, { error: e instanceof Error ? e.message : '设置同步时段失败' });
     }
     return true;
   }

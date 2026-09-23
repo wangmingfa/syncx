@@ -83,6 +83,13 @@ export interface SharedFolderConfig {
    * 配对 / 邀请 / 版本宣告不受影响。全局恢复后目录自己的 paused 仍独立生效。
    */
   paused?: boolean;
+  /**
+   * 同步时段(目录设置弹窗),形如 `HH:MM-HH:MM`,支持跨午夜(如 `22:00-08:00`)。
+   * 仅在该时段内同步:时段外数据面停摆(与 paused 同语义:不扫描、不广播、
+   * 不挂传输通道),控制面照常;跨过窗口边界时由 daemon 的分钟级巡检自动摘/挂。
+   * 空/缺省 = 全天同步;格式非法按全天处理(绝不因配置笔误把目录锁死)。
+   */
+  schedule?: string;
 }
 
 /** 目录的 wire 标识:优先 id,缺省用 path。 */
@@ -237,6 +244,15 @@ export interface Config {
   pendingOffers: PendingOffer[];
   /** 全局暂停同步:所有目录的数据面一起停摆;各目录自己的 paused 独立保留。 */
   paused?: boolean;
+  /**
+   * 全局发送带宽上限(KB/s):目录未单独配置 maxBandwidthKbps 时的兜底默认。
+   * 0/缺省 = 不限速。目录级配置优先级更高(未配置才落到这里)。
+   */
+  maxSendKbps?: number;
+  /** 每路径保留的文件版本份数上限(超出删最旧,见 executor.pruneVersions)。缺省 10。 */
+  versionsPerPath?: number;
+  /** 每目录保留的同步记录条数上限(超出轮转,见 history.ts)。缺省 2000。 */
+  historyMaxEvents?: number;
 }
 
 export const DEFAULT_CONFIG: Config = {
@@ -285,6 +301,38 @@ export function normalizePeerList(peers: unknown): string[] {
   return out;
 }
 
+/** 同步时段的合法形态:`HH:MM-HH:MM`(小时/分钟允许一位数,如 `8:00-22:30`)。 */
+const SCHEDULE_RE = /^(\d{1,2}):(\d{2})-(\d{1,2}):(\d{2})$/;
+
+/** 校验同步时段字符串形态(供设置入口拒绝笔误,避免存进去才发现不生效)。 */
+export function isValidSchedule(schedule: string): boolean {
+  const m = SCHEDULE_RE.exec(schedule.trim());
+  if (!m) return false;
+  return Number(m[1]) <= 23 && Number(m[3]) <= 23 && Number(m[2]) <= 59 && Number(m[4]) <= 59;
+}
+
+/**
+ * 某时刻是否处于同步时段内。规则:
+ *  - 空/缺省 = 全天同步(返回 true);
+ *  - 格式非法 = 全天同步 —— 时段是节流手段而非安全边界,解析失败按「不设限」处理,
+ *    绝不因配置笔误把目录永久锁死;
+ *  - `from === to` 视为零长度窗口,同样按全天处理(用户想要「只在某刻同步」没有意义);
+ *  - 支持跨午夜(`22:00-08:00`):`from > to` 时落在两段任一即在窗口内。
+ * 时段按 daemon 本机时区的墙上时间解释(用户填的就是自己看到的钟表时间)。
+ */
+export function isWithinSchedule(schedule: string | undefined, now: Date = new Date()): boolean {
+  const s = schedule?.trim();
+  if (!s) return true;
+  const m = SCHEDULE_RE.exec(s);
+  if (!m || !isValidSchedule(s)) return true;
+  const from = Number(m[1]) * 60 + Number(m[2]);
+  const to = Number(m[3]) * 60 + Number(m[4]);
+  if (from === to) return true;
+  const cur = now.getHours() * 60 + now.getMinutes();
+  if (from < to) return cur >= from && cur < to;
+  return cur >= from || cur < to;
+}
+
 export function loadConfig(configPath: string): Config {
   if (!existsSync(configPath)) {
     return structuredClone(DEFAULT_CONFIG);
@@ -298,7 +346,18 @@ export function loadConfig(configPath: string): Config {
     knownDevices: parsed.knownDevices ?? [],
     pendingOffers: parsed.pendingOffers ?? [],
     paused: parsed.paused === true ? true : undefined,
+    // 全局设置:手改 config.json 填了非法值(负数/字符串)时丢弃,回退默认,不让坏值外溢
+    maxSendKbps: sanitizeCount(parsed.maxSendKbps, 0),
+    versionsPerPath: sanitizeCount(parsed.versionsPerPath, 1),
+    historyMaxEvents: sanitizeCount(parsed.historyMaxEvents, 1),
   };
+}
+
+/** 清洗一个「非负整数」配置值:非法(负数/非有限数)返回 undefined;0 保留(0 = 不限速语义)。 */
+function sanitizeCount(v: unknown, min: number): number | undefined {
+  const n = typeof v === 'number' ? Math.floor(v) : NaN;
+  if (!Number.isFinite(n) || n < min) return undefined;
+  return n;
 }
 
 /**

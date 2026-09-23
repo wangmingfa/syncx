@@ -19,7 +19,7 @@ import { randomBytes } from 'node:crypto';
 import type { Logger } from 'pino';
 import { WebSocket } from 'ws';
 
-import { loadConfig, mutateConfig, folderIdFor, folderIndexKey, folderIndexPath, folderTrashPath, folderVersionsPath, purgeFolderIndex, type SharedFolderConfig } from './config.js';
+import { loadConfig, mutateConfig, folderIdFor, folderIndexKey, folderIndexPath, folderTrashPath, folderVersionsPath, purgeFolderIndex, isWithinSchedule, type SharedFolderConfig } from './config.js';
 import { checkFolderIdentity, readFolderIdentity } from './folder-identity.js';
 import { openIndexStore, type IndexStore } from './indexstore.js';
 import { createLocalExecutor, resolveSharePath, type LocalExecutor } from './executor.js';
@@ -29,7 +29,7 @@ import { scanFolder } from './scanner.js';
 import type { IndexEntry } from './index.js';
 import { hashBlock, splitIntoBlocks, readBlockAt } from './blockstore.js';
 import { createVersionVector, incrementVersion, mergeVersions, type VersionVector } from './version.js';
-import { recordSyncEvent } from './history.js';
+import { recordSyncEvent, setHistoryMaxEvents } from './history.js';
 import { parseConflictCopy } from './conflicts.js';
 import { TrafficLedger } from './traffic.js';
 import type { TrafficStats } from './status.js';
@@ -43,7 +43,7 @@ import { makePeerTransport, attachPeerMessages, sendControlMessage, type Control
 import { learnPeerUrl, learnPeerIp, getLanAddresses } from './net/addresses.js';
 import { hostname as osHostname } from 'node:os';
 import { RateLimiter } from './ratelimit.js';
-import { isPeerAllowed, addPeer, setFolderPaused, setGlobalPaused } from './devices.js';
+import { isPeerAllowed, addPeer, setFolderPaused, setGlobalPaused, setFolderSchedule as persistFolderSchedule, setGlobalSettings as persistGlobalSettings, type GlobalSettingsPatch } from './devices.js';
 import { receiveOffer, makeOfferId, pruneRevokedOffers } from './offers.js';
 import type { DeviceIdentity } from './identity.js';
 import type { ProgressCounts, RelayActivity, TransferFile } from './status.js';
@@ -385,6 +385,22 @@ export class SyncSessionManager {
    */
   private globalPaused = false;
   /**
+   * 全局发送带宽上限(config.maxSendKbps 的内存镜像,KB/s):目录未单独配置
+   * maxBandwidthKbps 时的兜底默认。构造时读取,热重载 / setGlobalSettings 时同步;
+   * 生效点是 transport 的令牌桶(attach 时创建),改值后由 rebuildRateLimitedTransports
+   * 重建「未单独限速」目录的通道让它立即生效。
+   */
+  private maxSendKbps?: number;
+  /**
+   * 每路径版本份数上限(config.versionsPerPath 的内存镜像)。上限是 executor 闭包常量,
+   * 改值后由 rebuildExecutors 重建全部执行器生效。
+   */
+  private versionsPerPath?: number;
+  /** 各配置时段目录最近一次观察的「窗口内」状态(folderId → bool),供边界巡检识别翻转。 */
+  private scheduleInside = new Map<string, boolean>();
+  /** 同步时段边界巡检定时器(见 checkScheduleTransitions)。 */
+  private scheduleTimer?: NodeJS.Timeout;
+  /**
    * close() 之后置位:随后 socket 的 close 事件**不得再排定重连**。
    * 优雅关闭时 close() 会 terminate 所有 peer socket,而 terminate 触发的 close
    * 事件是异步到达的 —— 那时 close() 早已清空 reconnectTimers 并返回,于是关闭
@@ -401,10 +417,53 @@ export class SyncSessionManager {
     this.peerPort = deps.peerPort;
     this.logger = deps.logger;
     this.notifyStatus = deps.onStatusChanged ?? ((): void => {});
-    // 全局暂停是 config.json 的顶层字段,不在 initialFolders 里:构造时读一次
-    this.globalPaused = loadConfig(deps.configPath).paused === true;
+    // 全局开关与全局设置都是 config.json 的顶层字段,不在 initialFolders 里:构造时读一次
+    const bootConfig = loadConfig(deps.configPath);
+    this.globalPaused = bootConfig.paused === true;
+    this.maxSendKbps = bootConfig.maxSendKbps;
+    this.versionsPerPath = bootConfig.versionsPerPath;
+    setHistoryMaxEvents(bootConfig.historyMaxEvents);
     this.folderStates = initialFolders.map((f) => this.createFolderState(f));
     this.startHeartbeat();
+    this.startScheduleTicker();
+  }
+
+  /**
+   * 启动同步时段边界巡检:每分钟核对一次配置了 schedule 的目录是否跨过窗口边界,
+   * 翻转时统一对账(出窗口摘数据通道、进窗口重挂 + 补扫)。与 paused 的生效路径一致,
+   * 巡检间隔 60s 意味着边界最多延迟一分钟生效 —— 对「时段同步」的粒度足够。
+   */
+  private startScheduleTicker(): void {
+    this.scheduleTimer = setInterval(() => {
+      if (this.closed) return;
+      this.checkScheduleTransitions();
+    }, 60_000);
+    this.scheduleTimer.unref?.();
+  }
+
+  /** 核对全部时段目录,发现窗口翻转即对账 + 补扫;首次观察只登记不触发。 */
+  private checkScheduleTransitions(): void {
+    let flipped = false;
+    for (const folder of this.folderStates) {
+      const s = folder.config.schedule;
+      if (!s) continue;
+      const inside = isWithinSchedule(s);
+      const prev = this.scheduleInside.get(folder.id);
+      if (prev === undefined) {
+        // 首次观察只登记:启动 / 新建目录时 reconcile 已按实时时段对过账,无「翻转」可言
+        this.scheduleInside.set(folder.id, inside);
+        continue;
+      }
+      if (prev !== inside) {
+        this.scheduleInside.set(folder.id, inside);
+        flipped = true;
+        this.logger.info(`folder schedule ${inside ? 'window opened' : 'window closed'}: ${folder.id} (${s})`);
+      }
+    }
+    if (!flipped) return;
+    this.applyPausedState();
+    // 进入窗口:把停摆期间的本地改动扫出来广播(重挂通道只互发索引,新文件要靠扫描发现)
+    void this.runScan();
   }
 
   /**
@@ -458,6 +517,7 @@ export class SyncSessionManager {
         index,
         folderTrashPath(this.configDir, indexKey),
         folderVersionsPath(this.configDir, indexKey),
+        { versionsPerPath: this.versionsPerPath },
       ),
     );
     // 索引快照只取一次:下面三处(硬忽略断根 / 本地索引 / 基线判定)都要用,
@@ -873,9 +933,9 @@ export class SyncSessionManager {
 
   /** 在一个存活会话上为指定目录补建 transport/peer,并发送该目录的索引。 */
   private attachFolderToSession(session: ActiveSession, folder: FolderState): void {
-    const rateLimiter = folder.config?.maxBandwidthKbps
-      ? new RateLimiter(folder.config.maxBandwidthKbps)
-      : undefined;
+    // 限速取目录级配置,未配置落到全局 maxSendKbps 兜底(设置页可调)
+    const kbps = folder.config.maxBandwidthKbps ?? this.maxSendKbps;
+    const rateLimiter = kbps ? new RateLimiter(kbps) : undefined;
     const transport = makePeerTransport(session.socket, session.key, folder.id, rateLimiter);
     folder.transports.push(transport);
     folder.transportDevice.set(transport, session.remoteDeviceId);
@@ -2092,9 +2152,12 @@ export class SyncSessionManager {
 
   /* ==================== 暂停同步 ==================== */
 
-  /** 某目录此刻是否处于暂停:目录自己的 paused 或全局 paused,任一生效即暂停。 */
+  /**
+   * 某目录此刻是否处于「数据面停摆」:目录自己的 paused、全局 paused 或
+   * 不在配置的同步时段内(见 config.isWithinSchedule),任一命中即停摆。
+   */
   private folderPausedNow(folder: FolderState): boolean {
-    return this.globalPaused || folder.config.paused === true;
+    return this.globalPaused || folder.config.paused === true || !isWithinSchedule(folder.config.schedule);
   }
 
   /**
@@ -2151,6 +2214,72 @@ export class SyncSessionManager {
     this.logger.info(`global sync ${paused ? 'paused' : 'resumed'}`);
   }
 
+  /**
+   * 设置某目录的同步时段(目录设置弹窗):落盘 + 立即对账。
+   * 空串 = 清除(全天同步);非法格式由 devices.setFolderSchedule 拒绝(400)。
+   * 出窗口立即摘通道,进窗口重挂并补扫 —— 与 paused 的生效路径完全一致。
+   */
+  setFolderSchedule(folderId: string, schedule: string): void {
+    persistFolderSchedule(this.configPath, folderId, schedule);
+    const folder = this.folderStates.find((f) => f.id === folderId);
+    if (folder) {
+      folder.config.schedule = schedule.trim() || undefined;
+      this.scheduleInside.set(folder.id, isWithinSchedule(folder.config.schedule));
+    }
+    this.applyPausedState();
+    this.logger.info(`folder schedule updated: ${folderId} -> ${schedule.trim() || '(always)'}`);
+  }
+
+  /**
+   * 全局设置(设置弹窗提交):落盘后按需热生效 ——
+   *  - maxSendKbps 变化:重建「未单独限速」目录的传输通道(令牌桶挂在 transport 上);
+   *  - versionsPerPath 变化:重建全部执行器(版本上限是 executor 闭包常量);
+   *  - historyMaxEvents 变化:setHistoryMaxEvents 即时生效(轮转按当前值裁剪)。
+   */
+  setGlobalSettings(patch: GlobalSettingsPatch): void {
+    persistGlobalSettings(this.configPath, patch);
+    const prevMaxSendKbps = this.maxSendKbps;
+    const prevVersionsPerPath = this.versionsPerPath;
+    const next = loadConfig(this.configPath);
+    this.maxSendKbps = next.maxSendKbps;
+    this.versionsPerPath = next.versionsPerPath;
+    setHistoryMaxEvents(next.historyMaxEvents);
+    if (prevMaxSendKbps !== this.maxSendKbps) this.rebuildRateLimitedTransports();
+    if (prevVersionsPerPath !== this.versionsPerPath) this.rebuildExecutors();
+    this.notifyStatus();
+    this.logger.info(`global settings updated: ${JSON.stringify(patch)}`);
+  }
+
+  /**
+   * 重建所有「目录未单独限速」的传输通道:全局 maxSendKbps 变化后让新令牌桶生效。
+   * 摘除后统一走 reconcile 重挂(重新 attach 会以新限速建 transport 并互发全量索引)。
+   */
+  private rebuildRateLimitedTransports(): void {
+    const affected = this.folderStates.filter((f) => !f.config.maxBandwidthKbps);
+    if (affected.length === 0) return;
+    for (const session of this.activeSessions) {
+      for (const folder of affected) {
+        if (session.peers.has(folder.id)) this.detachFolderFromSession(session, folder);
+      }
+    }
+    for (const session of this.activeSessions) {
+      this.reconcileSessionFolders(session);
+    }
+  }
+
+  /** 以当前配置的每路径版本份数重建全部执行器(索引/回收站/版本目录一律复用)。 */
+  private rebuildExecutors(): void {
+    for (const folder of this.folderStates) {
+      folder.executor = createLocalExecutor(
+        folder.path,
+        folder.index,
+        folderTrashPath(this.configDir, folder.indexKey),
+        folderVersionsPath(this.configDir, folder.indexKey),
+        { versionsPerPath: this.versionsPerPath },
+      );
+    }
+  }
+
   /* ==================== 配置热重载与关闭 ==================== */
 
   /**
@@ -2162,6 +2291,14 @@ export class SyncSessionManager {
       const newConfig = loadConfig(this.configPath);
       // 全局暂停随重载同步:手改 config.json 的 paused 也能实时生效(下方 reconcile 统一摘挂)
       this.globalPaused = newConfig.paused === true;
+      // 全局设置镜像随重载同步(手改 config.json 的路径):生效方式与 setGlobalSettings 一致
+      const prevMaxSendKbps = this.maxSendKbps;
+      const prevVersionsPerPath = this.versionsPerPath;
+      this.maxSendKbps = newConfig.maxSendKbps;
+      this.versionsPerPath = newConfig.versionsPerPath;
+      setHistoryMaxEvents(newConfig.historyMaxEvents);
+      if (prevMaxSendKbps !== this.maxSendKbps) this.rebuildRateLimitedTransports();
+      if (prevVersionsPerPath !== this.versionsPerPath) this.rebuildExecutors();
 
       // 共享目录变更:新增/移除/更新
       const newFolderById = new Map(newConfig.sharedFolders.map((f) => [folderIdFor(f), f]));
@@ -2171,6 +2308,7 @@ export class SyncSessionManager {
       for (const folder of this.folderStates) {
         if (!newFolderById.has(folder.id)) {
           this.logger.info(`config updated: removing shared folder ${folder.path}`);
+          this.scheduleInside.delete(folder.id);
           for (const session of this.activeSessions) {
             session.peers.delete(folder.id);
             session.transports = session.transports.filter((t) => t.folder.id !== folder.id);
@@ -2262,6 +2400,7 @@ export class SyncSessionManager {
               existing.index,
               folderTrashPath(this.configDir, existing.indexKey),
               folderVersionsPath(this.configDir, existing.indexKey),
+              { versionsPerPath: this.versionsPerPath },
             );
             existing.localIndex = new Map(
               filterIndexedEntries(parseIgnoreRules(existing.ignoreLines), existing.index.listEntries()).map((e) => [e.path, e]),
@@ -2312,6 +2451,10 @@ export class SyncSessionManager {
     // 先置位再拆连接:terminate 触发的 socket 'close' 是异步的,会在 close() 返回
     // 之后才跑,届时必须已被标记为「关闭中」,否则又会排定重连(见 closed 的注释)。
     this.closed = true;
+    if (this.scheduleTimer) {
+      clearInterval(this.scheduleTimer);
+      this.scheduleTimer = undefined;
+    }
     for (const timer of this.reconnectTimers.values()) clearTimeout(timer);
     this.reconnectTimers.clear();
     // 挂起的对比请求:拒绝掉,别让调用方(HTTP 路由)空等到超时

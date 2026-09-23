@@ -7,7 +7,7 @@ import { useStatusContext } from '../composables/statusContext';
 import { useTheme, type ThemeMode } from '../composables/useTheme';
 import { formatBytes } from '../utils/bytes';
 
-const { status, busy, checkForUpdate, openUpload, openLogs, openTopology, openTraffic, openGuide, openAuth, logout, copy } = useStatusContext();
+const { status, busy, checkForUpdate, openUpload, openLogs, openTopology, openTraffic, openGuide, openSettings, openAuth, logout, copy } = useStatusContext();
 const { mode: themeMode, resolved: themeResolved, setMode } = useTheme();
 
 const themeOptions: DropdownOption[] = [
@@ -55,6 +55,7 @@ type ChipRow =
   | { kind: 'divider' };
 
 const chipRows = computed<ChipRow[]>(() => [
+  { kind: 'item', label: '全局设置', run: openSettings },
   { kind: 'item', label: '日志', run: openLogs },
   { kind: 'item', label: '拓扑', run: openTopology, disabled: busy.value },
   { kind: 'divider' },

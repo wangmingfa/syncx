@@ -1078,6 +1078,12 @@ html[data-theme='dark'] .chip-menu__item--danger {
   color: var(--muted);
 }
 
+/* 弹窗内的时段/全局设置数字输入框:铺满弹窗内容列(n-input-number 默认宽度偏窄) */
+.schedule-input,
+.settings-input {
+  width: 100%;
+}
+
 /* 已指派设备的只读标签行(卡片上不可直接改,编辑走弹窗) */
 .device-tags {
   display: flex;

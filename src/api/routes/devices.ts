@@ -8,7 +8,7 @@ export async function tryDeviceRoutes(
   res: ServerResponse,
   deps: ControlServerDeps,
 ): Promise<boolean> {
-  const { addDevice, removeDevice, selfUpdate, shutdown, rescan, reconnect, setFolderPaused, setGlobalPaused, restoreFolderVersion, deleteFolderVersion } = deps;
+  const { addDevice, removeDevice, selfUpdate, shutdown, rescan, reconnect, setFolderPaused, setGlobalPaused, setGlobalSettings, restoreFolderVersion, deleteFolderVersion } = deps;
   const path = req.url ? pathname(req.url) : '/';
 
   // POST /api/devices : 添加一个已知对端设备 ID
@@ -70,6 +70,33 @@ export async function tryDeviceRoutes(
       setTimeout(() => shutdown?.(), 150);
     } catch (e) {
       sendJson(res, 400, { ok: false, error: e instanceof Error ? e.message : String(e) });
+    }
+    return true;
+  }
+
+  // POST /api/settings : 全局设置(设置弹窗)。键出现才改;值为 null = 回默认。
+  // 校验/拒绝非法值在 devices.setGlobalSettings,错误原样透出(400 + 原因)。
+  if (req.method === 'POST' && path === '/api/settings' && setGlobalSettings) {
+    try {
+      const raw = await readBody(req);
+      const body = raw === '' ? {} : JSON.parse(raw) as Record<string, unknown>;
+      // 数字字段逐一校验:非有限数字一律拒绝,不静默吞掉
+      for (const key of ['maxSendKbps', 'versionsPerPath', 'historyMaxEvents'] as const) {
+        if (!(key in body)) continue;
+        const v = body[key];
+        if (v !== null && !Number.isFinite(Number(v))) {
+          sendJson(res, 400, { error: `${key} must be a number or null` });
+          return true;
+        }
+      }
+      setGlobalSettings({
+        ...(('maxSendKbps' in body) ? { maxSendKbps: body.maxSendKbps === null ? null : Number(body.maxSendKbps) } : {}),
+        ...(('versionsPerPath' in body) ? { versionsPerPath: body.versionsPerPath === null ? null : Number(body.versionsPerPath) } : {}),
+        ...(('historyMaxEvents' in body) ? { historyMaxEvents: body.historyMaxEvents === null ? null : Number(body.historyMaxEvents) } : {}),
+      });
+      sendJson(res, 200, { ok: true });
+    } catch (e) {
+      sendJson(res, 400, { error: e instanceof Error ? e.message : '保存设置失败' });
     }
     return true;
   }

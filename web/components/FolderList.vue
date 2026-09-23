@@ -3,6 +3,7 @@ import { computed, ref } from 'vue';
 import { NButton, NInput, NCheckbox, NCheckboxGroup, NTooltip } from 'naive-ui';
 import { useStatusContext } from '../composables/statusContext';
 import { folderPathPlaceholder, visibleTransferFiles, XFER_FILE_LIMIT } from '../utils/format';
+import { outsideSchedule } from '../utils/schedule';
 import type { FolderInfo, TransferFile } from '../types';
 
 /**
@@ -181,9 +182,10 @@ function visibleFiles(f: FolderInfo): TransferFile[] {
            容器 pointer-events:none 让空隙鼠标穿透到下方按钮,单个徽标可命中以显示
            title 说明(「接收」没有专属操作按钮,只能靠徽标自身的 tooltip 解释)。
            「冲突 N」做成按钮:徽标本身就是收件箱入口,点它直接处理。 -->
-      <div v-if="f.receiveOnly || f.paused || conflictCountOf(f) > 0" class="card-floats">
+      <div v-if="f.receiveOnly || f.paused || outsideSchedule(f) || conflictCountOf(f) > 0" class="card-floats">
         <span v-if="f.receiveOnly" class="float-badge receive-badge" title="接收模式:只拉不推,本机改动不会同步出去">接收</span>
         <span v-if="f.paused" class="float-badge paused-badge" title="已暂停:不扫描、不广播、不接收;连接与配对照常">已暂停</span>
+        <span v-if="outsideSchedule(f)" class="float-badge paused-badge" :title="`同步时段外(${f.schedule}),到点自动恢复;连接与配对照常`">时段外</span>
         <button
           v-if="conflictCountOf(f) > 0"
           type="button"

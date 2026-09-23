@@ -128,10 +128,13 @@ export interface StatusContext extends FolderDiffApi {
   topoOpen: Ref<boolean>;
   /** 传输统计弹窗开关(顶栏「流量」按钮触发)。 */
   trafficOpen: Ref<boolean>;
+  /** 全局设置弹窗开关(顶栏本机 chip 菜单「全局设置」触发)。 */
+  settingsOpen: Ref<boolean>;
   openGuide: () => void;
   openLogs: () => void;
   openTopology: () => void;
   openTraffic: () => void;
+  openSettings: () => void;
   openAuth: () => void;
 }
 

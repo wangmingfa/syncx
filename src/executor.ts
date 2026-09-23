@@ -110,10 +110,18 @@ export function preserveLocalAsConflict(root: string, path: string, remoteDevice
  * @param versionsDir 文件版本目录的绝对路径,生产路径传 `<configDir>/versions/<index key>`
  *   (见 config.folderVersionsPath)。本机文件被对端版本**覆盖**前,旧内容快照一份到这里:
  *   回收站保护「删除」,版本目录保护「修改」。缺省(旧调用方/测试)不做版本快照。
+ * @param opts.versionsPerPath 每路径保留的版本份数上限(超出删最旧)。缺省 10;
+ *   生产路径由 config.versionsPerPath 注入(设置页可调),改值后由 daemon 重建执行器生效。
  */
-export function createLocalExecutor(root: string, index: IndexStore, trashDir: string, versionsDir?: string): LocalExecutor {
+export function createLocalExecutor(
+  root: string,
+  index: IndexStore,
+  trashDir: string,
+  versionsDir?: string,
+  opts?: { versionsPerPath?: number },
+): LocalExecutor {
   /** 每个路径保留的版本份数上限:超出删最旧。版本目录是安全网而非归档,无界增长不合适。 */
-  const MAX_VERSIONS_PER_PATH = 10;
+  const MAX_VERSIONS_PER_PATH = Math.max(1, Math.floor(opts?.versionsPerPath ?? 10));
 
   /** 共享目录内相对路径解析:复用模块级守卫(含符号链接越界校验)。 */
   function resolvePath(relPath: string): string {

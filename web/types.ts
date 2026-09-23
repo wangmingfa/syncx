@@ -32,6 +32,8 @@ export interface FolderInfo {
   receiveOnly?: boolean;
   /** 该目录是否暂停同步:数据面停摆(不扫描/不广播/不接收),连接与配对照常。 */
   paused?: boolean;
+  /** 同步时段(HH:MM-HH:MM,支持跨午夜):仅该时段内同步;空/缺省 = 全天。 */
+  schedule?: string;
 }
 
 export interface DeviceInfo {
@@ -102,6 +104,18 @@ export interface StatusData {
   hostname?: string;
   /** daemon 所在机器的局域网 IPv4 列表(顶栏本机 chip;多网卡则多条)。 */
   localAddresses?: string[];
+  /** 全局同步设置当前值(设置弹窗预填;旧后端缺省)。 */
+  settings?: GlobalSettingsData;
+}
+
+/** 全局同步设置(与后端 config 顶层字段同形;undefined = 未配置,走默认)。 */
+export interface GlobalSettingsData {
+  /** 发送带宽上限 KB/s(目录未配置时的兜底);undefined = 不限速。 */
+  maxSendKbps?: number;
+  /** 每路径版本份数;undefined = 默认 10。 */
+  versionsPerPath?: number;
+  /** 每目录同步记录保留条数;undefined = 默认 2000。 */
+  historyMaxEvents?: number;
 }
 
 /** 一个采样窗口的流量增量。 */

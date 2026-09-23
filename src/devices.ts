@@ -2,7 +2,7 @@ import { existsSync, mkdirSync, statSync } from 'node:fs';
 import { resolve, isAbsolute, sep, dirname, join } from 'node:path';
 import { homedir } from 'node:os';
 import { randomBytes } from 'node:crypto';
-import { loadConfig, saveConfig, mutateConfig, normalizePeerUrl, DEFAULT_CONFIG, folderIdFor, folderIndexKey, generateFolderInstanceId, purgeFolderIndex, type Config, type FolderIdentity, type SharedFolderConfig, type DeviceConfig } from './config.js';
+import { loadConfig, saveConfig, mutateConfig, normalizePeerUrl, DEFAULT_CONFIG, folderIdFor, folderIndexKey, generateFolderInstanceId, purgeFolderIndex, isValidSchedule, type Config, type FolderIdentity, type SharedFolderConfig, type DeviceConfig } from './config.js';
 import { readFolderIdentity } from './folder-identity.js';
 
 /**
@@ -324,6 +324,56 @@ export function setFolderPaused(configPath: string, folderId: string, paused: bo
 export function setGlobalPaused(configPath: string, paused: boolean): void {
   mutateConfig(configPath, (config) => {
     config.paused = paused;
+  });
+}
+
+/** 设置某目录的同步时段(目录设置弹窗;按 folderId 定位,id 缺省回退 path)。空串 = 清除(全天同步)。 */
+export function setFolderSchedule(configPath: string, folderId: string, schedule: string): void {
+  const s = schedule.trim();
+  if (s !== '' && !isValidSchedule(s)) {
+    throw new Error(`同步时段格式应为 HH:MM-HH:MM(如 22:00-08:00):「${schedule}」`);
+  }
+  mutateConfig(configPath, (config) => {
+    const existing = config.sharedFolders.find((f) => folderIdFor(f) === folderId);
+    if (!existing) throw new Error(`未找到共享目录:「${folderId}」`);
+    existing.schedule = s === '' ? undefined : s;
+  });
+}
+
+/** 全局设置补丁:键出现才改;值为 null = 清除该配置(回默认)。 */
+export interface GlobalSettingsPatch {
+  /** 发送带宽上限 KB/s;0 或 null = 不限速(清除)。 */
+  maxSendKbps?: number | null;
+  /** 每路径版本份数;null = 回默认 10。 */
+  versionsPerPath?: number | null;
+  /** 每目录历史上限;null = 回默认 2000。 */
+  historyMaxEvents?: number | null;
+}
+
+/** 校验并收敛一个设置值:null → undefined(清除);负数/非整数拒绝(设置页的输入必须可解释)。 */
+function sanitizeSetting(v: number | null | undefined, min: number, label: string): number | undefined {
+  if (v === null || v === undefined) return undefined;
+  const n = Math.floor(v);
+  if (!Number.isFinite(n) || n < min) {
+    throw new Error(`${label}必须为不小于 ${min} 的整数`);
+  }
+  return n;
+}
+
+/** 写入全局设置(设置弹窗提交):仅处理 patch 中出现的键,落盘由 mutateConfig 保证原子。 */
+export function setGlobalSettings(configPath: string, patch: GlobalSettingsPatch): void {
+  mutateConfig(configPath, (config) => {
+    if ('maxSendKbps' in patch) {
+      // 0 与 null 都归一为「不限速」:语义上无差别,config 里就不留 0 值
+      const v = sanitizeSetting(patch.maxSendKbps, 0, '发送带宽上限');
+      config.maxSendKbps = v === undefined || v === 0 ? undefined : v;
+    }
+    if ('versionsPerPath' in patch) {
+      config.versionsPerPath = sanitizeSetting(patch.versionsPerPath, 1, '每路径版本份数');
+    }
+    if ('historyMaxEvents' in patch) {
+      config.historyMaxEvents = sanitizeSetting(patch.historyMaxEvents, 1, '历史记录保留上限');
+    }
   });
 }
 

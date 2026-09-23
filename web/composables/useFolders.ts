@@ -36,7 +36,7 @@ export function useFolders(deps: CoreDeps): {
   conflictsFolder: Ref<FolderInfo | null>;
   /** 非空 = 打开该目录的文件版本弹窗。 */
   versionsFolder: Ref<FolderInfo | null>;
-  saveEditDevices: (payload: { path: string; devices: string[]; gitignore: boolean }) => Promise<void>;
+  saveEditDevices: (payload: { path: string; devices: string[]; gitignore: boolean; schedule: string }) => Promise<void>;
   toggleFolderPaused: (f: FolderInfo, paused: boolean) => Promise<void>;
   toggleGlobalPaused: (paused: boolean) => Promise<void>;
   /** 「目录不可信」横幅上的重新采集身份(仅更新指纹,索引不动)。 */
@@ -133,15 +133,33 @@ export function useFolders(deps: CoreDeps): {
     editDevicesOpen.value = true;
   }
 
-  /** 弹窗「保存」:设备指派与 .gitignore 开关一起提交,真正的写操作只有这里。 */
-  async function saveEditDevices(payload: { path: string; devices: string[]; gitignore: boolean }): Promise<void> {
+  /** 弹窗「保存」:设备指派、.gitignore 开关与同步时段一起提交,真正的写操作只有这里。 */
+  async function saveEditDevices(payload: { path: string; devices: string[]; gitignore: boolean; schedule: string }): Promise<void> {
     await commitFolderDevices(payload.path, payload.devices);
-    // refreshStatus 后按最新 folders 找回该目录,开关有变化才额外发一次请求
+    // refreshStatus 后按最新 folders 找回该目录,开关/时段有变化才额外发请求
     const f = status.value.folders.find((x) => x.path === payload.path);
     if (f && (f.useGitignore !== false) !== payload.gitignore) {
       await toggleFolderGitignore(f, payload.gitignore);
     }
+    if (f && (f.schedule ?? '') !== payload.schedule) {
+      await saveFolderSchedule(f, payload.schedule);
+    }
     editDevicesOpen.value = false;
+  }
+
+  /** 提交某目录的同步时段(空串 = 清除,全天同步);失败回读后端真实状态。 */
+  async function saveFolderSchedule(f: FolderInfo, schedule: string): Promise<void> {
+    try {
+      await apiJson('/api/folders/schedule', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ folderId: f.id ?? f.path, schedule }),
+      });
+      showToast(schedule ? `已设置同步时段 ${schedule},时段外自动暂停` : '已清除同步时段(全天同步)');
+    } catch (e) {
+      showToast(errText(e, '设置同步时段失败'), 'alert');
+    }
+    await refreshStatus();
   }
 
   async function commitFolderDevices(path: string, devices: string[]): Promise<void> {

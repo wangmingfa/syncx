@@ -18,11 +18,29 @@ export interface SyncEvent {
   deviceId?: string;
 }
 
-/** 单个目录保留的最大记录条数(超出后整文件轮转,仅保留最近 MAX_EVENTS 条)。 */
-const MAX_EVENTS = 2000;
+/** 每个目录保留的最大记录条数(超出后整文件轮转,仅保留最近 N 条)。 */
+const DEFAULT_MAX_EVENTS = 2000;
 
-/** 对外导出的保留上限:API 层用它 clamp limit、响应里回填 maxRetention,避免 2000 散落两处。 */
-export const HISTORY_MAX_EVENTS = MAX_EVENTS;
+/** 对外导出的默认保留上限:未配置 historyMaxEvents 时的兜底值。 */
+export const HISTORY_MAX_EVENTS = DEFAULT_MAX_EVENTS;
+
+/**
+ * 当前生效的保留上限(config.historyMaxEvents 可调)。模块级单值:daemon 启动 /
+ * 热重载 / 设置保存时由 setHistoryMaxEvents 同步,读路径(查询 clamp、响应回填)
+ * 与写路径(轮转裁剪)共用,改值后对新事件立即生效,旧文件在下次轮转时收敛。
+ */
+let currentMaxEvents = DEFAULT_MAX_EVENTS;
+
+/** 设置每目录保留上限(非正数/非有限数忽略,保持原值)。 */
+export function setHistoryMaxEvents(n: number | undefined): void {
+  const v = Math.floor(n ?? NaN);
+  if (Number.isFinite(v) && v >= 1) currentMaxEvents = v;
+}
+
+/** 当前生效的每目录保留上限(API 层 clamp limit、响应回填 maxRetention 用)。 */
+export function getHistoryMaxEvents(): number {
+  return currentMaxEvents;
+}
 
 /** 同步记录读取的筛选条件(服务端筛选;缺省字段 = 该维度不筛)。 */
 export interface SyncHistoryFilter {
@@ -90,7 +108,7 @@ function loadHistory(file: string): HistoryState {
   if (!existsSync(file)) return { events: [], persisted: 0 };
   try {
     const lines = readFileSync(file, 'utf8').split('\n').filter(Boolean);
-    const events = lines.map((l) => JSON.parse(l) as SyncEvent).slice(-MAX_EVENTS);
+    const events = lines.map((l) => JSON.parse(l) as SyncEvent).slice(-currentMaxEvents);
     return { events, persisted: events.length };
   } catch {
     // 损坏则视为空,下次落盘会整文件重写
@@ -103,8 +121,8 @@ function loadHistory(file: string): HistoryState {
  * 否则只增量追加未落盘的部分。
  */
 function flushHistory(file: string, state: HistoryState): void {
-  if (state.events.length > MAX_EVENTS) {
-    state.events = state.events.slice(-MAX_EVENTS);
+  if (state.events.length > currentMaxEvents) {
+    state.events = state.events.slice(-currentMaxEvents);
     // 尾部虽连续但已裁剪,文件与内存不再对应,标记整文件重写
     state.persisted = 0;
   }
@@ -190,7 +208,7 @@ export function getSyncHistory(
     total: all.length,
     matched: filtered.length,
     oldestTs: all.length > 0 ? all[0]!.ts : null,
-    maxRetention: MAX_EVENTS,
+    maxRetention: currentMaxEvents,
   };
 }
 
@@ -240,7 +258,7 @@ export function getGlobalSyncHistory(
     for (const ev of r.events) merged.push({ ...ev, folderPath: f.path });
   }
   merged.sort((a, b) => b.ts - a.ts);
-  return { events: merged.slice(0, limit), total, matched, oldestTs, maxRetention: MAX_EVENTS };
+  return { events: merged.slice(0, limit), total, matched, oldestTs, maxRetention: currentMaxEvents };
 }
 
 /** 清空某目录的同步记录:移除内存态、取消未落盘的攒批定时器,并截断磁盘文件。 */

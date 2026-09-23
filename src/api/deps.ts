@@ -53,6 +53,14 @@ export interface ControlServerDeps {
   setFolderUseGitignore?: (path: string, enabled: boolean) => void;
   /** 设置某共享目录是否暂停同步(按 folderId;暂停 = 数据面停摆,控制面照常)。 */
   setFolderPaused?: (folderId: string, paused: boolean) => void;
+  /** 设置某目录的同步时段(HH:MM-HH:MM,支持跨午夜;空串 = 清除,全天同步)。 */
+  setFolderSchedule?: (folderId: string, schedule: string) => void;
+  /** 写入全局设置(设置弹窗):maxSendKbps / versionsPerPath / historyMaxEvents;null = 回默认。 */
+  setGlobalSettings?: (patch: {
+    maxSendKbps?: number | null;
+    versionsPerPath?: number | null;
+    historyMaxEvents?: number | null;
+  }) => void;
   /** 「目录不可信」时重新采集身份指纹(仅更新 folderIdentity,不动索引)。 */
   reAdoptFolderIdentity?: (folderId: string) => void;
   /** 全局暂停/恢复同步(所有目录一起停;各目录自己的 paused 独立保留)。 */

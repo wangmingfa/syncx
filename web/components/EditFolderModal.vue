@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import { ref, watch } from 'vue';
-import { NButton, NCheckbox, NCheckboxGroup } from 'naive-ui';
+import { NButton, NCheckbox, NCheckboxGroup, NInput } from 'naive-ui';
 import type { DeviceInfo, FolderInfo } from '../types';
 import ModalShell from './ModalShell.vue';
 
@@ -13,13 +13,14 @@ const props = defineProps<{
 }>();
 const emit = defineEmits<{
   close: [];
-  /** 「保存」:设备指派与 .gitignore 开关一起提交给父级,真正的写操作只有父级那一处。 */
-  save: [payload: { path: string; devices: string[]; gitignore: boolean }];
+  /** 「保存」:设备指派、.gitignore 开关与同步时段一起提交给父级,真正的写操作只有父级那一处。 */
+  save: [payload: { path: string; devices: string[]; gitignore: boolean; schedule: string }];
 }>();
 
 const path = ref('');
 const selected = ref<string[]>([]);
 const gitignore = ref(true);
+const schedule = ref('');
 
 watch(
   () => props.folder,
@@ -28,12 +29,13 @@ watch(
     path.value = f.path;
     selected.value = [...f.devices];
     gitignore.value = f.useGitignore !== false;
+    schedule.value = f.schedule ?? '';
   },
 );
 
 function onSave(): void {
   if (props.busy || !props.folder) return;
-  emit('save', { path: path.value, devices: [...selected.value], gitignore: gitignore.value });
+  emit('save', { path: path.value, devices: [...selected.value], gitignore: gitignore.value, schedule: schedule.value.trim() });
 }
 
 // 地址(host:port)与主机名合并成一行,在设备 ID 之外提供可辨认的信息;两者都可能缺失
@@ -69,6 +71,16 @@ function deviceAddrLine(p: DeviceInfo): string {
     <div class="edit-section-label">忽略规则</div>
     <n-checkbox v-model:checked="gitignore" :disabled="busy">忽略 .gitignore 中的文件</n-checkbox>
     <p class="confirm-note-extra">勾选时,该目录内 .gitignore 命中的文件不参与同步(.syncxignore 优先级更高)。</p>
+
+    <div class="edit-section-label">同步时段</div>
+    <n-input
+      v-model:value="schedule"
+      class="schedule-input"
+      placeholder="如 22:00-08:00;留空 = 全天同步"
+      :disabled="busy"
+      @keydown.enter="onSave"
+    />
+    <p class="confirm-note-extra">只在该时段内同步(支持跨午夜),时段外数据面停摆、到点自动恢复;控制面(连接 / 配对)不受影响。</p>
 
     <template #footer>
       <n-button class="modal-cancel" :disabled="busy" @click="emit('close')">取消</n-button>

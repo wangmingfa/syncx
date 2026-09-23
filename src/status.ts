@@ -117,6 +117,8 @@ export interface StatusPayload {
   /** 本机主机名 / 局域网地址(顶栏 chip;旧后端缺省)。 */
   hostname?: string;
   localAddresses?: string[];
+  /** 全局同步设置当前值(设置弹窗;旧后端缺省)。 */
+  settings?: GlobalSettingsStatus;
 }
 
 /** 一个采样窗口的流量增量(窗口内发/收的字节数)。 */
@@ -134,6 +136,16 @@ export interface TrafficStats {
   samples: TrafficSample[];
 }
 
+/** 全局同步设置(设置弹窗展示当前值用;与 config 顶层字段同形)。 */
+export interface GlobalSettingsStatus {
+  /** 发送带宽上限 KB/s(目录未配置时的兜底);undefined = 不限速。 */
+  maxSendKbps?: number;
+  /** 每路径版本份数;undefined = 默认 10。 */
+  versionsPerPath?: number;
+  /** 每目录同步记录保留条数;undefined = 默认 2000。 */
+  historyMaxEvents?: number;
+}
+
 /** buildStatus 的扩展口径:新功能统计一律进这里,不再膨胀位置参数。 */
 export interface StatusExtras {
   /** 每目录残留冲突副本数(目录卡徽标)。 */
@@ -144,6 +156,8 @@ export interface StatusExtras {
   hostname?: string;
   /** daemon 所在机器的局域网 IPv4 地址列表(排除回环;多网卡则多条)。 */
   localAddresses?: string[];
+  /** 全局同步设置当前值(设置弹窗;缺省 = 后端旧版本未提供)。 */
+  settings?: GlobalSettingsStatus;
 }
 
 export function buildStatus(
@@ -177,5 +191,6 @@ export function buildStatus(
     traffic: extras.traffic,
     hostname: extras.hostname,
     localAddresses: extras.localAddresses,
+    settings: extras.settings,
   };
 }

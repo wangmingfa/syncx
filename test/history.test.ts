@@ -3,7 +3,7 @@ import { mkdtempSync, existsSync } from 'node:fs';
 import { rmDir } from './helpers.js';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { recordSyncEvent, listSyncHistory, getSyncHistory, getGlobalSyncHistory, flushSyncHistory, type SyncEvent } from '../src/history.js';
+import { recordSyncEvent, listSyncHistory, getSyncHistory, getGlobalSyncHistory, flushSyncHistory, setHistoryMaxEvents, getHistoryMaxEvents, HISTORY_MAX_EVENTS, type SyncEvent } from '../src/history.js';
 
 function tmpConfig(): string {
   const dir = mkdtempSync(join(tmpdir(), 'syncx-hist-'));
@@ -67,6 +67,40 @@ describe('sync history', () => {
     // 最旧的事件已被轮转丢弃,最新保留
     expect(list[0]!.path).toBe(`f${N - 1}.txt`);
     expect(list.some((e) => e.path === 'f0.txt')).toBe(false);
+  });
+});
+
+describe('history retention cap (historyMaxEvents)', () => {
+  // 上限是模块级单值:无论用例怎么改,组内收尾一律恢复默认,避免污染其它用例的 2000 断言
+  afterEach(() => {
+    setHistoryMaxEvents(HISTORY_MAX_EVENTS);
+  });
+
+  it('applies a custom cap to new events immediately', () => {
+    setHistoryMaxEvents(3);
+    const config = tmpConfig();
+    created.push(join(config, '..'));
+    for (let i = 0; i < 5; i++) recordSyncEvent(config, ev({ ts: i, path: `f${i}.txt` }));
+
+    const list = listSyncHistory(config, 'main');
+    expect(list).toHaveLength(3);
+    // 最旧的 f0/f1 已被轮转丢弃,最新在前
+    expect(list.map((e) => e.path)).toEqual(['f4.txt', 'f3.txt', 'f2.txt']);
+    // 查询口径的 maxRetention 跟随当前生效上限(前端「共 N」提示用)
+    expect(getSyncHistory(config, 'main').maxRetention).toBe(3);
+  });
+
+  it('ignores non-positive values and restores the default', () => {
+    setHistoryMaxEvents(3);
+    setHistoryMaxEvents(0);
+    setHistoryMaxEvents(-5);
+    expect(getHistoryMaxEvents()).toBe(3);
+
+    setHistoryMaxEvents(undefined);
+    expect(getHistoryMaxEvents()).toBe(3);
+
+    setHistoryMaxEvents(HISTORY_MAX_EVENTS);
+    expect(getHistoryMaxEvents()).toBe(2000);
   });
 });
 

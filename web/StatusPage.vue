@@ -35,6 +35,7 @@ import TopologyModal from './components/TopologyModal.vue';
 import UploadUpdateModal from './components/UploadUpdateModal.vue';
 import DropOverlay from './components/DropOverlay.vue';
 import ToastView from './components/ToastView.vue';
+import SettingsModal from './components/SettingsModal.vue';
 import StatusTopbar from './components/StatusTopbar.vue';
 import StatusPills from './components/StatusPills.vue';
 import OffersPanel from './components/OffersPanel.vue';
@@ -72,6 +73,7 @@ const logsOpen = ref(false);
 const topoOpen = ref(false);
 const trafficOpen = ref(false);
 const authOpen = ref(false);
+const settingsOpen = ref(false);
 function openGuide(): void {
   showGuide.value = true;
 }
@@ -86,6 +88,9 @@ function openTraffic(): void {
 }
 function openAuth(): void {
   authOpen.value = true;
+}
+function openSettings(): void {
+  settingsOpen.value = true;
 }
 
 /**
@@ -153,6 +158,8 @@ provide(StatusContextKey, {
   openTraffic,
   openAuth,
   authOpen,
+  settingsOpen,
+  openSettings,
 });
 </script>
 
@@ -215,6 +222,9 @@ provide(StatusContextKey, {
 
     <!-- 登录密码弹窗 -->
     <AuthPasswordModal :open="authOpen" :notify="showToast" @close="authOpen = false" />
+
+    <!-- 全局设置弹窗(带宽兜底 / 版本份数 / 历史上限) -->
+    <SettingsModal :open="settingsOpen" @close="settingsOpen = false" />
 
     <!-- 日志弹窗 -->
     <LogsModal :open="logsOpen" @close="logsOpen = false" />

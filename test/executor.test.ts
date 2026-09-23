@@ -624,6 +624,47 @@ describe('local executor file versions', () => {
     rmDir(dir);
   });
 
+  it('honours a custom versionsPerPath cap (and clamps it to at least 1)', async () => {
+    const dir = mkdtempSync(join(tmpdir(), 'syncx-exec-'));
+    const root = join(dir, 'share');
+    mkdirSync(root, { recursive: true });
+    const index = openIndexStore(join(dir, 'index.db'));
+    const versionsDir = join(dir, 'versions');
+
+    // cap=2:同一路径只保留最近 2 份留档;cap=0 会被钳到 1(至少留一份)
+    const capTwo = createLocalExecutor(root, index, join(dir, 'trash'), versionsDir, { versionsPerPath: 2 });
+    const capZero = createLocalExecutor(root, index, join(dir, 'trash'), versionsDir, { versionsPerPath: 0 });
+
+    for (let i = 0; i < 5; i++) {
+      const content = Buffer.from(`content-${i}`);
+      const blocks = [hashBlock(content)];
+      await capTwo.applyReceive(entry('a.txt', [['dev-b', i + 1]], blocks, content.length), {
+        getBlocks: async (): Promise<Buffer[]> => [content],
+      });
+      await capZero.applyReceive(entry('b.txt', [['dev-b', i + 1]], blocks, content.length), {
+        getBlocks: async (): Promise<Buffer[]> => [content],
+      });
+    }
+
+    const contentsOf = (names: string[]) => names.map((n) => readFileSync(join(versionsDir, n)).toString());
+    const all = readdirSync(versionsDir);
+    const aVersions = all.filter((n) => n.startsWith('a.txt.syncx-v-')).sort();
+    const bVersions = all.filter((n) => n.startsWith('b.txt.syncx-v-')).sort();
+
+    // cap=2:最旧的三份(content-0/1/2 落地前的留档)被裁掉,保留最近两份
+    expect(aVersions).toHaveLength(2);
+    expect(contentsOf(aVersions)).toEqual(['content-2', 'content-3']);
+    expect(readFileSync(join(root, 'a.txt')).toString()).toBe('content-4');
+
+    // cap=0 → 钳为 1:只留最新一份留档
+    expect(bVersions).toHaveLength(1);
+    expect(contentsOf(bVersions)).toEqual(['content-3']);
+    expect(readFileSync(join(root, 'b.txt')).toString()).toBe('content-4');
+
+    index.close();
+    rmDir(dir);
+  });
+
   it('does not double-snapshot during a conflict (local file already moved to a conflict copy)', async () => {
     const dir = mkdtempSync(join(tmpdir(), 'syncx-exec-'));
     const root = join(dir, 'share');

@@ -3,7 +3,7 @@ import { existsSync, mkdtempSync, readFileSync, utimesSync, writeFileSync } from
 import { rmDir } from './helpers.js';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { loadConfig, mutateConfig, saveConfig, type Config } from '../src/config.js';
+import { loadConfig, mutateConfig, saveConfig, isValidSchedule, isWithinSchedule, type Config } from '../src/config.js';
 
 function tempDir(): string {
   return mkdtempSync(join(tmpdir(), 'syncx-config-'));
@@ -181,5 +181,57 @@ describe('mutateConfig (config lock + atomic save)', () => {
     expect(loadConfig(path).sharedFolders).toEqual([{ path: '/recovered', devices: [] }]);
     expect(existsSync(lockPath)).toBe(false);
     rmDir(dir);
+  });
+});
+
+describe('sync schedule', () => {
+  // 固定时刻用本地时间构造,与 isWithinSchedule 的 getHours/getMinutes 口径一致
+  function at(hour: number, minute: number): Date {
+    return new Date(2026, 0, 15, hour, minute);
+  }
+
+  it('validates schedule string shapes (HH:MM-HH:MM, tolerates spaces)', () => {
+    expect(isValidSchedule('22:00-08:00')).toBe(true);
+    expect(isValidSchedule(' 9:05-18:30 ')).toBe(true);
+    expect(isValidSchedule('0:00-23:59')).toBe(true);
+    // 形态正确即合法;from===to 交给 isWithinSchedule 按「全天」处理
+    expect(isValidSchedule('12:00-12:00')).toBe(true);
+    expect(isValidSchedule('')).toBe(false);
+    expect(isValidSchedule('22:00')).toBe(false);
+    expect(isValidSchedule('24:00-08:00')).toBe(false);
+    expect(isValidSchedule('12:60-13:00')).toBe(false);
+    expect(isValidSchedule('abc')).toBe(false);
+    expect(isValidSchedule('22:00-08:00-06:00')).toBe(false);
+  });
+
+  it('treats empty or invalid schedules as all-day (fail-open)', () => {
+    expect(isWithinSchedule(undefined, at(12, 0))).toBe(true);
+    expect(isWithinSchedule('', at(12, 0))).toBe(true);
+    expect(isWithinSchedule('   ', at(12, 0))).toBe(true);
+    // 时段是节流手段而非安全边界:解析失败绝不锁死目录
+    expect(isWithinSchedule('25:00-08:00', at(12, 0))).toBe(true);
+    expect(isWithinSchedule('nonsense', at(12, 0))).toBe(true);
+    // from === to:区间为零,等价于全天
+    expect(isWithinSchedule('12:00-12:00', at(3, 0))).toBe(true);
+  });
+
+  it('gates a same-day window with inclusive from and exclusive to', () => {
+    const s = '09:00-18:00';
+    expect(isWithinSchedule(s, at(9, 0))).toBe(true);
+    expect(isWithinSchedule(s, at(12, 30))).toBe(true);
+    expect(isWithinSchedule(s, at(17, 59))).toBe(true);
+    expect(isWithinSchedule(s, at(8, 59))).toBe(false);
+    expect(isWithinSchedule(s, at(18, 0))).toBe(false);
+  });
+
+  it('gates a cross-midnight window (22:00-08:00 spans two days)', () => {
+    const s = '22:00-08:00';
+    expect(isWithinSchedule(s, at(22, 0))).toBe(true);
+    expect(isWithinSchedule(s, at(23, 30))).toBe(true);
+    expect(isWithinSchedule(s, at(0, 0))).toBe(true);
+    expect(isWithinSchedule(s, at(7, 59))).toBe(true);
+    expect(isWithinSchedule(s, at(8, 0))).toBe(false);
+    expect(isWithinSchedule(s, at(12, 0))).toBe(false);
+    expect(isWithinSchedule(s, at(21, 59))).toBe(false);
   });
 });
