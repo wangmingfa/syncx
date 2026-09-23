@@ -165,7 +165,10 @@ function visibleFiles(f: FolderInfo): TransferFile[] {
           </svg>
         </span>
         <span class="item-title">{{ f.path }}</span>
-        <!-- 操作按钮:图标 + hover tooltip(禁用态按钮不派发鼠标事件,由外层 span 承接 hover) -->
+        <!-- 操作成组(.item-actions):窄屏下整组一起落到标题下一行,而不是逐个换行
+             留单个按钮孤零零占一行 —— 与设备卡同一套策略。
+             操作按钮:图标 + hover tooltip(禁用态按钮不派发鼠标事件,由外层 span 承接 hover) -->
+        <div class="item-actions">
         <n-tooltip trigger="hover" :style="{ maxWidth: '280px' }">
           <template #trigger>
             <span class="icon-btn">
@@ -260,6 +263,7 @@ function visibleFiles(f: FolderInfo): TransferFile[] {
           </template>
           移除共享目录(磁盘文件不会被删除)
         </n-tooltip>
+        </div>
       </div>
 
       <!-- 目录 ID:跨机同步需两边配置同一 ID 才能对上 -->

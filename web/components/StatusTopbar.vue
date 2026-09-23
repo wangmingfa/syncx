@@ -1,11 +1,37 @@
 <script setup lang="ts">
-import { computed } from 'vue';
+import { computed, h } from 'vue';
+import type { VNodeChild } from 'vue';
 import { NButton, NDropdown, NPopover } from 'naive-ui';
 import type { DropdownOption } from 'naive-ui';
 import { useStatusContext } from '../composables/statusContext';
+import { useTheme, type ThemeMode } from '../composables/useTheme';
 import { formatBytes } from '../utils/bytes';
 
-const { status, busy, checkForUpdate, openUpload, openLogs, openTopology, openTraffic, openGuide, openAuth, logout } = useStatusContext();
+const { status, busy, checkForUpdate, openUpload, openLogs, openTopology, openTraffic, openGuide, openAuth, logout, copy } = useStatusContext();
+const { mode: themeMode, resolved: themeResolved, setMode } = useTheme();
+
+const themeOptions: DropdownOption[] = [
+  { label: '跟随系统', key: 'system' },
+  { label: '浅色', key: 'light' },
+  { label: '深色', key: 'dark' },
+];
+
+/** 当前模式在菜单里画 ✓(配合 n-dropdown 的 value 高亮,一眼看清现在用的是哪档)。
+    这版 naive-ui 的 renderLabel 只收 option 一个参数(不传 selected 状态),
+    勾选与否自己按 key 比对当前模式。容器必须用 display:flex 而非 inline-flex ——
+    空的 ✓ 槽位零高度,inline-flex 会拿它当基线,把整行文字拽得不居中;
+    槽位定宽则保证切换勾选时文字不左右跳。 */
+function renderThemeLabel(option: DropdownOption): VNodeChild {
+  const selected = option.key === themeMode.value;
+  return h('span', { style: 'display:flex;align-items:center;gap:8px' }, [
+    h('span', { style: 'width:12px;flex:none;text-align:center;color:var(--accent)' }, selected ? '✓' : ''),
+    h('span', { style: 'flex:1 1 auto' }, String(option.label ?? option.key)),
+  ]);
+}
+
+function onThemeSelect(key: string): void {
+  setMode(key as ThemeMode);
+}
 
 /** 累计收发(流量按钮直接把这组数当标签用:不点开也扫一眼可见)。 */
 const trafficText = computed<string>(() => {
@@ -14,44 +40,32 @@ const trafficText = computed<string>(() => {
   return `↑${formatBytes(t.sent)} · ↓${formatBytes(t.received)}`;
 });
 
-/**
- * 低频操作收进「更多」下拉:顶栏曾排 8 个按钮,笔记本宽度下把 device-chip 挤到
- * 第二行(本机信息是状态页的锚点,不该被挤走)。日志/拓扑/流量留在外面是高频项,
- * 其余收进菜单;小屏天然只剩一个「更多」,无需再按断点藏按钮。
- */
-const moreOptions = computed<DropdownOption[]>(() => [
-  { label: '检查更新', key: 'check-update', disabled: busy.value },
-  { label: '上传升级', key: 'upload', disabled: busy.value },
-  { type: 'divider', key: 'd-guide' },
-  { label: '使用指南', key: 'guide' },
-  { label: '登录密码', key: 'auth' },
-  { type: 'divider', key: 'd-logout' },
-  { label: '退出登录', key: 'logout' },
-]);
-
-function onMoreSelect(key: string): void {
-  switch (key) {
-    case 'check-update':
-      void checkForUpdate();
-      break;
-    case 'upload':
-      openUpload();
-      break;
-    case 'guide':
-      openGuide();
-      break;
-    case 'auth':
-      openAuth();
-      break;
-    case 'logout':
-      void logout();
-      break;
-  }
-}
-
-/** 本机网络信息(主机名 + 局域网地址):不外显,hover chip 时浮出。 */
+/** 本机网络信息(主机名 + 局域网地址)。 */
 const ips = computed<string[]>(() => status.value.localAddresses ?? []);
 const hasLocalInfo = computed<boolean>(() => !!status.value.hostname || ips.value.length > 0);
+
+/**
+ * 顶栏收纳策略(定稿):所有低频操作收进本机 chip 的 hover 浮层,
+ * 「更多」下拉与手机档 compact 分支一并删除 —— 顶栏常态只剩
+ * brand / 流量 / 主题 / chip,桌面与移动同一套结构。
+ * 浮内分两段:上半「本机信息」,分隔线下半「操作菜单」。
+ */
+type ChipRow =
+  | { kind: 'item'; label: string; run: () => void; disabled?: boolean; danger?: boolean }
+  | { kind: 'divider' };
+
+const chipRows = computed<ChipRow[]>(() => [
+  { kind: 'item', label: '日志', run: openLogs },
+  { kind: 'item', label: '拓扑', run: openTopology, disabled: busy.value },
+  { kind: 'divider' },
+  { kind: 'item', label: '检查更新', run: () => void checkForUpdate(), disabled: busy.value },
+  { kind: 'item', label: '上传升级', run: openUpload, disabled: busy.value },
+  { kind: 'divider' },
+  { kind: 'item', label: '使用指南', run: openGuide },
+  { kind: 'item', label: '登录密码', run: openAuth },
+  { kind: 'divider' },
+  { kind: 'item', label: '退出登录', run: () => void logout(), danger: true },
+]);
 </script>
 
 <template>
@@ -88,64 +102,67 @@ const hasLocalInfo = computed<boolean>(() => !!status.value.hostname || ips.valu
       {{ trafficText }}
     </n-button>
 
-    <n-button tertiary @click="openLogs">
-      <template #icon>
-        <svg viewBox="0 0 24 24" width="15" height="15" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
-          <path d="M4 5h16" />
-          <path d="M4 12h16" />
-          <path d="M4 19h10" />
-        </svg>
-      </template>
-      日志
-    </n-button>
-
-    <n-button tertiary :disabled="busy" @click="openTopology">
-      <template #icon>
-        <svg viewBox="0 0 24 24" width="15" height="15" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
-          <circle cx="5" cy="6" r="2.2" />
-          <circle cx="19" cy="6" r="2.2" />
-          <circle cx="12" cy="18" r="2.2" />
-          <path d="M6.8 7.4 10.4 16M17.2 7.4 13.6 16M7 6h10" />
-        </svg>
-      </template>
-      拓扑
-    </n-button>
-
-    <n-dropdown trigger="click" placement="bottom-end" :options="moreOptions" @select="onMoreSelect">
-      <n-button tertiary>
+    <!-- 主题切换:图标随当前生效主题变(日/月),悬停选三档。高频全局偏好,留在外面 -->
+    <n-dropdown
+      trigger="hover"
+      placement="bottom-end"
+      :options="themeOptions"
+      :value="themeMode"
+      :render-label="renderThemeLabel"
+      @select="onThemeSelect"
+    >
+      <n-button tertiary circle :title="`主题:${themeMode === 'system' ? '跟随系统' : themeResolved === 'dark' ? '深色' : '浅色'}`">
         <template #icon>
-          <svg viewBox="0 0 24 24" width="15" height="15" fill="currentColor" aria-hidden="true">
-            <circle cx="5" cy="12" r="1.7" />
-            <circle cx="12" cy="12" r="1.7" />
-            <circle cx="19" cy="12" r="1.7" />
+          <svg v-if="themeResolved === 'dark'" viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+            <path d="M20 14.5A8 8 0 1 1 9.5 4a6.5 6.5 0 0 0 10.5 10.5Z" />
+          </svg>
+          <svg v-else viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+            <circle cx="12" cy="12" r="4" />
+            <path d="M12 2v2M12 20v2M2 12h2M20 12h2M4.9 4.9l1.4 1.4M17.7 17.7l1.4 1.4M19.1 4.9l-1.4 1.4M6.3 17.7l-1.4 1.4" />
           </svg>
         </template>
-        更多
       </n-button>
     </n-dropdown>
 
     <div class="topbar__spacer"></div>
 
-    <!-- 主机名与局域网地址不占顶栏空间:hover 本机 chip 浮出明细(旧后端没下发时不挂浮层) -->
-    <n-popover trigger="hover" placement="bottom-end" :disabled="!hasLocalInfo" :style="{ maxWidth: '420px' }">
+    <!-- 本机 chip:悬停浮出「网络明细 + 低频操作菜单」两段。顶栏所有收纳入口都在这 -->
+    <n-popover trigger="hover" placement="bottom-end" :style="{ maxWidth: '360px' }">
       <template #trigger>
         <span class="device-chip">
           <span class="dot" :class="status.devices.some((p) => p.online) ? 'dot-online' : 'dot-offline'"></span>
           <span class="mono">{{ status.deviceId }}</span>
           <span v-if="status.version" class="chip-version">{{ status.version === 'dev' ? status.version : `v${status.version}` }}</span>
-          <svg v-if="hasLocalInfo" class="chip-caret" viewBox="0 0 24 24" width="10" height="10" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+          <svg class="chip-caret" viewBox="0 0 24 24" width="10" height="10" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
             <path d="m6 9 6 6 6-6" />
           </svg>
         </span>
       </template>
-      <div class="chip-info">
-        <div v-if="status.hostname" class="chip-info-row">
-          <span class="chip-info-label">主机名</span>
-          <span class="mono">{{ status.hostname }}</span>
+      <div class="chip-panel">
+        <div v-if="hasLocalInfo" class="chip-info">
+          <!-- 值可点复制(复用全局 copy:成功有 toast,与目录 ID 复制同一条路) -->
+          <div v-if="status.hostname" class="chip-info-row">
+            <span class="chip-info-label">主机名</span>
+            <button type="button" class="chip-copy mono" title="点击复制" @click="copy(status.hostname!)">{{ status.hostname }}</button>
+          </div>
+          <div v-for="ip in ips" :key="ip" class="chip-info-row">
+            <span class="chip-info-label">IPv4</span>
+            <button type="button" class="chip-copy mono" title="点击复制" @click="copy(ip)">{{ ip }}</button>
+          </div>
         </div>
-        <div v-for="ip in ips" :key="ip" class="chip-info-row">
-          <span class="chip-info-label">IPv4</span>
-          <span class="mono">{{ ip }}</span>
+        <div v-if="hasLocalInfo" class="chip-divider"></div>
+        <div class="chip-menu">
+          <template v-for="(row, i) in chipRows" :key="i">
+            <div v-if="row.kind === 'divider'" class="chip-menu__divider"></div>
+            <button
+              v-else
+              type="button"
+              class="chip-menu__item"
+              :class="{ 'chip-menu__item--danger': row.danger, 'is-disabled': row.disabled }"
+              :disabled="row.disabled"
+              @click="row.run()"
+            >{{ row.label }}</button>
+          </template>
         </div>
       </div>
     </n-popover>

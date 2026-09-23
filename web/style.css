@@ -382,12 +382,15 @@ tbody tr:last-child td {
 }
 
 /* hover 浮层里的明细行:标签弱化 + 值等宽 */
+.chip-panel {
+  min-width: 190px;
+}
+
 .chip-info {
   display: flex;
   flex-direction: column;
   gap: 4px;
   font-size: 12.5px;
-  padding: 2px 0;
 }
 
 .chip-info-row {
@@ -399,6 +402,85 @@ tbody tr:last-child td {
 .chip-info-label {
   color: var(--muted);
   flex: none;
+}
+
+/* 信息段与菜单段的分隔。
+   用半透明中性色而非 var(--border):实测深色下变量色在 naive 浮层底上偏亮、
+   显突兀,而 rgb(127 140 170 / α) 这种「灰蓝 + 透明度」在深浅两版底上
+   都只是淡淡一道,无需再按主题分别调。 */
+.chip-divider {
+  height: 1px;
+  background: rgb(127 140 170 / 0.35);
+  margin: 10px -16px;
+}
+
+/* chip 浮层下半部的低频操作菜单:负 margin 让 hover 底色越过 popover
+   内边距铺开,文字仍与上方信息段左对齐 */
+.chip-menu {
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+  padding-top: 2px;
+}
+
+.chip-menu__item {
+  display: block;
+  width: auto;
+  min-width: 100%;
+  text-align: left;
+  background: none;
+  border: 0;
+  margin: 0 -8px;
+  padding: 6px 8px;
+  border-radius: 7px;
+  font: inherit;
+  font-size: 13px;
+  color: var(--text);
+  cursor: pointer;
+}
+
+.chip-menu__item:hover:not(.is-disabled) {
+  background: rgb(127 140 170 / 0.14);
+}
+
+.chip-menu__item--danger {
+  color: #c0392b;
+}
+
+html[data-theme='dark'] .chip-menu__item--danger {
+  color: #f0796f;
+}
+
+.chip-menu__item.is-disabled {
+  opacity: 0.45;
+  cursor: not-allowed;
+}
+
+.chip-menu__divider {
+  height: 1px;
+  background: rgb(127 140 170 / 0.35);
+  margin: 5px -8px;
+}
+
+/* 主机名/IP 值可点复制:hover 给出可点的底色反馈,负 margin 抵消内边距保持左对齐 */
+.chip-copy {
+  font: inherit;
+  color: inherit;
+  background: none;
+  border: 0;
+  padding: 1px 5px;
+  margin: -1px -5px;
+  border-radius: 6px;
+  cursor: pointer;
+  text-align: left;
+}
+
+.chip-copy:hover {
+  background: rgb(127 140 170 / 0.22);
+}
+
+.chip-copy:active {
+  background: rgb(127 140 170 / 0.32);
 }
 
 /* chip 是顶栏的锚点:自身可收缩,绝不换行挤走按钮 */
@@ -532,12 +614,22 @@ tbody tr:last-child td {
 .col-head {
   display: flex;
   align-items: center;
+  flex-wrap: wrap;
   gap: 8px;
+  row-gap: 8px;
   font-size: 15px;
   font-weight: 600;
   letter-spacing: 0.02em;
   padding: 2px 2px;
   color: var(--text);
+}
+
+/* 窄栏(手机)下按钮组整排落到标题下一行,而不是把标题压成竖排单字 ——
+   「共享目录」四个字一字一行就是这么来的。首按钮的 margin-left:auto 在第二行
+   同样生效,落行后按钮组依旧贴右缘。 */
+.col-head > span:first-child {
+  flex: none;
+  white-space: nowrap;
 }
 
 /* 区块标题按栏着色:左蓝、右青 */
@@ -636,6 +728,19 @@ tbody tr:last-child td {
 .col--devices .item-top .item-title {
   flex: 1 1 0;
   min-width: 84px;
+}
+
+/* 目录卡标题行:同款「操作整组换行」策略。flex-basis 取 0 + 120px 保底 ——
+   换行判定不吃路径的满额宽度:放得下(桌面)标题与按钮同排,放不下(手机)
+   操作整组落到下一行,标题恢复全宽,不再一字一行把卡片撑成竖条。 */
+.col--folders .item-top {
+  flex-wrap: wrap;
+  row-gap: 8px;
+}
+
+.col--folders .item-top .item-title {
+  flex: 1 1 0;
+  min-width: 120px;
 }
 
 /* 首字母/图标徽标 */
@@ -3053,4 +3158,105 @@ li.history-row.row-conflict {
   font-size: 12.5px;
   line-height: 1.4;
   color: #b06a00; /* 警示橙:整文件覆盖不可撤销,需先二次确认 */
+}
+
+/* ============================================================================
+   深色主题
+   ----------------------------------------------------------------------------
+   结构层(卡片/弹窗/胶囊/toast/输入框)早已走 var(--card)/var(--border),
+   这里只需重定义 :root 变量即可整体翻深;下面再对少数「写死在浅色底上」的
+   语义色(徽标文字、对比页行底、语法高亮)定向提亮 —— 它们在白底调的色,
+   放到深底上对比度会塌。选择器用 `html[data-theme='dark']` 前缀,特异度高于
+   原规则,位置靠后即可覆盖。半透明底色(rgb(... / a))能自然叠在深卡上,不动。
+   ========================================================================== */
+
+html[data-theme='dark'] {
+  color-scheme: dark; /* 让原生控件(滚动条/表单/下拉)一并转深 */
+  --bg: #0f131a;
+  --bg-soft: #161b24;
+  --card: #1b212b;
+  --card-hi: #222a36;
+  --text: #e6ebf2;
+  --muted: #8a95a8;
+  --muted-strong: #b4bdcc;
+  --accent: #6ea3dd;
+  --accent-soft: #223149;
+  --accent-2: #3ec9bf;
+  --accent-3: #46b877;
+  --border: #2a323d;
+  --border-strong: #3a4553;
+  --online: #46b877;
+  --offline: #e08a8a;
+  --shadow: 0 1px 2px rgba(0, 0, 0, 0.4), 0 12px 30px -18px rgba(0, 0, 0, 0.6);
+}
+
+/* 同步记录/冲突徽标文字:白底调的深色在深底上太闷,提亮一档(半透明底不动) */
+html[data-theme='dark'] .act-add { color: #5ec97f; }
+html[data-theme='dark'] .act-update { color: #6ea6f0; }
+html[data-theme='dark'] .act-delete { color: #f0796f; }
+html[data-theme='dark'] .act-conflict { color: #e0a94a; }
+html[data-theme='dark'] .dir-remote { color: #b794f6; }
+html[data-theme='dark'] .receive-badge { color: #6ea6f0; border-color: rgb(110 166 240 / 0.5); }
+html[data-theme='dark'] .paused-badge { color: #e0a94a; border-color: rgb(224 169 74 / 0.55); }
+html[data-theme='dark'] .conflict-btn { color: #e0a94a !important; }
+html[data-theme='dark'] .conflict-from,
+html[data-theme='dark'] .conflict-paths .muted { color: var(--muted); }
+
+/* 目录卡错误横幅 / 设备标签状态色:同上一并提亮 */
+html[data-theme='dark'] .folder-error { color: #f0a29c; background: rgb(224 65 59 / 0.12); border-color: rgb(224 65 59 / 0.4); }
+html[data-theme='dark'] .device-tag.is-pending { color: #e0b45f; border-color: rgb(217 156 51 / 0.6); }
+html[data-theme='dark'] .device-tag.is-stopped { color: #ef9a9a; }
+
+/* 空态:白半透明底在深卡上会发灰发脏,换成透明 + 变量描边 */
+html[data-theme='dark'] .empty { background: transparent; }
+
+/* 对比页:行底色/分隔线是写死的浅色,翻深;hover 与状态底用半透明色相区分 */
+html[data-theme='dark'] .cmp-row { border-bottom-color: var(--border); }
+html[data-theme='dark'] .cmp-row.is-diff { background: rgb(224 169 74 / 0.08); }
+html[data-theme='dark'] .cmp-row.is-only-local { background: rgb(110 166 240 / 0.08); }
+html[data-theme='dark'] .cmp-row.is-only-remote { background: rgb(183 148 246 / 0.08); }
+html[data-theme='dark'] .cmp-row:hover { background: var(--card-hi); }
+html[data-theme='dark'] .cmp-error { background: rgb(224 65 59 / 0.1); border-color: rgb(224 65 59 / 0.35); }
+html[data-theme='dark'] .fd-view__tab { background: var(--card-hi); color: var(--muted-strong); }
+html[data-theme='dark'] .add-device::after { background: var(--border-strong); }
+
+/* 语法高亮六色:原值按「白底 ≥4.6:1」定,深底上整体翻亮一档重配 */
+html[data-theme='dark'] .fd-rows {
+  background: var(--card);
+  --hl-comment: #7c889c;
+  --hl-keyword: #e07fd0;
+  --hl-string: #6fd0a0;
+  --hl-number: #e0b072;
+  --hl-title: #74a8e6;
+  --hl-tag: #e8907a;
+}
+
+/* 差异行底色:每行靠 --fd-surface 驱动(行号/操作格跟随它)。深底用同色相的低饱和
+   暗调,与上面提亮后的语法色配套 —— 二者必须一起翻,否则高亮会踩在浅底上糊掉。 */
+html[data-theme='dark'] .fd-row { --fd-surface: #161b24; }
+html[data-theme='dark'] .fd-row.is-change { --fd-surface: #2b2416; }
+html[data-theme='dark'] .fd-row.is-del { --fd-surface: #2a1a1b; }
+html[data-theme='dark'] .fd-row.is-add { --fd-surface: #16281d; }
+html[data-theme='dark'] .fd-row.is-hover { --fd-surface: #20293a; }
+html[data-theme='dark'] .fd-row.is-change.is-hover { --fd-surface: #3d3320; }
+html[data-theme='dark'] .fd-row.is-del.is-hover { --fd-surface: #3d2426; }
+html[data-theme='dark'] .fd-row.is-add.is-hover { --fd-surface: #1f3a29; }
+
+/* 代码对比里的浮动按钮:白底翻深(图片舞台 .fd-image__stage 保留白底 —— 看图时
+   中性白底与主题无关,是刻意的例外) */
+html[data-theme='dark'] .fd-jump__btn,
+html[data-theme='dark'] .fd-apply { background: var(--card-hi); color: var(--text); }
+
+/* 下拉菜单项的 hover/选中底色画在 option-body 的 ::before 上
+   (naive 默认 top/bottom:0、left/right:4px → 相邻行底色上下连成一片)。
+   四边收进一圈留间隙;全局生效,主题与「更多」菜单同款。
+   ⚠ 选择器必须复刻 naive 的完整三层链 `.menu .option .body::before`:
+   它特异度是 (0,3,1),上一版只写两层 (0,2,2) 反而更低 → 整条被静默压掉,
+   症状就是「改了没效果」。补回 .n-dropdown-option 并加 body 前缀才稳赢。 */
+body .n-dropdown-menu .n-dropdown-option .n-dropdown-option-body::before {
+  left: 6px;
+  right: 6px;
+  top: 2px;
+  bottom: 2px;
+  border-radius: 7px;
 }

@@ -5,6 +5,21 @@
     <meta name="viewport" content="width=device-width" />
     <link rel="icon" type="image/svg+xml" href="/favicon.svg" />
     <title>syncx</title>
+    <script>
+      // 首绘前定主题:Vue 挂载在 <body> 末尾,等它再切会白闪一下(深色偏好用户尤甚)。
+      // 键位与 composables/useTheme.ts 的 LS_KEY 一致,两处改必须同步。
+      (function () {
+        try {
+          var m = localStorage.getItem('syncx:theme');
+          var dark =
+            m === 'dark' ||
+            ((!m || m === 'system') && window.matchMedia('(prefers-color-scheme: dark)').matches);
+          document.documentElement.dataset.theme = dark ? 'dark' : 'light';
+        } catch (e) {
+          /* 读不到 localStorage:保持浅色默认 */
+        }
+      })();
+    </script>
   </head>
   <body>
     <div id="app"></div>

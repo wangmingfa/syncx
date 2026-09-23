@@ -10,12 +10,21 @@ export const COOKIE_NAME = 'syncx_session';
  */
 export const EVENTS_PATH = '/api/events';
 
-/** 纯 CSR 页面壳:客户端 bundle 挂载后自行拉取状态与处理交互。 */
+/**
+ * 纯 CSR 页面壳:客户端 bundle 挂载后自行拉取状态与处理交互。
+ *
+ * 深色模式的首绘处理:bundle 是 module(延后执行),等它注入样式前 body 是白底,
+ * 深色用户会先白闪一下。故在 <head> 内联一段脚本按 localStorage/系统偏好预设
+ * `data-theme`,并给深色一条兜底底色。键位与 web/composables/useTheme.ts、
+ * web/index.html(dev 入口)三处必须一致。
+ */
 export const UI_SHELL = `<!DOCTYPE html><html lang="zh-CN"><head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width">
 <link rel="icon" type="image/svg+xml" href="/favicon.svg">
 <title>syncx</title>
+<style>html[data-theme=dark]{background:#0f131a;color-scheme:dark}</style>
+<script>(function(){try{var m=localStorage.getItem('syncx:theme');var d=m==='dark'||((!m||m==='system')&&matchMedia('(prefers-color-scheme:dark)').matches);if(d)document.documentElement.dataset.theme='dark';}catch(e){}})();</script>
 </head><body>
 <div id="app"></div>
 <script type="module" src="/client.js"></script>
