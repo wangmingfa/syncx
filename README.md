@@ -13,6 +13,10 @@
 - **双模式发现** — mDNS 自动发现局域网设备,同时支持手动配置 `peers` 地址回退
 - **忽略规则** — 默认遵循目录内的 `.gitignore`(可按目录关闭),外加每目录一个 `.syncxignore`,排除不需同步的内容
 - **端到端传输加密** — Ed25519 密钥对 + 双向握手,Device ID 由公钥派生
+- **传输限速** — 按目录限制发送带宽,并支持全局兜底;弱带宽 / NAS 场景不占满上行
+- **同步时段** — 每目录可设「只在某时段同步」(如夜间,支持跨午夜),时段外数据面停摆、到点自动恢复
+- **全局暂停** — `syncx pause` / `syncx resume` 一键停掉 / 恢复所有同步,备份维护窗口用
+- **版本留档** — 文件被覆盖前自动留档历史版本(份数可配),随时回滚
 - **Web UI** — 浏览器查看状态、添加/移除共享目录、配对设备
 - **系统服务安装** — `syncx install` 生成 systemd / launchd / Windows 服务模板
 
@@ -50,6 +54,7 @@ syncx start
    - **移除共享目录**:目录列表里删除
    - **设备配对**:右栏粘贴对方**设备 ID** 即发起配对,对方网页弹出请求、点「确认」即双向生效;目录卡上把目录指派给某设备即发出**共享邀请**,对方点「确认」并选好本地路径即开始同步(详见「两台设备配对」)
    - **待确认**:对方发来的配对 / 共享邀请会出现在页面顶部「待确认」区,确认或忽略都在这里
+   - **全局设置**:顶栏「全局设置」里配发送带宽兜底、版本留档份数、同步记录保留条数
    - 查看对端连接状态与同步进度、**手动触发扫描**、**手动重连**某台对端
 
 想让局域网内其它设备也能打开 Web UI?启动时加 `--host 0.0.0.0 --expose-control`(详见「端口」一节)。
@@ -101,7 +106,10 @@ syncx 采用类 Syncthing 的配对模型:**粘贴对方设备 ID 即发起配�
 - 同步全自动:目录内文件变化几秒内传到对端,删除也会传播;局域网内无需手动操作
 - **冲突处理**:双方同时编辑同一文件时,保留双方内容——本地版本存为 `xxx.sync-conflict-时间-设备ID.ext` 副本,远端版本落地,绝不静默丢数据
 - **忽略不需要同步的内容**:目录里的 `.gitignore` 默认生效(卡片上可按目录关闭);也可放一个 `.syncxignore`(gitignore 语法,如 `node_modules/`、`*.tmp`),新建的忽略规则只影响之后的变化,不会被对端覆盖
-- **限制带宽**:给目录加 `"maxBandwidthKbps": 1024` 可限制单个对端的发送速率,避免大文件占满局域网
+- **限制带宽**:给目录加 `"maxBandwidthKbps": 1024` 可限制单个对端的发送速率,避免大文件占满局域网;也可在顶栏「全局设置」里设全局兜底(目录未单独限速时生效)
+- **定时同步**:目录编辑里设「同步时段」(如 `22:00-08:00`,支持跨午夜),时段外该目录数据面停摆(卡片显示「时段外」徽标),到点自动恢复——适合 NAS / 备份机只在夜间同步
+- **临时全停**:`syncx pause` 一键暂停所有同步(备份、维护时),`syncx resume` 恢复;连接与配对照常,Web 顶栏也有同样开关
+- **误覆盖可回滚**:文件被覆盖前自动留档,目录卡「版本」里按路径列出历史版本(默认每路径 10 份),选择恢复即可
 - **怀疑没同步成功?** 目录卡上的「对比」按钮(或 `syncx diff <目录路径>`)会把两台设备**此刻**的内容逐条比一遍,每条差异都带**结论**而不只是路径,见「内容对比:两台设备究竟差在哪」
 
 ### 常见问题(FAQ)
@@ -112,6 +120,9 @@ syncx 采用类 Syncthing 的配对模型:**粘贴对方设备 ID 即发起配�
 | 两台设备互相找不到? | mDNS 依赖同一局域网;跨网段或路由器隔离时,双方在 `peers` 互填 `ws://IP:22000`,并放行 UDP 5353 与 TCP 22000 |
 | 启动提示端口被占用? | `--port 24001` 改同步端口;`--control-port 8385` 改 Web UI 端口 |
 | 忘了自己的 Device ID? | `syncx status` |
+| 想临时停掉所有同步? | `syncx pause`(Web 顶栏也有同样开关),`syncx resume` 恢复。暂停只停数据面,连接、配对、Web 管理照常;各目录自己的暂停/时段设置独立保留 |
+| 目录卡显示「时段外」? | 该目录设了同步时段,当前不在时段内,数据面已暂停,到点自动恢复;想改或清除时段,在目录卡「编辑」里清空「同步时段」即可 |
+| 文件被覆盖了,能找回旧版吗? | 能。目录卡「版本」按路径列出留档的历史版本(覆盖前自动快照,默认每路径 10 份,顶栏「全局设置」可调),选择恢复即写回原路径 |
 | 想撤销已发出的 CLI 邀请码? | `syncx revoke <邀请码>`(仅对命令行邀请码有效;Web UI 的配对/共享可在对方确认前于「待确认」里忽略,或移除设备/取消目录指派) |
 | 想升级 / 卸载? | 升级:`npm i -g @wangmingfa/syncx@latest`;卸载:`npm uninstall -g @wangmingfa/syncx`(配置与数据在 `~/.syncx/`,需手动删除) |
 | 忘了命令 / 想确认装的是哪个版本? | `syncx --help` 看全部命令与选项,`syncx --version` 看版本号 |
@@ -235,23 +246,35 @@ node dist/syncx.js start
 
 ## 配置
 
-配置文件默认在 `~/.syncx/config.json`(用 `--config <路径>` 指定其他位置)。
+配置文件默认在 `~/.syncx/config.json`(用 `--config <路径>` 指定其他位置,或 `--config-dir <目录>` 整体换数据目录——开发环境即用它隔离,见「开发命令」)。
 
 ```json
 {
   "sharedFolders": [
     {
       "path": "/home/me/Documents",
-      "devices": ["DEV1234567", "DEVABCDEFG"]
+      "devices": ["DEV1234567", "DEVABCDEFG"],
+      "maxBandwidthKbps": 1024,
+      "schedule": "22:00-08:00"
     }
   ],
-  "peers": ["ws://192.168.1.10:22000"]
+  "peers": ["ws://192.168.1.10:22000"],
+  "maxSendKbps": 2048,
+  "versionsPerPath": 10,
+  "historyMaxEvents": 2000
 }
 ```
 
 - **sharedFolders[*].path** — 要同步的本地目录绝对路径
 - **sharedFolders[*].devices** — 允许与该目录同步的设备 ID(来自对端 `syncx status`)
+- **sharedFolders[*].maxBandwidthKbps** — 限制向单个对端的发送速率(KB/s);未配置时回退全局 `maxSendKbps`
+- **sharedFolders[*].schedule** — 同步时段 `HH:MM-HH:MM`(支持跨午夜);留空 / 非法 = 全天同步;时段外该目录数据面停摆,连接与配对照常,到点自动恢复
 - **peers** — 手动对端地址(mDNS 不可用时的回退),默认 `[]`
+- **maxSendKbps** — 全局发送带宽兜底(KB/s):目录未单独限速时生效;缺省不限速
+- **versionsPerPath** — 每路径版本留档份数,默认 10(最小 1)
+- **historyMaxEvents** — 每目录同步记录保留条数,默认 2000
+
+全局设置三项与目录的时段 / 限速都可以在 Web UI 里改(顶栏「全局设置」、目录卡「编辑」),手改 `config.json` 也会被热重载,无需重启 daemon。
 
 忽略规则:见下方「忽略规则(`.syncxignore`)」一节。
 
@@ -321,6 +344,7 @@ build/**/*.map        # 含斜杠模式:按完整相对路径匹配
 | 索引库 | `~/.syncx/index-<hash>.db` |
 | 目录身份指纹 | `~/.syncx/config.json` 的 `sharedFolders[].folderIdentity` |
 | 删除回收站 | `~/.syncx/trash/<hash>/` |
+| 版本留档 | `~/.syncx/versions/<hash>/` |
 
 所以共享目录用 git 管理时,`git status` 不会被 syncx 弄脏。两个唯一的例外:
 
@@ -438,10 +462,14 @@ npm run dev -- --config-dir ~/syncx-dev-home --port 24001 --control-port 9484
 
 ```bash
 # 启动 daemon(前台;部署时配合 systemd/launchd 后台常驻)
-syncx start [--config <路径>] [--port <端口>] [--control-port <端口>] [--host <主机>]
+syncx start [--config <路径>] [--config-dir <目录>] [--port <端口>] [--control-port <端口>] [--host <主机>]
 
 # 停止运行中的 daemon(优先经控制 API 优雅关闭,失败回退信号)
 syncx stop [--config <路径>] [--control-port <端口>]
+
+# 全局暂停 / 恢复同步(备份、维护窗口用;连接与配对照常)
+syncx pause  [--config <路径>] [--config-dir <目录>] [--control-port <端口>]
+syncx resume [--config <路径>] [--config-dir <目录>] [--control-port <端口>]
 
 # 查看状态:daemon 运行状态、设备 ID 与共享目录数
 syncx status [--config <路径>] [--control-port <端口>]
@@ -467,6 +495,7 @@ node dist/syncx.js start
 | 选项 | 说明 |
 |---|---|
 | `--config <path>` | 指定配置文件路径(默认 `~/.syncx/config.json`) |
+| `--config-dir <dir>` | 整体换数据目录,取 `<dir>/config.json`(与 `--config` 同时给出时后者优先) |
 | `--port <port>` | peer 同步端口(默认 22000) |
 | `--control-port <port>` | Web UI/控制 API 端口(默认 8384) |
 | `--host <host>` | 控制服务绑定地址(默认 `127.0.0.1`;`0.0.0.0` 暴露局域网) |
