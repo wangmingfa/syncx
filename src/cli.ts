@@ -30,7 +30,7 @@ import { runUpgrade } from './upgrade.js';
 import { compareVersions } from './upgrade.js';
 import { consumeUpdateDoneFile, inspectPackage, isBundledRuntime, runSelfUpdate, runtimeVersion } from './selfupdate.js';
 import { createUpdateChecker, downloadTarball } from './update-check.js';
-import { loadOrCreateToken, daemonStatusLines, stopDaemon, listenControl, pidFilePath, type PidRecord } from './daemon.js';
+import { loadOrCreateToken, daemonStatusLines, stopDaemon, listenControl, pauseDaemon, pidFilePath, type PidRecord } from './daemon.js';
 import { SyncSessionManager, type FolderDiffResult } from './session-manager.js';
 import { formatFolderDiff } from './diff-text.js';
 
@@ -181,6 +181,12 @@ export async function run(args: ParsedArgs): Promise<void> {
   // 不应该凭空创建身份文件、默认配置等任何东西。
   if (args.command === 'stop') {
     await stopDaemon(configDir, args.controlPort);
+    return;
+  }
+
+  // pause/resume 与 stop 同理:操作运行中的 daemon,不在没跑过 syncx 的机器上创建任何文件
+  if (args.command === 'pause' || args.command === 'resume') {
+    await pauseDaemon(configDir, args.controlPort, args.command === 'pause');
     return;
   }
 

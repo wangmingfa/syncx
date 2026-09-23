@@ -1,7 +1,7 @@
 /** CLI 参数解析与重连退避策略(纯函数,无 daemon 状态)。 */
 
 export interface ParsedArgs {
-  command: 'start' | 'stop' | 'status' | 'install' | 'invite' | 'join' | 'revoke' | 'upgrade' | 'diff';
+  command: 'start' | 'stop' | 'status' | 'install' | 'invite' | 'join' | 'revoke' | 'upgrade' | 'diff' | 'pause' | 'resume';
   /** 位置参数(如 invite/join/diff 的参数)。 */
   positionals: string[];
   configPath?: string;
@@ -19,7 +19,7 @@ export interface ParsedArgs {
   devViteUrl?: string;
 }
 
-const COMMANDS = new Set(['start', 'stop', 'status', 'install', 'invite', 'join', 'revoke', 'upgrade', 'diff']);
+const COMMANDS = new Set(['start', 'stop', 'status', 'install', 'invite', 'join', 'revoke', 'upgrade', 'diff', 'pause', 'resume']);
 
 /** 控制 API 可安全绑定的回环地址;非回环地址必须显式 --expose-control。 */
 const LOOPBACK_HOSTS = new Set(['127.0.0.1', '::1', 'localhost']);

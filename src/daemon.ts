@@ -112,6 +112,63 @@ export async function daemonStatusLines(
 }
 
 /**
+ * 全局暂停/恢复同步(pause / resume 命令)。与 stop 同一条认证思路:
+ * 带令牌走控制 API(POST /api/pause),令牌认证通过即证明目标是本机 daemon。
+ * 只读 pid 文件与 control.token,不创建任何文件/身份 —— 在没跑过 syncx 的
+ * 机器上执行不会留下东西。幂等:重复 pause/resume 只是再设一次同样的值。
+ *
+ * @throws daemon 不在运行(连不上)或 API 返回非 2xx 时抛错,由 cli 统一转成中文提示。
+ */
+export async function pauseDaemon(
+  configDir: string,
+  controlPortOverride: number | undefined,
+  paused: boolean,
+): Promise<void> {
+  const pidFile = pidFilePath(configDir);
+  if (!existsSync(pidFile)) {
+    console.log('syncx is not running');
+    return;
+  }
+
+  let info: PidRecord = {};
+  try {
+    info = JSON.parse(readFileSync(pidFile, 'utf8')) as PidRecord;
+  } catch {
+    // pid 文件损坏:仍按「无端口记录」处理,回退到 override/默认端口试一次
+  }
+
+  const port = controlPortOverride ?? info.controlPort ?? 8384;
+  const tokenFile = join(configDir, 'control.token');
+  if (!existsSync(tokenFile)) {
+    throw new Error(`找不到控制令牌(${tokenFile}),无法操作 daemon`);
+  }
+  const token = readFileSync(tokenFile, 'utf8').trim();
+
+  let res: Response;
+  try {
+    res = await fetch(`http://127.0.0.1:${port}/api/pause`, {
+      method: 'POST',
+      headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' },
+      body: JSON.stringify({ paused }),
+      signal: AbortSignal.timeout(5000),
+    });
+  } catch {
+    throw new Error(`连不上本机 daemon(控制端口 ${port});先执行 syncx status 确认它在运行`);
+  }
+  // 读掉响应体:keep-alive 连接若挂着会让 CLI 进程在 run() 返回后仍不退出(同 stop)
+  await res.arrayBuffer().catch(() => {});
+  if (!res.ok) {
+    throw new Error(`操作失败(HTTP ${res.status})`);
+  }
+
+  console.log(
+    paused
+      ? 'syncx 已全局暂停:所有目录的数据面停摆,连接与配对照常(syncx resume 恢复)'
+      : 'syncx 已恢复同步',
+  );
+}
+
+/**
  * 停止运行中的 daemon(stop 命令)。不创建任何文件/身份。
  *
  * 优先走控制 API(带令牌):触发 daemon 优雅关闭(关 peer socket、sqlite 索引、
