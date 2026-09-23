@@ -142,6 +142,18 @@ describe('hard ignore', () => {
     expect(isHardIgnored('')).toBe(false);
   });
 
+  it('hard-ignores syncx conflict copies (local residue never syncs/indexes)', () => {
+    // 标准命名:<base>.sync-conflict-<ts36>-<10位base32设备ID><ext>
+    expect(isHardIgnored('a.sync-conflict-lxq8-ABCDEFGH23.txt')).toBe(true);
+    expect(isHardIgnored('docs/plan.sync-conflict-lxq9-2f-ABCDEFGH23.md')).toBe(true); // 带碰撞序号
+    expect(isHardIgnored('LICENSE.sync-conflict-lxq8-ABCDEFGH23')).toBe(true); // 无扩展名
+    // 不命中:设备 ID 段不合法(长度/字符集)、或缺 .sync-conflict- 标记
+    expect(isHardIgnored('a.sync-conflict-lxq8-short.txt')).toBe(false);
+    expect(isHardIgnored('a.sync-conflict-lxq8-lowercase1.txt')).toBe(false); // 小写非 base32
+    expect(isHardIgnored('sync-conflict-notes.txt')).toBe(false);
+    expect(isHardIgnored('normal.sync.txt')).toBe(false);
+  });
+
   it('is case-insensitive, so a .GIT directory cannot sneak through', () => {
     // Windows 与 macOS 默认文件系统大小写不敏感:'.GIT' 与 '.git' 是同一个目录,
     // 只按小写匹配等于给对端留了一条「改个大小写就绕过」的路

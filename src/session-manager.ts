@@ -76,6 +76,11 @@ export interface FolderState {
    * 首扫的 diff 是 daemon 离线期间的真实改动,必须记录。首扫完成后清除。
    */
   baselinePending: boolean;
+  /**
+   * 盘上残留冲突副本数(目录卡「冲突 N」徽标)。冲突副本已列为硬忽略、不进索引,
+   * 该计数由每轮扫描顺带盘点(scanFolder.conflictCount)。
+   */
+  conflictCount: number;
 }
 
 /** 一条存活的对端会话:配置热重载新增/移除目录时,对现有连接补建或摘除对应 peer。 */
@@ -481,7 +486,7 @@ export class SyncSessionManager {
     // 索引为空 → 首扫是建基线(存量文件不算新增);索引有存量 → 首扫 diff 是
     // daemon 离线期间的真实改动,要写同步记录
     const baselinePending = usable.length === 0;
-    return { id, indexKey, path: f.path, index, executor, localIndex, ignoreLines, transports: [], peers: new Map(), transportDevice: new Map(), config: f, baselinePending };
+    return { id, indexKey, path: f.path, index, executor, localIndex, ignoreLines, transports: [], peers: new Map(), transportDevice: new Map(), config: f, baselinePending, conflictCount: 0 };
   }
 
   /**
@@ -665,6 +670,8 @@ export class SyncSessionManager {
         this.recordFolderError(folder.id, error, '扫描失败');
         continue;
       }
+      // 徽标计数源:副本已硬忽略不进索引,取扫描顺带盘点的结果(零额外 IO)
+      folder.conflictCount = diff.conflictCount;
       // 结构性守卫:目录身份无法校验时(平台不提供 inode / 配置里尚未采集指纹),把
       // 「一个文件都没看到、却要删东西」当作目录不可信的形态,拒绝执行这批删除。
       // 只有这个极端情形被挡 —— 而那正是「盘未挂载 / 目录被换掉」的样子;正常的单文件
@@ -2067,15 +2074,13 @@ export class SyncSessionManager {
 
   /**
    * 每目录的冲突副本残留数(目录卡「冲突 N」徽标)。
-   * 走索引的 LIKE COUNT —— status 是高频推送,不能在这里扫盘或反序列化全表;
-   * 徽标只是入口提示,精确列表以冲突收件箱的实时扫盘(listConflictCopies)为准。
-   * 键为 wire 目录 id,与前端 folderKey(f.id ?? f.path) 对齐。
+   * 冲突副本已列为硬忽略、不进索引,计数来自每轮扫描顺带盘点的 folder.conflictCount
+   * (status 高频推送,不能在这里现扫磁盘)。键为 wire 目录 id,与前端 folderKey 对齐。
    */
   folderConflictCounts(): Record<string, number> {
     const out: Record<string, number> = {};
     for (const folder of this.folderStates) {
-      const n = folder.index.countConflictEntries?.() ?? 0;
-      if (n > 0) out[folder.id] = n;
+      if (folder.conflictCount > 0) out[folder.id] = folder.conflictCount;
     }
     return out;
   }

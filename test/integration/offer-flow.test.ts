@@ -1,6 +1,7 @@
 import { describe, expect, it, afterEach } from 'vitest';
 import { mkdtempSync, readFileSync, writeFileSync, mkdirSync, createWriteStream } from 'node:fs';
 import { rmDir } from '../helpers.js';
+import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { spawn, type ChildProcess } from 'node:child_process';
 import { loadOrCreateIdentity } from '../../src/identity.js';
@@ -40,10 +41,10 @@ interface DaemonSetup {
 }
 
 async function setupDaemon(name: string): Promise<DaemonSetup> {
-  // 不要用 os.tmpdir():macOS 上它是 /var/folders/...,会被 validateFolderPath 的
-  // 系统目录保护(/^\/var\b/)拒绝,导致 accept 邀请与 POST /api/folders 全部 400。
-  // /tmp 直连(macOS 上 resolve 后为 /private/tmp,不在禁止清单)。
-  const dir = mkdtempSync(`/tmp/syncx-offer-${name}-`);
+  // 用系统临时目录:validateFolderPath 的 /var 守卫已豁免 /var/folders(macOS tmpdir)
+  // 与 Windows 的 AppData\Local\Temp,三平台通吃。写死 '/tmp' 是守卫放宽前的遗留,
+  // Windows 上根本没有该路径(ENOENT 直接挂)。
+  const dir = mkdtempSync(join(tmpdir(), `syncx-offer-${name}-`));
   const share = join(dir, 'share');
   mkdirSync(share, { recursive: true });
   const identity = loadOrCreateIdentity(dir);

@@ -3,7 +3,7 @@ import { join, resolve, sep } from 'node:path';
 import type { IndexEntry } from './index.js';
 import type { IndexStore } from './indexstore.js';
 import type { IgnoreRule } from './ignore.js';
-import { isIgnoredPath } from './ignore.js';
+import { isIgnoredPath, isConflictCopyName } from './ignore.js';
 import { hashBlock, splitIntoBlocks } from './blockstore.js';
 import { incrementVersion } from './version.js';
 
@@ -31,6 +31,12 @@ export interface ScanDiff {
    * 目录未挂载或被换掉的典型形态,此时必须拒绝执行这批删除。
    */
   filesSeen: number;
+  /**
+   * 盘上残留的冲突副本数(它们被硬忽略、不进索引,但目录卡徽标要报数)。
+   * 扫描本就要遍历目录树,顺手计数零成本;嵌套共享根/硬忽略目录内的副本不计
+   * (与冲突收件箱的扫盘口径一致)。
+   */
+  conflictCount: number;
 }
 
 function contentChanged(entry: IndexEntry, absPath: string): boolean {
@@ -67,11 +73,13 @@ export function scanFolder(
   // 共享目录根不存在(盘符卸载 / 权限丢失 / 未挂载):不做墓碑推断,避免
   // 把整个目录误判为已删除而批量传播墓碑给对端
   if (!existsSync(root) || !statSync(root).isDirectory()) {
-    return { changed: [], tombstones: [], filesSeen: 0 };
+    return { changed: [], tombstones: [], filesSeen: 0, conflictCount: 0 };
   }
 
   const changed: string[] = [];
   const seen = new Set<string>();
+  // 盘上冲突副本计数(硬忽略、不进索引,但目录卡徽标要报数)
+  let conflictCount = 0;
 
   /**
    * 相对路径一律由父级相对目录 + 文件名以 '/' 拼接,**不使用 path.relative/join 生成**:
@@ -104,6 +112,8 @@ export function scanFolder(
         continue;
       }
       if (!dirent.isFile() || rel.endsWith(TMP_SUFFIX)) continue;
+      // 冲突副本被硬忽略跳过,但先计数供目录卡徽标(它们不参与同步/索引/墓碑)
+      if (isConflictCopyName(dirent.name)) conflictCount += 1;
       if (isIgnoredPath(rules, rel, false)) continue;
 
       seen.add(rel);
@@ -167,5 +177,5 @@ export function scanFolder(
     });
   }
 
-  return { changed, tombstones, filesSeen: seen.size };
+  return { changed, tombstones, filesSeen: seen.size, conflictCount };
 }

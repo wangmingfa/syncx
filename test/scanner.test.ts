@@ -44,6 +44,21 @@ describe('scanFolder', () => {
     rmDir(dir);
   });
 
+  it('counts conflict copies for the badge but never indexes them (hard ignore)', () => {
+    const { dir, root, index } = setup();
+    writeFileSync(join(root, 'a.txt'), 'real file');
+    writeFileSync(join(root, 'a.sync-conflict-lxq8-ABCDEFGH23.txt'), 'mine');
+    writeFileSync(join(root, 'docs.sync-conflict-lxq9-ABCDEFGH23.txt'), 'mine2');
+
+    const { changed, conflictCount } = scanFolder(root, index, [], 'DEV-A');
+
+    // 副本被硬忽略:不进 changed(不会被索引/发送),但计数供目录卡徽标
+    expect(changed).toEqual(['a.txt']);
+    expect(conflictCount).toBe(2);
+    index.close();
+    rmDir(dir);
+  });
+
   it('detects deletion as a tombstone with an incremented version', () => {
     const { dir, root, index } = setup();
     seed(root, index, 'gone.txt', 'data');
@@ -277,9 +292,11 @@ describe('scanFolder', () => {
     mkdirSync(plain, { recursive: true });
     writeFileSync(join(plain, 'x.txt'), 'x');
 
-    // 不传 nestedRoots:普通子目录照常递归索引(断言用平台分隔符,Windows 为反斜杠)
+    // 不传 nestedRoots:普通子目录照常递归索引。断言用 '/' —— scanner 的契约是
+    // 相对路径一律 POSIX 分隔(见 scanFolder 注释:Windows 上用 '\' 会与索引 key
+    // 错配,引发误报修改 + 墓碑误删),各平台都该断言 'plain/x.txt'。
     const { changed } = scanFolder(root, index, [], 'DEV-A');
-    expect(changed).toContain(join('plain', 'x.txt'));
+    expect(changed).toContain('plain/x.txt');
 
     index.close();
     rmDir(dir);

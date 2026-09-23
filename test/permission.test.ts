@@ -75,7 +75,8 @@ async function waitForFile(path: string, timeoutMs = 20_000): Promise<void> {
 }
 
 describe('ensureExecutable (权限自动修复核心)', () => {
-  it('把 0644 文件补成可执行(0755)', () => {
+  // hasExec 读的是 POSIX 执行位,Windows NTFS 无此概念(chmod 不置 x)→ 平台守卫跳过
+  it.skipIf(WIN)('把 0644 文件补成可执行(0755)', () => {
     const dir = mkdtempSync(join(tmpdir(), 'syncx-ens-'));
     const f = join(dir, 'bin.js');
     writeFileSync(f, '#!/usr/bin/env node\nconsole.log(1);');
@@ -85,7 +86,7 @@ describe('ensureExecutable (权限自动修复核心)', () => {
     rmSync(dir, { recursive: true, force: true });
   });
 
-  it('已可执行(0755)保持不动且不报错', () => {
+  it.skipIf(WIN)('已可执行(0755)保持不动且不报错', () => {
     const dir = mkdtempSync(join(tmpdir(), 'syncx-ens-'));
     const f = join(dir, 'bin.js');
     writeFileSync(f, 'x');

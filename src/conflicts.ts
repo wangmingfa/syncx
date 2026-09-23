@@ -2,7 +2,7 @@ import { copyFileSync, existsSync, mkdirSync, readFileSync, readdirSync, renameS
 import type { Dirent } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { resolveSharePath } from './executor.js';
-import { HARD_IGNORE_NAMES } from './ignore.js';
+import { CONFLICT_COPY_RE, HARD_IGNORE_NAMES } from './ignore.js';
 
 /**
  * 冲突副本的识别与处理(冲突收件箱的后端半边)。
@@ -39,11 +39,12 @@ export interface ConflictCopy {
 /** 冲突处理动作:keep-local=用副本覆盖回原路径;discard=副本进回收站。 */
 export type ConflictChoice = 'keep-local' | 'discard';
 
-/** 副本命名反解:命中返回 { originalPath, deviceId },非冲突命名返回 null。 */
+/** 副本命名反解:命中返回 { originalPath, deviceId },非冲突命名返回 null。
+ *  正则与 ignore.ts 的硬忽略判定同源(CONFLICT_COPY_RE),两处不会漂移。 */
 export function parseConflictCopy(
   relPath: string,
 ): { originalPath: string; deviceId: string } | null {
-  const m = /^(.+)\.sync-conflict-[0-9a-z]+(?:-[0-9a-z]+)?-([A-Z2-7]{10})(\.[^./]*)?$/.exec(relPath);
+  const m = CONFLICT_COPY_RE.exec(relPath);
   if (!m) return null;
   return { originalPath: m[1]! + (m[3] ?? ''), deviceId: m[2]! };
 }
@@ -132,7 +133,8 @@ export function listConflictCopies(root: string): { conflicts: ConflictCopy[]; t
 
 /** 与 executor 的回收站落盘同式:保留相对结构 + base36 时间戳后缀,碰撞加序号。 */
 function moveToTrashFile(root: string, trashDir: string, relPath: string): void {
-  const src = resolveSharePath(root, relPath);
+  // 移入回收站的正是冲突副本(硬忽略对象)→ 绕过硬忽略闸门,越界守卫仍在
+  const src = resolveSharePath(root, relPath, { allowHardIgnored: true });
   mkdirSync(trashDir, { recursive: true });
   const stamp = Date.now().toString(36);
   let dest = join(trashDir, `${relPath}.${stamp}`);
@@ -189,7 +191,7 @@ export function resolveConflictCopy(
   const { dir, name } = splitRel(copyPath);
   const parsed = parseConflictCopy(name);
   if (!parsed) throw new Error('不是冲突副本命名');
-  const copyAbs = resolveSharePath(root, copyPath);
+  const copyAbs = resolveSharePath(root, copyPath, { allowHardIgnored: true });
   if (!existsSync(copyAbs) || !statSync(copyAbs).isFile()) throw new Error('冲突副本已不存在');
 
   const originalRel = dir + parsed.originalPath;
@@ -219,7 +221,7 @@ export function applyConflictMerge(
   const parsed = parseConflictCopy(name);
   if (!parsed) throw new Error('不是冲突副本命名');
   // 校验副本还在(路径合法性由 resolveSharePath 兜底):避免对不存在的冲突写"合并"
-  const copyAbs = resolveSharePath(root, copyPath);
+  const copyAbs = resolveSharePath(root, copyPath, { allowHardIgnored: true });
   if (!existsSync(copyAbs) || !statSync(copyAbs).isFile()) throw new Error('冲突副本已不存在');
   const originalRel = dir + parsed.originalPath;
   const origAbs = resolveSharePath(root, originalRel);

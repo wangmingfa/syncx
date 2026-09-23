@@ -31,13 +31,20 @@ export interface LocalExecutor {
  * 尚不存在的路径段(将由 mkdirSync recursive 安全创建)跳过。
  *
  * 同时拒绝硬忽略路径(HARD_IGNORE_NAMES:`.git`/`.hg`/`.svn`/`.syncx-trash`/
- * `.syncx-folder`)。这是硬忽略的**最后一道、也是唯一一道文件系统级闸门**:即使上游
- * 某个调用方漏了过滤,同步也无法把对端内容写进本机 `.git`,更无法把本机的 `.git`
+ * `.syncx-folder`,以及冲突副本命名)。这是硬忽略的**最后一道、也是唯一一道文件系统级闸门**:
+ * 即使上游某个调用方漏了过滤,同步也无法把对端内容写进本机 `.git`,更无法把本机的 `.git`
  * 移进回收站。放在这里而不是只放在 peer/scanner 里,是因为「不碰这些路径」最终要由
  * 真正动文件的那一层保证,而这一层是全部读写操作的必经之路。
+ *
+ * `allowHardIgnored`:仅供冲突处理链路(生成副本 / 收件箱合并 / 丢弃)使用 —— 冲突副本
+ * 本身就是硬忽略对象,这些操作天然要碰它;符号链接越界守卫**不受该选项影响**,永远生效。
  */
-export function resolveSharePath(root: string, relPath: string): string {
-  if (isHardIgnored(relPath)) {
+export function resolveSharePath(
+  root: string,
+  relPath: string,
+  opts?: { allowHardIgnored?: boolean },
+): string {
+  if (!opts?.allowHardIgnored && isHardIgnored(relPath)) {
     throw new Error(`hard-ignored path: ${relPath}`);
   }
   // 根目录可能不存在(刚配置尚未创建 / 运行中被删除):realpathSync 会抛 ENOENT。
@@ -84,12 +91,13 @@ export function preserveLocalAsConflict(root: string, path: string, remoteDevice
   const ts = Date.now().toString(36);
   let n = 0;
   let copyName: string;
+  // 副本命名本身就是硬忽略对象 → allowHardIgnored(越界守卫不受影响)
   do {
     const seq = n > 0 ? `-${n.toString(36)}` : '';
     copyName = `${base}.sync-conflict-${ts}${seq}-${remoteDeviceId}${ext}`;
     n++;
-  } while (existsSync(resolveSharePath(root, copyName)) && n < 1000);
-  renameSync(target, resolveSharePath(root, copyName));
+  } while (existsSync(resolveSharePath(root, copyName, { allowHardIgnored: true })) && n < 1000);
+  renameSync(target, resolveSharePath(root, copyName, { allowHardIgnored: true }));
   return true;
 }
 
@@ -110,6 +118,14 @@ export function createLocalExecutor(root: string, index: IndexStore, trashDir: s
   /** 共享目录内相对路径解析:复用模块级守卫(含符号链接越界校验)。 */
   function resolvePath(relPath: string): string {
     return resolveSharePath(root, relPath);
+  }
+
+  /**
+   * 冲突副本专用解析:副本命名属硬忽略对象,生成副本这一步必须绕过硬忽略闸门,
+   * 但仍走完整的符号链接越界守卫(见 resolveSharePath 的 allowHardIgnored 说明)。
+   */
+  function resolveConflictCopyPath(relPath: string): string {
+    return resolveSharePath(root, relPath, { allowHardIgnored: true });
   }
 
   /**
@@ -283,8 +299,8 @@ export function createLocalExecutor(root: string, index: IndexStore, trashDir: s
           const seq = n > 0 ? `-${n.toString(36)}` : '';
           copyName = `${base}.sync-conflict-${ts}${seq}-${remoteDeviceId}${ext}`;
           n++;
-        } while (existsSync(resolvePath(copyName)) && n < 1000);
-        renameSync(target, resolvePath(copyName));
+        } while (existsSync(resolveConflictCopyPath(copyName)) && n < 1000);
+        renameSync(target, resolveConflictCopyPath(copyName));
       }
 
       const mtime = await landRemote(remote, blocks);

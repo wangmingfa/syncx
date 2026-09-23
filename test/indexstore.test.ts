@@ -35,16 +35,6 @@ describe('index store', () => {
     store.close();
   });
 
-  it('counts live conflict copies only (tombstones and ordinary paths excluded)', () => {
-    const store = openIndexStore(':memory:');
-    store.saveEntry(entry('a.sync-conflict-lxq8-ABCDEFGH23.txt', [['dev-a', 1]]));
-    store.saveEntry(entry('docs/b.sync-conflict-lxq9-ABCDEFGH23.md', [['dev-a', 1]]));
-    store.saveEntry(entry('gone.sync-conflict-lxaa-ABCDEFGH23.txt', [['dev-a', 1]], 10, true));
-    store.saveEntry(entry('notes.txt', [['dev-a', 1]]));
-    expect(store.countConflictEntries!()).toBe(2);
-    store.close();
-  });
-
   it('overwrites an existing entry on save', () => {
     const store = openIndexStore(':memory:');
     store.saveEntry(entry('docs/plan.md', [['dev-a', 1]]));
