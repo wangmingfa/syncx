@@ -585,6 +585,112 @@ describe('control api hardening', () => {
     server.close();
   });
 
+  it('POST /api/folders/re-adopt-identity validates and delegates to the backend', async () => {
+    const adopted: string[] = [];
+    const server = createControlServer({
+      token: 'secret',
+      getStatus: () => ({}),
+      reAdoptFolderIdentity: (folderId) => {
+        if (folderId === 'boom') throw new Error('目录当前不可读(不存在 / 未挂载?),拒绝采集身份');
+        adopted.push(folderId);
+      },
+    });
+    server.listen(0, '127.0.0.1');
+    await once(server, 'listening');
+    const port = (server.address() as AddressInfo).port;
+
+    const ok = await fetchJson(port, '/api/folders/re-adopt-identity', 'secret', {
+      method: 'POST',
+      body: { folderId: 'f1' },
+    });
+    expect(ok.status).toBe(200);
+    expect(adopted).toEqual(['f1']);
+
+    const missing = await fetchJson(port, '/api/folders/re-adopt-identity', 'secret', {
+      method: 'POST',
+      body: {},
+    });
+    expect(missing.status).toBe(400);
+
+    // 后端拒绝(目录不可读)→ 400 + 原样透出原因,前端 toast 直接可用
+    const refused = await fetchJson(port, '/api/folders/re-adopt-identity', 'secret', {
+      method: 'POST',
+      body: { folderId: 'boom' },
+    });
+    expect(refused.status).toBe(400);
+    expect((refused.body as { error?: string }).error).toContain('拒绝采集');
+
+    server.close();
+  });
+
+  it('conflict diff/merge/clean routes validate and delegate', async () => {    const mergeCalls: Array<[string, string, string]> = [];
+    let cleanCalls = 0;
+    const server = createControlServer({
+      token: 'secret',
+      getStatus: () => ({}),
+      conflictFilePair: (folderId, copyPath) => ({
+        folderId,
+        path: 'a.txt',
+        deviceId: 'ABCDEFGH23',
+        local: { exists: true, text: 'A' },
+        remote: { exists: true, text: 'B' },
+        _copy: copyPath,
+      }),
+      applyConflictMerge: (folderId, copyPath, content) => {
+        mergeCalls.push([folderId, copyPath, content]);
+      },
+      cleanIdenticalConflicts: () => {
+        cleanCalls += 1;
+        return { removed: 3 };
+      },
+    });
+    server.listen(0, '127.0.0.1');
+    await once(server, 'listening');
+    const port = (server.address() as AddressInfo).port;
+
+    // diff:GET 透传两参数,返回后端形状
+    const diff = await fetchJson(
+      port,
+      `/api/folders/conflicts/diff?folderId=f1&copyPath=${encodeURIComponent('a.sync-conflict-lxq8-ABCDEFGH23.txt')}`,
+      'secret',
+    );
+    expect(diff.status).toBe(200);
+    expect(diff.body).toMatchObject({ folderId: 'f1', path: 'a.txt' });
+    const diffMissing = await fetchJson(port, '/api/folders/conflicts/diff?folderId=f1', 'secret');
+    expect(diffMissing.status).toBe(400);
+
+    // merge:content 必填字符串
+    const ok = await fetchJson(port, '/api/folders/conflicts/merge', 'secret', {
+      method: 'POST',
+      body: { folderId: 'f1', copyPath: 'a.sync-conflict-lxq8-ABCDEFGH23.txt', content: 'merged' },
+    });
+    expect(ok.status).toBe(200);
+    expect(mergeCalls).toHaveLength(1);
+    expect(mergeCalls[0]![2]).toBe('merged');
+    const noContent = await fetchJson(port, '/api/folders/conflicts/merge', 'secret', {
+      method: 'POST',
+      body: { folderId: 'f1', copyPath: 'x' },
+    });
+    expect(noContent.status).toBe(400);
+    expect(mergeCalls).toHaveLength(1);
+
+    // clean-identical:folderId 必填,返回 removed
+    const clean = await fetchJson(port, '/api/folders/conflicts/clean-identical', 'secret', {
+      method: 'POST',
+      body: { folderId: 'f1' },
+    });
+    expect(clean.status).toBe(200);
+    expect(clean.body).toEqual({ removed: 3 });
+    expect(cleanCalls).toBe(1);
+    const cleanMissing = await fetchJson(port, '/api/folders/conflicts/clean-identical', 'secret', {
+      method: 'POST',
+      body: {},
+    });
+    expect(cleanMissing.status).toBe(400);
+
+    server.close();
+  });
+
   it('sets an HttpOnly, Path=/ session cookie on successful login', async () => {
     // 会话 cookie 存的是**签名串**,不再是把 token 原文塞进去:
     // 原文含分号/空格/非 ASCII 时会破坏 cookie 语法(后者还会让 writeHead 抛错)。

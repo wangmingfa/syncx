@@ -53,6 +53,8 @@ export interface ControlServerDeps {
   setFolderUseGitignore?: (path: string, enabled: boolean) => void;
   /** 设置某共享目录是否暂停同步(按 folderId;暂停 = 数据面停摆,控制面照常)。 */
   setFolderPaused?: (folderId: string, paused: boolean) => void;
+  /** 「目录不可信」时重新采集身份指纹(仅更新 folderIdentity,不动索引)。 */
+  reAdoptFolderIdentity?: (folderId: string) => void;
   /** 全局暂停/恢复同步(所有目录一起停;各目录自己的 paused 独立保留)。 */
   setGlobalPaused?: (paused: boolean) => void;
   /** 列出待确认项(对方推送的配对 / 目录共享邀请)。 */
@@ -74,6 +76,12 @@ export interface ControlServerDeps {
   listFolderConflicts?: (folderId: string) => unknown;
   /** 处理一条冲突副本:keep-local=副本覆盖回原路径(原内容留档);discard=副本进回收站。 */
   resolveFolderConflict?: (folderId: string, copyPath: string, choice: 'keep-local' | 'discard') => void;
+  /** 冲突「查看对比」:原文件 vs 冲突副本两个本机侧,返回与 /api/folders/file 同形状的数据。 */
+  conflictFilePair?: (folderId: string, copyPath: string) => unknown;
+  /** 把逐块合并后的内容写回原文件(当前内容先留档;副本不动,由用户显式清理)。 */
+  applyConflictMerge?: (folderId: string, copyPath: string, content: string) => void;
+  /** 一键清理:把所有「与原文件无差异」的冲突副本移入回收站,返回 { removed } 条数。 */
+  cleanIdenticalConflicts?: (folderId: string) => { removed: number };
   /**
    * 文件版本:被对端覆盖修改前,旧内容由 executor 自动快照进版本目录
    * (`<configDir>/versions/<index key>`,见 folderVersionsPath)。这里提供

@@ -1,4 +1,4 @@
-import { copyFileSync, existsSync, mkdirSync, readdirSync, renameSync, statSync } from 'node:fs';
+import { copyFileSync, existsSync, mkdirSync, readFileSync, readdirSync, renameSync, statSync, writeFileSync } from 'node:fs';
 import type { Dirent } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { resolveSharePath } from './executor.js';
@@ -27,6 +27,13 @@ export interface ConflictCopy {
   deviceId: string;
   size: number;
   mtime: number;
+  /**
+   * 副本与原文件是否逐字节一致(收件箱据此支持「一键清理无差异副本」):
+   *  - true:大小相同且内容比对相同;
+   *  - false:大小不同(免读直接判),或大小相同但内容不同;
+   *  - null:无法判定 —— 原文件已不存在,或超过比对上限(大文件不做同步读盘)。
+   */
+  identical: boolean | null;
 }
 
 /** 冲突处理动作:keep-local=用副本覆盖回原路径;discard=副本进回收站。 */
@@ -44,6 +51,26 @@ export function parseConflictCopy(
 /** 递归列目录的熔断上限:共享根可能是整个数据盘,扫爆不如截断(UI 提示可见条目数)。 */
 const MAX_SCAN_ENTRIES = 20_000;
 const MAX_RESULTS = 500;
+/** 内容比对上限:更大的副本不判(返回 null),避免列接口为超大文件成对读盘。 */
+const IDENTICAL_MAX_BYTES = 32 * 1024 * 1024;
+
+/** 副本与原文件是否逐字节一致;原文件缺失或超过上限返回 null(无法判定)。 */
+function compareWithOriginal(copyAbs: string, originalAbs: string, size: number): boolean | null {
+  let origStat;
+  try {
+    origStat = statSync(originalAbs);
+  } catch {
+    return null; // 原文件已被删除/移走:无从比对
+  }
+  if (!origStat.isFile()) return null;
+  if (origStat.size !== size) return false; // 大小不同免读直判,多数「有差异」不走 IO
+  if (size > IDENTICAL_MAX_BYTES) return null;
+  try {
+    return Buffer.compare(readFileSync(copyAbs), readFileSync(originalAbs)) === 0;
+  } catch {
+    return null;
+  }
+}
 
 /** 实时扫描共享根内的冲突副本残留(权威口径:副本被用户手动删了就不会误报)。 */
 export function listConflictCopies(root: string): { conflicts: ConflictCopy[]; truncated: boolean } {
@@ -93,6 +120,7 @@ export function listConflictCopies(root: string): { conflicts: ConflictCopy[]; t
         deviceId: parsed.deviceId,
         size,
         mtime,
+        identical: compareWithOriginal(abs, join(root, relDir === '' ? parsed.originalPath : `${relDir}/${parsed.originalPath}`), size),
       });
     }
   }
@@ -123,6 +151,28 @@ function moveToTrashFile(root: string, trashDir: string, relPath: string): void 
   }
 }
 
+/** 覆盖前把原文件当前内容留档进版本目录(命名与 executor.snapshotVersion 对齐,版本弹窗可认领)。 */
+function backupToVersions(versionsDir: string | undefined, originalRel: string, origAbs: string): void {
+  if (versionsDir === undefined) return;
+  if (!existsSync(origAbs) || !statSync(origAbs).isFile()) return;
+  mkdirSync(versionsDir, { recursive: true });
+  const stamp = Date.now().toString(36);
+  let backup = join(versionsDir, `${originalRel}.syncx-v-${stamp}`);
+  let n = 0;
+  while (existsSync(backup)) {
+    n += 1;
+    backup = join(versionsDir, `${originalRel}.syncx-v-${stamp}.${n}`);
+  }
+  mkdirSync(dirname(backup), { recursive: true });
+  copyFileSync(origAbs, backup);
+}
+
+/** 副本路径拆成 { 目录前缀, 文件名 }(无 '/' 时目录前缀为空串)。 */
+function splitRel(relPath: string): { dir: string; name: string } {
+  const cut = relPath.lastIndexOf('/') + 1;
+  return { dir: relPath.slice(0, cut), name: relPath.slice(cut) };
+}
+
 /**
  * 处理一条冲突副本。
  * - keep-local:副本内容覆盖回原路径(当前内容先快照进版本目录,动作可逆);
@@ -136,34 +186,44 @@ export function resolveConflictCopy(
   copyPath: string,
   choice: ConflictChoice,
 ): void {
-  const cut = copyPath.lastIndexOf('/') + 1; // 无 '/' 时为 0 → dir 空、name 全串
-  const dir = copyPath.slice(0, cut);
-  const name = copyPath.slice(cut);
+  const { dir, name } = splitRel(copyPath);
   const parsed = parseConflictCopy(name);
   if (!parsed) throw new Error('不是冲突副本命名');
   const copyAbs = resolveSharePath(root, copyPath);
   if (!existsSync(copyAbs) || !statSync(copyAbs).isFile()) throw new Error('冲突副本已不存在');
 
+  const originalRel = dir + parsed.originalPath;
+  const origAbs = resolveSharePath(root, originalRel);
   if (choice === 'keep-local') {
-    const originalRel = dir + parsed.originalPath;
-    const origAbs = resolveSharePath(root, originalRel);
-    if (existsSync(origAbs) && statSync(origAbs).isFile() && versionsDir !== undefined) {
-      // 当前(对端)内容留档:版本命名与 executor.snapshotVersion 对齐,版本弹窗可认领
-      mkdirSync(versionsDir, { recursive: true });
-      const stamp = Date.now().toString(36);
-      let backup = join(versionsDir, `${originalRel}.syncx-v-${stamp}`);
-      let n = 0;
-      while (existsSync(backup)) {
-        n += 1;
-        backup = join(versionsDir, `${originalRel}.syncx-v-${stamp}.${n}`);
-      }
-      mkdirSync(dirname(backup), { recursive: true });
-      copyFileSync(origAbs, backup);
-    }
+    backupToVersions(versionsDir, originalRel, origAbs);
     mkdirSync(dirname(origAbs), { recursive: true });
     copyFileSync(copyAbs, origAbs);
   } else if (choice !== 'discard') {
     throw new Error('未知处理方式');
   }
   moveToTrashFile(root, trashDir, copyPath);
+}
+
+/**
+ * 把逐块合并后的内容写回原文件(冲突收件箱「查看对比」里点 ← 应用差异块)。
+ * 与 keep-local 同一安全网:当前内容先留档;副本**不动** —— 合并可能只做一半,
+ * 副本要留到用户显式「丢弃/完成」才进回收站。写回后由调用方触发扫描广播。
+ */
+export function applyConflictMerge(
+  root: string,
+  versionsDir: string | undefined,
+  copyPath: string,
+  content: string,
+): void {
+  const { dir, name } = splitRel(copyPath);
+  const parsed = parseConflictCopy(name);
+  if (!parsed) throw new Error('不是冲突副本命名');
+  // 校验副本还在(路径合法性由 resolveSharePath 兜底):避免对不存在的冲突写"合并"
+  const copyAbs = resolveSharePath(root, copyPath);
+  if (!existsSync(copyAbs) || !statSync(copyAbs).isFile()) throw new Error('冲突副本已不存在');
+  const originalRel = dir + parsed.originalPath;
+  const origAbs = resolveSharePath(root, originalRel);
+  backupToVersions(versionsDir, originalRel, origAbs);
+  mkdirSync(dirname(origAbs), { recursive: true });
+  writeFileSync(origAbs, content, 'utf8');
 }

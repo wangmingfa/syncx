@@ -6,46 +6,59 @@ import { formatBytes } from '../utils/bytes';
 import { fileIconKind } from '../utils/file-icon';
 import { escapeHtml, highlightText } from '../utils/syntax';
 import { useToast } from '../composables/useToast';
-import type { FileCompareData, FileSideData } from '../types';
+import type { DiffActionCtx, DiffFooterAction, DiffHunkApply, DiffPaneData, FileSideData } from '../types';
 import ModalShell from './ModalShell.vue';
 
 /**
- * 文件内容对比弹窗(IDEA 风格的并排差异)。
+ * 通用文件差异弹窗(IDEA 风格并排对比)—— 纯展示引擎,不含业务语义。
  *
- * 四个状态各自有明确的降级路径 —— 不做「假装能比」:
- *  - 两侧都是文本 → 逐行并排,每个差异块可单独 ← / → 应用;
- *  - 任一侧是图片(后端按后缀给了 image 字节)→ 并排看图,只提供整文件覆盖
- *    (图片没有「第几行」这回事,挑不出可单独应用的块);
- *  - 任一侧是二进制 / 超过体积上限 → 不回传内容,只提供整文件覆盖;
- *  - 任一侧缺失(文件只在一边存在)→ 只能从存在的那侧覆盖过去。
+ * 「两侧是什么、能做什么」全部由调用方经 props 定义(见 types.ts 的 DiffPaneData /
+ * DiffFooterAction / DiffHunkApply):对比页传 本机↔对端 + 拉/推覆盖;冲突收件箱传
+ * 原文件↔冲突副本 + 合并写回。组件只认「侧配置 + 动作清单」,连二次确认都是通用机制。
+ *
+ * 四个展示状态各有明确的降级路径 —— 不做「假装能比」:
+ *  - 两侧都是文本 → 逐行并排,可按配置出逐块应用按钮;
+ *  - 任一侧是图片 → 并排看图,没有逐块(图片没有「第几行」);
+ *  - 任一侧二进制 / 超限 → 只报原因,动作交给 footerActions;
+ *  - 任一侧缺失 → 只能从存在的那侧覆盖过去。
  */
 const props = defineProps<{
   open: boolean;
+  /** 被对比文件的相对路径(标题与描述)。 */
   path: string;
-  data: FileCompareData | null;
+  /** 标题覆写:对比页默认「文件内容对比」,冲突场景传「冲突对比」。 */
+  title?: string;
+  left: DiffPaneData;
+  right: DiffPaneData;
+  /** 逐块应用按钮:哪个方向给了 tooltip 就出哪个按钮;省略 = 正文无按钮。 */
+  hunkApply?: DiffHunkApply;
+  /** footer 动作按钮(渲染 + 禁用 + 内联二次确认由组件通用处理,点击回传 id)。 */
+  footerActions?: DiffFooterAction[];
   loading: boolean;
   error: string;
-  deviceId: string;
 }>();
 
 const emit = defineEmits<{
   close: [];
-  /** direction:'pull' 写本机,'push' 写对端;content 省略 = 整文件照抄来源侧。 */
-  sync: [direction: 'pull' | 'push', content?: string];
+  /** footer 动作确认后的回传(语义由调用方解释)。 */
+  action: [id: string];
+  /** 逐块应用:组件算好「应用该块后的完整新内容」,dir = 写入目标侧。 */
+  applyHunk: [payload: { dir: 'left' | 'right'; content: string }];
 }>();
 
-const left = computed<FileSideData>(() => props.data?.local ?? { exists: false });
-const right = computed<FileSideData>(() => props.data?.remote ?? { exists: false });
+const left = computed<FileSideData>(() => props.left.side);
+const right = computed<FileSideData>(() => props.right.side);
+/** 组句角色名:role 缺省取 label(「本机」/「对端」/「原文件」…)。 */
+function roleOf(pane: DiffPaneData): string {
+  return pane.role ?? pane.label;
+}
 
 /**
- * 正文(以及底部那排覆盖按钮)是否展示。
- *
- * 注意按钮原先就住在 `v-else-if="data"` 这个分支里,提成 `#footer` 插槽后跟正文分家了 ——
- * 条件必须抽成一处共享,否则「加载中/出错时不显示覆盖按钮」这条会悄悄失效(拿不到 data 时
- * 按钮本来就全是禁用态,摆在那里只会让人以为能点)。重新加载时 data 仍留着旧值、loading
- * 为真,所以这里不能只判 `!!data`,要和正文那条分支完全一致。
+ * 正文(以及底部动作按钮)是否展示。加载中/出错时不显示动作按钮 ——
+ * 拿不到两侧数据时按钮全是禁用态,摆在那里只会让人以为能点。
+ * 正文与 footer 共用这一处判定,避免二者分叉。
  */
-const showData = computed<boolean>(() => !props.loading && !props.error && !!props.data);
+const showData = computed<boolean>(() => !props.loading && !props.error);
 
 /** 一侧能否用于逐行对比:存在、有文本、且不是二进制/过大。 */
 function comparable(side: FileSideData): boolean {
@@ -282,8 +295,8 @@ function reasonOf(side: FileSideData, role: string): string {
 
 const blocked = computed<string>(() => {
   if (canDiff.value) return '';
-  if (!comparable(left.value)) return reasonOf(left.value, '本机');
-  return reasonOf(right.value, '对端');
+  if (!comparable(left.value)) return reasonOf(left.value, roleOf(props.left));
+  return reasonOf(right.value, roleOf(props.right));
 });
 
 function rowClass(type: string): string {
@@ -291,39 +304,27 @@ function rowClass(type: string): string {
 }
 
 /**
- * 整文件覆盖是破坏性操作(直接拿一侧内容替换另一侧),要先二次确认。
- * 逐块同步(apply)是外科手术式的一小块,不算破坏性,不拦。
+ * 通用动作机制:footerActions 若带 confirm 文案,点击先进入内联二次确认条
+ * (破坏性操作的拦截留在组件里,文案与语义留在调用方);逐块应用不拦 ——
+ * 外科手术式的一小块,不算破坏性。
  */
-const overwriteConfirm = ref<'pull' | 'push' | null>(null);
-function requestOverwrite(dir: 'pull' | 'push'): void {
-  overwriteConfirm.value = dir;
+const pendingAction = ref<DiffFooterAction | null>(null);
+function requestAction(a: DiffFooterAction): void {
+  if (a.confirm) pendingAction.value = a;
+  else emit('action', a.id);
 }
-function confirmOverwrite(): void {
-  const dir = overwriteConfirm.value;
-  overwriteConfirm.value = null;
-  if (dir) emit('sync', dir);
+function confirmAction(): void {
+  const a = pendingAction.value;
+  pendingAction.value = null;
+  if (a) emit('action', a.id);
 }
 
-/**
- * 两个整文件覆盖按钮能否点:来源侧要有文件,且两侧不是已经一致 —— 内容相同时覆盖
- * 是纯粹的白跑一趟(还会白写一次对方的磁盘),不如直接禁用。
- */
-const pullDisabled = computed<boolean>(() => !right.value.exists || contentIdentical.value);
-const pushDisabled = computed<boolean>(() => !left.value.exists || contentIdentical.value);
-
-/**
- * 覆盖按钮的悬停说明(禁用时也要能看):禁用态讲清「为什么不能点」,可用态讲清
- * 「这一下会做什么」。文案与 disabled 条件同源,不会出现「说不能点却能点」。
- */
-function overwriteHint(dir: 'pull' | 'push'): string {
-  const from = dir === 'pull' ? '对端' : '本机';
-  const to = dir === 'pull' ? '本机' : '对端';
-  if (contentIdentical.value) return `两侧内容已经一致，无需用${from}覆盖${to}`;
-  if (dir === 'pull' ? !right.value.exists : !left.value.exists) {
-    return `${from}没有这个文件，无法覆盖${to}`;
-  }
-  return `用${from}文件内容完全替换${to}文件`;
-}
+/** 传给动作 disabled/hint 判定函数的实况:内容一致性与两侧存在性。 */
+const actionCtx = computed<DiffActionCtx>(() => ({
+  identical: contentIdentical.value,
+  leftExists: left.value.exists,
+  rightExists: right.value.exists,
+}));
 /**
  * 左右是两个独立滚动区,但滚动位置必须锁死:同一行左右两块要水平对齐,否则
  * 对比失去意义 —— 纵向如此,横向同理(两栏是同一份内容的两侧,横向错开就没法
@@ -367,7 +368,7 @@ const hoverIndex = ref<number | null>(null);
 watch(
   () => [props.open, props.path],
   () => {
-    overwriteConfirm.value = null;
+    pendingAction.value = null;
     hoverIndex.value = null;
     viewMode.value = 'preview';
     void nextTick(() => {
@@ -385,13 +386,13 @@ watch(
  * Esc 关窗。挂在 window 而不是弹窗元素上:焦点通常在窗格里的滚动区,或者压根没进过
  * 弹窗(点遮罩打开后直接按键),挂元素上会漏掉。
  *
- * 正在等待「整文件覆盖」二次确认时,Esc 先撤掉那一步(等价于点「取消」),不关窗:
+ * 正在等待某个动作的二次确认时,Esc 先撤掉那一步(等价于点「取消」),不关窗:
  * 那一按键的语义是「打消这次危险操作」,若顺手把弹窗也收了,用户反而丢了上下文。
  */
 function onKeydown(e: KeyboardEvent): void {
   if (e.key !== 'Escape' || !props.open) return;
-  if (overwriteConfirm.value) {
-    overwriteConfirm.value = null;
+  if (pendingAction.value) {
+    pendingAction.value = null;
     return;
   }
   emit('close');
@@ -400,12 +401,12 @@ onMounted(() => window.addEventListener('keydown', onKeydown));
 onUnmounted(() => window.removeEventListener('keydown', onKeydown));
 
 /**
- * 把某个差异块应用到目标侧。
- * 目标是对端 → 写远端(push);目标是本机 → 写本地(pull)。
+ * 把某个差异块应用到目标侧:算好应用后的完整新内容再抛给调用方
+ * (组件不关心目标是本机还是对端,写回路径由调用方解释)。
  */
 function apply(hunk: DiffHunk, target: 'left' | 'right'): void {
   const newText = applyHunk(left.value.text ?? '', right.value.text ?? '', hunk, target);
-  emit('sync', target === 'right' ? 'push' : 'pull', newText);
+  emit('applyHunk', { dir: target, content: newText });
 }
 </script>
 
@@ -414,7 +415,7 @@ function apply(hunk: DiffHunk, target: 'left' | 'right'): void {
        dialog(.modal)自己身上,而不是外层遮罩。fd-modal--tall 仍按「任一视图可用」加高。 -->
   <ModalShell
     :open="open"
-    title="文件内容对比"
+    :title="title ?? '文件内容对比'"
     :description="path"
     description-mono
     :class="['fd-modal', { 'fd-modal--tall': canDiff || canPreview }]"
@@ -427,22 +428,21 @@ function apply(hunk: DiffHunk, target: 'left' | 'right'): void {
       <div class="diff-error__msg break">{{ error }}</div>
     </div>
 
-    <!-- `&& data` 是给 vue-tsc 收窄类型用的(data 可空,正文里要取 data.folderPath):
-         条件本身仍是 showData 一处定义,底部按钮那条分支用的是同一个。 -->
-    <template v-if="showData && data">
+    <template v-if="showData">
+      <!-- 模板里裸 left/right 解析到的是局部 computed(侧数据),pane 配置必须走 props.* -->
       <div class="fd-legend mono">
-        <span class="fd-legend__role">本机</span>
-        <span class="fd-legend__id">{{ data.folderPath }}</span>
+        <span class="fd-legend__role">{{ props.left.label }}</span>
+        <span v-if="props.left.note" class="fd-legend__id">{{ props.left.note }}</span>
         <span class="fd-legend__sep">↔</span>
-        <span class="fd-legend__role">对端</span>
-        <span class="fd-legend__id">{{ deviceId }}</span>
+        <span class="fd-legend__role">{{ props.right.label }}</span>
+        <span v-if="props.right.note" class="fd-legend__id">{{ props.right.note }}</span>
       </div>
 
-      <!-- 对比区。表头(本机 / 中间摘要 / 对端)两种视图共用一份 —— 中间那格换内容,
+      <!-- 对比区。表头(左角色 / 中间摘要 / 右角色)两种视图共用一份 —— 中间那格换内容,
            免得两套表头各写一遍、宽窄对不齐。 -->
       <div v-if="showText || showImages" class="fd-body">
         <div class="fd-head">
-          <span class="fd-head__role">本机</span>
+          <span class="fd-head__role">{{ props.left.label }}</span>
           <span class="fd-head__mid">
             <template v-if="showText">
               <span v-if="contentIdentical" class="fd-head__clean">两侧内容一致</span>
@@ -496,7 +496,7 @@ function apply(hunk: DiffHunk, target: 'left' | 'right'): void {
               >逐行</button>
             </span>
           </span>
-          <span class="fd-head__role">对端（{{ deviceId }}）</span>
+          <span class="fd-head__role">{{ props.right.label }}{{ props.right.note ? `（${props.right.note}）` : '' }}</span>
         </div>
 
         <!-- 图片视图:并排各看一张,没有逐块应用(图片没有「第几行」)。
@@ -507,10 +507,10 @@ function apply(hunk: DiffHunk, target: 'left' | 'right'): void {
               <img
                 v-if="leftSrc"
                 :src="leftSrc"
-                alt="本机图片预览"
+                :alt="props.left.label + '图片预览'"
                 @load="onImgLoad('left', $event)"
               />
-              <span v-else class="fd-image__nil">{{ reasonOf(left, '本机') }}</span>
+              <span v-else class="fd-image__nil">{{ reasonOf(left, roleOf(props.left)) }}</span>
             </div>
             <div class="fd-image__meta mono">{{ metaOf(left, 'left', leftSrc) }}</div>
           </div>
@@ -519,10 +519,10 @@ function apply(hunk: DiffHunk, target: 'left' | 'right'): void {
               <img
                 v-if="rightSrc"
                 :src="rightSrc"
-                alt="对端图片预览"
+                :alt="props.right.label + '图片预览'"
                 @load="onImgLoad('right', $event)"
               />
-              <span v-else class="fd-image__nil">{{ reasonOf(right, '对端') }}</span>
+              <span v-else class="fd-image__nil">{{ reasonOf(right, roleOf(props.right)) }}</span>
             </div>
             <div class="fd-image__meta mono">{{ metaOf(right, 'right', rightSrc) }}</div>
           </div>
@@ -550,17 +550,21 @@ function apply(hunk: DiffHunk, target: 'left' | 'right'): void {
                    走 v-html 而不是插值。行号仍由 .fd-no 这一格负责。 -->
               <pre class="fd-text" v-html="cell(hl.left, row.leftNo, row.leftText)"></pre>
               <span class="fd-gutter">
+                <!-- 逐块按钮由调用方配置方向与文案(hunkApply):对比页两个方向都给,
+                     冲突收件箱只给「应用到原文件」(←),另一侧没有写回路径就不出按钮。 -->
                 <template v-if="hunkAtStart.get(i)">
                   <button
+                    v-if="hunkApply?.toLeft"
                     type="button"
                     class="fd-apply"
-                    title="把右边的这块应用到本机（拉取覆盖）"
+                    :title="hunkApply.toLeft"
                     @click="apply(hunkAtStart.get(i)!, 'left')"
                   >←</button>
                   <button
+                    v-if="hunkApply?.toRight"
                     type="button"
                     class="fd-apply"
-                    title="把左边的这块应用到对端（推送覆盖）"
+                    :title="hunkApply.toRight"
                     @click="apply(hunkAtStart.get(i)!, 'right')"
                   >→</button>
                 </template>
@@ -588,49 +592,41 @@ function apply(hunk: DiffHunk, target: 'left' | 'right'): void {
         </div>
       </div>
 
-      <!-- 降级:既不能逐行比、也没有图片可预览时,至少要能整文件覆盖 -->
+      <!-- 降级:既不能逐行比、也没有图片可预览时,提示原因;有动作按钮才补一句「仍可覆盖」 -->
       <div v-else class="fd-blocked">
         <p class="fd-blocked__msg">
           {{ blocked }}，{{ looksLikeImage ? '无法预览' : '无法逐行对比' }}。
         </p>
-        <p class="fd-blocked__hint">仍可整文件覆盖（以一侧内容为准替换另一侧）。</p>
+        <p v-if="footerActions?.length" class="fd-blocked__hint">仍可整文件覆盖（以一侧内容为准替换另一侧）。</p>
       </div>
     </template>
 
     <template v-if="showData" #footer>
-      <template v-if="overwriteConfirm">
-        <span class="fd-confirm__msg">
-          将用{{ overwriteConfirm === 'pull' ? '对端' : '本机' }}文件完全替换{{ overwriteConfirm === 'pull' ? '本机' : '对端' }}文件，此操作不可撤销。
-        </span>
-        <n-button size="small" type="error" @click="confirmOverwrite">确认覆盖</n-button>
-        <n-button size="small" tertiary @click="overwriteConfirm = null">取消</n-button>
+      <template v-if="pendingAction">
+        <span class="fd-confirm__msg">{{ pendingAction.confirm }}</span>
+        <n-button type="error" @click="confirmAction">确认</n-button>
+        <n-button tertiary @click="pendingAction = null">取消</n-button>
       </template>
       <template v-else>
         <!-- tooltip 直接挂在按钮上就够了 —— 实测 Chromium 对 disabled 按钮**照样**
              派发 mouseenter(mouseenter 不在被禁用的事件之列)。真正在禁用态静默失效的
              是**原生 title 属性**,旧写法 title="…" 在按钮不可点时就永远不显示了,
              这才是这里换成 tooltip 的原因。 -->
-        <n-tooltip trigger="hover" :style="{ maxWidth: '320px' }">
+        <n-tooltip
+          v-for="a in footerActions ?? []"
+          :key="a.id"
+          trigger="hover"
+          :style="{ maxWidth: '320px' }"
+        >
           <template #trigger>
             <n-button
-              size="small"
-              tertiary
-              :disabled="pullDisabled"
-              @click="requestOverwrite('pull')"
-            >← 用对端覆盖本机</n-button>
+              :tertiary="!a.tone || a.tone === 'default'"
+              :type="a.tone === 'error' ? 'error' : a.tone === 'primary' ? 'primary' : 'default'"
+              :disabled="a.disabled?.(actionCtx)"
+              @click="requestAction(a)"
+            >{{ a.label }}</n-button>
           </template>
-          {{ overwriteHint('pull') }}
-        </n-tooltip>
-        <n-tooltip trigger="hover" :style="{ maxWidth: '320px' }">
-          <template #trigger>
-            <n-button
-              size="small"
-              tertiary
-              :disabled="pushDisabled"
-              @click="requestOverwrite('push')"
-            >用本机覆盖对端 →</n-button>
-          </template>
-          {{ overwriteHint('push') }}
+          {{ a.hint?.(actionCtx) ?? a.label }}
         </n-tooltip>
       </template>
       <n-button type="primary" @click="emit('close')">关闭</n-button>

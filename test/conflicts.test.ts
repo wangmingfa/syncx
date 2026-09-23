@@ -3,7 +3,12 @@ import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, existsSync, readdi
 import { rmDir } from './helpers.js';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { parseConflictCopy, listConflictCopies, resolveConflictCopy } from '../src/conflicts.js';
+import {
+  parseConflictCopy,
+  listConflictCopies,
+  resolveConflictCopy,
+  applyConflictMerge,
+} from '../src/conflicts.js';
 
 // 副本命名与 executor.preserveLocalAsConflict 一致:
 //   <base>.sync-conflict-<ts36>[-<seq36>]-<10位base32设备ID><ext>
@@ -129,6 +134,50 @@ describe('resolveConflictCopy', () => {
     expect(() =>
       resolveConflictCopy(root, trash, undefined, `ghost.sync-conflict-lxq8-${DEV}.txt`, 'discard'),
     ).toThrow('已不存在');
+    rmDir(dir);
+  });
+});
+
+describe('identical detection & merge', () => {
+  it('marks copies identical / different / unknown against the original', () => {
+    const { dir, root } = tmpRoot();
+    writeFileSync(join(root, 'same.txt'), 'content-A');
+    writeFileSync(join(root, `same.sync-conflict-lxq8-${DEV}.txt`), 'content-A');
+    writeFileSync(join(root, 'diff.txt'), 'content-B');
+    writeFileSync(join(root, `diff.sync-conflict-lxq9-${DEV}.txt`), 'content-C');
+    // 原文件不存在的孤儿副本 → null(无法判定)
+    writeFileSync(join(root, `orphan.sync-conflict-lxaa-${DEV}.txt`), 'x');
+
+    const { conflicts } = listConflictCopies(root);
+    const byName = new Map(conflicts.map((c) => [c.originalPath, c.identical]));
+    expect(byName.get('same.txt')).toBe(true);
+    expect(byName.get('diff.txt')).toBe(false);
+    expect(byName.get('orphan.txt')).toBeNull();
+    rmDir(dir);
+  });
+
+  it('applyConflictMerge writes content back, archives the old one, keeps the copy', () => {
+    const { dir, root } = tmpRoot();
+    const versions = join(dir, 'versions');
+    writeFileSync(join(root, 'a.txt'), 'peer-version');
+    const copy = `a.sync-conflict-lxq8-${DEV}.txt`;
+    writeFileSync(join(root, copy), 'my-version');
+
+    applyConflictMerge(root, versions, copy, 'peer-version + merged hunk');
+    expect(readFileSync(join(root, 'a.txt'), 'utf8')).toBe('peer-version + merged hunk');
+    // 被覆盖前的当前内容留档(与 keep-local 同一安全网)
+    const backed = readdirSync(versions);
+    expect(backed.length).toBe(1);
+    expect(readFileSync(join(versions, backed[0]!), 'utf8')).toBe('peer-version');
+    // 副本不动:合并可能只做一半,留到用户显式清理
+    expect(existsSync(join(root, copy))).toBe(true);
+    rmDir(dir);
+  });
+
+  it('applyConflictMerge rejects non-conflict paths', () => {
+    const { dir, root } = tmpRoot();
+    writeFileSync(join(root, 'a.txt'), 'x');
+    expect(() => applyConflictMerge(root, undefined, 'a.txt', 'y')).toThrow('不是冲突副本命名');
     rmDir(dir);
   });
 });

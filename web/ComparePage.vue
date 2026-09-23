@@ -5,7 +5,7 @@ import { useCompare } from './composables/useCompare';
 import { useToast } from './composables/useToast';
 import { diffReportText } from './utils/diff-report';
 import { fmtTime, stripWs } from './utils/format';
-import type { StatusData } from './types';
+import type { DiffFooterAction, DiffPaneData, StatusData } from './types';
 import FileDiffModal from './components/FileDiffModal.vue';
 import ReportModal from './components/ReportModal.vue';
 import ToastView from './components/ToastView.vue';
@@ -26,6 +26,51 @@ const {
   fileOpen, filePath, fileData, fileLoading, fileError,
   openFile, closeFile, syncFile,
 } = useCompare(statusRef, props.folderId, props.device);
+
+// —— 差异弹窗的「本机 ↔ 对端」配置(FileDiffModal 已通用化,语义在这里定义) ——
+const diffLeft = computed<DiffPaneData>(() => ({
+  label: '本机',
+  note: fileData.value?.folderPath,
+  side: fileData.value?.local ?? { exists: false },
+}));
+const diffRight = computed<DiffPaneData>(() => ({
+  label: '对端',
+  note: data.value?.deviceId,
+  side: fileData.value?.remote ?? { exists: false },
+}));
+/** 两个整文件覆盖按钮:禁用/提示条件与旧版逐字等价(内容一致或来源侧缺文件时禁)。 */
+const diffActions: DiffFooterAction[] = [
+  {
+    id: 'pull',
+    label: '← 用对端覆盖本机',
+    disabled: (c) => !c.rightExists || c.identical,
+    hint: (c) =>
+      c.identical
+        ? '两侧内容已经一致，无需用对端覆盖本机'
+        : !c.rightExists
+          ? '对端没有这个文件，无法覆盖本机'
+          : '用对端文件内容完全替换本机文件',
+    confirm: '将用对端文件完全替换本机文件，此操作不可撤销。',
+  },
+  {
+    id: 'push',
+    label: '用本机覆盖对端 →',
+    disabled: (c) => !c.leftExists || c.identical,
+    hint: (c) =>
+      c.identical
+        ? '两侧内容已经一致，无需用本机覆盖对端'
+        : !c.leftExists
+          ? '本机没有这个文件，无法覆盖对端'
+          : '用本机文件内容完全替换对端文件',
+    confirm: '将用本机文件完全替换对端文件，此操作不可撤销。',
+  },
+];
+function onDiffAction(id: string): void {
+  syncFile(id as 'pull' | 'push');
+}
+function onDiffHunk({ dir, content }: { dir: 'left' | 'right'; content: string }): void {
+  syncFile(dir === 'right' ? 'push' : 'pull', content);
+}
 
 /** 只看差异:目录大时全量树会很长,这个开关是主要的浏览方式。 */
 const onlyDiff = ref(false);
@@ -424,12 +469,18 @@ const reportText = computed<string>(() => {
       v-if="data"
       :open="fileOpen"
       :path="filePath"
-      :data="fileData"
+      :left="diffLeft"
+      :right="diffRight"
+      :hunk-apply="{
+        toLeft: '把右边的这块应用到本机（拉取覆盖）',
+        toRight: '把左边的这块应用到对端（推送覆盖）',
+      }"
+      :footer-actions="diffActions"
       :loading="fileLoading"
       :error="fileError"
-      :device-id="data.deviceId"
       @close="closeFile"
-      @sync="syncFile"
+      @action="onDiffAction"
+      @apply-hunk="onDiffHunk"
     />
 
     <ReportModal

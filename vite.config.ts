@@ -81,6 +81,10 @@ export default defineConfig(({ mode }: { mode: string }) => {
     // test/integration/ports.ts 的 allocatePort() 动态分配(listen(0)),文件间并行
     // 不会 EADDRINUSE,无需全局串行。实测提速约 38%(本机 28s -> 17s)且无失败。
     fileParallelism: true,
+    // vitest 默认 include 会匹配 test/ 下所有 *.test.ts —— 包括 syncx 同步产生的
+    // `*.sync-conflict-*.test.ts` 副本(旧版断言必然失败,且纯属噪声)。这些副本
+    // 要保留作冲突功能测试素材,所以在发现层排除,而不是删除。
+    exclude: ['**/node_modules/**', '**/dist/**', '**/*.sync-conflict-*'],
   },
   // 开发模式:Vite dev server 提供 web/ 的热重载(HMR),
   // 把 /api/*、/login 代理到 control server(127.0.0.1:8384),

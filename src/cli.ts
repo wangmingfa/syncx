@@ -8,7 +8,7 @@ import { migrateLegacyTrash } from './trash.js';
 import { openIndexStore } from './indexstore.js';
 
 import { getSyncHistory, getGlobalSyncHistory, clearSyncHistory } from './history.js';
-import { listConflictCopies, resolveConflictCopy } from './conflicts.js';
+import { listConflictCopies, resolveConflictCopy, applyConflictMerge } from './conflicts.js';
 import { readFileSync, readdirSync, existsSync, statSync, writeFileSync, watch, unlinkSync, copyFileSync, mkdirSync, rmSync } from 'node:fs';
 import { relative, isAbsolute } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -648,6 +648,10 @@ export async function run(args: ParsedArgs): Promise<void> {
     setGlobalPaused: (paused) => {
       manager.setGlobalPaused(paused);
     },
+    reAdoptFolderIdentity: (folderId) => {
+      // 采集 + 写回 config + 清错误 + 补扫都在 manager 内完成;不可读时抛错由路由转 400
+      manager.reAdoptFolderIdentity(folderId);
+    },
     // 待确认区下发 pending + declined:已忽略项灰显供「恢复」,兜住手误忽略
     getOffers: () => listOpenOffers(configPath),
     getFolderHistory: (folderId, limit, filter) => getSyncHistory(configPath, folderId, limit, filter),
@@ -672,6 +676,33 @@ export async function run(args: ParsedArgs): Promise<void> {
       const key = folderIndexKey(folder);
       resolveConflictCopy(folder.path, folderTrashPath(configDir, key), folderVersionsPath(configDir, key), copyPath, choice);
       void manager.runScan();
+    },
+    // 冲突「查看对比」:两个本机侧(原文件 vs 副本)交给 manager 复用同一套读取/降级逻辑
+    conflictFilePair: (folderId, copyPath) => manager.readConflictPair(folderId, copyPath),
+    // 逐块合并写回:内容进原文件(当前内容留档),副本不动;随后触发扫描广播收敛对端
+    applyConflictMerge: (folderId, copyPath, content) => {
+      const folder = findConfigFolder(configPath, folderId);
+      applyConflictMerge(folder.path, folderVersionsPath(configDir, folderIndexKey(folder)), copyPath, content);
+      void manager.runScan();
+    },
+    // 一键清理:把逐字节无差异的副本移入回收站(有差异/无法判定的不碰),最后统一扫一轮
+    cleanIdenticalConflicts: (folderId) => {
+      const folder = findConfigFolder(configPath, folderId);
+      const key = folderIndexKey(folder);
+      const trash = folderTrashPath(configDir, key);
+      const { conflicts } = listConflictCopies(folder.path);
+      let removed = 0;
+      for (const c of conflicts) {
+        if (c.identical !== true) continue;
+        try {
+          resolveConflictCopy(folder.path, trash, undefined, c.copyPath, 'discard');
+          removed += 1;
+        } catch {
+          /* 单条失败(竞态删除等)不影响其余,计数如实 */
+        }
+      }
+      if (removed > 0) void manager.runScan();
+      return { removed };
     },
     // 文件版本:列出 / 恢复 / 删除。恢复 = 把旧版本拷回共享目录原路径,
     // 恢复前把当前内容也拷一份进版本目录(操作可逆),随后触发一轮扫描让恢复

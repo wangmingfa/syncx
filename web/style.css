@@ -1509,6 +1509,32 @@ html[data-theme='dark'] .chip-menu__item--danger {
   font-size: 11px;
 }
 
+/* 「目录不可信」横幅:是"待确认"不是"出错",改琥珀调与红底错误区分 */
+.folder-error--identity {
+  border-color: rgb(234 162 60 / 0.45);
+  background: rgb(234 162 60 / 0.08);
+  color: #a86a10;
+}
+
+.folder-error--identity .folder-error__time {
+  color: rgb(168 106 16 / 0.75);
+}
+
+/* 重新采集身份按钮:贴横幅右侧垂直居中,白底描边从琥珀底里立出来 */
+.folder-error__adopt {
+  margin-left: auto;
+  align-self: center;
+  flex: none;
+  background: var(--card);
+  border-color: rgb(234 162 60 / 0.6);
+  color: #a86a10;
+}
+
+.folder-error__adopt:hover {
+  border-color: #c47c14;
+  color: #c47c14;
+}
+
 /* 日志弹窗 / 对比报告弹窗:等宽纯文本块,浅色底仿终端观感(同一块规则共用) */
 .logs-view,
 .report-view {
@@ -1708,10 +1734,24 @@ li.history-row.row-conflict {
 
 /* —— 冲突收件箱 —— */
 
-/* 目录卡冲突入口:橙调,和普通 quaternary 图标按钮区分 */
-.conflict-btn {
-  color: #c47c14 !important;
-  font-weight: 600;
+/* 收件箱比通用 wide 弹窗(640)再加宽 200px:一行要同时放下时间、冲突徽标、
+   原文件路径 + 来源设备说明、两个动作按钮,640 下路径全被截成省略号。
+   与 .modal-wide 同为单类选择器,靠文件顺序后来者胜。 */
+.conflict-modal {
+  max-width: 840px;
+}
+
+/* 卡顶悬浮「冲突 N」徽标:红调(区别于暂停橙/接收蓝),本身即收件箱入口。
+   button 元素要清掉浏览器默认外观,字体与内衬跟 .float-badge 对齐。 */
+.conflict-float {
+  font-family: inherit;
+  cursor: pointer;
+  color: #c0392b;
+  border-color: rgb(192 57 43 / 0.65);
+}
+
+.conflict-float:hover {
+  background: rgb(192 57 43 / 0.08);
 }
 
 /* 冲突行是「四段式」:时间/徽标/路径块/操作。路径块自己纵向排两行 */
@@ -1728,6 +1768,19 @@ li.history-row.row-conflict {
 
 .conflict-from {
   font-size: 12px;
+}
+
+/* 行内差异状态:绿=无差异(可一键清理),橙=有差异(值得看对比) */
+.conflict-state-ok {
+  color: var(--online);
+}
+
+.conflict-state-diff {
+  color: #c47f00;
+}
+
+html[data-theme='dark'] .conflict-state-diff {
+  color: #e6b04a;
 }
 
 .conflict-ops {
@@ -1803,6 +1856,7 @@ li.history-row.row-conflict {
    等宽铺满还有个副作用:按钮宽度跟着**弹窗宽度**走,同一颗「关闭」在不同弹窗里宽度不同。 */
 .modal-actions {
   display: flex;
+  align-items: center;
   gap: 10px;
   margin-top: 18px;
   justify-content: flex-end;
@@ -3198,7 +3252,14 @@ html[data-theme='dark'] .act-conflict { color: #e0a94a; }
 html[data-theme='dark'] .dir-remote { color: #b794f6; }
 html[data-theme='dark'] .receive-badge { color: #6ea6f0; border-color: rgb(110 166 240 / 0.5); }
 html[data-theme='dark'] .paused-badge { color: #e0a94a; border-color: rgb(224 169 74 / 0.55); }
-html[data-theme='dark'] .conflict-btn { color: #e0a94a !important; }
+html[data-theme='dark'] .conflict-float {
+  color: #ff8a80;
+  border-color: rgb(255 138 128 / 0.6);
+}
+
+html[data-theme='dark'] .conflict-float:hover {
+  background: rgb(255 138 128 / 0.12);
+}
 html[data-theme='dark'] .conflict-from,
 html[data-theme='dark'] .conflict-paths .muted { color: var(--muted); }
 
@@ -3260,3 +3321,259 @@ body .n-dropdown-menu .n-dropdown-option .n-dropdown-option-body::before {
   bottom: 2px;
   border-radius: 7px;
 }
+
+/* ============================================================================
+   目录级差异弹窗(FolderDiffModal / useFolderDiff)
+   —— 组件从 Mac 端先行落地,样式按仓库既有观感补齐(diff 报告 = 分组折叠清单)
+   ========================================================================== */
+
+.diff-bar {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin: 4px 0 12px;
+}
+
+.diff-bar__label {
+  font-size: 12px;
+  color: var(--muted);
+}
+
+.diff-bar__rerun {
+  margin-left: auto;
+}
+
+.diff-loading {
+  color: var(--muted);
+  font-size: 13px;
+  padding: 14px 0;
+}
+
+.diff-hint {
+  margin-top: 6px;
+  font-size: 12px;
+  color: var(--muted);
+}
+
+.diff-error {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 10px 12px;
+  border: 1px solid rgb(224 65 59 / 0.35);
+  border-radius: 10px;
+  background: rgb(224 65 59 / 0.07);
+  font-size: 13px;
+  color: #c23730;
+  margin: 6px 0 10px;
+}
+
+.diff-error__msg {
+  flex: 1 1 auto;
+  min-width: 0;
+}
+
+.diff-meta {
+  font-size: 12px;
+  color: var(--muted);
+  margin-bottom: 8px;
+  font-variant-numeric: tabular-nums;
+}
+
+/* 设备身份两行:角色标签定宽,「主机名 · IP」过长省略号 */
+.diff-legend {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  font-size: 12px;
+  margin-bottom: 10px;
+}
+
+.diff-legend__row {
+  display: flex;
+  align-items: baseline;
+  gap: 10px;
+  min-width: 0;
+}
+
+.diff-legend__role {
+  flex: none;
+  width: 32px;
+  color: var(--muted-strong);
+  font-weight: 600;
+}
+
+.diff-legend__where {
+  color: var(--muted);
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.diff-note {
+  font-size: 12px;
+  color: #9a6b00;
+  background: rgb(196 127 0 / 0.07);
+  border-radius: 8px;
+  padding: 6px 10px;
+  margin: 0 0 6px;
+}
+
+.diff-clean {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 13px;
+  color: var(--online);
+  background: rgb(47 165 111 / 0.1);
+  border-radius: 10px;
+  padding: 10px 12px;
+  margin: 8px 0;
+}
+
+.diff-clean__mark {
+  font-size: 15px;
+}
+
+.diff-groups {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  max-height: 56vh;
+  overflow-y: auto;
+}
+
+.diff-group__head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  width: 100%;
+  text-align: left;
+  background: none;
+  border: 0;
+  padding: 7px 10px;
+  border-radius: 10px;
+  font: inherit;
+  font-size: 13px;
+  color: var(--text);
+  cursor: pointer;
+}
+
+.diff-group__head:hover {
+  background: rgb(127 140 170 / 0.1);
+}
+
+.diff-group__caret {
+  flex: none;
+  color: var(--muted);
+  transition: transform 0.15s ease;
+}
+
+.diff-group__caret.is-open {
+  transform: rotate(90deg);
+}
+
+.diff-group__label {
+  font-weight: 600;
+  flex: none;
+}
+
+.diff-group__count {
+  min-width: 22px;
+  text-align: center;
+  font-size: 12px;
+  font-weight: 600;
+  padding: 1px 7px;
+  border-radius: 999px;
+  background: rgb(224 65 59 / 0.12);
+  color: #c23730;
+  font-variant-numeric: tabular-nums;
+}
+
+/* 「规则使然」组不是故障,计数用中性色,别和真问题抢注意力 */
+.diff-group__count.is-noise {
+  background: rgb(127 140 170 / 0.14);
+  color: var(--muted-strong);
+}
+
+.diff-group__hint {
+  color: var(--muted);
+  font-size: 12px;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.diff-items {
+  list-style: none;
+  margin: 2px 0 6px;
+  padding: 0 0 0 30px;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.diff-item {
+  font-size: 12.5px;
+  border-left: 2px solid var(--border-strong);
+  padding-left: 10px;
+  min-width: 0;
+}
+
+.diff-item__path {
+  color: var(--text);
+}
+
+.diff-item__rule {
+  color: var(--muted);
+  margin-top: 2px;
+}
+
+.diff-item__rule code {
+  background: rgb(127 140 170 / 0.12);
+  padding: 0 5px;
+  border-radius: 5px;
+}
+
+.diff-chip {
+  font-size: 11px;
+  padding: 1px 6px;
+  border-radius: 999px;
+}
+
+.diff-chip--hard {
+  background: rgb(224 65 59 / 0.12);
+  color: #c23730;
+  margin-left: 4px;
+}
+
+.diff-item__side {
+  display: flex;
+  gap: 8px;
+  color: var(--muted);
+  margin-top: 2px;
+}
+
+.diff-item__side-label {
+  flex: none;
+  width: 28px;
+}
+
+.diff-item__warn {
+  color: #9a6b00;
+  margin-top: 2px;
+}
+
+.diff-more {
+  margin-top: 2px;
+}
+
+/* 差异弹窗的暗色微调(同徽标策略:白底调的深色文字在深底上提亮) */
+html[data-theme='dark'] .diff-error { color: #f0a19c; }
+html[data-theme='dark'] .diff-note { color: #e0b45f; }
+html[data-theme='dark'] .diff-group__count { color: #ff8a80; }
+html[data-theme='dark'] .diff-chip--hard { color: #ff8a80; }
+html[data-theme='dark'] .diff-item__warn { color: #e0b45f; }

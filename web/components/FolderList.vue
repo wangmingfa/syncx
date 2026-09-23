@@ -27,6 +27,26 @@ function basename(p: string): string {
 function conflictCountOf(f: FolderInfo): number {
   return status.value.conflictCounts?.[folderKey(f)] ?? 0;
 }
+
+/**
+ * 「目录不可信」→ 重新采集身份的二次确认。文案按 kind 分级:
+ * remounted(仅设备号变、inode 未变)大概率是重挂,语气给到"可以放心确认";
+ * changed(inode 也变了)可能是换盘/重建,把风险说满,让用户先看内容再决定。
+ */
+function askReAdopt(f: FolderInfo): void {
+  const kind = folderErrorOf(f)?.kind;
+  askConfirm({
+    title: '重新采集目录身份',
+    message:
+      kind === 'identity-remounted'
+        ? '仅设备号变化、inode 未变:大概率是同一块盘重新挂载(重启 / 容器重启)。确认后将更新目录指纹并恢复同步,索引不受影响。'
+        : '目录身份与记录不符(换盘 / 目录被重建?)。请先确认该目录内容就是你要同步的数据 —— 确认后仅更新指纹,索引不受影响。',
+    detail: f.path,
+    confirmText: '确认并恢复同步',
+    note: '若内容看起来不对(像是挂了别的盘),不要确认;接回正确的盘后下一轮扫描会自动恢复。',
+    action: () => reAdoptIdentity(f),
+  });
+}
 /** 传输百分比(0–100);总字节未知或 0 时记 0。 */
 function filePercent(f: TransferFile): number {
   if (!f.bytesTotal) return 0;
@@ -50,8 +70,11 @@ const {
   openGlobalHistory,
   openConflicts,
   openVersions,
+  openDiff,
   toggleFolderPaused,
   toggleGlobalPaused,
+  reAdoptIdentity,
+  askConfirm,
   copy,
   hoverFolderKey,
   onFolderEnter,
@@ -150,12 +173,20 @@ function visibleFiles(f: FolderInfo): TransferFile[] {
       @mouseleave="onFolderLeave"
     >
       <!-- 状态悬浮标签:贴在卡片顶缘外侧,不占标题行空间(内联徽标会让标题与按钮
-           整行横移,切换时卡片内容左右跳)。两个共用一个容器 → 同时「接收 + 已暂停」
-           时并排而不打架;容器 pointer-events:none 让空隙鼠标穿透到下方按钮,单个徽标
-           可命中以显示 title 说明(「接收」没有专属操作按钮,只能靠徽标自身的 tooltip 解释)。 -->
-      <div v-if="f.receiveOnly || f.paused" class="card-floats">
+           整行横移,切换时卡片内容左右跳)。多个共用一个容器 → 同时命中时并排而不打架;
+           容器 pointer-events:none 让空隙鼠标穿透到下方按钮,单个徽标可命中以显示
+           title 说明(「接收」没有专属操作按钮,只能靠徽标自身的 tooltip 解释)。
+           「冲突 N」做成按钮:徽标本身就是收件箱入口,点它直接处理。 -->
+      <div v-if="f.receiveOnly || f.paused || conflictCountOf(f) > 0" class="card-floats">
         <span v-if="f.receiveOnly" class="float-badge receive-badge" title="接收模式:只拉不推,本机改动不会同步出去">接收</span>
         <span v-if="f.paused" class="float-badge paused-badge" title="已暂停:不扫描、不广播、不接收;连接与配对照常">已暂停</span>
+        <button
+          v-if="conflictCountOf(f) > 0"
+          type="button"
+          class="float-badge conflict-float"
+          :title="`${conflictCountOf(f)} 个冲突副本待处理:两边都改过同一文件,点开逐条选保留哪版`"
+          @click="openConflicts(f)"
+        >冲突 {{ conflictCountOf(f) }}</button>
       </div>
 
       <div class="item-top">
@@ -203,6 +234,23 @@ function visibleFiles(f: FolderInfo): TransferFile[] {
           </template>
           {{ f.devices.length === 0 ? '该目录还没有指派设备,无从对比' : '打开双栏对比:左右目录结构对齐,双击文件可看内容差异' }}
         </n-tooltip>
+        <!-- 差异报告:按需向对端取实时快照分类两端差异,轻量弹窗(双栏对比的快查版) -->
+        <n-tooltip trigger="hover" :style="{ maxWidth: '280px' }">
+          <template #trigger>
+            <span class="icon-btn">
+              <n-button size="small" quaternary circle :disabled="busy || f.devices.length === 0" @click="openDiff(f)">
+                <template #icon>
+                  <svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+                    <circle cx="10.5" cy="10.5" r="6" />
+                    <path d="M15 15l5 5" />
+                    <path d="M8 8.5h5M8 12h3" />
+                  </svg>
+                </template>
+              </n-button>
+            </span>
+          </template>
+          {{ f.devices.length === 0 ? '该目录还没有指派设备,无从对比' : '差异报告:实时取两端索引,按「冲突/待推送/待拉取…」分类' }}
+        </n-tooltip>
         <n-tooltip trigger="hover" :style="{ maxWidth: '280px' }">
           <template #trigger>
             <span class="icon-btn">
@@ -234,17 +282,7 @@ function visibleFiles(f: FolderInfo): TransferFile[] {
           </template>
           查看文件版本:被对端覆盖修改前的旧内容会自动留档,可恢复或删除
         </n-tooltip>
-        <!-- 冲突入口:仅在真有残留时出现(计数来自索引聚合,点开以实时扫盘为准) -->
-        <n-tooltip v-if="conflictCountOf(f) > 0" trigger="hover" :style="{ maxWidth: '280px' }">
-          <template #trigger>
-            <span class="icon-btn">
-              <n-button size="small" quaternary class="conflict-btn" :disabled="busy" @click="openConflicts(f)">
-                冲突 {{ conflictCountOf(f) }}
-              </n-button>
-            </span>
-          </template>
-          {{ conflictCountOf(f) }} 个冲突副本待处理:两边都改过同一文件,点开逐条选保留哪版
-        </n-tooltip>
+        <!-- 冲突入口已挪到卡顶悬浮徽标(冲突 N),见 card-floats -->
         <n-tooltip trigger="hover" :style="{ maxWidth: '280px' }">
           <template #trigger>
             <span class="icon-btn">
@@ -288,7 +326,7 @@ function visibleFiles(f: FolderInfo): TransferFile[] {
       </div>
 
       <!-- 同步错误横幅:该目录最近一次同步失败的原因(扫描干净后自动消失) -->
-      <div v-if="folderErrorOf(f)" class="folder-error" role="alert">
+      <div v-if="folderErrorOf(f)" class="folder-error" :class="{ 'folder-error--identity': folderErrorOf(f)!.kind?.startsWith('identity') }" role="alert">
         <svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" class="folder-error__icon">
           <path d="M12 3 2.5 20h19z" />
           <line x1="12" y1="10" x2="12" y2="14" />
@@ -296,8 +334,20 @@ function visibleFiles(f: FolderInfo): TransferFile[] {
         </svg>
         <div class="folder-error__body">
           <div class="folder-error__msg break">{{ folderErrorOf(f)!.message }}</div>
-          <div class="folder-error__time">{{ fmtTime(folderErrorOf(f)!.ts) }} · 下一轮扫描成功后自动清除</div>
+          <div class="folder-error__time">
+            {{ fmtTime(folderErrorOf(f)!.ts) }} ·
+            {{ folderErrorOf(f)!.kind === 'identity-missing' ? '接回正确的盘后下一轮扫描自动恢复' : folderErrorOf(f)!.kind?.startsWith('identity') ? '需人工确认,不会自动恢复' : '下一轮扫描成功后自动清除' }}
+          </div>
         </div>
+        <!-- 身份不符(非"目录读不到")才给轻量恢复入口:只更新指纹、不动索引;
+             missing 挂的可能是空目录/别的盘,绝不能一键确认,接回正确的盘自愈 -->
+        <n-button
+          v-if="folderErrorOf(f)!.kind === 'identity-changed' || folderErrorOf(f)!.kind === 'identity-remounted'"
+          size="tiny"
+          class="folder-error__adopt"
+          :disabled="busy"
+          @click="askReAdopt(f)"
+        >重新采集身份</n-button>
       </div>
 
       <!-- 按目录指派可同步的设备:卡片上只读展示,点「编辑」弹窗修改后显式保存 -->

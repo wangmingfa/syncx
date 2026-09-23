@@ -11,6 +11,7 @@ import type {
   UploadPackageInfo,
 } from '../types';
 import type { ToastKind } from './useToast';
+import type { FolderDiffApi } from './useFolderDiff';
 
 /** 目录卡设备标签的四态:同步中 / 待对方确认 / 对方已停止共享 / 设备离线。 */
 export type DeviceTagStatus = 'syncing' | 'pending' | 'stopped' | 'offline';
@@ -18,8 +19,11 @@ export type DeviceTagStatus = 'syncing' | 'pending' | 'stopped' | 'offline';
 /**
  * StatusPage 向子组件注入的共享上下文。子组件通过 useStatusContext() 取用,
  * 无需层层 props 透传。status 与各 action(刷新/确认/业务操作)共享同一实例。
+ *
+ * 目录级差异弹窗的一整套状态(diffOpen/runDiff/…)经 FolderDiffApi 并入,
+ * 由 StatusPage 把 useFolderDiff() 的返回展开进 provide。
  */
-export interface StatusContext {
+export interface StatusContext extends FolderDiffApi {
   // 核心
   status: Ref<StatusData>;
   busy: Ref<boolean>;
@@ -68,6 +72,8 @@ export interface StatusContext {
   onFolderLeave: () => void;
   /** 暂停/恢复单个目录的同步(目录卡开关);全局开关见 toggleGlobalPaused。 */
   toggleFolderPaused: (f: FolderInfo, paused: boolean) => Promise<void>;
+  /** 「目录不可信」横幅上的重新采集身份(仅更新指纹,索引不动)。 */
+  reAdoptIdentity: (f: FolderInfo) => Promise<void>;
   /** 全局暂停/恢复同步:所有目录一起停摆,各目录自己的暂停状态独立保留。 */
   toggleGlobalPaused: (paused: boolean) => Promise<void>;
 

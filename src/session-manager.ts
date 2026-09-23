@@ -30,6 +30,7 @@ import type { IndexEntry } from './index.js';
 import { hashBlock, splitIntoBlocks, readBlockAt } from './blockstore.js';
 import { createVersionVector, incrementVersion, mergeVersions, type VersionVector } from './version.js';
 import { recordSyncEvent } from './history.js';
+import { parseConflictCopy } from './conflicts.js';
 import { TrafficLedger } from './traffic.js';
 import type { TrafficStats } from './status.js';
 import { encodeSnapshot, decodeSnapshot } from './messages.js';
@@ -274,7 +275,7 @@ export class SyncSessionManager {
   // --- 目录级同步错误采集(Web UI 目录卡上的错误提示) ---
   // 记录每个目录最近一次同步失败的错误信息(内存态,不落盘);同一目录再次出错覆盖,
   // 一轮完整扫描无新错误则清除(问题自愈后提示自动消失)。
-  private readonly folderErrorsState = new Map<string, { message: string; ts: number }>();
+  private readonly folderErrorsState = new Map<string, { message: string; ts: number; kind?: string }>();
   // --- 传输流量统计(流量面板:累计字节 + 5min 窗口采样环,内存态、重启清零)---
   private readonly traffic = new TrafficLedger();
   // 待清理索引库:removeFolder 时登记「目录实例 key」,等配置热重载关闭该目录的
@@ -370,6 +371,8 @@ export class SyncSessionManager {
   >();
   /** 扫描重入保护(见 runScan)。 */
   private scanning = false;
+  /** 扫描进行中新收到的触发不丢弃,合并成「本轮跑完补跑一轮」(见 runScan)。 */
+  private scanQueued = false;
   /**
    * 全局暂停开关(config.paused 的内存镜像):为 true 时所有目录的数据面停摆。
    * 构造时从配置读取,热重载 / setGlobalPaused 时同步;各目录自己的 paused
@@ -515,16 +518,16 @@ export class SyncSessionManager {
   }
 
   /** 目录级错误列表(倒序),供 status 下发到目录卡。 */
-  getFolderErrors(): Array<{ folder: string; message: string; ts: number }> {
+  getFolderErrors(): Array<{ folder: string; message: string; ts: number; kind?: string }> {
     return [...this.folderErrorsState.entries()]
-      .map(([folder, e]) => ({ folder, message: e.message, ts: e.ts }))
+      .map(([folder, e]) => ({ folder, message: e.message, ts: e.ts, ...(e.kind ? { kind: e.kind } : {}) }))
       .sort((a, b) => b.ts - a.ts);
   }
 
-  recordFolderError(folderId: string, error: unknown, detail?: string): void {
+  recordFolderError(folderId: string, error: unknown, detail?: string, kind?: string): void {
     const message = error instanceof Error ? error.message : String(error);
     const full = detail ? `${detail}: ${message}` : message;
-    this.folderErrorsState.set(folderId, { message: full, ts: Date.now() });
+    this.folderErrorsState.set(folderId, { message: full, ts: Date.now(), ...(kind ? { kind } : {}) });
     this.logger.warn(`folder ${folderId} sync error: ${full}`);
     // 目录卡上的错误横幅属「要看就得看到」的信息,不能等兜底 tick
     this.notifyStatus();
@@ -579,12 +582,23 @@ export class SyncSessionManager {
    * 慢设备上大目录的单轮扫描可能超过定时间隔,若允许并发重入,两轮 scanFolder
    * 会在对方 applySend 写回索引之前各自对同一文件检出变更 → 同一次编辑产生两条
    * 记录 + 两次版本递增 + 两次广播。因此同一时刻只允许一轮扫描在跑。
+   *
+   * 但「在跑就丢弃」会造成另一种丢失:冲突处理/版本恢复等动作写盘后追的这次
+   * 触发若撞上定时扫描窗口,磁盘变化要等下一个定时周期才被索引看见(目录卡
+   * 冲突徽标迟迟不减)。改为排队合并:扫描中收到新触发只记一次 scanQueued,
+   * 本轮收尾后补跑一轮 —— 多次触发塌缩成一轮,既有界又不漏。
    */
   async runScan(): Promise<void> {
-    if (this.scanning) return;
+    if (this.scanning) {
+      this.scanQueued = true;
+      return;
+    }
     this.scanning = true;
     try {
-      await this.scanOnce();
+      do {
+        this.scanQueued = false;
+        await this.scanOnce();
+      } while (this.scanQueued);
     } finally {
       this.scanning = false;
       // 一轮扫描会同时改动条目/墓碑数、传输进度与目录错误 —— 扫完统一通知一次。
@@ -610,20 +624,25 @@ export class SyncSessionManager {
       // 参照 Syncthing 的 .stfolder,但**不往共享目录写任何文件**(见 folder-identity.ts)。
       // 目录卡上给出原因与恢复方式,而不是静默不同步;同一原因不重复刷日志。
       const verdict = checkFolderIdentity(folder.path, folder.config.folderIdentity);
-      if (verdict === 'missing' || verdict === 'changed') {
+      if (verdict === 'missing' || verdict === 'changed' || verdict === 'remounted') {
         const reason =
           verdict === 'missing'
             ? '目录不存在或不可读(盘未挂载?)'
-            : '目录身份与记录不符(换盘 / 重新挂载 / 目录被重建?)';
+            : verdict === 'remounted'
+              ? '仅设备号变化而 inode 未变:疑似同一磁盘被重新挂载(重启 / 磁盘重枚举 / 容器重启),目录实体大概率没变'
+              : '目录身份与记录不符(换盘 / 重新挂载 / 目录被重建?)';
         const prev = this.folderErrorsState.get(folder.id);
         if (!prev || !prev.message.includes('目录身份校验失败')) {
           this.recordFolderError(
             folder.id,
             new Error(
               `目录身份校验失败:${reason}。已暂停该目录同步以防误删。` +
-                `确认目录内容无误后,在界面移除并重新添加该目录即可恢复`,
+                (verdict === 'missing'
+                  ? '挂载/放好正确的盘后,下一轮扫描会自动恢复'
+                  : '确认目录内容就是要同步的数据后,点目录卡上的「重新采集身份」仅更新指纹(不动索引);拿不准就移除并重新添加该目录'),
             ),
             '目录不可信',
+            verdict === 'missing' ? 'identity-missing' : verdict === 'remounted' ? 'identity-remounted' : 'identity-changed',
           );
         }
         continue;
@@ -1612,6 +1631,28 @@ export class SyncSessionManager {
   }
 
   /** 同一个文件在本机与对端的两侧状态(内容对比弹窗的数据源)。只读。 */
+  /**
+   * 冲突收件箱「查看对比」的数据源:本机侧的两个文件(原文件 vs 冲突副本)。
+   * 形状与 readFilePair 完全一致(local=原文件当前内容即对端版,remote=被让位的本机旧版),
+   * 前端复用同一个对比弹窗;deviceId 从副本命名反解,标出冲突来源。
+   */
+  readConflictPair(folderId: string, copyPath: string): FileCompareResult {
+    const folder = this.folderStates.find((f) => f.id === folderId);
+    if (!folder) throw new Error('共享目录不存在(可能刚被移除)');
+    const cut = copyPath.lastIndexOf('/') + 1;
+    const parsed = parseConflictCopy(copyPath.slice(cut));
+    if (!parsed) throw new Error('不是冲突副本命名');
+    const originalRel = copyPath.slice(0, cut) + parsed.originalPath;
+    return {
+      folderId,
+      folderPath: folder.path,
+      deviceId: parsed.deviceId,
+      path: originalRel,
+      local: this.readLocalFileForCompare(folder, originalRel),
+      remote: this.readLocalFileForCompare(folder, copyPath),
+    };
+  }
+
   async readFilePair(folderId: string, deviceId: string, path: string): Promise<FileCompareResult> {
     const folder = this.folderStates.find((f) => f.id === folderId);
     if (!folder) throw new Error('共享目录不存在(可能刚被移除)');
@@ -2070,6 +2111,31 @@ export class SyncSessionManager {
     if (folder) folder.config.paused = paused;
     this.applyPausedState();
     this.logger.info(`folder sync ${paused ? 'paused' : 'resumed'}: ${folderId}`);
+  }
+
+  /**
+   * 「目录不可信」时的轻量恢复:重新采集并写回 folderIdentity,索引与实例完全不动。
+   * 比「移除并重新添加」(会开新空索引库重建基线)安全得多,替代原先只能手改
+   * config.json 的自救路径。防护:
+   *  - 目录当前读不到身份(不存在/未挂载/无权限)时**拒绝采集** —— 不能把空挂载点
+   *    确认成合法身份,这正是本守卫要拦的事;
+   *  - 是否「同一块盘/同一份数据」由前端二次确认交用户判断(重挂场景文案更明确)。
+   * 写回后清错误、立即补一轮扫描让目录恢复同步。
+   */
+  reAdoptFolderIdentity(folderId: string): void {
+    const folder = this.folderStates.find((f) => f.id === folderId);
+    if (!folder) throw new Error('共享目录不存在(可能刚被移除)');
+    const identity = readFolderIdentity(folder.path);
+    if (identity === null) throw new Error('目录当前不可读(不存在 / 未挂载?),拒绝采集身份');
+    mutateConfig(this.configPath, (config) => {
+      const f = config.sharedFolders.find((x) => folderIdFor(x) === folderId);
+      if (!f) throw new Error('共享目录不存在');
+      f.folderIdentity = identity;
+    });
+    folder.config.folderIdentity = identity;
+    this.clearFolderError(folder.id);
+    this.logger.info(`folder identity re-adopted: ${folderId} dev=${identity.dev} ino=${identity.ino}`);
+    void this.runScan();
   }
 
   /** 设置全局暂停:所有目录一起停摆;各目录自己的 paused 独立保留,恢复全局后仍生效。 */

@@ -39,6 +39,8 @@ export function useFolders(deps: CoreDeps): {
   saveEditDevices: (payload: { path: string; devices: string[]; gitignore: boolean }) => Promise<void>;
   toggleFolderPaused: (f: FolderInfo, paused: boolean) => Promise<void>;
   toggleGlobalPaused: (paused: boolean) => Promise<void>;
+  /** 「目录不可信」横幅上的重新采集身份(仅更新指纹,索引不动)。 */
+  reAdoptIdentity: (f: FolderInfo) => Promise<void>;
 } {
   const { status, busy, refreshStatus, post, askConfirm } = deps;
   const { showToast } = useToast();
@@ -236,6 +238,25 @@ export function useFolders(deps: CoreDeps): {
     }
   }
 
+  /**
+   * 「目录不可信」→ 重新采集身份指纹:仅更新 folderIdentity、不动索引,成功后
+   * 后端会补一轮扫描让目录恢复。目录不可读时后端拒绝,错误原样透出到 toast。
+   */
+  async function reAdoptIdentity(f: FolderInfo): Promise<void> {
+    try {
+      await apiJson('/api/folders/re-adopt-identity', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ folderId: f.id ?? f.path }),
+      });
+      showToast('已重新采集目录身份,正在恢复同步');
+      await refreshStatus();
+    } catch (e) {
+      showToast(errText(e, '采集身份失败'), 'alert');
+      await refreshStatus();
+    }
+  }
+
   return {
     hoverDevices,
     hoverFolderKey,
@@ -263,5 +284,6 @@ export function useFolders(deps: CoreDeps): {
     versionsFolder,
     toggleFolderPaused,
     toggleGlobalPaused,
+    reAdoptIdentity,
   };
 }

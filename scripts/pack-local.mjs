@@ -36,7 +36,6 @@ import {
   mkdirSync,
   mkdtempSync,
   readFileSync,
-  renameSync,
   rmSync,
   statSync,
   writeFileSync,
@@ -141,7 +140,10 @@ try {
   run('tar', ['-czf', 'local.tgz', 'package'], { cwd: staging });
 
   const target = join(outDir, `syncx-${version}.tgz`);
-  renameSync(join(staging, 'local.tgz'), target);
+  // 不能用 renameSync:staging 在系统临时目录(Windows 上通常是 C:),而目标在项目盘
+  // (如 F:)——跨卷 rename 直接 EXDEV 失败。staging 反正会在 finally 里整体清掉,
+  // 这里复制一份等价且跨平台稳。
+  copyFileSync(join(staging, 'local.tgz'), target);
 
   const size = statSync(target).size;
   const sha256 = createHash('sha256').update(readFileSync(target)).digest('hex');

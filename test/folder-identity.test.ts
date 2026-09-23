@@ -7,6 +7,7 @@ import { rmDir } from './helpers.js';
 import {
   LEGACY_FOLDER_MARKER,
   checkFolderIdentity,
+  compareIdentity,
   readFolderIdentity,
   removeLegacyFolderMarker,
 } from '../src/folder-identity.js';
@@ -77,6 +78,22 @@ describe('checkFolderIdentity', () => {
     // 未记录指纹时宁可退化到结构守卫,也不凭空信任
     expect(checkFolderIdentity(dir, undefined)).toBe('unknown');
     rmDir(dir);
+  });
+});
+
+describe('compareIdentity (纯比对,重挂 vs 换盘)', () => {
+  it('ok when both dev and ino match', () => {
+    expect(compareIdentity({ dev: '65115', ino: '210052' }, { dev: '65115', ino: '210052' })).toBe('ok');
+  });
+
+  it('remounted when only dev changed (同一磁盘重新挂载的典型指纹)', () => {
+    // 真实现场:Linux 设备重启后磁盘重枚举,dev 65114→65115 而 ino 不变
+    expect(compareIdentity({ dev: '65115', ino: '210052' }, { dev: '65114', ino: '210052' })).toBe('remounted');
+  });
+
+  it('changed when ino differs (目录被重建 / 换了别的盘)', () => {
+    expect(compareIdentity({ dev: '65115', ino: '999' }, { dev: '65114', ino: '210052' })).toBe('changed');
+    expect(compareIdentity({ dev: '65115', ino: '999' }, { dev: '65115', ino: '210052' })).toBe('changed');
   });
 });
 

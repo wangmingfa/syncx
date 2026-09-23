@@ -47,8 +47,23 @@ export type FolderIdentityVerdict =
   | 'missing'
   /** 指纹变化:换盘、重新挂载、或目录被删掉后重建。 */
   | 'changed'
+  /**
+   * 仅设备号(dev)变、inode 未变:同一文件系统被**重新挂载**的典型指纹
+   * (重启后磁盘重枚举、容器/VM 重启、mount -o remount)。目录实体大概率没换,
+   * 但保护机制无法与「同路径挂了一块恰好 inode 相同的盘」区分,仍须人工确认。
+   */
+  | 'remounted'
   /** 无法校验:尚未采集指纹,或平台不提供 inode。 */
   | 'unknown';
+
+/**
+ * 纯比对逻辑(不碰磁盘,便于测试):当前指纹 vs 记录指纹。
+ * ino 相同而 dev 不同 → 'remounted';ino 也不同 → 'changed'。
+ */
+export function compareIdentity(current: FolderIdentity, recorded: FolderIdentity): Exclude<FolderIdentityVerdict, 'missing' | 'unknown'> {
+  if (current.dev === recorded.dev && current.ino === recorded.ino) return 'ok';
+  return current.ino === recorded.ino ? 'remounted' : 'changed';
+}
 
 /**
  * 比对共享根当前身份与已记录的指纹。
@@ -66,7 +81,7 @@ export function checkFolderIdentity(
   const current = readFolderIdentity(root);
   if (current === null) return 'missing';
   if (recorded === undefined) return 'unknown';
-  return current.dev === recorded.dev && current.ino === recorded.ino ? 'ok' : 'changed';
+  return compareIdentity(current, recorded);
 }
 
 /**

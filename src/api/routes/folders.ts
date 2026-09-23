@@ -56,7 +56,7 @@ export async function tryFolderRoutes(
   res: ServerResponse,
   deps: ControlServerDeps,
 ): Promise<boolean> {
-  const { addFolder, removeFolder, setFolderDevices, setFolderUseGitignore, setFolderPaused, getFolderHistory, getGlobalHistory, clearFolderHistory, listFolderConflicts, resolveFolderConflict, diffFolder, compareFolder, readFilePair, applyFileSync, listFolderVersions, restoreFolderVersion, deleteFolderVersion } = deps;
+  const { addFolder, removeFolder, setFolderDevices, setFolderUseGitignore, setFolderPaused, reAdoptFolderIdentity, getFolderHistory, getGlobalHistory, clearFolderHistory, listFolderConflicts, resolveFolderConflict, conflictFilePair, applyConflictMerge, cleanIdenticalConflicts, diffFolder, compareFolder, readFilePair, applyFileSync, listFolderVersions, restoreFolderVersion, deleteFolderVersion } = deps;
   const path = req.url ? pathname(req.url) : '/';
 
   // Form POST /folders : add or (via _method=DELETE) remove a folder
@@ -151,6 +151,25 @@ export async function tryFolderRoutes(
       sendJson(res, 200, { ok: true });
     } catch (e) {
       sendJson(res, 400, { error: e instanceof Error ? e.message : 'invalid json body' });
+    }
+    return true;
+  }
+
+  // POST /api/folders/re-adopt-identity { folderId } : 「目录不可信」时重新采集身份指纹。
+  // 仅更新 folderIdentity(索引/实例不动);目录不可读时后端拒绝(400 + 原因)。
+  if (req.method === 'POST' && path === '/api/folders/re-adopt-identity' && reAdoptFolderIdentity) {
+    try {
+      const raw = await readBody(req);
+      const body = raw === '' ? {} : JSON.parse(raw);
+      const folderId = (body as { folderId?: unknown }).folderId;
+      if (typeof folderId !== 'string' || folderId === '') {
+        sendJson(res, 400, { error: 'folderId is required' });
+        return true;
+      }
+      reAdoptFolderIdentity(folderId);
+      sendJson(res, 200, { ok: true });
+    } catch (e) {
+      sendJson(res, 400, { error: e instanceof Error ? e.message : '采集身份失败' });
     }
     return true;
   }
@@ -493,6 +512,68 @@ export async function tryFolderRoutes(
       sendJson(res, 200, { ok: true });
     } catch (e) {
       sendJson(res, 400, { error: e instanceof Error ? e.message : '处理冲突失败' });
+    }
+    return true;
+  }
+
+  // GET /api/folders/conflicts/diff?folderId=xxx&copyPath=yyy : 冲突「查看对比」数据。
+  // 返回与 /api/folders/file 同形状:{ path(原文件), local(原文件当前=对端版), remote(副本=本机旧版), deviceId }。
+  if (req.method === 'GET' && req.url && path === '/api/folders/conflicts/diff' && conflictFilePair) {
+    const url = new URL(req.url, 'http://localhost');
+    const folderId = url.searchParams.get('folderId');
+    const copyPath = url.searchParams.get('copyPath');
+    if (!folderId || !copyPath) {
+      sendJson(res, 400, { error: 'folderId and copyPath are required' });
+      return true;
+    }
+    try {
+      sendJson(res, 200, conflictFilePair(folderId, copyPath));
+    } catch (e) {
+      sendJson(res, 400, { error: e instanceof Error ? e.message : '读取对比失败' });
+    }
+    return true;
+  }
+
+  // POST /api/folders/conflicts/merge { folderId, copyPath, content }
+  // : 把逐块合并后的完整内容写回原文件(当前内容先留档,副本不动),随后触发扫描广播。
+  if (req.method === 'POST' && path === '/api/folders/conflicts/merge' && applyConflictMerge) {
+    try {
+      const raw = await readBody(req);
+      const body = raw === '' ? {} : JSON.parse(raw);
+      const { folderId, copyPath, content } = body as { folderId?: unknown; copyPath?: unknown; content?: unknown };
+      if (typeof folderId !== 'string' || folderId === '') {
+        sendJson(res, 400, { error: 'folderId is required' });
+        return true;
+      }
+      if (typeof copyPath !== 'string' || copyPath === '') {
+        sendJson(res, 400, { error: 'copyPath is required' });
+        return true;
+      }
+      if (typeof content !== 'string') {
+        sendJson(res, 400, { error: 'content is required' });
+        return true;
+      }
+      applyConflictMerge(folderId, copyPath, content);
+      sendJson(res, 200, { ok: true });
+    } catch (e) {
+      sendJson(res, 400, { error: e instanceof Error ? e.message : '合并写回失败' });
+    }
+    return true;
+  }
+
+  // POST /api/folders/conflicts/clean-identical { folderId } : 一键清理逐字节无差异的副本。
+  if (req.method === 'POST' && path === '/api/folders/conflicts/clean-identical' && cleanIdenticalConflicts) {
+    try {
+      const raw = await readBody(req);
+      const body = raw === '' ? {} : JSON.parse(raw);
+      const folderId = (body as { folderId?: unknown }).folderId;
+      if (typeof folderId !== 'string' || folderId === '') {
+        sendJson(res, 400, { error: 'folderId is required' });
+        return true;
+      }
+      sendJson(res, 200, cleanIdenticalConflicts(folderId));
+    } catch (e) {
+      sendJson(res, 400, { error: e instanceof Error ? e.message : '清理失败' });
     }
     return true;
   }

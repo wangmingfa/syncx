@@ -262,12 +262,32 @@ export const HARD_IGNORE_NAMES = ['.git', '.hg', '.svn', '.syncx-trash', '.syncx
 const HARD_IGNORE_SET = new Set(HARD_IGNORE_NAMES);
 
 /**
- * 相对路径中任一段命中硬忽略名单(大小写不敏感,兼容 '\' 分隔符)。
+ * syncx 冲突副本的命名(生成逻辑见 executor 的 preserveLocalAsConflict / applyConflict):
+ *   <原名去扩展名>.sync-conflict-<ts36>[-<seq36>]-<10位base32设备ID>[.扩展名]
+ * 设备 ID 是纯 base32(A-Z2-7)不含连字符,所以该模式可以无歧义匹配/反解。
+ *
+ * 冲突副本是「本机当时输掉的那份内容」——设备本机的恢复残骸,对别的机器没有意义。
+ * 让它参与同步会在多设备间互相流传、副本撞副本生成双层套娃(2026-09-23 实测
+ * 三台设备风暴出 934 个副本、467 个双层命名),故列为硬忽略:不进索引、不同步、
+ * 不可被用户规则解除。收件箱/清理走磁盘直扫(conflicts.ts),不受此影响。
+ */
+export const CONFLICT_COPY_RE = /^(.+)\.sync-conflict-[0-9a-z]+(?:-[0-9a-z]+)?-([A-Z2-7]{10})(\.[^./]*)?$/;
+
+/** 文件名是否为 syncx 冲突副本(按单段 basename 判定)。 */
+export function isConflictCopyName(name: string): boolean {
+  return CONFLICT_COPY_RE.test(name);
+}
+
+/**
+ * 相对路径中任一段命中硬忽略名单(大小写不敏感,兼容 '\' 分隔符),
+ * 或 basename 符合冲突副本命名。
  * 路径段比较而非子串比较:`.github` / `.svnignore` 这类前缀相同但段不同的名字不受影响。
  */
 export function isHardIgnored(relPath: string): boolean {
   for (const segment of relPath.split(/[\\/]/)) {
-    if (segment !== '' && HARD_IGNORE_SET.has(segment.toLowerCase())) return true;
+    if (segment === '') continue;
+    if (HARD_IGNORE_SET.has(segment.toLowerCase())) return true;
+    if (isConflictCopyName(segment)) return true;
   }
   return false;
 }

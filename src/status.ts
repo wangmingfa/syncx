@@ -67,6 +67,11 @@ export interface FolderErrorStatus {
   message: string;
   /** 发生时间(毫秒时间戳)。 */
   ts: number;
+  /**
+   * 错误分类(供 UI 精准给恢复动作):identity-changed / identity-remounted /
+   * identity-missing = 目录身份校验失败(前两者可「重新采集身份」);缺省 = 普通错误。
+   */
+  kind?: string;
 }
 
 /** 一次中转活动(ADR-0014):本机作为枢纽,把来源设备收到的目录索引条目转发给目标设备。

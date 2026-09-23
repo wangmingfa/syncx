@@ -70,6 +70,8 @@ export interface FolderErrorItem {
   folder: string;
   message: string;
   ts: number;
+  /** 错误分类:identity-changed / identity-remounted / identity-missing = 目录身份校验失败。 */
+  kind?: string;
 }
 
 export interface StatusData {
@@ -233,6 +235,55 @@ export interface FolderCompareData {
   };
   localProgress?: { pending: number; sending: number; receiving: number };
   remoteProgress?: { pending: number; sending: number; receiving: number };
+}
+
+/**
+ * GET /api/folders/diff 的响应(目录级差异弹窗 useFolderDiff/FolderDiffModal 用)。
+ * 与 compare 载荷同形;Mac 端功能先行落地,若其 types.ts 原版稍后同步过来有出入,以并集校准。
+ */
+export type FolderDiffData = FolderCompareData;
+
+/**
+ * 通用差异弹窗「一侧」的配置。FileDiffModal 已抽象为纯展示引擎 ——
+ * 「两侧是什么、能做什么」全由调用方(对比页 / 冲突收件箱)定义,组件不再内置
+ * 本机/对端语义。role 是组句用的角色短名(如「用{role}覆盖…」),缺省取 label。
+ */
+export interface DiffPaneData {
+  /** 列名:出现在图例与表头(本机 / 对端 / 原文件 / 冲突副本 …)。 */
+  label: string;
+  /** 组句角色名(降级说明、按钮 tooltip 里的短称);缺省 = label。 */
+  role?: string;
+  /** 列名后的补充说明(目录路径 / 设备 ID / 「本机旧版」注记),可选。 */
+  note?: string;
+  side: FileSideData;
+}
+
+/** 弹窗据两侧实况算出的动作可用性上下文,传给 footerActions 的判定函数。 */
+export interface DiffActionCtx {
+  /** 两侧内容是否真的逐字节一致(文本原文比/图片字节比,降级态恒 false)。 */
+  identical: boolean;
+  leftExists: boolean;
+  rightExists: boolean;
+}
+
+/** 通用差异弹窗的 footer 动作:组件只负责渲染、禁用、二次确认条,语义由调用方解释。 */
+export interface DiffFooterAction {
+  id: string;
+  label: string;
+  tone?: 'default' | 'primary' | 'error';
+  disabled?: (ctx: DiffActionCtx) => boolean;
+  /** tooltip:禁用讲「为什么不能点」,可用讲「这一下做什么」。与 disabled 同源计算。 */
+  hint?: (ctx: DiffActionCtx) => string;
+  /** 给了就先进入内联二次确认(文案由调用方写全),确认后才 emit('action', id)。 */
+  confirm?: string;
+}
+
+/** 逐块应用按钮配置:哪个方向出按钮、tooltip 写什么;省略 = 该方向无按钮。 */
+export interface DiffHunkApply {
+  /** 把「右」块应用到「左」侧(← 按钮)的 tooltip;undefined 不出按钮。 */
+  toLeft?: string;
+  /** 把「左」块应用到「右」侧(→ 按钮)的 tooltip。 */
+  toRight?: string;
 }
 
 /** 文件内容对比:某一侧的状态。 */

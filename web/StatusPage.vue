@@ -8,6 +8,7 @@ import { useConfirm } from './composables/useConfirm';
 import { useDevices } from './composables/useDevices';
 import { useFolders } from './composables/useFolders';
 import { useOffers } from './composables/useOffers';
+import { useFolderDiff } from './composables/useFolderDiff';
 import { useSelfUpdate } from './composables/useSelfUpdate';
 import { useFormat } from './composables/useFormat';
 import {
@@ -39,6 +40,7 @@ import StatusPills from './components/StatusPills.vue';
 import OffersPanel from './components/OffersPanel.vue';
 import FolderList from './components/FolderList.vue';
 import DeviceList from './components/DeviceList.vue';
+import FolderDiffModal from './components/FolderDiffModal.vue';
 
 const props = defineProps<{ status: StatusData; message?: string }>();
 
@@ -54,6 +56,8 @@ const deps: CoreDeps = { status, busy, isDev, refreshStatus, post, askConfirm };
 const devices = useDevices(deps);
 const folders = useFolders(deps);
 const offers = useOffers(deps);
+// 目录级差异弹窗(Mac 端功能):状态经 provide 展开进 context,FolderDiffModal 自取
+const folderDiff = useFolderDiff(deps);
 const selfUpdate = useSelfUpdate(deps);
 const fmt = useFormat(status);
 
@@ -128,6 +132,7 @@ provide(StatusContextKey, {
   ...devices,
   ...folders,
   ...offers,
+  ...folderDiff,
   ...selfUpdate,
   ...fmt,
   folderKey,
@@ -191,6 +196,9 @@ provide(StatusContextKey, {
 
     <!-- 传输统计弹窗 -->
     <TrafficModal :open="trafficOpen" @close="trafficOpen = false" />
+
+    <!-- 目录级差异弹窗(状态全部走 context,无 props) -->
+    <FolderDiffModal />
 
     <!-- 通用二次确认弹窗 -->
     <ConfirmModal :state="confirmState" :notify="showToast" @closed="confirmState = null" />
