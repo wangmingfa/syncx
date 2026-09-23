@@ -28,13 +28,16 @@ export async function tryPublicAuthRoutes(
   const { authFile } = deps;
   const path = req.url ? pathname(req.url) : '/';
 
-  // GET /api/auth : 公开。告诉登录页当前该渲染哪种表单(账号密码 / 令牌)。
+  // GET /api/auth : 公开。告诉登录页当前该渲染哪种表单(账号密码 / 令牌),
+  // 并带上数据目录 —— 令牌输入框的路径提示(control.token 位置)要跟着真实目录走,
+  // 数据目录隔离(--config-dir)时提示才不会指错地方。仅目录路径,无敏感内容。
   if (req.method === 'GET' && path === '/api/auth') {
     const acct = authFile ? loadAccount(authFile) : undefined;
     sendJson(res, 200, {
       mode: acct ? 'password' : 'token',
       ...(acct ? { username: acct.username } : {}),
       ...(authFile ? {} : { passwordLogin: false }),
+      ...(deps.configDir ? { configDir: deps.configDir } : {}),
     });
     return true;
   }

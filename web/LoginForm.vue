@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { ref, onMounted } from 'vue';
+import { ref, computed, onMounted } from 'vue';
 import { NInput, NButton, NTabs, NTab } from 'naive-ui';
 
 // 登录失败原因:优先取外部传入,否则用本地校验结果。
@@ -21,16 +21,22 @@ const password = ref('');
 const token = ref('');
 const busy = ref(false);
 const errorMsg = ref<string | undefined>(props.error);
+/** daemon 的数据目录(/api/auth 下发;取不到 = 旧后端,退回默认 ~/.syncx)。 */
+const configDir = ref('');
+
+/** 令牌输入框的路径提示:跟着真实数据目录走,--config-dir 隔离(dev .syncx-dev)时不误导。 */
+const tokenPlaceholder = computed(() => `粘贴 ${(configDir.value || '~/.syncx').replace(/[\\/]+$/, '')}/control.token 的内容`);
 
 onMounted(async () => {
   try {
     const res = await fetch('/api/auth');
     if (res.ok) {
-      const data = (await res.json()) as { mode?: Mode };
+      const data = (await res.json()) as { mode?: Mode; configDir?: string };
       if (data.mode === 'password') {
         hasPassword.value = true;
         mode.value = 'password';
       }
+      if (data.configDir) configDir.value = data.configDir;
     }
   } catch {
     // 拉取失败就退回令牌登录,不阻塞用户
@@ -194,7 +200,7 @@ async function submitToken(): Promise<void> {
             type="password"
             show-password-on="click"
             autocomplete="current-password"
-            placeholder="粘贴 ~/.syncx/control.token 的内容"
+            :placeholder="tokenPlaceholder"
           />
         </label>
 

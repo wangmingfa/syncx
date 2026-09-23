@@ -114,9 +114,15 @@ export interface UpgradeIo {
  * - 已是最新:提示后直接返回,不触发安装;
  * - 本机 daemon 在运行:先给提示(Windows 下全局安装替换正在使用的文件可能 EPERM);
  * - 安装经子进程执行且 stdio 透传,npm 的交互/进度原样呈现。
+ * @param opts.pidFile daemon pid 文件路径;不传按默认 ~/.syncx/syncx.pid 探测。
+ *   cli 会传 --config-dir/--config 解析出的真实路径,数据目录隔离时提示才不会漏判。
  * @throws 查询失败或 npm 安装退出码非零时抛错。
  */
-export async function runUpgrade(tagInput: string | undefined, io: UpgradeIo = { log: console.log, error: console.error }): Promise<void> {
+export async function runUpgrade(
+  tagInput: string | undefined,
+  io: UpgradeIo = { log: console.log, error: console.error },
+  opts?: { pidFile?: string },
+): Promise<void> {
   const tag = normalizeUpgradeTag(tagInput);
   const current = packageVersion();
   io.log(`当前版本: ${current}`);
@@ -131,7 +137,7 @@ export async function runUpgrade(tagInput: string | undefined, io: UpgradeIo = {
     return;
   }
   io.log(`${current} → ${target}(${tag} 通道),开始安装...`);
-  if (isDaemonRunning()) {
+  if (isDaemonRunning(opts?.pidFile)) {
     io.log('提示: 检测到 daemon 正在运行。若安装报 EPERM/文件占用,请先 syncx stop 再重试。');
   }
 

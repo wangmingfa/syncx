@@ -122,8 +122,8 @@ interface Started {
   close: () => void;
 }
 
-async function start(token: string, authFile: string): Promise<Started> {
-  const server = createControlServer({ token, authFile, getStatus: () => ({ ok: true }) });
+async function start(token: string, authFile: string, configDir?: string): Promise<Started> {
+  const server = createControlServer({ token, authFile, configDir, getStatus: () => ({ ok: true }) });
   await new Promise<void>((r) => server.listen(0, '127.0.0.1', r));
   const addr = server.address();
   const port = typeof addr === 'object' && addr ? addr.port : 0;
@@ -152,6 +152,20 @@ describe('control server: 令牌 + 账号密码双通道', () => {
   it('/api/auth 未设密码时报告 token 模式', async () => {
     const res = await fetch(`http://127.0.0.1:${s.port}/api/auth`);
     expect(((await res.json()) as { mode: string }).mode).toBe('token');
+  });
+
+  it('/api/auth 携带数据目录,令牌输入框的路径提示跟着 --config-dir 走', async () => {
+    const withDir = await start(TOKEN, authFile, 'D:/data/syncx-dev');
+    try {
+      const res = await fetch(`http://127.0.0.1:${withDir.port}/api/auth`);
+      const data = (await res.json()) as { mode: string; configDir?: string };
+      expect(data.configDir).toBe('D:/data/syncx-dev');
+    } finally {
+      withDir.close();
+    }
+    // 未传 configDir 的 deps(旧形态)不下发该字段:前端退回 ~/.syncx 提示
+    const data = (await (await fetch(`http://127.0.0.1:${s.port}/api/auth`)).json()) as { configDir?: string };
+    expect(data.configDir).toBeUndefined();
   });
 
   it('未认证请求被拒;Bearer 令牌可用', async () => {

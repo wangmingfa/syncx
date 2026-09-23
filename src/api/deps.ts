@@ -4,6 +4,12 @@ import type { SyncHistoryFilter } from '../history.js';
 export interface ControlServerDeps {
   token: string;
   /**
+   * 数据目录(--config-dir / --config 的解析结果,cli 传 configPath 所在目录)。
+   * GET /api/auth 会把它带给登录页:令牌输入框的路径提示据此动态生成,
+   * 数据目录隔离(dev .syncx-dev / 自定义 --config)时不再误导用户去 ~/.syncx 找。
+   */
+  configDir?: string;
+  /**
    * 账号密码落盘位置(cli 传 ~/.syncx/auth.json)。
    * 不传则禁用账号密码登录,只保留 control.token 一条通道;
    * 文件不存在时同样退回「仅令牌登录」,设置密码后才启用账号登录。

@@ -117,6 +117,9 @@ export interface StatusPayload {
   /** 本机主机名 / 局域网地址(顶栏 chip;旧后端缺省)。 */
   hostname?: string;
   localAddresses?: string[];
+  /** 数据目录(--config-dir / --config 的解析结果;旧后端缺省)。
+   *  前端示例命令/路径提示(control.token、--log-file)据此动态生成,不写死 ~/.syncx。 */
+  configDir?: string;
   /** 全局同步设置当前值(设置弹窗;旧后端缺省)。 */
   settings?: GlobalSettingsStatus;
 }
@@ -156,6 +159,8 @@ export interface StatusExtras {
   hostname?: string;
   /** daemon 所在机器的局域网 IPv4 地址列表(排除回环;多网卡则多条)。 */
   localAddresses?: string[];
+  /** 数据目录(前端路径提示动态生成用;缺省 = 后端旧版本未提供)。 */
+  configDir?: string;
   /** 全局同步设置当前值(设置弹窗;缺省 = 后端旧版本未提供)。 */
   settings?: GlobalSettingsStatus;
 }
@@ -191,6 +196,7 @@ export function buildStatus(
     traffic: extras.traffic,
     hostname: extras.hostname,
     localAddresses: extras.localAddresses,
+    configDir: extras.configDir,
     settings: extras.settings,
   };
 }

@@ -5,6 +5,8 @@ export interface ParsedArgs {
   /** 位置参数(如 invite/join/diff 的参数)。 */
   positionals: string[];
   configPath?: string;
+  /** 数据目录:取 <dir>/config.json 作为配置文件(与 --config 二选一,同时给出时 --config 优先)。 */
+  configDir?: string;
   port?: number;
   controlPort?: number;
   /** Control API/Web UI bind host; default 127.0.0.1 (localhost only). */
@@ -54,6 +56,9 @@ export function parseArgs(argv: string[]): ParsedArgs {
     const value = rest[i + 1];
     if (flag === '--config') {
       result.configPath = value;
+      i++;
+    } else if (flag === '--config-dir') {
+      result.configDir = value;
       i++;
     } else if (flag === '--port') {
       result.port = Number(value);

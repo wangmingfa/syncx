@@ -68,6 +68,7 @@ export function helpText(version: string): string {
     '  -h, --help                显示本帮助',
     '  -v, --version             显示版本号',
     '  --config <path>           配置文件路径(默认 ~/.syncx/config.json)',
+    '  --config-dir <dir>        数据目录(取 <dir>/config.json;与 --config 同时给出时后者优先)',
     '  --port <port>             peer 监听端口(默认 22000)',
     '  --control-port <port>     Web UI / 控制 API 端口(默认 8384)',
     '  --host <host>             控制 API 绑定地址(默认 127.0.0.1)',

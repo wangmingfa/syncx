@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { ref, watch } from 'vue';
+import { ref, computed, watch } from 'vue';
 import { NButton, NInput } from 'naive-ui';
 import ModalShell from './ModalShell.vue';
 
@@ -17,6 +17,13 @@ const password = ref('');
 const confirm = ref('');
 /** 设置/清除密码必须当场提供的 control.token 原文(防止已登录机器被他人顺手改密)。 */
 const token = ref('');
+/** daemon 的数据目录(/api/auth 下发;取不到 = 旧后端,退回默认 ~/.syncx)。 */
+const configDir = ref('');
+
+/** 令牌输入框的路径提示:跟着真实数据目录走,--config-dir 隔离(dev .syncx-dev)时不误导。 */
+const tokenPlaceholder = computed(
+  () => `粘贴 ${(configDir.value || '~/.syncx').replace(/[\\/]+$/, '')}/control.token 的内容`,
+);
 
 // 每次打开都回读当前认证模式(token / password)
 watch(
@@ -28,8 +35,9 @@ watch(
     try {
       const res = await fetch('/api/auth');
       if (!res.ok) throw new Error(`auth ${res.status}`);
-      const data = (await res.json()) as { mode?: 'token' | 'password' };
+      const data = (await res.json()) as { mode?: 'token' | 'password'; configDir?: string };
       mode.value = data.mode === 'password' ? 'password' : 'token';
+      if (data.configDir) configDir.value = data.configDir;
     } catch {
       mode.value = 'token';
     }
@@ -130,7 +138,7 @@ async function removePassword(): Promise<void> {
         type="password"
         show-password-on="click"
         autocomplete="off"
-        placeholder="粘贴 ~/.syncx/control.token 的内容"
+        :placeholder="tokenPlaceholder"
       />
       <p class="form-hint">设置或清除登录密码都需当场提供控制令牌,防止他人在已登录的机器上顺手改密。</p>
     </label>

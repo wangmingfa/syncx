@@ -104,6 +104,9 @@ export interface StatusData {
   hostname?: string;
   /** daemon 所在机器的局域网 IPv4 列表(顶栏本机 chip;多网卡则多条)。 */
   localAddresses?: string[];
+  /** 数据目录(--config-dir / --config 解析结果;旧后端缺省)。
+   *  路径提示(control.token、--log-file 示例)据此动态生成,不写死 ~/.syncx。 */
+  configDir?: string;
   /** 全局同步设置当前值(设置弹窗预填;旧后端缺省)。 */
   settings?: GlobalSettingsData;
 }

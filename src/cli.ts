@@ -165,9 +165,13 @@ async function runDiffCommand(
  * thin on purpose: real daemon integration tests are a later batch.
  */
 export async function run(args: ParsedArgs): Promise<void> {
-  // --config 指向完整配置文件路径;默认 ~/.syncx/config.json。
-  // 身份/索引/token 等数据仍存放在配置文件所在目录。
-  const configPath = args.configPath ?? join(homedir(), '.syncx', 'config.json');
+  // --config 指向完整配置文件路径;--config-dir 指向数据目录(取 <dir>/config.json),
+  // 两者同时给出时 --config 优先;都不给则默认 ~/.syncx/config.json。
+  // 身份/索引/token/回收站/版本等数据一律存放在配置文件所在目录,因此指定独立的
+  // --config-dir 即可与生产实例完全隔离(dev 与生产并行跑两套,见 package.json dev 脚本)。
+  const configPath =
+    args.configPath ??
+    (args.configDir ? join(args.configDir, 'config.json') : join(homedir(), '.syncx', 'config.json'));
   const configDir = dirname(configPath);
   // 日志实例在身份/配置加载后初始化,CLI 一次性命令(status/install/invite/join)
   // 仍用 console.log 直接打印给用户;仅 daemon 运行期用 logger 持久化。
@@ -180,9 +184,10 @@ export async function run(args: ParsedArgs): Promise<void> {
     return;
   }
 
-  // upgrade 同样不依赖本地身份/配置:自升级 npm 包,与 ~/.syncx 数据无关
+  // upgrade 不读写身份/配置数据,但「daemon 是否在跑」的探测要看 pid 文件 ——
+  // 路径必须跟着 --config-dir/--config 走,数据目录隔离时提示才不会漏判。
   if (args.command === 'upgrade') {
-    await runUpgrade(args.positionals[0]);
+    await runUpgrade(args.positionals[0], { log: console.log, error: console.error }, { pidFile: pidFilePath(configDir) });
     return;
   }
 
@@ -409,6 +414,8 @@ export async function run(args: ParsedArgs): Promise<void> {
   // 上方的状态推送通道能取到同一份 getStatus 实现,避免两处各写一遍状态快照)。
   const controlDeps: ControlServerDeps = {
     token,
+    // 数据目录:登录页令牌输入框的路径提示(control.token 位置)据此动态生成
+    configDir,
     // 账号密码落盘位置:与 control.token 同一目录,0600。文件不存在即「仅令牌登录」。
     authFile: join(configDir, 'auth.json'),
     devViteUrl: args.devViteUrl,
@@ -570,6 +577,8 @@ export async function run(args: ParsedArgs): Promise<void> {
             versionsPerPath: config.versionsPerPath,
             historyMaxEvents: getHistoryMaxEvents(),
           },
+          // 数据目录:日志弹窗等处的示例命令要跟真实目录走(--config-dir 隔离时不误导)
+          configDir,
         },
       );
     },

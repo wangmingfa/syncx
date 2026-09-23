@@ -1,14 +1,21 @@
 <script setup lang="ts">
-import { ref, watch } from 'vue';
+import { ref, computed, watch } from 'vue';
 import { NButton } from 'naive-ui';
 import { apiJson, errText } from '../utils/api';
 import { useToast } from '../composables/useToast';
+import { useStatusContext } from '../composables/statusContext';
 import { copyText } from '../utils/clipboard';
 import ModalShell from './ModalShell.vue';
 
 const props = defineProps<{ open: boolean }>();
 const emit = defineEmits<{ close: [] }>();
 const { showToast } = useToast();
+const { status } = useStatusContext();
+
+/** 示例命令里的数据目录:跟 daemon 真实 --config-dir 走(旧后端缺省 ~/.syncx),不写死。 */
+const defaultLogPath = computed(
+  () => `${(status.value.configDir || '~/.syncx').replace(/[\\/]+$/, '')}/syncx.log`,
+);
 
 const loading = ref(false);
 const lines = ref<string[]>([]);
@@ -90,7 +97,7 @@ async function copyLogs(): Promise<void> {
       <div class="logs-unavailable" role="alert">{{ error }}</div>
       <p class="confirm-note-extra">
         在启动 daemon 时加上 <code class="mono">--log-file &lt;路径&gt;</code> 参数(如
-        <code class="mono">syncx start --log-file ~/.syncx/syncx.log</code>),日志会同步写入该文件,这里即可查看。
+        <code class="mono">syncx start --log-file {{ defaultLogPath }}</code>),日志会同步写入该文件,这里即可查看。
       </p>
     </template>
     <pre v-else ref="view" class="logs-view mono">{{ lines.join('\n') }}</pre>

@@ -50,6 +50,13 @@ function inlineCssIntoJs(): Plugin {
 // code-inspector 是 dev 态「点击元素跳 IDE」的便利插件;测试(vitest)与生产
 // 构建都不需要它。受限环境(沙箱)下其临时目录创建会被拦截,导致 vitest 在
 // 配置加载/转换阶段直接失败,故仅在非测试模式下启用(VITEST 由 vitest 注入)。
+
+// dev 后端专属端口:与 package.json dev 脚本的 --port 23000 --control-port 9384
+// 保持一致(助记:dev = 生产端口 + 1000,生产为 peer 22000 / 控制 8384)。刻意拉开
+// 距离,避免与生产并行跑在同一台机器时撞端口,也避免两个端口只差 1 时的手滑混淆。
+// 配置目录同样经 --config-dir .syncx-dev 完全隔离。改动这里必须同步改 dev 脚本,反之亦然。
+const DEV_CONTROL_PORT = 9384;
+
 export default defineConfig(({ mode }: { mode: string }) => {
   // code-inspector 是 dev 态「点击元素跳 IDE」的便利插件;测试(vitest, mode=test)
   // 与生产构建都不需要它。受限环境(沙箱)下其临时目录创建会被拦截,导致 vitest
@@ -87,35 +94,35 @@ export default defineConfig(({ mode }: { mode: string }) => {
     exclude: ['**/node_modules/**', '**/dist/**', '**/*.sync-conflict-*'],
   },
   // 开发模式:Vite dev server 提供 web/ 的热重载(HMR),
-  // 把 /api/*、/login 代理到 control server(127.0.0.1:8384),
+  // 把 /api/*、/login 代理到 control server(127.0.0.1:9384,dev 专属端口),
   // 登录 cookie 与认证逻辑经代理转发保持一致。
   // allowedHosts:局域网/外网访问时 Vite 会拒绝请求;手动白名单放行。
   server: {
     host: '0.0.0.0',
-    // 固定端口:dev 下 8384 会把前端请求代理到这个地址(见 --dev-vite),
+    // 固定端口:dev 下 9384 会把前端请求代理到这个地址(见 --dev-vite),
     // 端口一旦漂移,代理目标就静默失效。strictPort 让冲突直接报错而非换端口。
     port: 5173,
     strictPort: true,
     // HMR 的 WebSocket 不再需要 ws.clientPort:dev 下页面由 vite 自身(5173)
     // 直接提供,浏览器按 location.port 连过来正好命中 HMR 端点。
-    // (旧写法是为了兼容"页面从 8384 打开"的反向代理形态,该形态已废弃。)
+    // (旧写法是为了兼容"页面从控制端口打开"的反向代理形态,该形态已废弃。)
     allowedHosts: ['wmf3.com'],
-    // dev 下浏览器经 8384 的页面会 302 跳到 5173(vite 原生 HMR 源),
-    // 因此 5173 才是前端实际运行域。这里把前端需要的控制端点代理回 8384:
+    // dev 下浏览器经 9384 的页面会 302 跳到 5173(vite 原生 HMR 源),
+    // 因此 5173 才是前端实际运行域。这里把前端需要的控制端点代理回 9384:
     // - /api:JSON 控制 API(状态/扫描/配对等)
-    // - /login:仅代理 POST(登录提交,8384 下发 HttpOnly cookie);
+    // - /login:仅代理 POST(登录提交,9384 下发 HttpOnly cookie);
     //   GET /login 是页面壳,交给 vite 自身 SPA fallback 返回 index.html,避免回环。
-    // - /favicon.svg:8384 侧提供的站点图标,避免 5173 页面 404。
+    // - /favicon.svg:控制侧提供的站点图标,避免 5173 页面 404。
     proxy: {
       // ws: true 让 /api/events(状态推送通道)的 Upgrade 请求也转发到控制服务。
       // 少了它,5173 页面上的 WebSocket 会被当成普通请求处理、握手失败,前端只能
       // 退回轮询 —— 功能不报错但实时性失效,很难察觉。
-      '/api': { target: 'http://127.0.0.1:8384', ws: true },
-      '/favicon.svg': 'http://127.0.0.1:8384',
+      '/api': { target: `http://127.0.0.1:${DEV_CONTROL_PORT}`, ws: true },
+      '/favicon.svg': `http://127.0.0.1:${DEV_CONTROL_PORT}`,
       '/login': {
-        target: 'http://127.0.0.1:8384',
+        target: `http://127.0.0.1:${DEV_CONTROL_PORT}`,
         changeOrigin: true,
-        // GET /login 不代理(返回 index.html 让前端渲染登录表单);POST /login 才转发到 8384
+        // GET /login 不代理(返回 index.html 让前端渲染登录表单);POST /login 才转发
         bypass(req) {
           return req.method === 'GET' ? '/login' : undefined;
         },

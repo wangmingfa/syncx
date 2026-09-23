@@ -378,18 +378,21 @@ npm run typecheck      # TypeScript 类型检查(tsc --noEmit)
 npm run build          # 编译到 dist/(tsc)
 ```
 
-`npm run dev` 会同时起两个进程:vite dev server(固定 `5173`)和 syncx 后端(控制端口 `8384`)。
+`npm run dev` 会同时起两个进程:vite dev server(固定 `5173`)和 syncx 后端。
+后端与生产实例**完全隔离**:控制端口 `9384`、peer 端口 `23000`(助记:生产默认
+`8384`/`22000` 各 +1000),数据目录独立在仓库根 `.syncx-dev/`(生产是 `~/.syncx`),
+两边可以并行运行,互不抢端口、互不碰数据。
 
 **dev 下浏览器请打开 `http://localhost:5173`** —— 页面由 vite 原生提供,改 `.vue` 即时热更新,
 也不需要先跑 `vite build`。vite 会把前端用到的控制端点(`/api/*`、`POST /login`、`/favicon.svg`)
-代理回 `8384`,登录与会话行为和生产一致。
+代理回 `9384`,登录与会话行为和生产一致。
 
-为避免走错入口,dev 下 `8384` **不再提供 web 页面**:访问它会 302 重定向到 `5173`(只换端口、
-沿用你输入的主机名,因此局域网访问 `http://<内网IP>:8384` 也会正确跳到 `http://<内网IP>:5173`)。
-`8384` 此时只保留控制 API。
+为避免走错入口,dev 下 `9384` **不再提供 web 页面**:访问它会 302 重定向到 `5173`(只换端口、
+沿用你输入的主机名,因此局域网访问 `http://<内网IP>:9384` 也会正确跳到 `http://<内网IP>:5173`)。
+`9384` 此时只保留控制 API。
 
-> 为什么不能从 `8384` 打开页面?HMR 走 WebSocket,而 `8384` 侧只能做 HTTP 反向代理、
-> 无法转发 WebSocket upgrade —— 以前从 `8384` 打开的页面能加载却**不会热更新**,
+> 为什么不能从 `9384` 打开页面?HMR 走 WebSocket,而 `9384` 侧只能做 HTTP 反向代理、
+> 无法转发 WebSocket upgrade —— 以前从控制端口打开的页面能加载却**不会热更新**,
 > 是个静默失效的坑,所以现在直接重定向到 `5173`。
 
 **build 之后则相反**:不带 `--dev-vite` 启动时,`8384` 直接提供页面(前端来自内嵌 bundle),
@@ -399,11 +402,12 @@ npm run build          # 编译到 dist/(tsc)
 
 `npm run dev` 等价于 `tsx watch src/main.ts start`,任何 `start` 支持的参数都可以通过 `npm run dev -- <参数>` 传入(注意中间的 `--`):
 
-| 参数 | 说明 | 默认值 |
+| 参数 | 说明 | 默认值(syncx 不带 dev 脚本时) |
 |---|---|---|
-| `--config <路径>` | 指定配置文件路径(任意 JSON 文件) | `~/.syncx/config.json` |
-| `--port <端口>` | P2P 同步端口(其他设备连接用) | `22000` |
-| `--control-port <端口>` | Web UI / 控制 API 端口 | `8384` |
+| `--config <路径>` | 指定配置文件路径(任意 JSON 文件) | `~/.syncx/config.json`(dev 脚本已传 `--config-dir .syncx-dev`) |
+| `--config-dir <目录>` | 数据目录,取 `<目录>/config.json`(与 `--config` 同时给出时后者优先) | `~/.syncx`(dev 脚本已传 `.syncx-dev`) |
+| `--port <端口>` | P2P 同步端口(其他设备连接用) | `22000`(dev 脚本已传 `23000`) |
+| `--control-port <端口>` | Web UI / 控制 API 端口 | `8384`(dev 脚本已传 `9384`) |
 | `--host <地址>` | 控制服务绑定地址 | `0.0.0.0`(dev 脚本已默认;`127.0.0.1` 仅本机) |
 | `--dev-vite <url>` | dev 模式:web 页面请求 302 重定向到该 vite dev server(HMR 由 vite 原生提供),控制端口只保留 API | dev 脚本已传 `http://127.0.0.1:5173` |
 
@@ -417,13 +421,13 @@ npm run build          # 编译到 dist/(tsc)
 npm run dev -- --config ~/syncx-home.json
 
 # 指定同步端口与控制端口(避免与其他服务冲突)
-npm run dev -- --port 24001 --control-port 8385
+npm run dev -- --port 24001 --control-port 9484
 
 # 仅本机访问 Web UI(关闭局域网访问)
 npm run dev -- --host 127.0.0.1
 
 # 组合使用
-npm run dev -- --config ~/syncx-home.json --port 24001 --control-port 8385
+npm run dev -- --config-dir ~/syncx-dev-home --port 24001 --control-port 9484
 ```
 
 启动后日志会打印所有可达的 Web UI 地址(`http://IP:控制端口`)与 peer 同步地址(`ws://IP:同步端口`),可直接复制。
