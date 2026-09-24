@@ -9,7 +9,7 @@ import { useTheme, type ThemeMode } from '../composables/useTheme';
 import { formatBytes } from '../utils/bytes';
 import { osIconLabel } from '../utils/os-icon';
 
-const { status, busy, checkForUpdate, openUpload, openLogs, openTopology, openTraffic, openGuide, openSettings, openAuth, logout, copy } = useStatusContext();
+const { status, busy, checkForUpdate, openUpload, openLogs, openTopology, openTraffic, openGuide, openSettings, openTerminal, openAuth, logout, copy, notifSupported, notifEnabled, toggleNotifications } = useStatusContext();
 const { mode: themeMode, resolved: themeResolved, setMode } = useTheme();
 
 const themeOptions: DropdownOption[] = [
@@ -71,6 +71,7 @@ type ChipRow =
 
 const chipRows = computed<ChipRow[]>(() => [
   { kind: 'item', label: '全局设置', run: openSettings },
+  { kind: 'item', label: '终端', run: openTerminal },
   { kind: 'item', label: '日志', run: openLogs },
   { kind: 'item', label: '拓扑', run: openTopology, disabled: busy.value },
   { kind: 'divider' },
@@ -139,6 +140,30 @@ const chipRows = computed<ChipRow[]>(() => [
         </template>
       </n-button>
     </n-dropdown>
+
+    <!-- 桌面通知开关:浏览器不支持(或非安全上下文)时不渲染;开启时铃铛带响铃波纹点。
+         点击即切换(内部处理权限申请与被拒提示),title 随状态说明下一档行为 -->
+    <n-button
+      v-if="notifSupported"
+      tertiary
+      circle
+      :title="notifEnabled ? '桌面通知:已开启,点击关闭' : '桌面通知:已关闭,点击开启'"
+      @click="() => void toggleNotifications()"
+    >
+      <template #icon>
+        <svg v-if="notifEnabled" viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+          <path d="M6 9a6 6 0 0 1 12 0c0 5 2 6 2 6H4s2-1 2-6Z" />
+          <path d="M10.3 20a2 2 0 0 0 3.4 0" />
+          <path d="M17 3s3 1 3 5" />
+          <path d="M7 3S4 4 4 8" />
+        </svg>
+        <svg v-else viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+          <path d="M6 9a6 6 0 0 1 12 0c0 5 2 6 2 6H4s2-1 2-6Z" />
+          <path d="M10.3 20a2 2 0 0 0 3.4 0" />
+          <path d="M3 3l18 18" />
+        </svg>
+      </template>
+    </n-button>
 
     <div class="topbar__spacer"></div>
 

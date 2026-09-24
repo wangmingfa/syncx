@@ -164,6 +164,25 @@ export interface ControlServerDeps {
    * 防止有人直连 API 在 dev 态触发自更新。
    */
   devMode?: boolean;
+
+  // ---- 配对二维码 / 文件管理器 / 浏览器内终端 ----
+  /**
+   * 本机配对信息(GET /api/paircode):deviceId + 数据面端口 + 局域网地址。
+   * 前端把三者拼成 syncx:// 配对串画二维码,对端扫码/粘贴即可配对。
+   * port 为 0(对端服务未就绪)时路由返回 503。
+   */
+  pairCode?: () => { deviceId: string; port: number; addresses: string[] };
+  /** 列举共享目录内某子目录(filebrowser.listDirectory,含路径越界防护)。 */
+  listFolderDirectory?: (folderId: string, relPath: string, limit?: number) => unknown;
+  /** 解析共享目录内某相对路径为绝对路径(下载用);越界/不存在抛错转 400。 */
+  resolveFolderFile?: (folderId: string, relPath: string) => string;
+  /** 删除共享目录内单个文件或整个子目录(递归);真实删除,扫描后传播给对端。 */
+  deleteFolderEntry?: (folderId: string, relPath: string) => void;
+  /**
+   * 浏览器内终端(`WS /api/terminal`)。传入后在 upgrade 阶段完成鉴权并把连接交给它;
+   * 不传则对 /api/terminal 的握手一律拒绝。见 src/api/terminal.ts。
+   */
+  terminal?: { handle(socket: import('ws').WebSocket): void; close(): void };
 }
 
 /** 域路由处理器的统一签名:处理了请求返回 true,未命中返回 false(交给下一个域)。 */

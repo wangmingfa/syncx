@@ -14,6 +14,7 @@ export type ActionIconName =
   | 'history'
   | 'versions'
   | 'trash'
+  | 'browse'
   | 'more';
 
 /**

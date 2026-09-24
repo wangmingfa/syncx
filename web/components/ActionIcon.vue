@@ -72,6 +72,12 @@ defineProps<{ name: ActionIconName }>();
       <path d="M14 11v6" />
     </template>
 
+    <!-- 浏览文件(文件管理器):打开的文件夹 -->
+    <template v-else-if="name === 'browse'">
+      <path d="M3.5 6.5A1.5 1.5 0 0 1 5 5h4l2 2.5h8A1.5 1.5 0 0 1 20.5 9v8A1.5 1.5 0 0 1 19 18.5H5A1.5 1.5 0 0 1 3.5 17Z" />
+      <path d="M3.5 10.5h17" />
+    </template>
+
     <!-- 更多(收起态占位):三个点。刻意不用「⚙/滑块」那类图标 —— 占位图标只负责
          说「这里还有东西」,不该长得像某个具体动作,否则会被读成「这是一个设置按钮」。 -->
     <template v-else>

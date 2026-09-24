@@ -30,6 +30,8 @@ export function useFolders(deps: CoreDeps): {
   openConflicts: (f: FolderInfo) => void;
   /** 打开某目录的文件版本弹窗(拉取与展示在 VersionsModal 内)。 */
   openVersions: (f: FolderInfo) => void;
+  /** 打开某目录的浏览器内文件管理器(FilesModal;浏览/下载/删除)。 */
+  openFiles: (f: FolderInfo) => void;
   editDevicesOpen: Ref<boolean>;
   editFolder: Ref<FolderInfo | null>;
   historyFolder: Ref<FolderInfo | null>;
@@ -39,6 +41,8 @@ export function useFolders(deps: CoreDeps): {
   conflictsFolder: Ref<FolderInfo | null>;
   /** 非空 = 打开该目录的文件版本弹窗。 */
   versionsFolder: Ref<FolderInfo | null>;
+  /** 非空 = 打开该目录的文件管理器。 */
+  filesFolder: Ref<FolderInfo | null>;
   saveEditDevices: (payload: { path: string; devices: string[]; gitignore: boolean; schedule: string }) => Promise<void>;
   toggleFolderPaused: (f: FolderInfo, paused: boolean) => Promise<void>;
   toggleGlobalPaused: (paused: boolean) => Promise<void>;
@@ -236,6 +240,12 @@ export function useFolders(deps: CoreDeps): {
     versionsFolder.value = f;
   }
 
+  // 浏览器内文件管理器:非空 = 打开该目录的文件浏览(列表/下载/删除在 FilesModal 内)
+  const filesFolder = ref<FolderInfo | null>(null);
+  function openFiles(f: FolderInfo): void {
+    filesFolder.value = f;
+  }
+
   // ---- 暂停同步(目录卡开关 + 全局开关):数据面停摆,控制面照常 ----
   /** 暂停/恢复单个目录的同步。暂停 = 不扫描、不广播、不接收;连接与配对不受影响。 */
   async function toggleFolderPaused(f: FolderInfo, paused: boolean): Promise<void> {
@@ -310,6 +320,7 @@ export function useFolders(deps: CoreDeps): {
     openGlobalHistory,
     openConflicts,
     openVersions,
+    openFiles,
     editDevicesOpen,
     editFolder,
     saveEditDevices,
@@ -317,6 +328,7 @@ export function useFolders(deps: CoreDeps): {
     historyGlobal,
     conflictsFolder,
     versionsFolder,
+    filesFolder,
     toggleFolderPaused,
     toggleGlobalPaused,
     reAdoptIdentity,

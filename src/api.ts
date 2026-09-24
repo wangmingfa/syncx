@@ -9,6 +9,8 @@ import { trySystemRoutes } from './api/routes/system.js';
 import { tryFolderRoutes } from './api/routes/folders.js';
 import { tryDeviceRoutes } from './api/routes/devices.js';
 import { tryOfferRoutes } from './api/routes/offers.js';
+import { tryFileRoutes } from './api/routes/files.js';
+import { TERMINAL_PATH } from './api/terminal.js';
 
 export type { ControlServerDeps } from './api/deps.js';
 
@@ -68,6 +70,7 @@ export function createControlServer(deps: ControlServerDeps): Server {
         if (await tryFolderRoutes(req, res, deps)) return;
         if (await tryDeviceRoutes(req, res, deps)) return;
         if (await tryOfferRoutes(req, res, deps)) return;
+        if (await tryFileRoutes(req, res, deps)) return;
 
         sendJson(res, 404, { error: 'not found' });
       } catch (err) {
@@ -90,13 +93,16 @@ export function createControlServer(deps: ControlServerDeps): Server {
     })();
   });
 
-  // WebSocket 升级:只认 /api/events,其余路径一律断开(没有别的 upgrade 消费者,
-  // 放着不管会让连接永久挂起)。鉴权失败回一个 401 响应再断开 —— 客户端能据此
-  // 区分「没登录」与「网络不通」,而不是看到一个没有原因的重连循环。
+  // WebSocket 升级:/api/events 是状态推送(status-hub),/api/terminal 是浏览器内
+  // 终端(简易 shell 通道),其余路径一律断开 —— 放着不管会让连接永久挂起。
+  // 鉴权失败回一个 401 响应再断开 —— 客户端能据此区分「没登录」与「网络不通」,
+  // 而不是看到一个没有原因的重连循环。
   const wss = new WebSocketServer({ noServer: true });
   server.on('upgrade', (req, socket, head) => {
     const path = req.url ? pathname(req.url) : '/';
-    if (path !== EVENTS_PATH || !deps.statusHub) {
+    const eventsOk = path === EVENTS_PATH && deps.statusHub;
+    const terminalOk = path === TERMINAL_PATH && deps.terminal;
+    if (!eventsOk && !terminalOk) {
       socket.destroy();
       return;
     }
@@ -105,7 +111,12 @@ export function createControlServer(deps: ControlServerDeps): Server {
       socket.destroy();
       return;
     }
-    const hub = deps.statusHub;
+    if (terminalOk && !eventsOk) {
+      const terminal = deps.terminal!;
+      wss.handleUpgrade(req, socket, head, (ws) => terminal.handle(ws));
+      return;
+    }
+    const hub = deps.statusHub!;
     wss.handleUpgrade(req, socket, head, (ws) => hub.attach(ws));
   });
 

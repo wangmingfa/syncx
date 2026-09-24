@@ -18,6 +18,8 @@ import { startDiscovery } from './net/discovery.js';
 import { getLanAddresses, formatHost } from './net/addresses.js';
 import { createControlServer, type ControlServerDeps } from './api.js';
 import { createStatusHub } from './status-hub.js';
+import { createTerminalHub } from './api/terminal.js';
+import { listDirectory, resolveFolderSubpath, deleteFolderEntry } from './filebrowser.js';
 import { buildStatus, type DeviceStatus, type SyncProgress, type FolderErrorStatus } from './status.js';
 import { addSharedFolder, removeSharedFolder, isPeerAllowed, addKnownDevice, removeKnownDevice, addPeer, removePeer, setFolderDevices, setFolderGitignore, setGlobalSettings, acceptFolderInvitation } from './devices.js';
 import { markOfferAccepted, markOfferDeclined, restoreDeclinedOffer, listOpenOffers, findPendingOffer } from './offers.js';
@@ -397,6 +399,10 @@ export async function run(args: ParsedArgs): Promise<void> {
     getStatus: () => controlDeps.getStatus(),
     log: (message) => logger.debug(message),
   });
+  // 浏览器内终端:每个 WS 连接 spawn 一个本机 shell;daemon 关闭时统一收割子进程。
+  const terminalHub = createTerminalHub();
+  // 数据面(对端 ws)端口:控制服务先启动,绑定完成后再回填实际端口(可能避开占用)。
+  let peerPort = 0;
 
   // 会话/目录运行期状态管理器:连接、同步通道、扫描、配置热重载、P2P 自更新全部内聚于此
   const manager = new SyncSessionManager(
@@ -587,12 +593,30 @@ export async function run(args: ParsedArgs): Promise<void> {
           },
           // 数据目录:日志弹窗等处的示例命令要跟真实目录走(--config-dir 隔离时不误导)
           configDir,
+          // 附近发现的设备:过 TTL 的先剪掉;已经配对上的从列表摘除(升格成设备卡)
+          discovered: (() => {
+            const now = Date.now();
+            for (const [id, d] of discoveredPeers) {
+              if (now - d.ts > DISCOVERY_TTL_MS) discoveredPeers.delete(id);
+            }
+            const cfg = loadConfig(configPath);
+            return [...discoveredPeers.values()]
+              .filter((d) => !isPeerAllowed(d.deviceId, cfg.sharedFolders, cfg.knownDevices))
+              .map((d) => ({ deviceId: d.deviceId, host: d.host, port: d.port, lastSeen: d.ts }));
+          })(),
         },
       );
     },
     rescan: () => {
       void manager.runScan();
     },
+    // 配对二维码(GET /api/paircode):deviceId + 数据面端口 + 局域网地址。
+    // startPeerServer 在控制服务之后才启动,先用 0 占位,绑定完成后回填实际端口。
+    pairCode: () => ({
+      deviceId: identity.deviceId,
+      port: peerPort,
+      addresses: getLanAddresses().map((a) => a.address),
+    }),
     reconnect: (deviceId) => manager.forceReconnect(deviceId),
     addDevice: (deviceId, address) => {
       addKnownDevice(configPath, deviceId);
@@ -735,6 +759,22 @@ export async function run(args: ParsedArgs): Promise<void> {
       if (removed > 0) void manager.runScan();
       return { removed };
     },
+    // 浏览器内文件管理器:列举 / 下载寻址 / 删除。全部经 filebrowser 的路径越界防护,
+    // 越出共享目录根的相对路径(../、绝对路径、软链外指)一律抛 PathUnsafeError → 400。
+    listFolderDirectory: (folderId, relPath, limit) => {
+      const folder = findConfigFolder(configPath, folderId);
+      return listDirectory(folder.path, relPath, limit);
+    },
+    resolveFolderFile: (folderId, relPath) => {
+      const folder = findConfigFolder(configPath, folderId);
+      return resolveFolderSubpath(folder.path, relPath);
+    },
+    deleteFolderEntry: (folderId, relPath) => {
+      const folder = findConfigFolder(configPath, folderId);
+      deleteFolderEntry(folder.path, relPath);
+      // 删除已改变盘面:立刻触发一轮扫描,把删除尽快作为墓碑广播给对端
+      void manager.runScan();
+    },
     // 文件版本:列出 / 恢复 / 删除。恢复 = 把旧版本拷回共享目录原路径,
     // 恢复前把当前内容也拷一份进版本目录(操作可逆),随后触发一轮扫描让恢复
     // 产生的「本地修改」尽快广播给对端。
@@ -847,6 +887,8 @@ export async function run(args: ParsedArgs): Promise<void> {
     },
     // 状态推送通道:控制服务在 WS upgrade 阶段完成鉴权后把连接交给它
     statusHub,
+    // 浏览器内终端(WS /api/terminal):同一条 upgrade 鉴权路径
+    terminal: terminalHub,
   };
   const control = createControlServer(controlDeps);
   // 绑定控制端口:失败(EACCES/EADDRINUSE 等)在 listenControl 内打印根因与修复指引后
@@ -894,15 +936,25 @@ export async function run(args: ParsedArgs): Promise<void> {
     },
     args.port ?? 22000,
   );
+  peerPort = server.port;
 
-  // mDNS 自动发现:发现对端后自动发起连接并建立会话
+  // mDNS 自动发现:发现对端后自动发起连接并建立会话。
+  // 顺带收集「未配对」的邻居进「附近发现的设备」:已配对的不收(那是设备卡的事),
+  // 首次发现立即推送一次状态,前端顶栏/设备栏就能冒出「发现新设备」。
+  const DISCOVERY_TTL_MS = 3 * 60_000;
+  const discoveredPeers = new Map<string, { deviceId: string; host: string; port: number; ts: number }>();
   const discovery = startDiscovery(identity, server.port, (peer) => {
     if (manager.isPeerConnected(peer.deviceId)) return;
     // 未授权的对端(已移除,或从未添加)不主动连接。否则移除设备后 mDNS 会把它重新连回来,
     // 握手能过但 startSyncSession 判定未授权,只建控制面会话:界面显示「在线」却不同步数据,
     // 比显示离线更误导。顺带的效果:本机不再主动连接任何未添加的设备。
     const cfg = loadConfig(configPath);
-    if (!isPeerAllowed(peer.deviceId, cfg.sharedFolders, cfg.knownDevices)) return;
+    if (!isPeerAllowed(peer.deviceId, cfg.sharedFolders, cfg.knownDevices)) {
+      const prev = discoveredPeers.get(peer.deviceId);
+      discoveredPeers.set(peer.deviceId, { ...peer, ts: Date.now() });
+      if (!prev) statusHub.notify();
+      return;
+    }
     const url = `ws://${peer.host}:${peer.port}`;
     manager.connectTo(url, {
       onRejected: (error) =>
@@ -982,6 +1034,8 @@ const shutdown = (): void => {
     configWatcher?.close();
     // 重连定时器、peer socket、目录索引库的清理在 manager 内完成
     manager.close();
+    // 浏览器内终端的 shell 子进程一并收割,不留孤儿进程
+    terminalHub.close();
     // 状态推送连接先于控制端口关闭:否则浏览器会以为通道还活着,一直等推送而不重连
     statusHub.close();
     control.close();

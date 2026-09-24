@@ -90,6 +90,17 @@ export interface RelayActivity {
   at: number;
 }
 
+/** 局域网内 mDNS 发现、但尚未配对的设备(「附近发现的设备」一键添加用)。 */
+export interface DiscoveredDeviceStatus {
+  deviceId: string;
+  /** mDNS SRV 记录里的主机名(对端机器的 os hostname)。 */
+  host: string;
+  /** 对端数据面(ws)端口。 */
+  port: number;
+  /** 最近一次被发现的时刻(毫秒);超过 TTL 的条目不再下发。 */
+  lastSeen: number;
+}
+
 export interface StatusPayload {
   deviceId: string;
   /** 本机运行版本(runtimeVersion 口径):打包态为具体版本号,dev 态为 'dev'。 */
@@ -125,6 +136,8 @@ export interface StatusPayload {
   configDir?: string;
   /** 全局同步设置当前值(设置弹窗;旧后端缺省)。 */
   settings?: GlobalSettingsStatus;
+  /** 局域网内发现、但尚未配对的设备(设备栏「附近发现的设备」;旧后端缺省)。 */
+  discovered?: DiscoveredDeviceStatus[];
 }
 
 /** 一个采样窗口的流量增量(窗口内发/收的字节数)。 */
@@ -166,6 +179,8 @@ export interface StatusExtras {
   configDir?: string;
   /** 全局同步设置当前值(设置弹窗;缺省 = 后端旧版本未提供)。 */
   settings?: GlobalSettingsStatus;
+  /** 局域网内发现、尚未配对的设备(设备栏一键添加;缺省 = 后端旧版本未提供)。 */
+  discovered?: DiscoveredDeviceStatus[];
 }
 
 export function buildStatus(
@@ -201,5 +216,6 @@ export function buildStatus(
     localAddresses: extras.localAddresses,
     configDir: extras.configDir,
     settings: extras.settings,
+    discovered: extras.discovered,
   };
 }

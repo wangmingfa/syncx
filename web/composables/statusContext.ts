@@ -3,6 +3,7 @@ import type { InjectionKey, Ref, ComputedRef } from 'vue';
 import type {
   ConfirmState,
   DeviceInfo,
+  DiscoveredDevice,
   FolderErrorItem,
   FolderInfo,
   OfferInfo,
@@ -45,6 +46,8 @@ export interface StatusContext extends FolderDiffApi {
   newDevicePort: Ref<string>;
   askRemoveDevice: (deviceId: string) => void;
   askUpgrade: (p: DeviceInfo) => void;
+  /** 一键添加「附近发现的设备」:直接带 mDNS 学到的直连地址配对。 */
+  addDiscovered: (d: DiscoveredDevice) => Promise<void>;
   hoverDevices: Ref<string[]>;
   /** 反向拓扑联动:悬停设备卡时该设备 id(非空 = 设备→目录高亮进行中)。 */
   hoverDeviceId: Ref<string>;
@@ -70,6 +73,10 @@ export interface StatusContext extends FolderDiffApi {
   conflictsFolder: Ref<FolderInfo | null>;
   /** 打开某目录的文件版本弹窗(拉取与展示在 VersionsModal 内)。 */
   openVersions: (f: FolderInfo) => void;
+  /** 打开某目录的浏览器内文件管理器(FilesModal;浏览/下载/删除)。 */
+  openFiles: (f: FolderInfo) => void;
+  /** 非空 = 打开该目录的文件管理器(StatusPage 挂 FilesModal 用)。 */
+  filesFolder: Ref<FolderInfo | null>;
   copy: (text: string) => Promise<void>;
   hoverFolderKey: Ref<string>;
   onFolderEnter: (f: { id?: string; path: string; devices: string[] }) => void;
@@ -139,6 +146,13 @@ export interface StatusContext extends FolderDiffApi {
   openTopology: () => void;
   openTraffic: () => void;
   openSettings: () => void;
+  /** 浏览器内终端弹窗开关(顶栏本机 chip 菜单「终端」触发)。 */
+  terminalOpen: Ref<boolean>;
+  openTerminal: () => void;
+  /** 桌面通知:浏览器偏好(localStorage),开关在顶栏铃铛。 */
+  notifSupported: boolean;
+  notifEnabled: Ref<boolean>;
+  toggleNotifications: () => Promise<void>;
   openAuth: () => void;
 }
 

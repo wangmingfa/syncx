@@ -26,6 +26,22 @@ export async function trySystemRoutes(
     return true;
   }
 
+  // GET /api/paircode : 本机配对信息(deviceId + 数据面端口 + 局域网地址)。
+  // 前端画二维码 / 展示可粘贴的 syncx:// 配对串;对端扫码或粘贴即可完成配对。
+  if (req.method === 'GET' && req.url && path === '/api/paircode') {
+    if (!deps.pairCode) {
+      sendJson(res, 503, { error: 'paircode not available' });
+      return true;
+    }
+    const code = deps.pairCode();
+    if (code.port <= 0) {
+      sendJson(res, 503, { error: 'peer server 未就绪' });
+      return true;
+    }
+    sendJson(res, 200, code);
+    return true;
+  }
+
   // GET /api/logs?lines=500 : 读取日志文件尾部(Web UI「日志」弹窗)。需认证。
   // 仅在 daemon 以 --log-file 启动时可用:未设置时没有日志文件可读,
   // 返回 ok:false 而非 404,前端据此提示用户补上启动参数。

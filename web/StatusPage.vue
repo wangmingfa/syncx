@@ -11,6 +11,7 @@ import { useOffers } from './composables/useOffers';
 import { useFolderDiff } from './composables/useFolderDiff';
 import { useSelfUpdate } from './composables/useSelfUpdate';
 import { useFormat } from './composables/useFormat';
+import { useNotifications } from './composables/useNotifications';
 import {
   folderKey,
   monogram,
@@ -36,6 +37,8 @@ import UploadUpdateModal from './components/UploadUpdateModal.vue';
 import DropOverlay from './components/DropOverlay.vue';
 import ToastView from './components/ToastView.vue';
 import SettingsModal from './components/SettingsModal.vue';
+import FilesModal from './components/FilesModal.vue';
+import TerminalModal from './components/TerminalModal.vue';
 import StatusTopbar from './components/StatusTopbar.vue';
 import StatusPills from './components/StatusPills.vue';
 import OffersPanel from './components/OffersPanel.vue';
@@ -61,6 +64,8 @@ const offers = useOffers(deps);
 const folderDiff = useFolderDiff(deps);
 const selfUpdate = useSelfUpdate(deps);
 const fmt = useFormat(status);
+// 桌面通知 + favicon 角标:内部 watch 注意力计数(邀请/冲突/目录错误),边沿触发通知
+const notifications = useNotifications(status);
 
 // 标签页标题:默认「SYNCX · 主机名 · IPv4」;有待确认邀请时改为该邀请的标题
 // (与 OffersPanel 卡片标题同语义),确认/忽略后 status 推送刷新、pending 清空即恢复默认。
@@ -81,7 +86,7 @@ watchEffect(() => {
 });
 
 // 需要本页模板双向绑定的模态状态:必须提到顶层,否则 <script setup> 模板不会自动拆包 Ref
-const { historyFolder, historyGlobal, versionsFolder, conflictsFolder, editDevicesOpen, editFolder, saveEditDevices } = folders;
+const { historyFolder, historyGlobal, versionsFolder, conflictsFolder, filesFolder, editDevicesOpen, editFolder, saveEditDevices } = folders;
 const { upgrading, askSelfUpdate, uploadOpen, openUpload, selectUploadFile } = selfUpdate;
 const { showToast } = useToast();
 
@@ -92,6 +97,11 @@ const topoOpen = ref(false);
 const trafficOpen = ref(false);
 const authOpen = ref(false);
 const settingsOpen = ref(false);
+// 浏览器内终端:顶栏本机 chip 菜单「终端」触发
+const terminalOpen = ref(false);
+function openTerminal(): void {
+  terminalOpen.value = true;
+}
 function openGuide(): void {
   showGuide.value = true;
 }
@@ -178,6 +188,11 @@ provide(StatusContextKey, {
   authOpen,
   settingsOpen,
   openSettings,
+  terminalOpen,
+  openTerminal,
+  notifSupported: notifications.notifSupported,
+  notifEnabled: notifications.notifEnabled,
+  toggleNotifications: notifications.toggleNotifications,
 });
 </script>
 
@@ -243,6 +258,12 @@ provide(StatusContextKey, {
 
     <!-- 全局设置弹窗(带宽兜底 / 版本份数 / 历史上限) -->
     <SettingsModal :open="settingsOpen" @close="settingsOpen = false" />
+
+    <!-- 浏览器内文件管理器(目录卡「浏览文件」触发;浏览/下载/删除) -->
+    <FilesModal :folder="filesFolder" @close="filesFolder = null" />
+
+    <!-- 浏览器内终端(顶栏本机 chip 菜单「终端」触发) -->
+    <TerminalModal :open="terminalOpen" @close="terminalOpen = false" />
 
     <!-- 日志弹窗 -->
     <LogsModal :open="logsOpen" @close="logsOpen = false" />

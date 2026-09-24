@@ -111,6 +111,47 @@ export interface StatusData {
   configDir?: string;
   /** 全局同步设置当前值(设置弹窗预填;旧后端缺省)。 */
   settings?: GlobalSettingsData;
+  /** 局域网内 mDNS 发现、但尚未配对的设备(设备栏「附近发现的设备」;旧后端缺省)。 */
+  discovered?: DiscoveredDevice[];
+}
+
+/** 局域网内发现、尚未配对的设备(一键添加后升格为设备卡)。 */
+export interface DiscoveredDevice {
+  deviceId: string;
+  /** 对端机器的 mDNS 主机名。 */
+  host: string;
+  /** 对端数据面(ws)端口。 */
+  port: number;
+  /** 最近一次被发现的时刻(毫秒)。 */
+  lastSeen: number;
+}
+
+/** GET /api/paircode 的响应:本机配对信息(配对二维码用)。 */
+export interface PairCodeData {
+  deviceId: string;
+  /** 数据面(ws)端口;后端未就绪时不会返回(503)。 */
+  port: number;
+  /** 本机局域网 IPv4 地址列表。 */
+  addresses: string[];
+}
+
+/** 文件管理器的单条目录项(GET /api/folder-files)。 */
+export interface FolderDirEntry {
+  /** 相对共享目录根的路径(POSIX 分隔),列表/下载/删除统一寻址。 */
+  path: string;
+  name: string;
+  dir: boolean;
+  /** 字节数(目录恒为 0)。 */
+  size: number;
+  /** 修改时间(毫秒)。 */
+  mtime: number;
+}
+
+/** GET /api/folder-files 的响应。 */
+export interface FolderDirListing {
+  entries: FolderDirEntry[];
+  /** 条目数超上限被截断时为 true。 */
+  truncated: boolean;
 }
 
 /** 全局同步设置(与后端 config 顶层字段同形;undefined = 未配置,走默认)。 */

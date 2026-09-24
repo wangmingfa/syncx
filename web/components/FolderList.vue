@@ -73,6 +73,7 @@ const {
   openGlobalHistory,
   openConflicts,
   openVersions,
+  openFiles,
   openDiff,
   toggleFolderPaused,
   toggleGlobalPaused,
@@ -149,6 +150,13 @@ function folderActions(f: FolderInfo): RailAction[] {
       disabled: b,
       tooltip: f.paused ? '恢复该目录的同步' : '暂停该目录的同步(连接保持在线)',
       onClick: () => toggleFolderPaused(f, !f.paused),
+    },
+    {
+      key: 'files',
+      icon: 'browse',
+      disabled: b,
+      tooltip: '浏览文件:查看本机目录内容,可下载单个文件或删除',
+      onClick: () => openFiles(f),
     },
     {
       key: 'compare',

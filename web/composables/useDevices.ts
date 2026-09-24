@@ -1,10 +1,11 @@
 import { ref, type Ref } from 'vue';
 import { useToast } from './useToast';
 import { apiJson, errText } from '../utils/api';
+import { parsePairCode } from '../utils/qrcode';
 import type { CoreDeps } from './statusContext';
-import type { DeviceInfo } from '../types';
+import type { DeviceInfo, DiscoveredDevice } from '../types';
 
-/** 设备相关:扫描/重连/配对/移除(防误删确认)/从对端升级。 */
+/** 设备相关:扫描/重连/配对/移除(防误删确认)/从对端升级/附近发现一键添加。 */
 export function useDevices(deps: CoreDeps): {
   rescan: () => void;
   reconnect: (deviceId: string) => void;
@@ -16,6 +17,8 @@ export function useDevices(deps: CoreDeps): {
   newDevicePort: Ref<string>;
   askRemoveDevice: (deviceId: string) => void;
   askUpgrade: (p: DeviceInfo) => void;
+  /** 一键添加「附近发现的设备」:直接带 mDNS 学到的地址配对。 */
+  addDiscovered: (d: DiscoveredDevice) => Promise<void>;
 } {
   const { status, busy, refreshStatus, post, askConfirm } = deps;
   const { showToast } = useToast();
@@ -39,12 +42,20 @@ export function useDevices(deps: CoreDeps): {
   }
 
   async function addDevice(): Promise<void> {
-    const id = newDeviceId.value.trim();
-    if (!id) {
+    const raw = newDeviceId.value.trim();
+    if (!raw) {
       showToast('请填写设备 ID');
       return;
     }
     if (busy.value) return;
+    // 支持直接粘贴对方的 syncx:// 配对串(扫对方二维码得到):拆出 ID 与地址自动填表
+    const pair = parsePairCode(raw);
+    const id = pair?.deviceId ?? raw;
+    if (pair) {
+      newDeviceId.value = id;
+      if (pair.host) newDeviceHost.value = pair.host;
+      if (pair.port) newDevicePort.value = pair.port;
+    }
     // 地址为可选项:仅跨网段/无 mDNS 时需要。由 ws://(前缀) + 主机 + :端口(默认 22000) 拼成
     const host = newDeviceHost.value.trim();
     let address: string | undefined;
@@ -64,6 +75,25 @@ export function useDevices(deps: CoreDeps): {
       newDeviceHost.value = '';
       newDevicePort.value = '22000';
       addDeviceOpen.value = false;
+      await refreshStatus();
+    } catch (e) {
+      showToast(errText(e, '添加失败,请重试'), 'alert');
+    } finally {
+      busy.value = false;
+    }
+  }
+
+  /** 「附近发现的设备」一键添加:deviceId + mDNS 学到的 ws://host:port 直连地址。 */
+  async function addDiscovered(d: DiscoveredDevice): Promise<void> {
+    if (busy.value) return;
+    busy.value = true;
+    try {
+      await apiJson('/api/devices', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ deviceId: d.deviceId, address: `ws://${d.host}:${d.port}` }),
+      });
+      showToast(`已添加设备 ${d.deviceId}`);
       await refreshStatus();
     } catch (e) {
       showToast(errText(e, '添加失败,请重试'), 'alert');
@@ -133,5 +163,6 @@ export function useDevices(deps: CoreDeps): {
     newDevicePort,
     askRemoveDevice,
     askUpgrade,
+    addDiscovered,
   };
 }
