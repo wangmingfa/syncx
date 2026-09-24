@@ -128,8 +128,11 @@ export function sessionSecret(base: string): string {
 }
 
 export interface SessionPayload {
-  /** 登录方式:'password'(账号密码)或 'token'(令牌恢复通道) */
-  via: 'password' | 'token';
+  /**
+   * 会话方式:'password'(账号密码)/ 'token'(令牌恢复通道)/
+   * 'elevate'(敏感操作提权 —— 终端、文件管理器,短时效,见 api/session.ts)。
+   */
+  via: 'password' | 'token' | 'elevate';
   /** 用户名;token 登录时固定为 'token' */
   sub: string;
   /** 过期时间(毫秒时间戳) */

@@ -2,9 +2,10 @@ import { createServer, type Server } from 'node:http';
 import { WebSocketServer } from 'ws';
 import { type ControlServerDeps } from './api/deps.js';
 import { createSessionAuth } from './api/session.js';
-import { isControlRoute, devViteTarget, pathname, readToken, redirect, sendJson, RequestBodyTooLargeError, EVENTS_PATH } from './api/helpers.js';
+import { isControlRoute, devViteTarget, pathname, readToken, redirect, sendJson, RequestBodyTooLargeError, EVENTS_PATH, ELEVATE_COOKIE, readCookie } from './api/helpers.js';
 import { tryPreAuthRoutes } from './api/routes/public.js';
 import { tryPublicAuthRoutes, tryAccountRoutes } from './api/routes/auth.js';
+import { tryElevationRoutes } from './api/routes/elevation.js';
 import { trySystemRoutes } from './api/routes/system.js';
 import { tryFolderRoutes } from './api/routes/folders.js';
 import { tryDeviceRoutes } from './api/routes/devices.js';
@@ -65,12 +66,14 @@ export function createControlServer(deps: ControlServerDeps): Server {
         }
 
         // 已认证业务域;每域未命中返回 false,落到下一个域,最后 404
+        if (await tryElevationRoutes(req, res, deps, auth)) return;
         if (await trySystemRoutes(req, res, deps)) return;
         if (await tryAccountRoutes(req, res, deps, auth)) return;
         if (await tryFolderRoutes(req, res, deps)) return;
         if (await tryDeviceRoutes(req, res, deps)) return;
         if (await tryOfferRoutes(req, res, deps)) return;
-        if (await tryFileRoutes(req, res, deps)) return;
+        // 文件管理器是敏感域:除了登录,还要一次性提权(终端/文件管理器共用)
+        if (await tryFileRoutes(req, res, deps, auth.elevateOk(readCookie(req, ELEVATE_COOKIE)), auth.issueElevation)) return;
 
         sendJson(res, 404, { error: 'not found' });
       } catch (err) {
@@ -108,6 +111,14 @@ export function createControlServer(deps: ControlServerDeps): Server {
     }
     if (!auth.credentialOk(readToken(req))) {
       socket.write('HTTP/1.1 401 Unauthorized\r\nConnection: close\r\n\r\n');
+      socket.destroy();
+      return;
+    }
+    // 终端是最高危通道(整机 shell):登录之外还要提权。文件管理器的三个 HTTP
+    // 路由在请求处理器里查,这里是 WS 的对应关口;过期后重连会被打回,前端
+    // 收到关闭会重新探测并弹验证。
+    if (terminalOk && !auth.elevateOk(readCookie(req, ELEVATE_COOKIE))) {
+      socket.write('HTTP/1.1 403 Forbidden\r\nConnection: close\r\n\r\n');
       socket.destroy();
       return;
     }

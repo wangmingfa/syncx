@@ -2,6 +2,7 @@ import { ref, type Ref } from 'vue';
 import { useToast } from './useToast';
 import { apiJson, errText } from '../utils/api';
 import { folderKey } from '../utils/format';
+import { ensureElevated } from '../utils/elevation';
 import type { CoreDeps } from './statusContext';
 import type { FolderInfo } from '../types';
 
@@ -243,7 +244,10 @@ export function useFolders(deps: CoreDeps): {
   // 浏览器内文件管理器:非空 = 打开该目录的文件浏览(列表/下载/删除在 FilesModal 内)
   const filesFolder = ref<FolderInfo | null>(null);
   function openFiles(f: FolderInfo): void {
-    filesFolder.value = f;
+    // 列盘面/下载/删除是高危操作:先过敏感操作验证门,通过后再进弹窗
+    void ensureElevated('浏览共享目录文件(含下载/删除)', () => {
+      filesFolder.value = f;
+    });
   }
 
   // ---- 暂停同步(目录卡开关 + 全局开关):数据面停摆,控制面照常 ----

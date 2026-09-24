@@ -4,6 +4,7 @@ import { NConfigProvider, darkTheme, dateZhCN, zhCN, type GlobalThemeOverrides }
 import StatusPage from './StatusPage.vue';
 import LoginForm from './LoginForm.vue';
 import ComparePage from './ComparePage.vue';
+import TerminalPage from './TerminalPage.vue';
 import { route } from './utils/route';
 import { useTheme } from './composables/useTheme';
 import type { StatusData } from './types';
@@ -46,9 +47,10 @@ onMounted(async () => {
 
 <template>
   <n-config-provider :theme="naiveTheme" :theme-overrides="themeOverrides" :locale="zhCN" :date-locale="dateZhCN">
-    <!-- 路由优先于状态页:/compare/<folderId> 直接渲染双栏对比页,其余走状态页 -->
+    <!-- 路由优先于状态页:终端页不依赖 status(自带登录预检),对比页需要 status 渲染 -->
+    <TerminalPage v-if="route.name === 'terminal'" />
     <ComparePage
-      v-if="status && route.name === 'compare' && route.folderId"
+      v-else-if="status && route.name === 'compare' && route.folderId"
       :status="status"
       :folder-id="route.folderId"
       :device="route.device"

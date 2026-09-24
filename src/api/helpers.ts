@@ -3,6 +3,11 @@ import type { IncomingMessage, ServerResponse } from 'node:http';
 
 export const COOKIE_NAME = 'syncx_session';
 
+/** 敏感操作提权 cookie(终端/文件管理器):独立于登录会话,短时效、独立签名密钥。 */
+export const ELEVATE_COOKIE = 'syncx_su';
+/** 提权有效期:10 分钟。仅在敏感请求上滑动续期,后台轮询不会续。 */
+export const ELEVATE_TTL_MS = 10 * 60 * 1000;
+
 /**
  * 状态推送通道的路径。前端 useStatus.ts 里手写了同一个字面量(客户端 bundle 不 import
  * 后端模块),改这里时务必同步改那边 —— 两边不一致的表现是「界面不再实时更新,悄悄退回
@@ -70,6 +75,18 @@ export function readToken(req: IncomingMessage): string | undefined {
     const k = trimmed.slice(0, eqIdx);
     const v = trimmed.slice(eqIdx + 1);
     if (k === COOKIE_NAME) return v;
+  }
+  return undefined;
+}
+
+/** 按名字读单个 cookie(提权校验只认 cookie;Bearer 头是 CLI 场景,不参与提权)。 */
+export function readCookie(req: IncomingMessage, name: string): string | undefined {
+  const cookie = req.headers.cookie ?? '';
+  for (const part of cookie.split(';')) {
+    const trimmed = part.trim();
+    const eqIdx = trimmed.indexOf('=');
+    if (eqIdx < 0) continue;
+    if (trimmed.slice(0, eqIdx) === name) return trimmed.slice(eqIdx + 1);
   }
   return undefined;
 }

@@ -67,6 +67,10 @@ await build({
   target: 'node22',
   outfile: tmpfile,
   packages: 'bundle',
+  // node-pty 是原生依赖(.node 二进制 + conpty 资产),无法内联进单文件;
+  // 保留为运行时动态 import:旁边有 node_modules(npm 安装)即得完整 PTY,
+  // 没有则 import 抛错、终端自动降级为管道模式(src/api/terminal.ts)。
+  external: ['node-pty'],
   minify: true,
   treeShaking: true,
   banner: {

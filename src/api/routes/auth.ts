@@ -98,10 +98,17 @@ export async function tryPublicAuthRoutes(
   }
 
   // GET /compare/* : 双栏对比页(纯 CSR,路径里带目录 id、设备走查询参数)。
-  // 用路径路由而不是哈希路由,链接可分享、可刷新 —— 代价是服务端必须对这个路径
-  // 回页面壳,否则刷新直接 404。刻意只放行 /compare 这一棵子树:其余未知路径仍按
-  // 原样 404,不让「任何路径都回首页」把拼错的 API 路径掩盖成一张空页面。
-  if (req.method === 'GET' && (path === '/compare' || path.startsWith('/compare/'))) {
+  // GET /terminal : 浏览器内终端页(完整 PTY + xterm.js,独立全屏页面)。
+  // 用路径路由而不是哈希路由,链接可分享、可刷新 —— 代价是服务端必须对这些路径
+  // 回页面壳,否则刷新直接 404。刻意只放行这几棵子树:其余未知路径仍按原样 404,
+  // 不让「任何路径都回首页」把拼错的 API 路径掩盖成一张空页面。
+  if (
+    req.method === 'GET' &&
+    (path === '/compare' ||
+      path.startsWith('/compare/') ||
+      path === '/terminal' ||
+      path.startsWith('/terminal/'))
+  ) {
     sendHtml(res, UI_SHELL);
     return true;
   }

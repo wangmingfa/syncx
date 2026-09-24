@@ -7,7 +7,7 @@ import {
   SESSION_TTL_MS,
   type SessionPayload,
 } from '../auth.js';
-import { COOKIE_NAME, tokenMatches } from './helpers.js';
+import { COOKIE_NAME, ELEVATE_COOKIE, ELEVATE_TTL_MS, tokenMatches } from './helpers.js';
 
 /** 会话签名与凭据校验:闭包持有 token 与账号文件路径,由 createControlServer 创建。 */
 export interface SessionAuth {
@@ -17,6 +17,13 @@ export interface SessionAuth {
   issueSession(res: ServerResponse, payload: SessionPayload): void;
   /** token 原文是否匹配(令牌登录通道用)。 */
   tokenAccepted(candidate: string | undefined): boolean;
+  /**
+   * 敏感操作提权是否有效(终端/文件管理器)。与登录会话用**不同的签名密钥**,
+   * 登录 cookie 不能冒充提权 cookie —— 提权必须来自一次新鲜的密码/令牌校验。
+   */
+  elevateOk(raw: string | undefined): boolean;
+  /** 下发/续期提权 cookie(滑动:每次敏感请求成功后重新签发)。 */
+  issueElevation(res: ServerResponse): void;
 }
 
 export function createSessionAuth(token: string, authFile?: string): SessionAuth {
@@ -55,5 +62,24 @@ export function createSessionAuth(token: string, authFile?: string): SessionAuth
     );
   }
 
-  return { credentialOk, issueSession, tokenAccepted };
+  // 提权密钥 = 会话密钥再叠一层独立上下文:同一串签名既当不了会话、也当不了提权,
+  // 反之亦然 —— 两级凭据互不通用是这套门存在的意义。
+  function elevateSecret(): string {
+    return sessionSecret(`${sessionBase()}|elevate`);
+  }
+
+  return {
+    credentialOk,
+    issueSession,
+    tokenAccepted,
+    elevateOk: (raw) => (raw ? verifySession(raw, elevateSecret()) !== undefined : false),
+    issueElevation: (res) => {
+      const payload: SessionPayload = { via: 'elevate', sub: 'su', exp: Date.now() + ELEVATE_TTL_MS };
+      const value = signSession(payload, elevateSecret());
+      res.setHeader(
+        'Set-Cookie',
+        `${ELEVATE_COOKIE}=${value}; HttpOnly; SameSite=Lax; Path=/; Max-Age=${Math.floor(ELEVATE_TTL_MS / 1000)}`,
+      );
+    },
+  };
 }

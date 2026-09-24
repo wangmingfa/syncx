@@ -3,7 +3,10 @@ import { ref, computed, onMounted } from 'vue';
 import { NInput, NButton, NTabs, NTab } from 'naive-ui';
 
 // 登录失败原因:优先取外部传入,否则用本地校验结果。
-const props = defineProps<{ error?: string }>();
+// elevate = true 时本组件作为「敏感操作验证门」嵌在弹窗/页面里复用:
+// 同样的表单与两种方式,但提交到 /api/elevate,成功后 emit('success') 而不是跳转。
+const props = defineProps<{ error?: string; elevate?: boolean }>();
+const emit = defineEmits<{ success: [] }>();
 
 /**
  * 两种登录方式:
@@ -79,6 +82,21 @@ async function submitPassword(): Promise<void> {
   busy.value = true;
   errorMsg.value = undefined;
   try {
+    if (props.elevate) {
+      // 提权通道:成功时服务端下发短时效 syncx_su cookie,不跳转,交给调用方接续
+      const res = await fetch('/api/elevate', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ username: u, password: p }),
+      });
+      if (res.ok) {
+        emit('success');
+        return;
+      }
+      const data = (await res.json().catch(() => ({}))) as { error?: string };
+      errorMsg.value = data.error ?? '验证失败,请重试';
+      return;
+    }
     const res = await fetch('/api/login', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
@@ -107,6 +125,20 @@ async function submitToken(): Promise<void> {
   busy.value = true;
   errorMsg.value = undefined;
   try {
+    if (props.elevate) {
+      const res = await fetch('/api/elevate', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ token: value }),
+      });
+      if (res.ok) {
+        emit('success');
+        return;
+      }
+      const data = (await res.json().catch(() => ({}))) as { error?: string };
+      errorMsg.value = data.error ?? '令牌无效,请重试';
+      return;
+    }
     // 依然走原生 POST /login:成功时服务端下发 HttpOnly cookie,
     // fetch 会自动存储;失败时服务端返回的是 200 页面壳(无错误信号),
     // 因此用 /api/status 复检来判定是否真的登录成功。
@@ -126,8 +158,8 @@ async function submitToken(): Promise<void> {
 </script>
 
 <template>
-  <div class="login">
-    <div class="login__bg" aria-hidden="true">
+  <div class="login" :class="{ 'is-embedded': elevate }">
+    <div v-if="!elevate" class="login__bg" aria-hidden="true">
       <div class="login__grid"></div>
       <div class="login__glow"></div>
     </div>
@@ -155,7 +187,7 @@ async function submitToken(): Promise<void> {
         </div>
       </div>
 
-      <div class="login__title">Access Control</div>
+      <div class="login__title">{{ elevate ? 'Elevated Access' : 'Access Control' }}</div>
 
       <!-- 登录方式切换:仅在已设置账号密码时出现,未设置时固定令牌登录 -->
       <n-tabs
@@ -213,13 +245,16 @@ async function submitToken(): Promise<void> {
           :loading="busy"
           :disabled="!ready"
           block
-        >登录</n-button>
+        >{{ elevate ? '验证' : '登录' }}</n-button>
       </form>
 
       <div class="login__foot">
         <span class="pulse"></span>
         <span>
-          <template v-if="mode === 'password'">
+          <template v-if="elevate">
+            终端与文件管理器需要二次验证,10 分钟内不再询问
+          </template>
+          <template v-else-if="mode === 'password'">
             忘记密码? 切到控制令牌登录,进入后可在「登录密码」里重设
           </template>
           <template v-else>
@@ -243,6 +278,31 @@ async function submitToken(): Promise<void> {
     radial-gradient(620px 420px at 16% 8%, rgb(74 127 192 / 0.1), transparent 70%),
     radial-gradient(560px 400px at 86% 94%, rgb(43 182 172 / 0.08), transparent 70%),
     var(--bg);
+}
+
+/* 嵌入模式(验证门):剥掉整页包装,只留卡片内容,交给弹窗/宿主页面排版 */
+.login.is-embedded {
+  display: block;
+  min-height: 0;
+  padding: 0;
+  background: none;
+  overflow: visible;
+}
+
+.login.is-embedded .login__card {
+  max-width: none;
+  padding: 4px 0 0;
+  border: 0;
+  background: none;
+  box-shadow: none;
+}
+
+.login.is-embedded .login__card::before {
+  display: none;
+}
+
+.login.is-embedded .login__title {
+  margin-top: 8px;
 }
 
 /* ---------- 背景:极淡网格 ---------- */

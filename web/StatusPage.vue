@@ -38,7 +38,7 @@ import DropOverlay from './components/DropOverlay.vue';
 import ToastView from './components/ToastView.vue';
 import SettingsModal from './components/SettingsModal.vue';
 import FilesModal from './components/FilesModal.vue';
-import TerminalModal from './components/TerminalModal.vue';
+import ElevateGateModal from './components/ElevateGateModal.vue';
 import StatusTopbar from './components/StatusTopbar.vue';
 import StatusPills from './components/StatusPills.vue';
 import OffersPanel from './components/OffersPanel.vue';
@@ -97,10 +97,10 @@ const topoOpen = ref(false);
 const trafficOpen = ref(false);
 const authOpen = ref(false);
 const settingsOpen = ref(false);
-// 浏览器内终端:顶栏本机 chip 菜单「终端」触发
-const terminalOpen = ref(false);
+// 浏览器内终端:独立全屏页(完整 PTY + xterm.js),验证门在终端页内部。
+// 新开标签页 —— 终端是长驻工作区,不该顶掉正在看的状态页。
 function openTerminal(): void {
-  terminalOpen.value = true;
+  window.open('/terminal', '_blank');
 }
 function openGuide(): void {
   showGuide.value = true;
@@ -188,7 +188,6 @@ provide(StatusContextKey, {
   authOpen,
   settingsOpen,
   openSettings,
-  terminalOpen,
   openTerminal,
   notifSupported: notifications.notifSupported,
   notifEnabled: notifications.notifEnabled,
@@ -259,11 +258,11 @@ provide(StatusContextKey, {
     <!-- 全局设置弹窗(带宽兜底 / 版本份数 / 历史上限) -->
     <SettingsModal :open="settingsOpen" @close="settingsOpen = false" />
 
+    <!-- 敏感操作验证门(终端/文件管理器共用的提权弹窗,状态在 utils/elevation) -->
+    <ElevateGateModal />
+
     <!-- 浏览器内文件管理器(目录卡「浏览文件」触发;浏览/下载/删除) -->
     <FilesModal :folder="filesFolder" @close="filesFolder = null" />
-
-    <!-- 浏览器内终端(顶栏本机 chip 菜单「终端」触发) -->
-    <TerminalModal :open="terminalOpen" @close="terminalOpen = false" />
 
     <!-- 日志弹窗 -->
     <LogsModal :open="logsOpen" @close="logsOpen = false" />
