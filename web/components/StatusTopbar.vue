@@ -3,9 +3,11 @@ import { computed, h } from 'vue';
 import type { VNodeChild } from 'vue';
 import { NButton, NDropdown, NPopover } from 'naive-ui';
 import type { DropdownOption } from 'naive-ui';
+import OsIcon from './OsIcon.vue';
 import { useStatusContext } from '../composables/statusContext';
 import { useTheme, type ThemeMode } from '../composables/useTheme';
 import { formatBytes } from '../utils/bytes';
+import { osIconLabel } from '../utils/os-icon';
 
 const { status, busy, checkForUpdate, openUpload, openLogs, openTopology, openTraffic, openGuide, openSettings, openAuth, logout, copy } = useStatusContext();
 const { mode: themeMode, resolved: themeResolved, setMode } = useTheme();
@@ -43,6 +45,19 @@ const trafficText = computed<string>(() => {
 /** 本机网络信息(主机名 + 局域网地址)。 */
 const ips = computed<string[]>(() => status.value.localAddresses ?? []);
 const hasLocalInfo = computed<boolean>(() => !!status.value.hostname || ips.value.length > 0);
+
+/**
+ * 本机 chip 的图标同时说两件事:
+ *  - **形状** = status.platform(daemon 的 process.platform,不是浏览器所在的那台机器
+ *    —— 控制台常从另一台机器打开,读 navigator 会画出错的系统);
+ *  - **彩色 / 灰** = 是否至少有一个对端连上,沿用原来那颗圆点的口径,语义没动。
+ * 两件信息叠在同一枚图标上确有歧义风险(容易读成「Windows 在线/不在线」),
+ * 所以 hint 文本把两件事分开说明,hover 即见。
+ */
+const anyPeerOnline = computed<boolean>(() => status.value.devices.some((p) => p.online));
+const chipOsHint = computed<string>(
+  () => `${osIconLabel(status.value.platform)} · ${anyPeerOnline.value ? '已有对端在线' : '暂无对端连接'}`,
+);
 
 /**
  * 顶栏收纳策略(定稿):所有低频操作收进本机 chip 的 hover 浮层,
@@ -131,7 +146,7 @@ const chipRows = computed<ChipRow[]>(() => [
     <n-popover trigger="hover" placement="bottom-end" :style="{ maxWidth: '360px' }">
       <template #trigger>
         <span class="device-chip">
-          <span class="dot" :class="status.devices.some((p) => p.online) ? 'dot-online' : 'dot-offline'"></span>
+          <OsIcon :platform="status.platform" :offline="!anyPeerOnline" :hint="chipOsHint" />
           <span class="mono">{{ status.deviceId }}</span>
           <span v-if="status.version" class="chip-version">{{ status.version === 'dev' ? status.version : `v${status.version}` }}</span>
           <svg class="chip-caret" viewBox="0 0 24 24" width="10" height="10" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">

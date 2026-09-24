@@ -42,6 +42,8 @@ export interface DeviceInfo {
   url?: string;
   /** 对端主机名(hello 宣告);undefined=旧版本对端未发,不展示。 */
   hostname?: string;
+  /** 对端运行平台(hello 宣告的 process.platform);undefined=旧版本对端未发,头像退回字母。 */
+  platform?: string;
   /** 该设备被指派到的目录 id 列表(用于展示「共享 N 个目录」)。 */
   folders: string[];
   /** 对端宣告的「它与本机在同步的目录 id 集合」;undefined=旧版本对端,无法判断已停止共享。 */

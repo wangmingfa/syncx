@@ -1,6 +1,8 @@
 <script setup lang="ts">
 import { NButton, NInput } from 'naive-ui';
+import OsIcon from './OsIcon.vue';
 import { useStatusContext } from '../composables/statusContext';
+import { osIconLabel } from '../utils/os-icon';
 
 const {
   status,
@@ -56,7 +58,17 @@ const {
       :class="{ 'is-linked': hoverDevices.includes(p.deviceId) }"
     >
       <div class="item-top">
-        <span class="avatar" :class="p.online ? 'online' : 'offline'">{{ monogram(p.deviceId) }}</span>
+        <span class="avatar" :class="p.online ? 'online' : 'offline'">
+          <!-- 对端宣告了平台就画系统图标;旧版本对端不发该字段(undefined)则保持字母头像,
+               不留空位。在线/离线仍由头像底色的 online/offline 表达,图标只额外去个色。 -->
+          <OsIcon
+            v-if="p.platform"
+            :platform="p.platform"
+            :offline="!p.online"
+            :hint="`${osIconLabel(p.platform)} · ${p.deviceId}`"
+          />
+          <template v-else>{{ monogram(p.deviceId) }}</template>
+        </span>
         <span class="item-title mono">{{ p.deviceId }}</span>
         <span class="status-pill" :class="p.online ? 'pill-online' : 'pill-offline'">
           {{ p.online ? '在线' : '离线' }}

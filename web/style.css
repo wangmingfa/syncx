@@ -186,23 +186,33 @@ tbody tr:last-child td {
   color: var(--offline);
 }
 
-.dot {
-  display: inline-block;
-  width: 8px;
-  height: 8px;
-  border-radius: 50%;
-  margin-right: 8px;
-  vertical-align: middle;
+/* ---------- 操作系统图标(本机 chip 的在线指示 + 设备卡头像) ---------- */
+
+.os-icon {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  flex: none;
 }
 
-.dot-online {
-  background: var(--online);
-  box-shadow: 0 0 0 3px rgb(47 165 111 / 0.16);
+/* 不在线 = 去色 + 减淡。
+   为什么走 filter 而不是「一条规则把子元素 fill 刷成 var(--muted)」:后者字更少,也确实施得通
+   (SVG 的 fill 是 presentation attribute,优先级低于任何 CSS 规则),但它会把 Tux 的肚皮和
+   身子刷成同一个灰 —— 图标塌成一块没有轮廓的灰斑,形状信息全丢。grayscale 保留亮度对比:
+   四格窗去饱和后仍是四块不同明度的灰,企鹅肚子仍比身子亮。
+   这条实现方式有个硬前提:苹果必须是彩虹版(见 OsIcon.vue)。单色黑剪影去饱和后与不去饱和
+   完全相同,在线 / 离线会长得一模一样。 */
+.os-icon.is-offline {
+  filter: grayscale(1);
+  opacity: 0.5;
 }
 
-.dot-offline {
-  background: var(--offline);
-  box-shadow: 0 0 0 3px rgb(217 107 107 / 0.16);
+/* 头像位 30px,比 chip 里大一号。CSS 的 width/height 优先级高于 svg 上的同名
+   presentation attribute,所以按位置覆盖即可,不必给组件加 size prop。
+   「未知平台」那枚是纯描边 + currentColor,在这里会顺势吃到头像的在线/离线色,是想要的效果。 */
+.avatar .os-icon svg {
+  width: 18px;
+  height: 18px;
 }
 
 /* ---------- 进度条(「数据流」签名的浅色版本) ---------- */

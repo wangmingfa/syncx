@@ -106,6 +106,8 @@ export interface DeviceLinkInfo {
   version?: string;
   /** 对端主机名(hello 宣告);undefined=旧版本对端未发。 */
   hostname?: string;
+  /** 对端运行平台(hello 宣告的 process.platform);undefined=旧版本对端未发,UI 退回字母头像。 */
+  platform?: string;
 }
 
 /** 内容对比时对端返回的目录索引快照(见 folder-index-request)。 */
@@ -312,12 +314,12 @@ export class SyncSessionManager {
   // (配对请求 / 目录共享邀请 / 确认回执)。离线对端查不到即跳过(连接建立时会自动补发)。
   private readonly peerSessions = new Map<string, ActiveSession>();
   /**
-   * 对端经 hello 宣告的运行版本 / 主机名,按 deviceId 存储,与「书签会话」解耦。
+   * 对端经 hello 宣告的运行版本 / 主机名 / 平台,按 deviceId 存储,与「书签会话」解耦。
    * 任意一条与该对端的存活会话收到 hello 都更新此 map,因此设备卡显示的对端版本 /
-   * 主机名不再受「书签会话 ≠ 实际收到 hello 的会话」影响 —— 双连接 / 重连 /
-   * 书签迁移等拓扑抖动下均稳定,不会再偶发「版本未知」。
+   * 主机名 / 操作系统图标不再受「书签会话 ≠ 实际收到 hello 的会话」影响 —— 双连接 /
+   * 重连 / 书签迁移等拓扑抖动下均稳定,不会再偶发「版本未知」。
    */
-  private readonly peerInfo = new Map<string, { version?: string; hostname?: string }>();
+  private readonly peerInfo = new Map<string, { version?: string; hostname?: string; platform?: string }>();
   /**
    * 心跳存活探测:每个 peer socket 自最近一次 ping 起是否收到过 pong。
    * 网络分区 / 对端静默掉线时,本端 socket 仍停留在 OPEN 状态,sessionAlive 据此
@@ -922,7 +924,7 @@ export class SyncSessionManager {
   /** 忘记某对端的地址并断开其所有会话;返回关闭的会话数。 */
   forgetAndCloseSessions(deviceId: string): number {
     this.outboundPeerUrls.delete(deviceId);
-    this.peerInfo.delete(deviceId); // 忘记对端时一并清除其版本 / 主机名缓存
+    this.peerInfo.delete(deviceId); // 忘记对端时一并清除其版本 / 主机名 / 平台缓存
     // 断开与该设备的所有会话连接(遍历 activeSessions 而非只取 peerSessions 里的
     // 当前一条)。close 回调会拆掉目录 peer;当前会话的 close 会清书签并尝试排定
     // 重连,但此时 outboundPeerUrls 已清空,scheduleReconnect 直接返回,不会重连。
@@ -1068,9 +1070,9 @@ export class SyncSessionManager {
     }
   }
 
-  /** 给一条出站控制消息注入本机运行版本与主机名(供对端设备卡展示来源 / 计算可否升级)。 */
+  /** 给一条出站控制消息注入本机运行版本、主机名与平台(供对端设备卡展示来源 / 计算可否升级 / 画系统图标)。 */
   private withSelfInfo(message: ControlMessage): ControlMessage {
-    return { ...message, version: runtimeVersion(), hostname: osHostname() };
+    return { ...message, version: runtimeVersion(), hostname: osHostname(), platform: process.platform };
   }
 
   /** 收到对端 control 消息:把配对 / 目录共享邀请落成待确认项;确认回执触发会话对账。 */
@@ -1886,12 +1888,13 @@ export class SyncSessionManager {
       transports: [],
     };
     this.activeSessions.push(session);
-    // 版本握手:双方各发一次 hello,设备卡显示对端版本与主机名,并据此计算「可否从对方升级」
+    // 版本握手:双方各发一次 hello,设备卡显示对端版本、主机名与操作系统图标,并据此计算「可否从对方升级」
     sendControlMessage(socket, key, {
       kind: 'hello',
       fromDeviceId: this.identity.deviceId,
       version: runtimeVersion(),
       hostname: osHostname(),
+      platform: process.platform,
     });
     // 书签策略:仅当当前书签缺失或其 socket 已死时才移交给新会话。
     // 健康的当前会话保持不动(重复连接照常注册为备份,handlers 可收消息);
@@ -1925,21 +1928,27 @@ export class SyncSessionManager {
       // 处理会去碰已关闭的资源(folder-sync-list 会触发 mutateConfig 重写配置,
       // 在测试里表现为对已删除目录重试 5s 后抛 config lock timeout)。
       if (this.closed) return;
-      // 版本 / 主机名随每条控制消息携带(hello 必然带,其余控制消息也在发送侧注入)。
+      // 版本 / 主机名 / 平台随每条控制消息携带(hello 必然带,其余控制消息也在发送侧注入)。
       // 即便一次性 hello 在双连接 / 重连抖动中丢失,只要任意一条控制消息到达,
       // 对端版本即可被学到 —— 设备卡不再偶发「版本未知」。用消息里的 fromDeviceId
       // 而非会话 remoteDeviceId,确保严格按照对端身份缓存(与书签会话解耦)。
-      if (message.version || message.hostname) {
+      if (message.version || message.hostname || message.platform) {
         const prev = this.peerInfo.get(message.fromDeviceId);
         this.peerInfo.set(message.fromDeviceId, {
           version: message.version ?? prev?.version,
           hostname: message.hostname ?? prev?.hostname,
+          platform: message.platform ?? prev?.platform,
         });
         // 仅当版本首次学到或发生变化时记录,避免每条控制消息都刷日志
         // (现在 pairing / invitation / folder-sync-list 都带版本)
-        if (message.version && message.version !== prev?.version) {
+        const versionChanged = !!message.version && message.version !== prev?.version;
+        if (versionChanged) {
           this.logger.info(`peer ${message.fromDeviceId} runs syncx ${message.version}${message.hostname ? ` (host ${message.hostname})` : ''}`);
-          // 设备卡上的对端版本/主机名/可否升级都依赖它,首次学到时立即刷新
+        }
+        // 设备卡上的对端版本 / 主机名 / 系统图标 / 可否升级都读这份缓存,任一字段
+        // 首次学到都要立刻刷快照:否则 platform 迟到(version 未变)会让图标停在旧帧,
+        // 用户看到的是一台永远显示字母头像的设备。
+        if (versionChanged || (message.platform && !prev?.platform)) {
           this.notifyStatus();
         }
       }
@@ -2078,7 +2087,7 @@ export class SyncSessionManager {
     if (!ok) this.logger.warn(`folder invitation to ${deviceId} could not be delivered (no live session)`);
   }
 
-  /** 某对端的连接信息(在线/地址/对端宣告的目录清单/对端版本/对端主机名),供 status 组装。 */
+  /** 某对端的连接信息(在线/地址/对端宣告的目录清单/对端版本/对端主机名/对端平台),供 status 组装。 */
   describeDevice(deviceId: string): DeviceLinkInfo {
     const session = this.peerSessions.get(deviceId);
     return {
@@ -2088,6 +2097,7 @@ export class SyncSessionManager {
       remotePendingFolders: session?.remotePendingFolders ? [...session.remotePendingFolders] : [],
       version: this.peerInfo.get(deviceId)?.version,
       hostname: this.peerInfo.get(deviceId)?.hostname,
+      platform: this.peerInfo.get(deviceId)?.platform,
     };
   }
 

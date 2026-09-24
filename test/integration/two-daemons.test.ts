@@ -746,6 +746,10 @@ describe('peer version visibility under dual connections (peerInfo regression)',
       expect(cSeesA.version!.length).toBeGreaterThan(0);
       // 主机名也应随 hello 一起可靠下发
       expect(typeof aSeesC.hostname).toBe('string');
+      // 运行平台走同一条路:设备卡的操作系统图标读 device.platform,
+      // 这条字段若在双连接下偶发丢失,图标会永久退化成字母头像且没有别的征兆。
+      expect(typeof aSeesC.platform).toBe('string');
+      expect(typeof cSeesA.platform).toBe('string');
 
       await stopChildren();
       rmDir(a.dir);

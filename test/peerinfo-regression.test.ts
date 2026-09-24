@@ -74,6 +74,7 @@ describe('peerInfo keyed by deviceId (regression: version survives non-bookmark 
         fromDeviceId: cId.deviceId,
         version: '9.9.9',
         hostname: 'hostC',
+        platform: 'darwin',
       });
 
       // 等待 hello 被处理(异步 WS 收发 + 解密)
@@ -83,6 +84,8 @@ describe('peerInfo keyed by deviceId (regression: version survives non-bookmark 
       // 核心不变量:version 按 deviceId 缓存,不受「书签会话 ≠ 收到 hello 的会话」影响
       expect(link.version).toBe('9.9.9');
       expect(link.hostname).toBe('hostC');
+      // platform 走的是同一条按 deviceId 缓存的路(设备卡的操作系统图标据此画)
+      expect(link.platform).toBe('darwin');
       // 双连接:两条会话都应在线
       expect(link.online).toBe(true);
 
@@ -102,7 +105,7 @@ describe('peerInfo keyed by deviceId (regression: version survives non-bookmark 
  * 唯独 hello 没到 → 设备卡永久「版本未知」。根因:版本只挂在 hello 这一条「建连时一次性
  * 发送」的消息上,一旦它在双连接 / 重连抖动中丢失即不可恢复。
  *
- * 修复:version / hostname 随每条控制消息发送(发送侧注入),接收侧对「任意带版本的控制
+ * 修复:version / hostname / platform 随每条控制消息发送(发送侧注入),接收侧对「任意带版本的控制
  * 消息」更新 peerInfo。于是只要任意一条控制消息到达,版本即可被学到,不再依赖那条
  * 可能被丢的 hello。
  *
@@ -146,6 +149,7 @@ describe('peer version learned from non-hello control messages (regression: lost
         folderIds: ['f1'],
         version: '9.9.9',
         hostname: 'hostC',
+        platform: 'win32',
       });
 
       await waitFor(() => managerA.describeDevice(cId.deviceId).version === '9.9.9', 5000);
@@ -153,6 +157,8 @@ describe('peer version learned from non-hello control messages (regression: lost
       const link = managerA.describeDevice(cId.deviceId);
       expect(link.version).toBe('9.9.9');
       expect(link.hostname).toBe('hostC');
+      // 平台同样不依赖那条可能被丢的 hello
+      expect(link.platform).toBe('win32');
       expect(link.online).toBe(true);
 
       managerA.close();
