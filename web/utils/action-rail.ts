@@ -8,6 +8,7 @@
 export type ActionIconName =
   | 'pause'
   | 'play'
+  | 'rescan'
   | 'compare'
   | 'diff'
   | 'history'

@@ -541,12 +541,9 @@ html[data-theme='dark'] .chip-menu__item--danger {
 
 /* ---------- 两栏布局(参考 Syncthing:左=共享目录 / 右=已配对设备) ---------- */
 
-/* 断点取 1060 而非「手机竖屏宽度」:821–1060px 的窗口虽然够宽,但两栏后每栏只有
-   380–500px,放不下栏头一整排按钮(标题+徽标+扫描/记录/暂停/添加 ≈ 480px 固有宽,
-   实测 784px 视口下 head 宽 703px)。挤成两栏的结果是:栏头 wrap 成两行、「＋ 添加」
-   孤零零落到左下角(item-card 上方的缝隙里,像跑到了卡片外面)、卡片标题行的 6 个
-   图标按钮整组掉到第二行 —— 卡片从 134px 涨到 170px。这个区间改为单栏全宽,
-   栏头与卡片标题行都能一行放下(2026-09-23 用户窄窗口截图反馈)。 */
+/* 两栏收成单栏的断点:最初取 1060(821–1060px 两栏后每栏只有 380–500px,栏头一整排
+   按钮放不下,wrap 后「＋ 添加」孤零零落到卡片缝隙)。栏头按钮收进 ActionRail 后
+   固有宽度大幅缩小,按用户要求把阈值再调小 200px → 860:861–1060px 的窗口恢复两栏。 */
 .layout {
   display: grid;
   grid-template-columns: 1fr 1fr;
@@ -555,8 +552,8 @@ html[data-theme='dark'] .chip-menu__item--danger {
   position: relative;
 }
 
-/* 宽屏下两栏之间加一道竖直分隔,强化左右区分 */
-@media (min-width: 1061px) {
+/* 宽屏下两栏之间加一道竖直分隔,强化左右区分(两栏布局的保底宽度是 861px) */
+@media (min-width: 861px) {
   .layout::before {
     content: '';
     position: absolute;
@@ -570,7 +567,7 @@ html[data-theme='dark'] .chip-menu__item--danger {
   }
 }
 
-@media (max-width: 1060px) {
+@media (max-width: 860px) {
   .layout {
     grid-template-columns: 1fr;
   }
@@ -579,6 +576,7 @@ html[data-theme='dark'] .chip-menu__item--danger {
 /* 左右两栏各自包一层淡色面板:左=共享目录(天青蓝)、右=设备(薄荷青),
    卡片仍为纯白,叠在淡色面板上更分明,整体一眼区分两大功能区。 */
 .col {
+  position: relative;
   display: flex;
   flex-direction: column;
   gap: 12px;
@@ -586,6 +584,16 @@ html[data-theme='dark'] .chip-menu__item--danger {
   padding: 14px;
   border: 1px solid var(--border);
   border-radius: var(--radius);
+}
+
+/* 全局暂停徽标:复用目录卡暂停徽标的橙色胶囊(.float-badge .paused-badge),
+   贴在栏容器顶缘右上角、外探 10px。卡片自身的悬浮徽标锚在 .item-card
+   (自身已 relative),不受这里把 .col 变成定位容器的影响。 */
+.col-paused {
+  position: absolute;
+  top: -10px;
+  right: 16px;
+  z-index: 1;
 }
 
 .col--folders {

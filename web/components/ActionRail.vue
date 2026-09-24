@@ -13,22 +13,33 @@
  * 2. **键盘可达不靠 JS**。CSS 里 `.rail:focus-within` 与 `.is-open` 驱动同一套展开样式,
  *    所以 Tab 走到占位图标时动作条自动摊开,受控模式下父级完全不参与也成立。
  * 3. **散开动画是 transform 的结果,不是逐个挂载**。N 个按钮常驻 DOM,收起时各自
- *    `translateX` 回占位图标那一点并缩到 0.35、透明度 0;展开即反向移动。这样不需要
+ *    平移回占位图标那一点并缩到 0.35、透明度 0;展开即反向移动。这样不需要
  *    TransitionGroup 也不需要测量尺寸,而 `visibility: hidden` 顺手把收起态的按钮
  *    从 tab 序列里摘掉(比 `inert` 好,`inert` 是 DOM 属性、CSS 驱动不了,会和第 2 条打架)。
+ *
+ * 展开方向(direction,默认 left)只影响面板锚点与收起位移的轴向/符号,由
+ * .rail--xxx 方向类覆写两个 CSS 变量实现,动画机制四个方向完全一致。
  */
 import { computed, ref } from 'vue';
 import { NButton, NTooltip } from 'naive-ui';
 import ActionIcon from './ActionIcon.vue';
 import type { RailAction } from '../utils/action-rail';
 
-const props = defineProps<{
-  actions: RailAction[];
-  /** 父级驱动展开状态;不传(undefined)则组件自管。 */
-  expanded?: boolean;
-  /** 占位图标的无障碍名称。 */
-  label?: string;
-}>();
+/** 展开方向:动作条相对「更多」按钮摊开的方位;竖直方向动作条排成一列。 */
+export type RailDirection = 'left' | 'right' | 'up' | 'down';
+
+const props = withDefaults(
+  defineProps<{
+    actions: RailAction[];
+    /** 父级驱动展开状态;不传(undefined)则组件自管。 */
+    expanded?: boolean;
+    /** 占位图标的无障碍名称。 */
+    label?: string;
+    /** 展开方向,默认往左(目录卡同款)。 */
+    direction?: RailDirection;
+  }>(),
+  { direction: 'left' },
+);
 
 const emit = defineEmits<{ (e: 'update:expanded', value: boolean): void }>();
 
@@ -57,7 +68,7 @@ function onMoreClick(): void {
 </script>
 
 <template>
-  <span class="rail" :class="{ 'is-open': open }" :style="{ '--rail-n': actions.length }">
+  <span class="rail" :class="[`rail--${direction}`, { 'is-open': open }]" :style="{ '--rail-n': actions.length }">
     <span class="rail__panel">
       <!-- 背板单独一层、铺满面板:收起时面板 visibility:hidden 会连它一起摘掉,
            不会留下一条盖住标题的空心胶囊;它自己的 opacity 过渡则负责展开时淡入。
@@ -128,14 +139,15 @@ function onMoreClick(): void {
 
 .rail__panel {
   position: absolute;
-  /* 右缘对齐 rail 右缘 = 正好盖在占位图标上方:展开后最后一个动作就落在「更多」原来的
-     位置上,占位图标被不透明背板整块遮住,视线里只有 6 个动作、右缘不发生位移。
-     (此前钉在占位图标左缘,展开后是「6 个动作 + 占位」共 7 格,右侧多出一个空位。) */
+  /* 默认往左展开(目录卡同款):右缘对齐 rail 右缘 = 正好盖在占位图标上方,
+     展开后最后一个动作就落在「更多」原来的位置上,占位图标被不透明背板整块遮住,
+     右缘不发生位移。往右 / 往上 / 往下由 .rail--xxx 覆写锚点。 */
   right: 0;
   top: 50%;
   transform: translateY(-50%);
   z-index: 2;
   display: flex;
+  flex-direction: row;
   align-items: center;
   gap: var(--rail-gap);
   /* 四周等距留白:hover 时按钮会亮起一个与自身等大的圆,贴边会让那个圆和胶囊边打架。
@@ -147,6 +159,31 @@ function onMoreClick(): void {
      延迟取动画时长,让按钮先收拢完再消失;展开时延迟归零,立刻可见。 */
   visibility: hidden;
   transition: visibility 0s linear var(--rail-dur);
+}
+
+/* 往右展开:左缘锚在「更多」上,第一个动作盖住占位图标的位置。 */
+.rail--right .rail__panel {
+  right: auto;
+  left: 0;
+}
+
+/* 竖直方向:动作排成一列,水平居中于「更多」;往上时底缘贴住 rail 底缘
+   (最底下的动作盖住占位图标),往下时顶缘贴住 rail 顶缘。 */
+.rail--up .rail__panel,
+.rail--down .rail__panel {
+  right: auto;
+  top: auto;
+  left: 50%;
+  transform: translateX(-50%);
+  flex-direction: column;
+}
+
+.rail--up .rail__panel {
+  bottom: 0;
+}
+
+.rail--down .rail__panel {
+  top: 0;
 }
 
 /* :focus-within 与 .is-open 驱动同一套展开样式:键盘 Tab 到占位图标时动作条自动摊开,
@@ -177,25 +214,46 @@ function onMoreClick(): void {
 }
 
 /* 收起 = 每个动作各自平移到占位图标那一点并缩小;展开 = 回到自己的位置。
-   位移量写成 (100% + gap) 的倍数:100% 就是按钮自身宽度,按钮尺寸怎么调都算不错,
-   不留「28px 小圆钮」这种会过期的魔法数字。
-   两个方向的错峰相反:散开时离占位图标最近的先到(外层 .is-open 的 delay),
+   位移量写成 (100% + gap) 的倍数:100% 就是按钮自身尺寸(横向用宽、竖向用高),
+   按钮尺寸怎么调都算不错,不留「28px 小圆钮」这种会过期的魔法数字。
+   方向只改两个量:--rail-coll-x/y(收起位移,朝「更多」所在的那一侧收敛)和
+   --rail-near-i(离「更多」最近的槽位序号:left/up 是最后一个,right/down 是第一个)。
+   两个方向的错峰:散开时离占位图标最近的先到(外层 .is-open 的 delay),
    收拢时最远的先走(这里的 delay),否则按钮会在收拢途中叠成一摞。 */
 .rail__slot {
+  --rail-near-i: calc(var(--rail-n) - var(--rail-i) - 1);
+  --rail-coll-x: calc(var(--rail-near-i) * (100% + var(--rail-gap)));
+  --rail-coll-y: 0px;
   display: inline-flex;
   opacity: 0;
-  transform: translateX(calc((var(--rail-n) - var(--rail-i) - 1) * (100% + var(--rail-gap)))) scale(0.35);
+  transform: translate(var(--rail-coll-x), var(--rail-coll-y)) scale(0.35);
   transition:
     transform var(--rail-dur) cubic-bezier(0.2, 0.8, 0.3, 1),
     opacity calc(var(--rail-dur) * 0.6) ease;
-  transition-delay: calc(var(--rail-i) * var(--rail-stagger));
+  transition-delay: calc((var(--rail-n) - var(--rail-near-i) - 1) * var(--rail-stagger));
+}
+
+.rail--right .rail__slot {
+  --rail-near-i: var(--rail-i);
+  --rail-coll-x: calc(var(--rail-i) * (100% + var(--rail-gap)) * -1);
+}
+
+.rail--up .rail__slot {
+  --rail-coll-x: 0px;
+  --rail-coll-y: calc(var(--rail-near-i) * (100% + var(--rail-gap)));
+}
+
+.rail--down .rail__slot {
+  --rail-near-i: var(--rail-i);
+  --rail-coll-x: 0px;
+  --rail-coll-y: calc(var(--rail-i) * (100% + var(--rail-gap)) * -1);
 }
 
 .rail.is-open .rail__slot,
 .rail:focus-within .rail__slot {
   opacity: 1;
   transform: none;
-  transition-delay: calc((var(--rail-n) - var(--rail-i) - 1) * var(--rail-stagger));
+  transition-delay: calc(var(--rail-near-i) * var(--rail-stagger));
 }
 
 @media (prefers-reduced-motion: reduce) {

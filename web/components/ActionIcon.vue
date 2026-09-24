@@ -29,6 +29,14 @@ defineProps<{ name: ActionIconName }>();
       <path d="M8 5.5 18 12 8 18.5Z" />
     </template>
 
+    <!-- 重新扫描:双向循环箭头 -->
+    <template v-else-if="name === 'rescan'">
+      <polyline points="21 3.5 21 9.5 15 9.5" />
+      <polyline points="3 20.5 3 14.5 9 14.5" />
+      <path d="M4.6 10a8 8 0 0 1 13.2-3.1L21 9.5" />
+      <path d="M3 14.5l3.2 2.6A8 8 0 0 0 19.4 14" />
+    </template>
+
     <!-- 双栏对比 -->
     <template v-else-if="name === 'compare'">
       <rect x="3.5" y="4.5" width="17" height="15" rx="2" />

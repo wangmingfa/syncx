@@ -97,6 +97,40 @@ const {
 const pathPlaceholder = computed(() => folderPathPlaceholder(status.value.platform));
 
 /**
+ * 栏头动作(扫描全部 / 全局记录 / 全局暂停)收成数据交给 ActionRail,与目录卡同款
+ * hover 展开 —— 收起只留一个「更多」占位图标,小屏不再挤一行按钮。
+ * hover 范围是整栏(hover 目录卡也会顺带摊开栏头动作,与「hover 卡片展开」同构);
+ * 点占位图标可钉住(触屏兜底),离开整栏一并复位。全局暂停没有目录可停,
+ * 沿用原按钮的 conditions:无目录不给这个动作。
+ */
+const headHover = ref(false);
+const headPinned = ref(false);
+
+function onHeadLeave(): void {
+  headHover.value = false;
+  headPinned.value = false;
+}
+
+const headActions = computed<RailAction[]>(() => {
+  const b = busy.value;
+  const actions: RailAction[] = [
+    { key: 'rescan', icon: 'rescan', disabled: b, tooltip: '扫描全部目录', onClick: () => rescan() },
+    { key: 'global-history', icon: 'history', tooltip: '全局同步记录:跨目录的归并时间线', onClick: () => openGlobalHistory() },
+  ];
+  if (status.value.folders.length > 0) {
+    actions.push({
+      key: 'global-pause',
+      icon: status.value.paused ? 'play' : 'pause',
+      active: status.value.paused,
+      disabled: b,
+      tooltip: status.value.paused ? '恢复所有目录的同步' : '暂停所有目录的同步(连接保持在线)',
+      onClick: () => toggleGlobalPaused(!status.value.paused),
+    });
+  }
+  return actions;
+});
+
+/**
  * 目录卡的六个动作,收成数据交给 ActionRail。
  *
  * 每次渲染重新构造数组是有意的:禁用态与 tooltip 文案都跟着 `busy` / `f.paused` /
@@ -193,7 +227,9 @@ function visibleFiles(f: FolderInfo): TransferFile[] {
 </script>
 
 <template>
-  <section class="col col--folders">
+  <section class="col col--folders" @mouseenter="headHover = true" @mouseleave="onHeadLeave">
+    <!-- 全局暂停徽标:与目录卡的暂停徽标同款,贴在栏容器顶缘右上角 -->
+    <span v-if="status.paused" class="float-badge paused-badge col-paused" title="全局已暂停:所有目录不扫描、不广播、不接收;连接与配对照常">已暂停</span>
     <div class="col-head">
       <!-- 标题+徽标绑成一组(.col-head__lead):窄屏 wrap 时两者同进退,
            徽标不会单独掉进按钮行;手机上 lead 整行独占,按钮组落到第二行(见 style.css) -->
@@ -201,14 +237,15 @@ function visibleFiles(f: FolderInfo): TransferFile[] {
         <span>共享目录</span>
         <span class="badge">{{ status.folders.length }}</span>
       </div>
-      <n-button :disabled="busy" @click="rescan">扫描全部</n-button>
-      <!-- 全局时间线入口:跨目录的同步记录归并视图(同一 HistoryModal 的全局模式) -->
-      <n-button size="small" tertiary @click="openGlobalHistory">全局记录</n-button>
-      <!-- 全局开关:所有目录一起停摆;各目录自己的暂停状态独立保留,恢复全局后仍生效 -->
-      <n-button v-if="status.folders.length > 0" size="small" tertiary :type="status.paused ? 'primary' : 'default'" :disabled="busy"
-        :title="status.paused ? '恢复所有目录的同步' : '暂停所有目录的同步(连接保持在线)'"
-        @click="toggleGlobalPaused(!status.paused)"
-      >{{ status.paused ? '恢复全部同步' : '暂停全部同步' }}</n-button>
+      <!-- 栏头动作收进 ActionRail(与目录卡同款):收起只留一个「更多」图标,
+           hover 栏头摊开;省空间,小屏不再挤一行文字按钮 -->
+      <ActionRail
+        :actions="headActions"
+        :expanded="headHover || headPinned"
+        direction="right"
+        label="目录栏操作"
+        @update:expanded="headPinned = $event"
+      />
       <n-button v-if="status.folders.length > 0" class="add-toggle" :class="{ 'is-invisible': addFolderOpen }" :disabled="busy" :tabindex="addFolderOpen ? -1 : 0" @click="toggleAddFolder">＋ 添加</n-button>
     </div>
 
