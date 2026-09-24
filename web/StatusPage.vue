@@ -1,6 +1,6 @@
 <script setup lang="ts">
-import { provide, ref, onMounted, onUnmounted } from 'vue';
-import type { StatusData } from './types';
+import { provide, ref, computed, watchEffect, onMounted, onUnmounted } from 'vue';
+import type { OfferInfo, StatusData } from './types';
 import { useToast } from './composables/useToast';
 import { StatusContextKey, type CoreDeps } from './composables/statusContext';
 import { useStatus } from './composables/useStatus';
@@ -61,6 +61,24 @@ const offers = useOffers(deps);
 const folderDiff = useFolderDiff(deps);
 const selfUpdate = useSelfUpdate(deps);
 const fmt = useFormat(status);
+
+// 标签页标题:默认「SYNCX · 主机名 · IPv4」;有待确认邀请时改为该邀请的标题
+// (与 OffersPanel 卡片标题同语义),确认/忽略后 status 推送刷新、pending 清空即恢复默认。
+// 放在本页而非 App.vue:App 只在挂载时拉一次 status,不随 WS 推送更新。
+const pendingOffers = computed<OfferInfo[]>(() => status.value.offers.filter((o) => o.status === 'pending'));
+function offerTitle(o: OfferInfo): string {
+  return o.kind === 'folder' ? `目录共享邀请 · ${o.folderName ?? o.folderId ?? ''}` : '配对请求';
+}
+watchEffect(() => {
+  const base = ['SYNCX', status.value.hostname, status.value.localAddresses?.[0]].filter(Boolean).join(' · ');
+  const pending = pendingOffers.value;
+  if (pending.length === 0) {
+    document.title = base;
+    return;
+  }
+  const head = offerTitle(pending[0]!);
+  document.title = pending.length > 1 ? `${head} 等 ${pending.length} 条邀请` : head;
+});
 
 // 需要本页模板双向绑定的模态状态:必须提到顶层,否则 <script setup> 模板不会自动拆包 Ref
 const { historyFolder, historyGlobal, versionsFolder, conflictsFolder, editDevicesOpen, editFolder, saveEditDevices } = folders;
