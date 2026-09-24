@@ -12,6 +12,18 @@ import { createHash, randomBytes } from 'node:crypto';
 export interface FolderIdentity {
   dev: string;
   ino: string;
+  /**
+   * 该目录**已经人工确认过**的设备号集合(含当前 `dev`)。
+   *
+   * 存在的理由:Android A/B 分区设备上,每次 OTA 会切到另一个 slot,`/data` 的
+   * device-mapper minor 随之挪一位 —— `st_dev` 在两个值之间来回跳,而 inode 始终不变。
+   * 于是「仅 dev 变」在这类机器上每次系统更新都要弹一次确认,而正确答案永远一样,
+   * 只会把人训练成不看就点。规则改为:集合内的 dev 再出现 → 静默重采;
+   * 没出现过的 dev → 仍弹一次确认,确认后才入集合。详见 docs/adr/0009 附录。
+   *
+   * 缺省(本次改动之前写的配置)= 只有 `dev` 一个值,行为与升级前一致。
+   */
+  devs?: string[];
 }
 
 export interface SharedFolderConfig {

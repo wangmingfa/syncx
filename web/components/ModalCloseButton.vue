@@ -11,8 +11,8 @@ import { NButton } from 'naive-ui';
  * 绑死在某款字体上,换个平台就翻车(14px 时偏差只有 ~0.5px,所以字号小的时候看不出来)。
  * SVG 的几何与字体无关。改回文字前请先读这段。
  *
- * 样式在全局 `web/style.css` 的 `.modal-close` / `.modal-close-x`(本项目约定:组件样式集中在
- * style.css,与 `.modal` 的定位上下文放在一处)。圆 34px(naive-ui medium)、图标 14x14、
+ * 样式在 `web/style.css` 的 `.modal-close` / `.modal-close-x`(留在全局而不是收进组件,是因为
+ * 它与 `.modal` 的定位互相咬合,拆开会看不出层叠关系)。圆 34px(naive-ui medium)、图标 14x14、
  * 34px 盒内左右各留 10px 整数边距。
  */
 defineProps<{

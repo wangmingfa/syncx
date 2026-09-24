@@ -65,6 +65,7 @@ const {
             v-if="p.platform"
             :platform="p.platform"
             :offline="!p.online"
+            :size="18"
             :hint="`${osIconLabel(p.platform)} · ${p.deviceId}`"
           />
           <template v-else>{{ monogram(p.deviceId) }}</template>

@@ -2,8 +2,10 @@
 import { computed, ref } from 'vue';
 import { NButton, NInput, NCheckbox, NCheckboxGroup, NTooltip } from 'naive-ui';
 import { useStatusContext } from '../composables/statusContext';
+import ActionRail from './ActionRail.vue';
 import { folderPathPlaceholder, visibleTransferFiles, XFER_FILE_LIMIT } from '../utils/format';
 import { outsideSchedule } from '../utils/schedule';
+import type { RailAction } from '../utils/action-rail';
 import type { FolderInfo, TransferFile } from '../types';
 
 /**
@@ -40,7 +42,7 @@ function askReAdopt(f: FolderInfo): void {
     title: '重新采集目录身份',
     message:
       kind === 'identity-remounted'
-        ? '仅设备号变化、inode 未变:大概率是同一块盘重新挂载(重启 / 容器重启)。确认后将更新目录指纹并恢复同步,索引不受影响。'
+        ? '仅设备号变化、inode 未变:大概率是同一块盘重新挂载(重启 / 容器重启 / Android A/B 分区每次 OTA)。确认后将更新目录指纹并恢复同步,索引不受影响;本次的设备号会被记住,下次再变回它时不再询问。'
         : '目录身份与记录不符(换盘 / 目录被重建?)。请先确认该目录内容就是你要同步的数据 —— 确认后仅更新指纹,索引不受影响。',
     detail: f.path,
     confirmText: '确认并恢复同步',
@@ -93,6 +95,77 @@ const {
 
 /** 路径示例按 daemon 平台给(Windows 显示 F:\shared\docs),避免在 Windows 上提示 POSIX 路径。 */
 const pathPlaceholder = computed(() => folderPathPlaceholder(status.value.platform));
+
+/**
+ * 目录卡的六个动作,收成数据交给 ActionRail。
+ *
+ * 每次渲染重新构造数组是有意的:禁用态与 tooltip 文案都跟着 `busy` / `f.paused` /
+ * `f.devices.length` 变,写成 computed 反而要为每个目录建一份。`key` 稳定,
+ * 所以展开动画过渡的始终是同一批 DOM 节点。
+ */
+function folderActions(f: FolderInfo): RailAction[] {
+  const noPeer = f.devices.length === 0;
+  const b = busy.value;
+  return [
+    {
+      key: 'pause',
+      icon: f.paused ? 'play' : 'pause',
+      active: f.paused,
+      disabled: b,
+      tooltip: f.paused ? '恢复该目录的同步' : '暂停该目录的同步(连接保持在线)',
+      onClick: () => toggleFolderPaused(f, !f.paused),
+    },
+    {
+      key: 'compare',
+      icon: 'compare',
+      disabled: b || noPeer,
+      tooltip: noPeer ? '该目录还没有指派设备,无从对比' : '打开双栏对比:左右目录结构对齐,双击文件可看内容差异',
+      onClick: () => openCompare(f),
+    },
+    {
+      key: 'diff',
+      icon: 'diff',
+      disabled: b || noPeer,
+      tooltip: noPeer ? '该目录还没有指派设备,无从对比' : '差异报告:实时取两端索引,按「冲突/待推送/待拉取…」分类',
+      onClick: () => openDiff(f),
+    },
+    { key: 'history', icon: 'history', disabled: b, tooltip: '查看该目录的同步记录', onClick: () => openHistory(f) },
+    {
+      key: 'versions',
+      icon: 'versions',
+      disabled: b,
+      tooltip: '查看文件版本:被对端覆盖修改前的旧内容会自动留档,可恢复或删除',
+      onClick: () => openVersions(f),
+    },
+    {
+      key: 'remove',
+      icon: 'trash',
+      danger: true,
+      disabled: b,
+      tooltip: '移除共享目录(磁盘文件不会被删除)',
+      onClick: () => askRemoveFolder(f.path),
+    },
+  ];
+}
+
+/**
+ * 触屏兜底:hover 在触屏上不可靠(且 :focus 是否随点击落住要看浏览器),
+ * 所以点一下占位图标也把动作条钉住,离开卡片即复位。
+ *
+ * 展开条件与 `hoverFolderKey` 取并集 —— 那个 ref 是拓扑联动已经在维护的「当前悬停目录」,
+ * 直接复用,不再另起一套 hover 状态。代价是两件事共用一个状态:将来若给拓扑联动加
+ * 防抖之类,动作条会跟着一起变,改的人需要知道。
+ */
+const railPinned = ref('');
+
+function onRailExpand(expanded: boolean, key: string): void {
+  railPinned.value = expanded ? key : '';
+}
+
+function onCardLeave(): void {
+  railPinned.value = '';
+  onFolderLeave();
+}
 
 /**
  * 「传输中文件」列表的展开状态(按目录)。
@@ -175,7 +248,7 @@ function visibleFiles(f: FolderInfo): TransferFile[] {
       class="item-card"
       :class="{ 'is-linked': hoverFolderKey === folderKey(f) }"
       @mouseenter="onFolderEnter(f)"
-      @mouseleave="onFolderLeave"
+      @mouseleave="onCardLeave"
     >
       <!-- 状态悬浮标签:贴在卡片顶缘外侧,不占标题行空间(内联徽标会让标题与按钮
            整行横移,切换时卡片内容左右跳)。多个共用一个容器 → 同时命中时并排而不打架;
@@ -204,109 +277,14 @@ function visibleFiles(f: FolderInfo): TransferFile[] {
         <span class="item-title">{{ f.path }}</span>
         <!-- 操作成组(.item-actions):窄屏下整组一起落到标题下一行,而不是逐个换行
              留单个按钮孤零零占一行 —— 与设备卡同一套策略。
-             操作按钮:图标 + hover tooltip(禁用态按钮不派发鼠标事件,由外层 span 承接 hover) -->
+             六个动作收成数据交给 ActionRail:收起只留一个「更多」占位图标,hover 卡片时摊开。 -->
         <div class="item-actions">
-        <n-tooltip trigger="hover" :style="{ maxWidth: '280px' }">
-          <template #trigger>
-            <span class="icon-btn">
-              <n-button size="small" quaternary circle :type="f.paused ? 'primary' : 'default'" :disabled="busy"
-                @click="toggleFolderPaused(f, !f.paused)">
-                <template #icon>
-                  <svg v-if="!f.paused" viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
-                    <line x1="9" y1="5.5" x2="9" y2="18.5" />
-                    <line x1="15" y1="5.5" x2="15" y2="18.5" />
-                  </svg>
-                  <svg v-else viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
-                    <path d="M8 5.5 18 12 8 18.5Z" />
-                  </svg>
-                </template>
-              </n-button>
-            </span>
-          </template>
-          {{ f.paused ? '恢复该目录的同步' : '暂停该目录的同步(连接保持在线)' }}
-        </n-tooltip>
-        <n-tooltip trigger="hover" :style="{ maxWidth: '280px' }">
-          <template #trigger>
-            <span class="icon-btn">
-              <n-button size="small" quaternary circle :disabled="busy || f.devices.length === 0" @click="openCompare(f)">
-                <template #icon>
-                  <svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
-                    <rect x="3.5" y="4.5" width="17" height="15" rx="2" />
-                    <line x1="12" y1="4.5" x2="12" y2="19.5" />
-                  </svg>
-                </template>
-              </n-button>
-            </span>
-          </template>
-          {{ f.devices.length === 0 ? '该目录还没有指派设备,无从对比' : '打开双栏对比:左右目录结构对齐,双击文件可看内容差异' }}
-        </n-tooltip>
-        <!-- 差异报告:按需向对端取实时快照分类两端差异,轻量弹窗(双栏对比的快查版) -->
-        <n-tooltip trigger="hover" :style="{ maxWidth: '280px' }">
-          <template #trigger>
-            <span class="icon-btn">
-              <n-button size="small" quaternary circle :disabled="busy || f.devices.length === 0" @click="openDiff(f)">
-                <template #icon>
-                  <svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
-                    <circle cx="10.5" cy="10.5" r="6" />
-                    <path d="M15 15l5 5" />
-                    <path d="M8 8.5h5M8 12h3" />
-                  </svg>
-                </template>
-              </n-button>
-            </span>
-          </template>
-          {{ f.devices.length === 0 ? '该目录还没有指派设备,无从对比' : '差异报告:实时取两端索引,按「冲突/待推送/待拉取…」分类' }}
-        </n-tooltip>
-        <n-tooltip trigger="hover" :style="{ maxWidth: '280px' }">
-          <template #trigger>
-            <span class="icon-btn">
-              <n-button size="small" quaternary circle :disabled="busy" @click="openHistory(f)">
-                <template #icon>
-                  <svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
-                    <circle cx="12" cy="12" r="8.5" />
-                    <path d="M12 7.5V12l3 2" />
-                  </svg>
-                </template>
-              </n-button>
-            </span>
-          </template>
-          查看该目录的同步记录
-        </n-tooltip>
-        <n-tooltip trigger="hover" :style="{ maxWidth: '280px' }">
-          <template #trigger>
-            <span class="icon-btn">
-              <n-button size="small" quaternary circle :disabled="busy" @click="openVersions(f)">
-                <template #icon>
-                  <svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
-                    <path d="M4 8.5 12 4.5l8 4" />
-                    <path d="M4 13 12 9l8 4" />
-                    <path d="M4 17.5 12 13.5l8 4" />
-                  </svg>
-                </template>
-              </n-button>
-            </span>
-          </template>
-          查看文件版本:被对端覆盖修改前的旧内容会自动留档,可恢复或删除
-        </n-tooltip>
-        <!-- 冲突入口已挪到卡顶悬浮徽标(冲突 N),见 card-floats -->
-        <n-tooltip trigger="hover" :style="{ maxWidth: '280px' }">
-          <template #trigger>
-            <span class="icon-btn">
-              <n-button size="small" type="error" quaternary circle :disabled="busy" @click="askRemoveFolder(f.path)">
-                <template #icon>
-                  <svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
-                    <path d="M4.5 7h15" />
-                    <path d="M9.5 7V4.5h5V7" />
-                    <path d="M6.5 7l.8 12a2 2 0 0 0 2 1.8h5.4a2 2 0 0 0 2-1.8l.8-12" />
-                    <path d="M10 11v6" />
-                    <path d="M14 11v6" />
-                  </svg>
-                </template>
-              </n-button>
-            </span>
-          </template>
-          移除共享目录(磁盘文件不会被删除)
-        </n-tooltip>
+          <ActionRail
+            :actions="folderActions(f)"
+            :expanded="hoverFolderKey === folderKey(f) || railPinned === folderKey(f)"
+            label="目录操作"
+            @update:expanded="onRailExpand($event, folderKey(f))"
+          />
         </div>
       </div>
 

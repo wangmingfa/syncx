@@ -25,7 +25,9 @@ import ModalCloseButton from './ModalCloseButton.vue';
  *    确认弹窗),挂在 window 上的 keydown 一响就会把两层一起关掉。要做得先定「只关最上面
  *    那层」的规则,那是另一件事。今天只有对比弹窗自己处理 Esc(它还兼着「先撤销覆盖确认」
  *    的语义,不是单纯的关闭),维持原样。
- *  - 不搬样式。本项目约定组件样式集中在 web/style.css,`.modal` / `.modal-*` 都在那里。
+ *  - 不搬样式。`.modal` / `.modal-*` 是一组互相咬合的定位上下文,散进各组件就看不出层叠关系了。
+ *    (原先这里写的「本项目约定组件样式集中在 web/style.css」已作废:自包含的组件样式放组件
+ *    自己的 `<style scoped>` 里,只有像这样跨层依赖上下文的才留在 style.css。)
  *
  * ⚠️ `inheritAttrs: false` 是必须的:属性透传的默认目标是**根元素**,而根元素是
  * `.modal-overlay`,调用方写的 `class` 会落到遮罩上 —— 对比弹窗的 `.fd-modal`(96% 宽)

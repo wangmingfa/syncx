@@ -1,8 +1,8 @@
 /*
  * 全局样式与设计变量(清新典雅 · 浅色主题)。
  *
- * 配色沿用 src/ui-fallback.ts 的 SSR 回退页(--bg/--card/--accent 等),
- * 保证纯 CSR 的 Vue 应用与无 JS 回退页视觉一致。改动此处请同步该文件的 STYLE。
+ * 这里的 `:root` 设计变量块是全站配色的**唯一真相源**:无 JS 回退页(src/ui-fallback.ts)
+ * 不再手抄色值,而是由 src/theme-tokens.ts 抽出这一块直接复用 —— 改主题只改这里。
  */
 
 :root {
@@ -184,35 +184,6 @@ tbody tr:last-child td {
 
 .offline {
   color: var(--offline);
-}
-
-/* ---------- 操作系统图标(本机 chip 的在线指示 + 设备卡头像) ---------- */
-
-.os-icon {
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  flex: none;
-}
-
-/* 不在线 = 去色 + 减淡。
-   为什么走 filter 而不是「一条规则把子元素 fill 刷成 var(--muted)」:后者字更少,也确实施得通
-   (SVG 的 fill 是 presentation attribute,优先级低于任何 CSS 规则),但它会把 Tux 的肚皮和
-   身子刷成同一个灰 —— 图标塌成一块没有轮廓的灰斑,形状信息全丢。grayscale 保留亮度对比:
-   四格窗去饱和后仍是四块不同明度的灰,企鹅肚子仍比身子亮。
-   这条实现方式有个硬前提:苹果必须是彩虹版(见 OsIcon.vue)。单色黑剪影去饱和后与不去饱和
-   完全相同,在线 / 离线会长得一模一样。 */
-.os-icon.is-offline {
-  filter: grayscale(1);
-  opacity: 0.5;
-}
-
-/* 头像位 30px,比 chip 里大一号。CSS 的 width/height 优先级高于 svg 上的同名
-   presentation attribute,所以按位置覆盖即可,不必给组件加 size prop。
-   「未知平台」那枚是纯描边 + currentColor,在这里会顺势吃到头像的在线/离线色,是想要的效果。 */
-.avatar .os-icon svg {
-  width: 18px;
-  height: 18px;
 }
 
 /* ---------- 进度条(「数据流」签名的浅色版本) ---------- */
@@ -1088,8 +1059,30 @@ html[data-theme='dark'] .chip-menu__item--danger {
   color: var(--muted);
 }
 
-/* 弹窗内的时段/全局设置数字输入框:铺满弹窗内容列(n-input-number 默认宽度偏窄) */
-.schedule-input,
+/* 编辑弹窗的同步时段:开始/结束两个时间选择器加「至」分隔,铺满弹窗内容列 */
+.schedule-pickers {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.schedule-pickers .schedule-picker {
+  flex: 1;
+  min-width: 0;
+}
+
+.schedule-sep {
+  flex: none;
+  font-size: 12px;
+  color: var(--muted);
+}
+
+/* 只填了一端时的行内提示(n-time-picker 的值不完整,保存被禁用) */
+.schedule-incomplete {
+  color: var(--offline);
+}
+
+/* 全局设置弹窗的数字输入框:铺满弹窗内容列(n-input-number 默认宽度偏窄) */
 .settings-input {
   width: 100%;
 }

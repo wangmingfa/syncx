@@ -647,6 +647,8 @@ interface StatusDevice {
   online: boolean;
   version?: string;
   hostname?: string;
+  /** 对端 hello 宣告的 process.platform;旧版本对端不发则缺省。 */
+  platform?: string;
 }
 interface StatusResponse {
   devices: StatusDevice[];

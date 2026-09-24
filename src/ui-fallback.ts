@@ -4,6 +4,8 @@
  * 纯字符串模板,不依赖 Vue,可被 tsx 直接加载(无需构建步骤)。
  */
 
+import themeRoot from './theme-tokens.js';
+
 function escapeHtml(value: string): string {
   return value
     .replace(/&/g, '&amp;')
@@ -26,8 +28,10 @@ function fmtRate(bps?: number): string {
   return `${v >= 10 || u === 0 ? Math.round(v) : v.toFixed(1)} ${units[u]}`;
 }
 
+/** 回退页样式。第一行的设计变量整块取自 web/style.css 的 `:root`(见 src/theme-tokens.ts)
+ *  —— 这里不再手抄色值,改主题只改 style.css,回退页自动跟上。 */
 const STYLE = `
-  :root { --bg:#f4f6f9; --bg-soft:#eaeef3; --card:#ffffff; --card-hi:#ffffff; --text:#1e2630; --muted:#7e8aa0; --muted-strong:#55606f; --accent:#4a7fc0; --accent-2:#2bb6ac; --accent-3:#2fa56f; --flow:linear-gradient(90deg,var(--accent),var(--accent-2)); --border:#e5e9f0; --border-strong:#d4dae4; --online:#2fa56f; --offline:#d96b6b; }
+  ${themeRoot}
   * { box-sizing: border-box; margin: 0; padding: 0; }
   body { background: var(--bg); color: var(--text); font-family: system-ui, sans-serif; padding: 24px; line-height: 1.5; }
   .container { max-width: 720px; margin: 0 auto; }

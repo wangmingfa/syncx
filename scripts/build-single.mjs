@@ -5,6 +5,7 @@ import { fileURLToPath } from 'node:url';
 const outfile = fileURLToPath(new URL('../dist/syncx.js', import.meta.url));
 const tmpfile = `${outfile}.tmp`;
 const webClientPath = fileURLToPath(new URL('../dist/web/client.js', import.meta.url));
+const styleCssPath = fileURLToPath(new URL('../web/style.css', import.meta.url));
 
 /**
  * 把 vite 构建出的 Web 客户端 bundle 内联为 'web-client' 模块,
@@ -33,6 +34,31 @@ const webClientPlugin = {
   },
 };
 
+/**
+ * 设计变量(`web/style.css` 的 `:root` 块)内联为 'theme-tokens' 模块,
+ * 替换 dev 用的磁盘读取实现(src/theme-tokens.ts)—— 产物旁边没有源文件可读。
+ *
+ * 与 web-client 那条的区别:**这里取不到就报错**。web-client 缺失只是没有前端页面,
+ * 而这里静默失败会让回退页悄悄退回浏览器默认配色,那种色差很难在发布前被发现。
+ */
+const themeTokensPlugin = {
+  name: 'theme-tokens-embed',
+  setup(b) {
+    b.onResolve({ filter: /theme-tokens(\.js)?$/ }, () => ({
+      path: 'theme-tokens-embedded',
+      namespace: 'theme-tokens-embedded',
+    }));
+    b.onLoad({ filter: /.*/, namespace: 'theme-tokens-embedded' }, () => {
+      const css = readFileSync(styleCssPath, 'utf8');
+      const root = css.match(/:root\s*\{[^}]*\}/)?.[0] ?? '';
+      if (!root.includes('--border')) {
+        throw new Error(`没能在 ${styleCssPath} 里取到 :root 设计变量块,回退页会没有配色`);
+      }
+      return { contents: `export default ${JSON.stringify(root)};`, loader: 'js' };
+    });
+  },
+};
+
 await build({
   entryPoints: [fileURLToPath(new URL('../src/main.ts', import.meta.url))],
   bundle: true,
@@ -52,7 +78,7 @@ await build({
       'const require = __createRequire(import.meta.url);',
     ].join('\n'),
   },
-  plugins: [webClientPlugin],
+  plugins: [webClientPlugin, themeTokensPlugin],
   logLevel: 'info',
 });
 

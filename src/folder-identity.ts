@@ -48,21 +48,53 @@ export type FolderIdentityVerdict =
   /** 指纹变化:换盘、重新挂载、或目录被删掉后重建。 */
   | 'changed'
   /**
-   * 仅设备号(dev)变、inode 未变:同一文件系统被**重新挂载**的典型指纹
-   * (重启后磁盘重枚举、容器/VM 重启、mount -o remount)。目录实体大概率没换,
-   * 但保护机制无法与「同路径挂了一块恰好 inode 相同的盘」区分,仍须人工确认。
+   * 仅设备号(dev)变、inode 未变,且这个 dev **从未被人工确认过**:同一文件系统被
+   * 重新挂载的典型指纹(重启后磁盘重枚举、容器/VM 重启、mount -o remount、
+   * Android A/B 设备每次 OTA)。目录实体大概率没换,但保护机制无法与「同路径挂了
+   * 一块恰好 inode 相同的盘」区分,仍须人工确认。
    */
   | 'remounted'
+  /**
+   * 同上,但该 dev 已在 `folderIdentity.devs` 里 —— 即这个设备号本机曾经确认过。
+   * 典型场景:Android A/B 分区每次 OTA 让 `/data` 的设备号在两个值之间来回跳
+   * (见 docs/adr/0009 附录)。这类值已经过一次人工闸门,再出现时静默重采,
+   * 否则每次系统更新都要点一次,而正确答案永远一样。
+   */
+  | 'remounted-known'
   /** 无法校验:尚未采集指纹,或平台不提供 inode。 */
   | 'unknown';
 
+/** 该指纹已确认可接受的设备号集合(旧配置没有 `devs` 字段时,只有 `dev` 一个)。 */
+export function acceptedDevs(recorded: FolderIdentity): string[] {
+  const list = recorded.devs?.length ? recorded.devs : [];
+  return list.includes(recorded.dev) ? list : [...list, recorded.dev];
+}
+
+/** `devs` 集合的容量上限:A/B 摆动只需两个,留足余量也别让配置无限膨胀。 */
+const MAX_ACCEPTED_DEVS = 8;
+
+/**
+ * 把一个新确认的设备号并入集合(去重、按最近确认排序、超上限丢最旧)。
+ * 只在**人工确认**时调用 —— 静默重采不扩大集合,否则一次误点就会被永久记住。
+ */
+export function withAcceptedDev(recorded: FolderIdentity | undefined, dev: string): string[] {
+  const prev = recorded ? acceptedDevs(recorded) : [];
+  const merged = [...prev.filter((d) => d !== dev), dev];
+  return merged.slice(-MAX_ACCEPTED_DEVS);
+}
+
 /**
  * 纯比对逻辑(不碰磁盘,便于测试):当前指纹 vs 记录指纹。
- * ino 相同而 dev 不同 → 'remounted';ino 也不同 → 'changed'。
+ * ino 相同而 dev 不同 → 'remounted'(该 dev 曾确认过则为 'remounted-known');
+ * ino 也不同 → 'changed'。
  */
-export function compareIdentity(current: FolderIdentity, recorded: FolderIdentity): Exclude<FolderIdentityVerdict, 'missing' | 'unknown'> {
+export function compareIdentity(
+  current: FolderIdentity,
+  recorded: FolderIdentity,
+): Exclude<FolderIdentityVerdict, 'missing' | 'unknown'> {
   if (current.dev === recorded.dev && current.ino === recorded.ino) return 'ok';
-  return current.ino === recorded.ino ? 'remounted' : 'changed';
+  if (current.ino !== recorded.ino) return 'changed';
+  return acceptedDevs(recorded).includes(current.dev) ? 'remounted-known' : 'remounted';
 }
 
 /**

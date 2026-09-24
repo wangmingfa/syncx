@@ -19,8 +19,8 @@ import { randomBytes } from 'node:crypto';
 import type { Logger } from 'pino';
 import { WebSocket } from 'ws';
 
-import { loadConfig, mutateConfig, folderIdFor, folderIndexKey, folderIndexPath, folderTrashPath, folderVersionsPath, purgeFolderIndex, isWithinSchedule, type SharedFolderConfig } from './config.js';
-import { checkFolderIdentity, readFolderIdentity } from './folder-identity.js';
+import { loadConfig, mutateConfig, folderIdFor, folderIndexKey, folderIndexPath, folderTrashPath, folderVersionsPath, purgeFolderIndex, isWithinSchedule, type FolderIdentity, type SharedFolderConfig } from './config.js';
+import { acceptedDevs, checkFolderIdentity, readFolderIdentity, withAcceptedDev } from './folder-identity.js';
 import { openIndexStore, type IndexStore } from './indexstore.js';
 import { createLocalExecutor, resolveSharePath, type LocalExecutor } from './executor.js';
 import { filterIndexedEntries, HARD_IGNORE_NAMES, isHardIgnored, parseIgnoreRules, readFolderIgnoreLines } from './ignore.js';
@@ -691,7 +691,12 @@ export class SyncSessionManager {
       // 参照 Syncthing 的 .stfolder,但**不往共享目录写任何文件**(见 folder-identity.ts)。
       // 目录卡上给出原因与恢复方式,而不是静默不同步;同一原因不重复刷日志。
       const verdict = checkFolderIdentity(folder.path, folder.config.folderIdentity);
-      if (verdict === 'missing' || verdict === 'changed' || verdict === 'remounted') {
+      if (verdict === 'remounted-known') {
+        // 设备号曾人工确认过 → 静默采回来,本轮照常扫描。典型场景是 Android A/B 分区
+        // 设备:每次 OTA 切到另一个 slot,`/data` 的 device-mapper minor 挪一位,
+        // st_dev 跟着变而 inode 始终不变(见 docs/adr/0009 附录)。
+        this.adoptKnownDev(folder);
+      } else if (verdict === 'missing' || verdict === 'changed' || verdict === 'remounted') {
         const reason =
           verdict === 'missing'
             ? '目录不存在或不可读(盘未挂载?)'
@@ -2205,15 +2210,39 @@ export class SyncSessionManager {
     if (!folder) throw new Error('共享目录不存在(可能刚被移除)');
     const identity = readFolderIdentity(folder.path);
     if (identity === null) throw new Error('目录当前不可读(不存在 / 未挂载?),拒绝采集身份');
+    // 只有**人工确认**才扩大可接受设备号集合:这个值从此被视为「本机确认过是同一个
+    // 文件系统」,下次 A/B 摆动回来时不再打扰(见 adoptKnownDev)。
+    const next: FolderIdentity = { ...identity, devs: withAcceptedDev(folder.config.folderIdentity, identity.dev) };
     mutateConfig(this.configPath, (config) => {
       const f = config.sharedFolders.find((x) => folderIdFor(x) === folderId);
       if (!f) throw new Error('共享目录不存在');
-      f.folderIdentity = identity;
+      f.folderIdentity = next;
     });
-    folder.config.folderIdentity = identity;
+    folder.config.folderIdentity = next;
     this.clearFolderError(folder.id);
-    this.logger.info(`folder identity re-adopted: ${folderId} dev=${identity.dev} ino=${identity.ino}`);
+    this.logger.info(`folder identity re-adopted: ${folderId} dev=${next.dev} ino=${next.ino} 可接受dev=[${next.devs?.join(', ')}]`);
     void this.runScan();
+  }
+
+  /**
+   * 静默采回一个**已在可接受集合里**的设备号(扫描门禁的 'remounted-known' 分支)。
+   *
+   * 与 reAdoptFolderIdentity 的差别只有一条,而且是关键的那条:这里**不扩大集合**。
+   * 扩大集合必须经过人的手 —— 否则一次没看清就点下去的确认,会被永久记成信任。
+   */
+  private adoptKnownDev(folder: FolderState): void {
+    const recorded = folder.config.folderIdentity;
+    const identity = readFolderIdentity(folder.path);
+    if (!recorded || !identity) return;
+    const next: FolderIdentity = { ...identity, devs: acceptedDevs(recorded) };
+    mutateConfig(this.configPath, (config) => {
+      const f = config.sharedFolders.find((x) => folderIdFor(x) === folder.id);
+      if (f) f.folderIdentity = next;
+    });
+    folder.config.folderIdentity = next;
+    this.logger.info(
+      `folder identity re-adopted (设备号曾确认过): ${folder.id} dev=${recorded.dev}→${next.dev},inode 未变`,
+    );
   }
 
   /** 设置全局暂停:所有目录一起停摆;各目录自己的 paused 独立保留,恢复全局后仍生效。 */

@@ -1,6 +1,6 @@
 <script setup lang="ts">
-import { ref, watch } from 'vue';
-import { NButton, NCheckbox, NCheckboxGroup, NInput } from 'naive-ui';
+import { computed, ref, watch } from 'vue';
+import { NButton, NCheckbox, NCheckboxGroup, NTimePicker } from 'naive-ui';
 import type { DeviceInfo, FolderInfo } from '../types';
 import ModalShell from './ModalShell.vue';
 
@@ -20,7 +20,10 @@ const emit = defineEmits<{
 const path = ref('');
 const selected = ref<string[]>([]);
 const gitignore = ref(true);
-const schedule = ref('');
+// 时段拆成开始/结束两个时间戳(n-time-picker 的 value 是毫秒时间戳),保存时再拼回
+// 后端约定的 `HH:MM-HH:MM` 字符串;两端都空 = 全天同步。
+const scheduleFrom = ref<number | null>(null);
+const scheduleTo = ref<number | null>(null);
 
 watch(
   () => props.folder,
@@ -29,13 +32,35 @@ watch(
     path.value = f.path;
     selected.value = [...f.devices];
     gitignore.value = f.useGitignore !== false;
-    schedule.value = f.schedule ?? '';
+    const [from, to] = (f.schedule ?? '').split('-');
+    scheduleFrom.value = parseScheduleTime(from ?? '');
+    scheduleTo.value = parseScheduleTime(to ?? '');
   },
 );
 
+/** `HH:MM`(小时可一位数)→ 当日该时刻的时间戳;空串/非法返回 null。 */
+function parseScheduleTime(part: string): number | null {
+  const m = /^(\d{1,2}):(\d{2})$/.exec(part.trim());
+  if (!m || Number(m[1]) > 23 || Number(m[2]) > 59) return null;
+  return new Date(2000, 0, 1, Number(m[1]), Number(m[2])).getTime();
+}
+
+/** 时间戳 → 两位 `HH:MM`,用于拼回后端约定的时段字符串。 */
+function formatScheduleTime(ts: number): string {
+  const d = new Date(ts);
+  return `${String(d.getHours()).padStart(2, '0')}:${String(d.getMinutes()).padStart(2, '0')}`;
+}
+
+/** 只填了一端:拼不出合法时段,禁止保存并提示。 */
+const scheduleIncomplete = computed(() => (scheduleFrom.value === null) !== (scheduleTo.value === null));
+
 function onSave(): void {
-  if (props.busy || !props.folder) return;
-  emit('save', { path: path.value, devices: [...selected.value], gitignore: gitignore.value, schedule: schedule.value.trim() });
+  if (props.busy || !props.folder || scheduleIncomplete.value) return;
+  const schedule =
+    scheduleFrom.value !== null && scheduleTo.value !== null
+      ? `${formatScheduleTime(scheduleFrom.value)}-${formatScheduleTime(scheduleTo.value)}`
+      : '';
+  emit('save', { path: path.value, devices: [...selected.value], gitignore: gitignore.value, schedule });
 }
 
 // 地址(host:port)与主机名合并成一行,在设备 ID 之外提供可辨认的信息;两者都可能缺失
@@ -73,18 +98,34 @@ function deviceAddrLine(p: DeviceInfo): string {
     <p class="confirm-note-extra">勾选时,该目录内 .gitignore 命中的文件不参与同步(.syncxignore 优先级更高)。</p>
 
     <div class="edit-section-label">同步时段</div>
-    <n-input
-      v-model:value="schedule"
-      class="schedule-input"
-      placeholder="如 22:00-08:00;留空 = 全天同步"
-      :disabled="busy"
-      @keydown.enter="onSave"
-    />
-    <p class="confirm-note-extra">只在该时段内同步(支持跨午夜),时段外数据面停摆、到点自动恢复;控制面(连接 / 配对)不受影响。</p>
+    <!-- n-time-picker 不支持区间,用开始/结束两个选择器表达,天然支持跨午夜 -->
+    <div class="schedule-pickers">
+      <n-time-picker
+        v-model:value="scheduleFrom"
+        class="schedule-picker"
+        format="HH:mm"
+        placeholder="开始时间"
+        clearable
+        :disabled="busy"
+      />
+      <span class="schedule-sep">至</span>
+      <n-time-picker
+        v-model:value="scheduleTo"
+        class="schedule-picker"
+        format="HH:mm"
+        placeholder="结束时间"
+        clearable
+        :disabled="busy"
+      />
+    </div>
+    <p class="confirm-note-extra">
+      两端都留空 = 全天同步;只在该时段内同步(支持跨午夜),时段外数据面停摆、到点自动恢复,控制面(连接 / 配对)不受影响。
+    </p>
+    <p v-if="scheduleIncomplete" class="confirm-note-extra schedule-incomplete">开始与结束需同时设置,或都留空。</p>
 
     <template #footer>
       <n-button class="modal-cancel" :disabled="busy" @click="emit('close')">取消</n-button>
-      <n-button type="primary" :loading="busy" @click="onSave">保存</n-button>
+      <n-button type="primary" :loading="busy" :disabled="scheduleIncomplete" @click="onSave">保存</n-button>
     </template>
   </ModalShell>
 </template>

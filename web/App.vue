@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import { computed, ref, onMounted } from 'vue';
-import { NConfigProvider, darkTheme, type GlobalThemeOverrides } from 'naive-ui';
+import { NConfigProvider, darkTheme, dateZhCN, zhCN, type GlobalThemeOverrides } from 'naive-ui';
 import StatusPage from './StatusPage.vue';
 import LoginForm from './LoginForm.vue';
 import ComparePage from './ComparePage.vue';
@@ -45,7 +45,7 @@ onMounted(async () => {
 </script>
 
 <template>
-  <n-config-provider :theme="naiveTheme" :theme-overrides="themeOverrides">
+  <n-config-provider :theme="naiveTheme" :theme-overrides="themeOverrides" :locale="zhCN" :date-locale="dateZhCN">
     <!-- 路由优先于状态页:/compare/<folderId> 直接渲染双栏对比页,其余走状态页 -->
     <ComparePage
       v-if="status && route.name === 'compare' && route.folderId"

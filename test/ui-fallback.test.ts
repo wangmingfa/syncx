@@ -1,7 +1,19 @@
 import { describe, expect, it } from 'vitest';
+import { readFileSync } from 'node:fs';
 import { renderControlFallback } from '../src/ui-fallback.js';
 
 describe('ui-fallback', () => {
+  it('配色取自 web/style.css 的 :root,而不是手抄的第二份', () => {
+    const html = renderControlFallback({});
+    // 抽出的块必须真的落进 <style>,否则回退页会退回浏览器默认配色(静默、发布前难发现)
+    expect(html).toMatch(/:root\s*\{[^}]*--border:/);
+    // 与源文件逐字相同 —— 钉的是「同源」,不是「碰巧值一样」
+    const styleCss = readFileSync(new URL('../web/style.css', import.meta.url), 'utf8');
+    const root = styleCss.match(/:root\s*\{[^}]*\}/)?.[0] ?? '';
+    expect(root).not.toBe('');
+    expect(html).toContain(root);
+  });
+
   it('renders a login form when no status is provided', () => {
     const html = renderControlFallback({});
 

@@ -106,3 +106,59 @@ sync, and mount detection uses an out-of-band identity fingerprint.**
 - `~/.syncx/trash` is not garbage-collected. Entries are recoverable data, so
   nothing prunes them automatically; orphans accumulate when folders are
   removed. Cleaning it is a manual operation.
+
+## Addendum (2026-09-24): `st_dev` is not stable on Android A/B devices
+
+Two changes since this ADR was written. The first is bookkeeping: `ee4ffc4`
+split `changed` in §2 into `changed` (inode differs — a different directory) and
+`remounted` (only `dev` differs — same filesystem, re-mounted), and added
+`POST /api/folders/re-adopt-identity`, which re-captures the fingerprint without
+touching the index or `instanceId`. Read §2 as five verdicts.
+
+The second is a measured fact that changed what `remounted` should *do*.
+
+**Observed.** On a real device — syncx under Termux on Android, two consecutive
+over-the-air updates — `sharedFolders[].folderIdentity.dev` went `65114` →
+`65115` → `65114`. The `ino` never changed.
+
+**Mechanism.** `/data` is not part of an A/B update: userdata is a single
+partition, so the filesystem and its inode numbers survive the update untouched.
+But `st_dev` is not a disk serial number — it is the device number of whatever
+the mount happens to be backed by *this boot*. On Android `/data` sits on a
+device-mapper target (metadata encryption), and dm minor numbers are handed out
+in creation order during boot. Each A/B update boots the **other** slot, whose
+vendor ramdisk / `fstab` creates a slightly different number of dm targets
+before `/data` is mapped, so the minor shifts by one — and the next update boots
+the first slot again and shifts it back. The value does not drift; it
+**oscillates, indefinitely, once per update**.
+
+**Consequence for the design.** `remounted` is not a rare anomaly on such a
+device; it recurs on every single update. A confirmation prompt that fires
+repeatedly, and whose correct answer is always the same, trains the user to
+click through it without reading — which is worse than having no prompt,
+because it spends the attention the guard needs for the case that actually
+matters.
+
+**Amended decision.** `folderIdentity` records the **set of `dev` values
+accepted** for that folder, not just one:
+
+1. A `remounted` verdict whose new `dev` is already in the accepted set is
+   **auto-adopted**: the fingerprint is updated, a log line records it, and no
+   banner is shown. The A/B oscillation therefore costs the user nothing after
+   the first occurrence of each value.
+2. A `remounted` verdict with a `dev` never seen before still **prompts once**,
+   and confirming adds that value to the set.
+3. `changed` (the inode differs) is untouched: always manual, never
+   auto-adopted.
+4. Configs written before this hold a single `dev`; it is read as a one-element
+   set, so the first re-mount after an upgrade behaves exactly like today's.
+
+**Why not simply auto-adopt every `remounted`.** That discards half of the
+fingerprint and reopens the precise case this ADR exists for: a *different*
+volume mounted at the same path whose root directory happens to carry the same
+inode number (§2, fact 2). Keying the auto-repair on a set of previously
+confirmed device numbers keeps that gate shut — an attacker's or an accident's
+new filesystem presents a `dev` that is not in the set — while removing the
+recurring noise. The cost is one confirmation per genuinely new device number,
+which is the information we actually need a human for.
+
