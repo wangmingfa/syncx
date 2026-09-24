@@ -11,6 +11,9 @@ export function useFolders(deps: CoreDeps): {
   hoverFolderKey: Ref<string>;
   onFolderEnter: (f: { id?: string; path: string; devices: string[] }) => void;
   onFolderLeave: () => void;
+  hoverDeviceId: Ref<string>;
+  onDeviceEnter: (deviceId: string) => void;
+  onDeviceLeave: () => void;
   addFolderOpen: Ref<boolean>;
   toggleAddFolder: () => void;
   addFolder: () => Promise<void>;
@@ -56,6 +59,17 @@ export function useFolders(deps: CoreDeps): {
   function onFolderLeave(): void {
     hoverDevices.value = [];
     hoverFolderKey.value = '';
+  }
+
+  // 反向联动:悬停设备卡时,设备卡自身与所有指派到它的目录卡同时高亮,
+  // 一眼看出该设备在同步哪些目录。与目录→设备各自独立(互不复用状态:
+  // 若共用 hoverDevices,悬停目录会把「共享同一设备的其他目录」也链着点亮)。
+  const hoverDeviceId = ref('');
+  function onDeviceEnter(deviceId: string): void {
+    hoverDeviceId.value = deviceId;
+  }
+  function onDeviceLeave(): void {
+    hoverDeviceId.value = '';
   }
 
   // ---- 添加共享目录(默认收起,点按钮展开表单) ----
@@ -280,6 +294,9 @@ export function useFolders(deps: CoreDeps): {
     hoverFolderKey,
     onFolderEnter,
     onFolderLeave,
+    hoverDeviceId,
+    onDeviceEnter,
+    onDeviceLeave,
     addFolderOpen,
     toggleAddFolder,
     addFolder,

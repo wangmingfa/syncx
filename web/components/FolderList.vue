@@ -82,6 +82,7 @@ const {
   hoverFolderKey,
   onFolderEnter,
   onFolderLeave,
+  hoverDeviceId,
   folderKey,
   deviceTagStatus,
   deviceTagTip,
@@ -283,7 +284,7 @@ function visibleFiles(f: FolderInfo): TransferFile[] {
       v-for="f in status.folders"
       :key="folderKey(f)"
       class="item-card"
-      :class="{ 'is-linked': hoverFolderKey === folderKey(f) }"
+      :class="{ 'is-linked': hoverFolderKey === folderKey(f) || (hoverDeviceId !== '' && f.devices.includes(hoverDeviceId)) }"
       @mouseenter="onFolderEnter(f)"
       @mouseleave="onCardLeave"
     >

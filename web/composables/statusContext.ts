@@ -46,6 +46,10 @@ export interface StatusContext extends FolderDiffApi {
   askRemoveDevice: (deviceId: string) => void;
   askUpgrade: (p: DeviceInfo) => void;
   hoverDevices: Ref<string[]>;
+  /** 反向拓扑联动:悬停设备卡时该设备 id(非空 = 设备→目录高亮进行中)。 */
+  hoverDeviceId: Ref<string>;
+  onDeviceEnter: (deviceId: string) => void;
+  onDeviceLeave: () => void;
 
   // 文件夹
   addFolderOpen: Ref<boolean>;

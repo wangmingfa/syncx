@@ -20,6 +20,9 @@ const {
   monogram,
   deviceAddrLine,
   hoverDevices,
+  hoverDeviceId,
+  onDeviceEnter,
+  onDeviceLeave,
 } = useStatusContext();
 </script>
 
@@ -55,7 +58,9 @@ const {
       v-for="p in status.devices"
       :key="p.deviceId"
       class="item-card"
-      :class="{ 'is-linked': hoverDevices.includes(p.deviceId) }"
+      :class="{ 'is-linked': hoverDevices.includes(p.deviceId) || hoverDeviceId === p.deviceId }"
+      @mouseenter="onDeviceEnter(p.deviceId)"
+      @mouseleave="onDeviceLeave()"
     >
       <div class="item-top">
         <span class="avatar" :class="p.online ? 'online' : 'offline'">
