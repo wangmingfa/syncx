@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, h } from 'vue';
+import { computed, h, ref } from 'vue';
 import type { VNodeChild } from 'vue';
 import { NButton, NDropdown, NPopover } from 'naive-ui';
 import type { DropdownOption } from 'naive-ui';
@@ -83,6 +83,19 @@ const chipRows = computed<ChipRow[]>(() => [
   { kind: 'divider' },
   { kind: 'item', label: '退出登录', run: () => void logout(), danger: true },
 ]);
+
+/**
+ * chip 浮层的显示状态(受控)。hover 触发仍交给 naive —— 它会把悬停进出回灌到这个 ref,
+ * 我们只在「点了菜单里的某一项」时强制收起:那一项要么开弹窗、要么跳转,浮层留在上面
+ * 既压住弹窗又挡住 toast,而鼠标还悬在浮层里,不接管就永远不会自己关。
+ */
+const chipOpen = ref(false);
+
+function runChipRow(row: ChipRow): void {
+  if (row.kind !== 'item') return;
+  chipOpen.value = false;
+  row.run();
+}
 </script>
 
 <template>
@@ -168,7 +181,7 @@ const chipRows = computed<ChipRow[]>(() => [
     <div class="topbar__spacer"></div>
 
     <!-- 本机 chip:悬停浮出「网络明细 + 低频操作菜单」两段。顶栏所有收纳入口都在这 -->
-    <n-popover trigger="hover" placement="bottom-end" :style="{ maxWidth: '360px' }">
+    <n-popover v-model:show="chipOpen" trigger="hover" placement="bottom-end" :style="{ maxWidth: '360px' }">
       <template #trigger>
         <span class="device-chip">
           <OsIcon :platform="status.platform" :offline="!anyPeerOnline" :hint="chipOsHint" />
@@ -201,7 +214,7 @@ const chipRows = computed<ChipRow[]>(() => [
               class="chip-menu__item"
               :class="{ 'chip-menu__item--danger': row.danger, 'is-disabled': row.disabled }"
               :disabled="row.disabled"
-              @click="row.run()"
+              @click="runChipRow(row)"
             >{{ row.label }}</button>
           </template>
         </div>
