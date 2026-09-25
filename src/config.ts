@@ -102,6 +102,39 @@ export interface SharedFolderConfig {
    * 空/缺省 = 全天同步;格式非法按全天处理(绝不因配置笔误把目录锁死)。
    */
   schedule?: string;
+  /**
+   * Git 提交同步模式:当共享目录是 git 仓库时,检测本地提交并通知其他设备自动提交。
+   *
+   * - 'off'(默认):不启用 git 同步
+   * - 'send':检测并广播本地提交,但不自动提交对端通知
+   * - 'receive':收到通知时自动提交,但不广播本地提交
+   * - 'full':双向 —— 既广播本地提交,也自动提交对端通知
+   *
+   * 缺省 'off'(显式 opt-in),避免对非 git 目录产生不必要的 git 命令调用。
+   * 旧配置缺省(尚未设置)按 'off' 处理。
+   */
+  gitSync?: GitSyncMode;
+  /**
+   * 上次观测到的 HEAD 提交哈希(**仅本机使用,不进 wire、不跨设备对齐**)。
+   *
+   * 与 gitSync 配套:扫描时拿当前 HEAD 与它比对,不同即说明产生了新提交。存进配置而不只放
+   * 内存,是为了让 daemon 停机期间的提交在重启后仍能被检出并补广播 —— 缺省时只能把重启后的
+   * HEAD 重新当基线,停机期间那次提交的消息就永久不会传播了。
+   *
+   * 每次 gitSync 模式被改动时清空(devices.setFolderGitSync):改模式视为「重新启用」,
+   * 从当前 HEAD 重新起基线,绝不把启用前积压的历史提交一次性重放出去。
+   */
+  gitLastCommitHash?: string;
+}
+
+/** Git 提交同步的四种模式;定义见 SharedFolderConfig.gitSync 的注释。 */
+export type GitSyncMode = 'off' | 'send' | 'receive' | 'full';
+
+const GIT_SYNC_MODES: readonly string[] = ['off', 'send', 'receive', 'full'];
+
+/** 校验 gitSync 取值(供设置入口拒绝笔误,非法值 400 而非静默失效)。 */
+export function isGitSyncMode(v: unknown): v is GitSyncMode {
+  return typeof v === 'string' && GIT_SYNC_MODES.includes(v);
 }
 
 /** 目录的 wire 标识:优先 id,缺省用 path。 */

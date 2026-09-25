@@ -2,7 +2,7 @@ import { existsSync, mkdirSync, statSync } from 'node:fs';
 import { resolve, isAbsolute, sep, dirname, join } from 'node:path';
 import { homedir } from 'node:os';
 import { randomBytes } from 'node:crypto';
-import { loadConfig, saveConfig, mutateConfig, normalizePeerUrl, DEFAULT_CONFIG, folderIdFor, folderIndexKey, generateFolderInstanceId, purgeFolderIndex, isValidSchedule, type Config, type FolderIdentity, type SharedFolderConfig, type DeviceConfig } from './config.js';
+import { loadConfig, saveConfig, mutateConfig, normalizePeerUrl, DEFAULT_CONFIG, folderIdFor, folderIndexKey, generateFolderInstanceId, purgeFolderIndex, isValidSchedule, isGitSyncMode, type Config, type FolderIdentity, type SharedFolderConfig, type DeviceConfig, type GitSyncMode } from './config.js';
 import { readFolderIdentity } from './folder-identity.js';
 
 /**
@@ -337,6 +337,40 @@ export function setFolderSchedule(configPath: string, folderId: string, schedule
     const existing = config.sharedFolders.find((f) => folderIdFor(f) === folderId);
     if (!existing) throw new Error(`未找到共享目录:「${folderId}」`);
     existing.schedule = s === '' ? undefined : s;
+  });
+}
+
+/**
+ * 设置某目录的 git 提交同步模式(目录设置弹窗;按 folderId 定位)。
+ * 'off' 存成 undefined 而非字面量:与「旧配置从未设置过该字段」保持同一种形态,
+ * 避免关一次开关后 config.json 里永久留一条 'off'。
+ *
+ * 同时清空 gitLastCommitHash:改模式一律按「重新启用」处理,下一轮扫描从当前 HEAD
+ * 重新起基线。否则 full→off→full 之间用户自己 commit 的那几次会在重新开启瞬间被
+ * 成批补广播出去。
+ */
+export function setFolderGitSync(configPath: string, folderId: string, mode: GitSyncMode): void {
+  if (!isGitSyncMode(mode)) {
+    throw new Error(`git 同步模式应为 off / send / receive / full:「${String(mode)}」`);
+  }
+  mutateConfig(configPath, (config) => {
+    const existing = config.sharedFolders.find((f) => folderIdFor(f) === folderId);
+    if (!existing) throw new Error(`未找到共享目录:「${folderId}」`);
+    existing.gitSync = mode === 'off' ? undefined : mode;
+    existing.gitLastCommitHash = undefined;
+  });
+}
+
+/**
+ * 记录某目录最近一次观测到的 HEAD 提交哈希(仅本机状态,不代表用户意图)。
+ * 与 gitSync 分开成两个函数:这个由扫描循环在每次检出提交后高频调用,不碰模式。
+ */
+export function setFolderGitLastCommitHash(configPath: string, folderId: string, hash: string): void {
+  mutateConfig(configPath, (config) => {
+    const existing = config.sharedFolders.find((f) => folderIdFor(f) === folderId);
+    if (!existing) return false; // 目录已被移除:无需为它补写状态
+    if (existing.gitLastCommitHash === hash) return false; // 未变则不落盘,避免无谓重写
+    existing.gitLastCommitHash = hash;
   });
 }
 

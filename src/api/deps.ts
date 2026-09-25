@@ -61,6 +61,8 @@ export interface ControlServerDeps {
   setFolderPaused?: (folderId: string, paused: boolean) => void;
   /** 设置某目录的同步时段(HH:MM-HH:MM,支持跨午夜;空串 = 清除,全天同步)。 */
   setFolderSchedule?: (folderId: string, schedule: string) => void;
+  /** 设置某目录的 git 提交同步模式(off / send / receive / full)。 */
+  setFolderGitSync?: (folderId: string, mode: 'off' | 'send' | 'receive' | 'full') => void;
   /** 写入全局设置(设置弹窗):maxSendKbps / versionsPerPath / historyMaxEvents;null = 回默认。 */
   setGlobalSettings?: (patch: {
     maxSendKbps?: number | null;

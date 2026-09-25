@@ -696,6 +696,10 @@ export async function run(args: ParsedArgs): Promise<void> {
       // 校验(非法格式 400)+ 落盘 + 立即对账都在 manager 内完成
       manager.setFolderSchedule(folderId, schedule);
     },
+    setFolderGitSync: (folderId, mode) => {
+      // 校验(非法模式 400)+ 落盘 + 内存生效都在 manager 内完成
+      manager.setFolderGitSync(folderId, mode);
+    },
     setGlobalSettings: (patch) => {
       // 落盘 + 按需热生效(重建通道/执行器/历史上限)都在 manager 内完成
       manager.setGlobalSettings(patch);

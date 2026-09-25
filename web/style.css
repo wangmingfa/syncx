@@ -1090,6 +1090,11 @@ html[data-theme='dark'] .chip-menu__item--danger {
   color: var(--offline);
 }
 
+/* 编辑弹窗的 Git 提交同步下拉框(n-select 默认宽度偏窄,铺满内容列) */
+.schedule-input {
+  width: 100%;
+}
+
 /* 全局设置弹窗的数字输入框:铺满弹窗内容列(n-input-number 默认宽度偏窄) */
 .settings-input {
   width: 100%;
