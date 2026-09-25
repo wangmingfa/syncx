@@ -3,7 +3,7 @@ import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, statSync
 import { rmDir } from './helpers.js';
 import { tmpdir, homedir } from 'node:os';
 import { join, resolve } from 'node:path';
-import { addSharedFolder, removeSharedFolder, isPeerAllowed, addPeer, removePeer, acceptFolderInvitation } from '../src/devices.js';
+import { addSharedFolder, removeSharedFolder, isPeerAllowed, addPeer, removePeer, acceptFolderInvitation, setFolderGitSync, setFolderGitLastCommitHash } from '../src/devices.js';
 import type { SharedFolderConfig } from '../src/config.js';
 
 function tempDir(): string {
@@ -462,6 +462,98 @@ describe('acceptFolderInvitation', () => {
     expect(raw.sharedFolders[0].id).toBe('fid-1');
     expect(raw.sharedFolders[0].path).toBe(resolve(docsPath));
     expect(raw.sharedFolders[0].devices).toContain('PEER2');
+    rmDir(dir);
+  });
+});
+
+describe('git commit sync settings', () => {
+  /** 建一个带单个共享目录的配置,返回 configPath 与该目录的 folderId。 */
+  function folderFixture(): { dir: string; configPath: string; folderId: string } {
+    const dir = tempDir();
+    const configPath = join(dir, 'config.json');
+    const docsPath = join(dir, 'docs');
+    mkdirSync(docsPath, { recursive: true });
+    addSharedFolder(configPath, docsPath, ['DEV1234567'], 'git-1');
+    return { dir, configPath, folderId: 'git-1' };
+  }
+
+  function readFolder(configPath: string): Record<string, unknown> {
+    return JSON.parse(readFileSync(configPath, 'utf8')).sharedFolders[0];
+  }
+
+  it('persists an enabled mode verbatim', () => {
+    const { dir, configPath, folderId } = folderFixture();
+    setFolderGitSync(configPath, folderId, 'full');
+    expect(readFolder(configPath).gitSync).toBe('full');
+    rmDir(dir);
+  });
+
+  it("stores 'off' as an absent field rather than the literal string", () => {
+    const { dir, configPath, folderId } = folderFixture();
+    setFolderGitSync(configPath, folderId, 'send');
+    expect(readFolder(configPath).gitSync).toBe('send');
+
+    setFolderGitSync(configPath, folderId, 'off');
+    // 关一次开关不该在 config.json 里永久留下 'off':与「从未设置过」保持同一形态
+    expect('gitSync' in readFolder(configPath)).toBe(false);
+    rmDir(dir);
+  });
+
+  it('rejects an unknown mode without touching the config', () => {
+    const { dir, configPath, folderId } = folderFixture();
+    setFolderGitSync(configPath, folderId, 'receive');
+    const before = readFileSync(configPath, 'utf8');
+
+    expect(() => setFolderGitSync(configPath, folderId, 'bogus' as never)).toThrow(/off \/ send \/ receive \/ full/);
+    expect(readFileSync(configPath, 'utf8')).toBe(before);
+    rmDir(dir);
+  });
+
+  it('rejects an unknown folder', () => {
+    const { dir, configPath } = folderFixture();
+    expect(() => setFolderGitSync(configPath, 'nope', 'full')).toThrow(/未找到共享目录/);
+    rmDir(dir);
+  });
+
+  it('clears the persisted baseline whenever the mode changes', () => {
+    const { dir, configPath, folderId } = folderFixture();
+    setFolderGitSync(configPath, folderId, 'full');
+    setFolderGitLastCommitHash(configPath, folderId, 'abc123');
+    expect(readFolder(configPath).gitLastCommitHash).toBe('abc123');
+
+    // 改模式视为「重新启用」:基线必须清空,否则启用前积压的历史提交会在切换瞬间被成批补广播
+    setFolderGitSync(configPath, folderId, 'send');
+    expect('gitLastCommitHash' in readFolder(configPath)).toBe(false);
+    rmDir(dir);
+  });
+
+  it('writes the baseline without disturbing the mode', () => {
+    const { dir, configPath, folderId } = folderFixture();
+    setFolderGitSync(configPath, folderId, 'receive');
+    setFolderGitLastCommitHash(configPath, folderId, 'deadbeef');
+
+    const folder = readFolder(configPath);
+    expect(folder.gitSync).toBe('receive');
+    expect(folder.gitLastCommitHash).toBe('deadbeef');
+    rmDir(dir);
+  });
+
+  it('skips the rewrite when the baseline is unchanged', () => {
+    const { dir, configPath, folderId } = folderFixture();
+    setFolderGitSync(configPath, folderId, 'full');
+    setFolderGitLastCommitHash(configPath, folderId, 'same-hash');
+    const before = readFileSync(configPath, 'utf8');
+
+    // 扫描循环每检出一次提交就落盘;同值重写会让 config.json 被无谓地反复替换
+    setFolderGitLastCommitHash(configPath, folderId, 'same-hash');
+    expect(readFileSync(configPath, 'utf8')).toBe(before);
+    rmDir(dir);
+  });
+
+  it('ignores a baseline write for a folder that no longer exists', () => {
+    const { dir, configPath } = folderFixture();
+    setFolderGitLastCommitHash(configPath, 'removed-folder', 'hash');
+    expect('gitLastCommitHash' in readFolder(configPath)).toBe(false);
     rmDir(dir);
   });
 });

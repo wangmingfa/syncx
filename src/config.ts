@@ -102,6 +102,17 @@ export interface SharedFolderConfig {
    * 旧配置缺省(尚未设置)按 'off' 处理。
    */
   gitSync?: GitSyncMode;
+  /**
+   * 上次观测到的 HEAD 提交哈希(**仅本机使用,不进 wire、不跨设备对齐**)。
+   *
+   * 与 gitSync 配套:扫描时拿当前 HEAD 与它比对,不同即说明产生了新提交。存进配置而不只放
+   * 内存,是为了让 daemon 停机期间的提交在重启后仍能被检出并补广播 —— 缺省时只能把重启后的
+   * HEAD 重新当基线,停机期间那次提交的消息就永久不会传播了。
+   *
+   * 每次 gitSync 模式被改动时清空(devices.setFolderGitSync):改模式视为「重新启用」,
+   * 从当前 HEAD 重新起基线,绝不把启用前积压的历史提交一次性重放出去。
+   */
+  gitLastCommitHash?: string;
 }
 
 /** Git 提交同步的四种模式;定义见 SharedFolderConfig.gitSync 的注释。 */

@@ -43,7 +43,7 @@ import { makePeerTransport, attachPeerMessages, sendControlMessage, type Control
 import { learnPeerUrl, learnPeerIp, getLanAddresses } from './net/addresses.js';
 import { hostname as osHostname } from 'node:os';
 import { RateLimiter } from './ratelimit.js';
-import { isPeerAllowed, addPeer, setFolderPaused, setGlobalPaused, setFolderSchedule as persistFolderSchedule, setFolderGitSync as persistFolderGitSync, setGlobalSettings as persistGlobalSettings, type GlobalSettingsPatch } from './devices.js';
+import { isPeerAllowed, addPeer, setFolderPaused, setGlobalPaused, setFolderSchedule as persistFolderSchedule, setFolderGitSync as persistFolderGitSync, setFolderGitLastCommitHash, setGlobalSettings as persistGlobalSettings, type GlobalSettingsPatch } from './devices.js';
 import { receiveOffer, makeOfferId, pruneRevokedOffers } from './offers.js';
 import type { DeviceIdentity } from './identity.js';
 import type { ProgressCounts, RelayActivity, TransferFile } from './status.js';
@@ -94,6 +94,11 @@ export interface FolderState {
    * 集合大小有上限(见 onGitCommitNotify),超出后淘汰最早的一半,防止无限膨胀。
    */
   processedRemoteCommits: Set<string>;
+  /**
+   * Git 提交同步:有一笔提交因对端全部离线而尚未送达,等下一轮扫描重试。
+   * 只用来抑制「每轮扫描都打一遍」的重复日志,不参与判定。
+   */
+  gitBroadcastPending: boolean;
 }
 
 /** 一条存活的对端会话:配置热重载新增/移除目录时,对现有连接补建或摘除对应 peer。 */
@@ -559,7 +564,7 @@ export class SyncSessionManager {
     // 索引为空 → 首扫是建基线(存量文件不算新增);索引有存量 → 首扫 diff 是
     // daemon 离线期间的真实改动,要写同步记录
     const baselinePending = usable.length === 0;
-    return { id, indexKey, path: f.path, index, executor, localIndex, ignoreLines, transports: [], peers: new Map(), transportDevice: new Map(), config: f, baselinePending, conflictCount: 0, lastCommitHash: null, processedRemoteCommits: new Set() };
+    return { id, indexKey, path: f.path, index, executor, localIndex, ignoreLines, transports: [], peers: new Map(), transportDevice: new Map(), config: f, baselinePending, conflictCount: 0, lastCommitHash: f.gitLastCommitHash ?? null, processedRemoteCommits: new Set(), gitBroadcastPending: false };
   }
 
   /**
@@ -843,7 +848,7 @@ export class SyncSessionManager {
       if (!mode || mode === 'off' || mode === 'receive') continue;
 
       if (!isGitRepo(folder.path)) {
-        folder.lastCommitHash = null;
+        this.setGitBaseline(folder, null);
         continue;
       }
 
@@ -851,8 +856,10 @@ export class SyncSessionManager {
       if (!currentHash) continue;
 
       if (folder.lastCommitHash === null) {
-        // 首次扫描:只记录基线,不广播(避免 daemon 启动时把历史提交都推一遍)
-        folder.lastCommitHash = currentHash;
+        // 无基线(首次启用 / 重启后配置里没有):只记录基线,不广播。
+        // 这是「绝不重放历史提交」的兜底 —— 停机期间漏掉的提交最多只有一次(见
+        // gitLastCommitHash 的持久化),而首次启用时把整段历史推出去才是真灾难。
+        this.setGitBaseline(folder, currentHash);
         continue;
       }
 
@@ -861,30 +868,69 @@ export class SyncSessionManager {
       // 检测到新提交,收集信息并广播
       const info = getCommitInfo(folder.path, folder.lastCommitHash, currentHash);
       if (info) {
-        this.broadcastGitCommit(folder, info);
+        if (!this.broadcastGitCommit(folder, info)) {
+          // 一个对端都没送达(全部离线 / 握手还没完成):基线**保持不动**,下一轮扫描重试。
+          // 否则这笔提交会被永久跳过 —— daemon 重启后补广播停机期间的提交,靠的正是这里。
+          if (!folder.gitBroadcastPending) {
+            folder.gitBroadcastPending = true;
+            this.logger.info(`git commit broadcast deferred: ${folder.id} (no online peer, retry next scan)`);
+          }
+          continue;
+        }
+        if (folder.gitBroadcastPending) {
+          folder.gitBroadcastPending = false;
+          this.logger.info(`git commit broadcast resent: ${folder.id}`);
+        }
       }
-      folder.lastCommitHash = currentHash;
+      this.setGitBaseline(folder, currentHash);
     }
   }
 
-  /** 向目录的所有对端设备广播 git 提交通知 */
-  private broadcastGitCommit(folder: FolderState, info: CommitInfo): void {
-    const devices = folder.config.devices ?? [];
-    for (const deviceId of devices) {
-      this.sendControlTo(deviceId, {
-        kind: 'git-commit-notify',
-        fromDeviceId: this.identity.deviceId,
-        folderId: folder.id,
-        commitHash: info.hash,
-        commitMessage: info.fullMessage,
-        changedFiles: info.changedFiles,
-        diffStat: info.diffStat,
-        parentHash: info.parentHash,
+  /** 更新基线哈希并落盘(内存与磁盘始终同值,热重载读回的必然是最新基线)。 */
+  private setGitBaseline(folder: FolderState, hash: string | null): void {
+    if (folder.lastCommitHash === hash) return;
+    folder.lastCommitHash = hash;
+    if (hash === null) {
+      // 非 git 仓库:清掉磁盘上的陈旧基线,免得日后重建仓库时拿旧哈希去比对
+      mutateConfig(this.configPath, (config) => {
+        const f = config.sharedFolders.find((x) => folderIdFor(x) === folder.id);
+        if (!f || f.gitLastCommitHash === undefined) return false;
+        f.gitLastCommitHash = undefined;
       });
+    } else {
+      setFolderGitLastCommitHash(this.configPath, folder.id, hash);
     }
-    this.logger.info(
-      `git commit broadcast: ${folder.id} ${info.hash.slice(0, 8)} "${info.message.split('\n')[0]}" (${info.changedFiles.length} 个文件: ${info.changedFiles.slice(0, 10).join(', ')}${info.changedFiles.length > 10 ? ` …等 ${info.changedFiles.length} 个` : ''})`,
-    );
+  }
+
+  /**
+   * 向目录的所有对端设备广播 git 提交通知。
+   * 返回是否至少送达一个对端(目录未配置任何设备时视为已送达,不该因此卡住基线)。
+   */
+  private broadcastGitCommit(folder: FolderState, info: CommitInfo): boolean {
+    const devices = folder.config.devices ?? [];
+    let reached = devices.length === 0;
+    for (const deviceId of devices) {
+      if (
+        this.sendControlTo(deviceId, {
+          kind: 'git-commit-notify',
+          fromDeviceId: this.identity.deviceId,
+          folderId: folder.id,
+          commitHash: info.hash,
+          commitMessage: info.fullMessage,
+          changedFiles: info.changedFiles,
+          diffStat: info.diffStat,
+          parentHash: info.parentHash,
+        })
+      ) {
+        reached = true;
+      }
+    }
+    if (reached) {
+      this.logger.info(
+        `git commit broadcast: ${folder.id} ${info.hash.slice(0, 8)} "${info.message.split('\n')[0]}" (${info.changedFiles.length} 个文件: ${info.changedFiles.slice(0, 10).join(', ')}${info.changedFiles.length > 10 ? ` …等 ${info.changedFiles.length} 个` : ''})`,
+      );
+    }
+    return reached;
   }
 
   /** 处理对端发来的 git 提交通知:在本地目录执行自动提交 */
@@ -923,8 +969,8 @@ export class SyncSessionManager {
     const result = autoCommit(folder.path, commitMessage);
     if (result.success) {
       this.logger.info(`auto-commit success: ${folderId} -> ${result.hash?.slice(0, 8)}`);
-      // 更新 lastCommitHash,防止扫描循环把这个自动提交误判为「新提交」再广播回去(死循环防护)
-      folder.lastCommitHash = result.hash ?? getLastCommitHash(folder.path);
+      // 更新基线并落盘:防止扫描循环把这个自动提交误判为「新提交」再广播回去(死循环防护)
+      this.setGitBaseline(folder, result.hash ?? getLastCommitHash(folder.path));
       // 同时把本机产生的新哈希也加入去重集合
       if (folder.lastCommitHash) {
         folder.processedRemoteCommits.add(folder.lastCommitHash);
