@@ -1,7 +1,7 @@
 <script setup lang="ts">
 import { ref, watch } from 'vue';
-import { NButton, NCheckbox, NCheckboxGroup, NInput } from 'naive-ui';
-import type { DeviceInfo, FolderInfo } from '../types';
+import { NButton, NCheckbox, NCheckboxGroup, NInput, NSelect } from 'naive-ui';
+import type { DeviceInfo, FolderInfo, GitSyncMode } from '../types';
 import ModalShell from './ModalShell.vue';
 
 const props = defineProps<{
@@ -13,14 +13,22 @@ const props = defineProps<{
 }>();
 const emit = defineEmits<{
   close: [];
-  /** 「保存」:设备指派、.gitignore 开关与同步时段一起提交给父级,真正的写操作只有父级那一处。 */
-  save: [payload: { path: string; devices: string[]; gitignore: boolean; schedule: string }];
+  /** 「保存」:设备指派、.gitignore 开关、同步时段与 git 同步模式一起提交给父级,真正的写操作只有父级那一处。 */
+  save: [payload: { path: string; devices: string[]; gitignore: boolean; schedule: string; gitSync: GitSyncMode }];
 }>();
 
 const path = ref('');
 const selected = ref<string[]>([]);
 const gitignore = ref(true);
 const schedule = ref('');
+const gitSync = ref<GitSyncMode>('off');
+
+const GIT_SYNC_OPTIONS: { label: string; value: GitSyncMode }[] = [
+  { label: '关闭', value: 'off' },
+  { label: '仅发送(广播本机提交,不自动提交)', value: 'send' },
+  { label: '仅接收(自动提交对端通知,不广播)', value: 'receive' },
+  { label: '双向(广播本机提交,并自动提交对端通知)', value: 'full' },
+];
 
 watch(
   () => props.folder,
@@ -30,12 +38,13 @@ watch(
     selected.value = [...f.devices];
     gitignore.value = f.useGitignore !== false;
     schedule.value = f.schedule ?? '';
+    gitSync.value = f.gitSync ?? 'off';
   },
 );
 
 function onSave(): void {
   if (props.busy || !props.folder) return;
-  emit('save', { path: path.value, devices: [...selected.value], gitignore: gitignore.value, schedule: schedule.value.trim() });
+  emit('save', { path: path.value, devices: [...selected.value], gitignore: gitignore.value, schedule: schedule.value.trim(), gitSync: gitSync.value });
 }
 
 // 地址(host:port)与主机名合并成一行,在设备 ID 之外提供可辨认的信息;两者都可能缺失
@@ -81,6 +90,19 @@ function deviceAddrLine(p: DeviceInfo): string {
       @keydown.enter="onSave"
     />
     <p class="confirm-note-extra">只在该时段内同步(支持跨午夜),时段外数据面停摆、到点自动恢复;控制面(连接 / 配对)不受影响。</p>
+
+    <div class="edit-section-label">Git 提交同步</div>
+    <n-select
+      v-model:value="gitSync"
+      class="schedule-input"
+      :options="GIT_SYNC_OPTIONS"
+      :disabled="busy"
+    />
+    <p class="confirm-note-extra">
+      目录为 git 仓库时生效:一端 commit 后通知其他设备,对端把本地全部改动一次性
+      commit(<code>git add -A</code>)并沿用相同提交信息,无需每台设备手动提交。
+      首次启用只记录当前 HEAD 作为基线,不会重放历史提交。
+    </p>
 
     <template #footer>
       <n-button class="modal-cancel" :disabled="busy" @click="emit('close')">取消</n-button>

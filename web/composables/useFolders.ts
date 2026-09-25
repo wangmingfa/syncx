@@ -3,7 +3,7 @@ import { useToast } from './useToast';
 import { apiJson, errText } from '../utils/api';
 import { folderKey } from '../utils/format';
 import type { CoreDeps } from './statusContext';
-import type { FolderInfo } from '../types';
+import type { FolderInfo, GitSyncMode } from '../types';
 
 /** 文件夹相关:添加/移除(防误删确认)/编辑指派设备/ .gitignore 开关/悬停联动/同步记录。 */
 export function useFolders(deps: CoreDeps): {
@@ -36,7 +36,7 @@ export function useFolders(deps: CoreDeps): {
   conflictsFolder: Ref<FolderInfo | null>;
   /** 非空 = 打开该目录的文件版本弹窗。 */
   versionsFolder: Ref<FolderInfo | null>;
-  saveEditDevices: (payload: { path: string; devices: string[]; gitignore: boolean; schedule: string }) => Promise<void>;
+  saveEditDevices: (payload: { path: string; devices: string[]; gitignore: boolean; schedule: string; gitSync: GitSyncMode }) => Promise<void>;
   toggleFolderPaused: (f: FolderInfo, paused: boolean) => Promise<void>;
   toggleGlobalPaused: (paused: boolean) => Promise<void>;
   /** 「目录不可信」横幅上的重新采集身份(仅更新指纹,索引不动)。 */
@@ -133,10 +133,10 @@ export function useFolders(deps: CoreDeps): {
     editDevicesOpen.value = true;
   }
 
-  /** 弹窗「保存」:设备指派、.gitignore 开关与同步时段一起提交,真正的写操作只有这里。 */
-  async function saveEditDevices(payload: { path: string; devices: string[]; gitignore: boolean; schedule: string }): Promise<void> {
+  /** 弹窗「保存」:设备指派、.gitignore 开关、同步时段与 git 同步模式一起提交,真正的写操作只有这里。 */
+  async function saveEditDevices(payload: { path: string; devices: string[]; gitignore: boolean; schedule: string; gitSync: GitSyncMode }): Promise<void> {
     await commitFolderDevices(payload.path, payload.devices);
-    // refreshStatus 后按最新 folders 找回该目录,开关/时段有变化才额外发请求
+    // refreshStatus 后按最新 folders 找回该目录,开关/时段/git 模式有变化才额外发请求
     const f = status.value.folders.find((x) => x.path === payload.path);
     if (f && (f.useGitignore !== false) !== payload.gitignore) {
       await toggleFolderGitignore(f, payload.gitignore);
@@ -144,7 +144,33 @@ export function useFolders(deps: CoreDeps): {
     if (f && (f.schedule ?? '') !== payload.schedule) {
       await saveFolderSchedule(f, payload.schedule);
     }
+    if (f && (f.gitSync ?? 'off') !== payload.gitSync) {
+      await saveFolderGitSync(f, payload.gitSync);
+    }
     editDevicesOpen.value = false;
+  }
+
+  /** 提交某目录的 git 提交同步模式;失败回读后端真实状态。 */
+  async function saveFolderGitSync(f: FolderInfo, mode: GitSyncMode): Promise<void> {
+    try {
+      await apiJson('/api/folders/git-sync', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ folderId: f.id ?? f.path, mode }),
+      });
+      showToast(
+        mode === 'off'
+          ? '已关闭 Git 提交同步'
+          : mode === 'send'
+            ? '已设为仅发送:本机提交会通知对端,但不自动提交对端通知'
+            : mode === 'receive'
+              ? '已设为仅接收:自动提交对端通知,不广播本机提交'
+              : '已开启双向 Git 提交同步',
+      );
+    } catch (e) {
+      showToast(errText(e, '设置 Git 同步模式失败'), 'alert');
+    }
+    await refreshStatus();
   }
 
   /** 提交某目录的同步时段(空串 = 清除,全天同步);失败回读后端真实状态。 */

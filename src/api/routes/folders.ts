@@ -56,7 +56,7 @@ export async function tryFolderRoutes(
   res: ServerResponse,
   deps: ControlServerDeps,
 ): Promise<boolean> {
-  const { addFolder, removeFolder, setFolderDevices, setFolderUseGitignore, setFolderPaused, setFolderSchedule, reAdoptFolderIdentity, getFolderHistory, getGlobalHistory, clearFolderHistory, listFolderConflicts, resolveFolderConflict, conflictFilePair, applyConflictMerge, cleanIdenticalConflicts, diffFolder, compareFolder, readFilePair, applyFileSync, listFolderVersions, restoreFolderVersion, deleteFolderVersion } = deps;
+  const { addFolder, removeFolder, setFolderDevices, setFolderUseGitignore, setFolderPaused, setFolderSchedule, setFolderGitSync, reAdoptFolderIdentity, getFolderHistory, getGlobalHistory, clearFolderHistory, listFolderConflicts, resolveFolderConflict, conflictFilePair, applyConflictMerge, cleanIdenticalConflicts, diffFolder, compareFolder, readFilePair, applyFileSync, listFolderVersions, restoreFolderVersion, deleteFolderVersion } = deps;
   const path = req.url ? pathname(req.url) : '/';
 
   // Form POST /folders : add or (via _method=DELETE) remove a folder
@@ -175,6 +175,30 @@ export async function tryFolderRoutes(
       sendJson(res, 200, { ok: true });
     } catch (e) {
       sendJson(res, 400, { error: e instanceof Error ? e.message : '设置同步时段失败' });
+    }
+    return true;
+  }
+
+  // POST /api/folders/git-sync { folderId, mode } : 设置某目录的 git 提交同步模式。
+  // mode 取 off / send / receive / full;非法值 400。
+  if (req.method === 'POST' && path === '/api/folders/git-sync' && setFolderGitSync) {
+    try {
+      const raw = await readBody(req);
+      const body = raw === '' ? {} : JSON.parse(raw);
+      const folderId = (body as { folderId?: unknown }).folderId;
+      const mode = (body as { mode?: unknown }).mode;
+      if (typeof folderId !== 'string' || folderId === '') {
+        sendJson(res, 400, { error: 'folderId is required' });
+        return true;
+      }
+      if (mode !== 'off' && mode !== 'send' && mode !== 'receive' && mode !== 'full') {
+        sendJson(res, 400, { error: 'mode must be one of: off, send, receive, full' });
+        return true;
+      }
+      setFolderGitSync(folderId, mode);
+      sendJson(res, 200, { ok: true });
+    } catch (e) {
+      sendJson(res, 400, { error: e instanceof Error ? e.message : '设置 git 同步模式失败' });
     }
     return true;
   }

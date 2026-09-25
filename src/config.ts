@@ -101,7 +101,17 @@ export interface SharedFolderConfig {
    * 缺省 'off'(显式 opt-in),避免对非 git 目录产生不必要的 git 命令调用。
    * 旧配置缺省(尚未设置)按 'off' 处理。
    */
-  gitSync?: 'off' | 'send' | 'receive' | 'full';
+  gitSync?: GitSyncMode;
+}
+
+/** Git 提交同步的四种模式;定义见 SharedFolderConfig.gitSync 的注释。 */
+export type GitSyncMode = 'off' | 'send' | 'receive' | 'full';
+
+const GIT_SYNC_MODES: readonly string[] = ['off', 'send', 'receive', 'full'];
+
+/** 校验 gitSync 取值(供设置入口拒绝笔误,非法值 400 而非静默失效)。 */
+export function isGitSyncMode(v: unknown): v is GitSyncMode {
+  return typeof v === 'string' && GIT_SYNC_MODES.includes(v);
 }
 
 /** 目录的 wire 标识:优先 id,缺省用 path。 */

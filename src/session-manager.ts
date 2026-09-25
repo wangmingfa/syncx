@@ -19,7 +19,7 @@ import { randomBytes } from 'node:crypto';
 import type { Logger } from 'pino';
 import { WebSocket } from 'ws';
 
-import { loadConfig, mutateConfig, folderIdFor, folderIndexKey, folderIndexPath, folderTrashPath, folderVersionsPath, purgeFolderIndex, isWithinSchedule, type SharedFolderConfig } from './config.js';
+import { loadConfig, mutateConfig, folderIdFor, folderIndexKey, folderIndexPath, folderTrashPath, folderVersionsPath, purgeFolderIndex, isWithinSchedule, type SharedFolderConfig, type GitSyncMode } from './config.js';
 import { checkFolderIdentity, readFolderIdentity } from './folder-identity.js';
 import { openIndexStore, type IndexStore } from './indexstore.js';
 import { createLocalExecutor, resolveSharePath, type LocalExecutor } from './executor.js';
@@ -43,7 +43,7 @@ import { makePeerTransport, attachPeerMessages, sendControlMessage, type Control
 import { learnPeerUrl, learnPeerIp, getLanAddresses } from './net/addresses.js';
 import { hostname as osHostname } from 'node:os';
 import { RateLimiter } from './ratelimit.js';
-import { isPeerAllowed, addPeer, setFolderPaused, setGlobalPaused, setFolderSchedule as persistFolderSchedule, setGlobalSettings as persistGlobalSettings, type GlobalSettingsPatch } from './devices.js';
+import { isPeerAllowed, addPeer, setFolderPaused, setGlobalPaused, setFolderSchedule as persistFolderSchedule, setFolderGitSync as persistFolderGitSync, setGlobalSettings as persistGlobalSettings, type GlobalSettingsPatch } from './devices.js';
 import { receiveOffer, makeOfferId, pruneRevokedOffers } from './offers.js';
 import type { DeviceIdentity } from './identity.js';
 import type { ProgressCounts, RelayActivity, TransferFile } from './status.js';
@@ -882,7 +882,9 @@ export class SyncSessionManager {
         parentHash: info.parentHash,
       });
     }
-    this.logger.info(`git commit broadcast: ${folder.id} ${info.hash.slice(0, 8)} "${info.message.split('\n')[0]}"`);
+    this.logger.info(
+      `git commit broadcast: ${folder.id} ${info.hash.slice(0, 8)} "${info.message.split('\n')[0]}" (${info.changedFiles.length} 个文件: ${info.changedFiles.slice(0, 10).join(', ')}${info.changedFiles.length > 10 ? ` …等 ${info.changedFiles.length} 个` : ''})`,
+    );
   }
 
   /** 处理对端发来的 git 提交通知:在本地目录执行自动提交 */
@@ -911,7 +913,12 @@ export class SyncSessionManager {
       return;
     }
 
-    this.logger.info(`auto-committing: ${folderId} with message "${commitMessage.split('\n')[0]}" (from ${fromDeviceId})`);
+    const filesDesc = msg.changedFiles.length
+      ? `${msg.changedFiles.length} 个文件: ${msg.changedFiles.slice(0, 10).join(', ')}${msg.changedFiles.length > 10 ? ' …' : ''}`
+      : '无文件变更';
+    this.logger.info(
+      `auto-committing: ${folderId} (from ${fromDeviceId}) "${commitMessage.split('\n')[0]}" — ${filesDesc}`,
+    );
 
     const result = autoCommit(folder.path, commitMessage);
     if (result.success) {
@@ -2346,6 +2353,21 @@ export class SyncSessionManager {
     }
     this.applyPausedState();
     this.logger.info(`folder schedule updated: ${folderId} -> ${schedule.trim() || '(always)'}`);
+  }
+
+  /**
+   * 设置某目录的 git 提交同步模式(目录设置弹窗):落盘 + 同步内存 config。
+   *
+   * 刻意不把 lastCommitHash 重置为 null:重置会让下一轮扫描重新「建基线」,
+   * 而这次扫描与上次之间产生的提交就被静默吞掉了。保留既有基线,首次启用时
+   * lastCommitHash 本来就是 null,第一扫只记基线、不重放历史提交(两种情形都已覆盖)。
+   */
+  setFolderGitSync(folderId: string, mode: GitSyncMode): void {
+    persistFolderGitSync(this.configPath, folderId, mode);
+    const folder = this.folderStates.find((f) => f.id === folderId);
+    if (folder) folder.config.gitSync = mode === 'off' ? undefined : mode;
+    this.logger.info(`git sync mode updated: ${folderId} -> ${mode}`);
+    this.notifyStatus();
   }
 
   /**

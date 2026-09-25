@@ -34,7 +34,12 @@ export interface FolderInfo {
   paused?: boolean;
   /** 同步时段(HH:MM-HH:MM,支持跨午夜):仅该时段内同步;空/缺省 = 全天。 */
   schedule?: string;
+  /** git 提交同步模式;缺省 = 'off'(未启用)。仅当目录本身是 git 仓库时才有实际作用。 */
+  gitSync?: GitSyncMode;
 }
+
+/** 与后端 SharedFolderConfig.gitSync 取值保持一致。 */
+export type GitSyncMode = 'off' | 'send' | 'receive' | 'full';
 
 export interface DeviceInfo {
   deviceId: string;

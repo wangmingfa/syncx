@@ -2,7 +2,7 @@ import { existsSync, mkdirSync, statSync } from 'node:fs';
 import { resolve, isAbsolute, sep, dirname, join } from 'node:path';
 import { homedir } from 'node:os';
 import { randomBytes } from 'node:crypto';
-import { loadConfig, saveConfig, mutateConfig, normalizePeerUrl, DEFAULT_CONFIG, folderIdFor, folderIndexKey, generateFolderInstanceId, purgeFolderIndex, isValidSchedule, type Config, type FolderIdentity, type SharedFolderConfig, type DeviceConfig } from './config.js';
+import { loadConfig, saveConfig, mutateConfig, normalizePeerUrl, DEFAULT_CONFIG, folderIdFor, folderIndexKey, generateFolderInstanceId, purgeFolderIndex, isValidSchedule, isGitSyncMode, type Config, type FolderIdentity, type SharedFolderConfig, type DeviceConfig, type GitSyncMode } from './config.js';
 import { readFolderIdentity } from './folder-identity.js';
 
 /**
@@ -337,6 +337,22 @@ export function setFolderSchedule(configPath: string, folderId: string, schedule
     const existing = config.sharedFolders.find((f) => folderIdFor(f) === folderId);
     if (!existing) throw new Error(`未找到共享目录:「${folderId}」`);
     existing.schedule = s === '' ? undefined : s;
+  });
+}
+
+/**
+ * 设置某目录的 git 提交同步模式(目录设置弹窗;按 folderId 定位)。
+ * 'off' 存成 undefined 而非字面量:与「旧配置从未设置过该字段」保持同一种形态,
+ * 避免关一次开关后 config.json 里永久留一条 'off'。
+ */
+export function setFolderGitSync(configPath: string, folderId: string, mode: GitSyncMode): void {
+  if (!isGitSyncMode(mode)) {
+    throw new Error(`git 同步模式应为 off / send / receive / full:「${String(mode)}」`);
+  }
+  mutateConfig(configPath, (config) => {
+    const existing = config.sharedFolders.find((f) => folderIdFor(f) === folderId);
+    if (!existing) throw new Error(`未找到共享目录:「${folderId}」`);
+    existing.gitSync = mode === 'off' ? undefined : mode;
   });
 }
 
