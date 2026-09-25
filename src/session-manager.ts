@@ -50,6 +50,7 @@ import type { ProgressCounts, RelayActivity, TransferFile } from './status.js';
 import { isBundledRuntime, packSelfTgz, runSelfUpdate, runtimeVersion, sha256Hex } from './selfupdate.js';
 import { compareVersions } from './upgrade.js';
 import { reconnectDelayMs } from './args.js';
+import { isGitRepo, getLastCommitHash, getCommitInfo, autoCommit, type CommitInfo } from './git-monitor.js';
 
 /** 一个共享目录的运行期状态:索引、执行器与本地索引,随配置热重载增删。 */
 export interface FolderState {
@@ -81,6 +82,18 @@ export interface FolderState {
    * 该计数由每轮扫描顺带盘点(scanFolder.conflictCount)。
    */
   conflictCount: number;
+  /**
+   * Git 提交同步:上次观测到的 HEAD 提交哈希。null 表示尚未初始化或非 git 仓库。
+   * 每次扫描时比对当前 HEAD,不同则说明有新提交,触发广播。自动提交后也更新此字段,
+   * 防止把自动提交产生的新哈希误判为「又有一次新提交」而重复广播(死循环防护)。
+   */
+  lastCommitHash: string | null;
+  /**
+   * Git 提交同步:已处理过的远端提交哈希集合(去重用)。
+   * 对端发来的 commitHash 若已在此集合中,跳过自动提交,避免同一通知被多次执行。
+   * 集合大小有上限(见 onGitCommitNotify),超出后淘汰最早的一半,防止无限膨胀。
+   */
+  processedRemoteCommits: Set<string>;
 }
 
 /** 一条存活的对端会话:配置热重载新增/移除目录时,对现有连接补建或摘除对应 peer。 */
@@ -546,7 +559,7 @@ export class SyncSessionManager {
     // 索引为空 → 首扫是建基线(存量文件不算新增);索引有存量 → 首扫 diff 是
     // daemon 离线期间的真实改动,要写同步记录
     const baselinePending = usable.length === 0;
-    return { id, indexKey, path: f.path, index, executor, localIndex, ignoreLines, transports: [], peers: new Map(), transportDevice: new Map(), config: f, baselinePending, conflictCount: 0 };
+    return { id, indexKey, path: f.path, index, executor, localIndex, ignoreLines, transports: [], peers: new Map(), transportDevice: new Map(), config: f, baselinePending, conflictCount: 0, lastCommitHash: null, processedRemoteCommits: new Set() };
   }
 
   /**
@@ -811,6 +824,107 @@ export class SyncSessionManager {
         broadcastFolderUpdates(folder, sends);
       }
       folder.baselinePending = false;
+    }
+    // 扫描完成后检查 git 提交(若有目录启用了 gitSync)
+    await this.checkGitCommits();
+  }
+
+  /* ==================== Git 提交同步 ==================== */
+
+  /**
+   * 检查各目录的 git HEAD 变化:若检测到新提交,广播给其他共享设备。
+   * 在每轮扫描末尾调用,复用 5 秒定时间隔,不额外起定时器。
+   */
+  private async checkGitCommits(): Promise<void> {
+    for (const folder of this.folderStates) {
+      if (this.folderPausedNow(folder)) continue;
+      const mode = folder.config.gitSync;
+      // 只处理启用了发送的模式('send' 或 'full')
+      if (!mode || mode === 'off' || mode === 'receive') continue;
+
+      if (!isGitRepo(folder.path)) {
+        folder.lastCommitHash = null;
+        continue;
+      }
+
+      const currentHash = getLastCommitHash(folder.path);
+      if (!currentHash) continue;
+
+      if (folder.lastCommitHash === null) {
+        // 首次扫描:只记录基线,不广播(避免 daemon 启动时把历史提交都推一遍)
+        folder.lastCommitHash = currentHash;
+        continue;
+      }
+
+      if (currentHash === folder.lastCommitHash) continue;
+
+      // 检测到新提交,收集信息并广播
+      const info = getCommitInfo(folder.path, folder.lastCommitHash, currentHash);
+      if (info) {
+        this.broadcastGitCommit(folder, info);
+      }
+      folder.lastCommitHash = currentHash;
+    }
+  }
+
+  /** 向目录的所有对端设备广播 git 提交通知 */
+  private broadcastGitCommit(folder: FolderState, info: CommitInfo): void {
+    const devices = folder.config.devices ?? [];
+    for (const deviceId of devices) {
+      this.sendControlTo(deviceId, {
+        kind: 'git-commit-notify',
+        fromDeviceId: this.identity.deviceId,
+        folderId: folder.id,
+        commitHash: info.hash,
+        commitMessage: info.fullMessage,
+        changedFiles: info.changedFiles,
+        diffStat: info.diffStat,
+        parentHash: info.parentHash,
+      });
+    }
+    this.logger.info(`git commit broadcast: ${folder.id} ${info.hash.slice(0, 8)} "${info.message.split('\n')[0]}"`);
+  }
+
+  /** 处理对端发来的 git 提交通知:在本地目录执行自动提交 */
+  private onGitCommitNotify(msg: Extract<ControlMessage, { kind: 'git-commit-notify' }>): void {
+    const { fromDeviceId, folderId, commitHash, commitMessage } = msg;
+
+    const folder = this.folderStates.find((f) => f.id === folderId);
+    if (!folder) return;
+
+    // 只处理启用了接收的模式('receive' 或 'full')
+    const mode = folder.config.gitSync;
+    if (!mode || mode === 'off' || mode === 'send') return;
+
+    // 去重:已处理过的提交跳过
+    if (folder.processedRemoteCommits.has(commitHash)) return;
+    folder.processedRemoteCommits.add(commitHash);
+
+    // 限制去重集合大小,防止无限膨胀(保留最新的一半)
+    if (folder.processedRemoteCommits.size > 1000) {
+      const toRemove = [...folder.processedRemoteCommits].slice(0, 500);
+      for (const h of toRemove) folder.processedRemoteCommits.delete(h);
+    }
+
+    if (!isGitRepo(folder.path)) {
+      this.logger.info(`git-commit-notify ignored: ${folderId} is not a git repo`);
+      return;
+    }
+
+    this.logger.info(`auto-committing: ${folderId} with message "${commitMessage.split('\n')[0]}" (from ${fromDeviceId})`);
+
+    const result = autoCommit(folder.path, commitMessage);
+    if (result.success) {
+      this.logger.info(`auto-commit success: ${folderId} -> ${result.hash?.slice(0, 8)}`);
+      // 更新 lastCommitHash,防止扫描循环把这个自动提交误判为「新提交」再广播回去(死循环防护)
+      folder.lastCommitHash = result.hash ?? getLastCommitHash(folder.path);
+      // 同时把本机产生的新哈希也加入去重集合
+      if (folder.lastCommitHash) {
+        folder.processedRemoteCommits.add(folder.lastCommitHash);
+      }
+    } else {
+      this.logger.warn(`auto-commit failed: ${folderId}: ${result.error}`);
+      this.recordFolderError(folderId, new Error(`Git auto-commit failed: ${result.error}`), 'Git 自动提交失败');
     }
   }
 
@@ -1159,6 +1273,10 @@ export class SyncSessionManager {
         break;
       case 'file-content-write-result':
         this.onPeerFileWriteResult(message);
+        break;
+      case 'git-commit-notify':
+        // 对端检测到新提交,通知本机也执行自动提交
+        this.onGitCommitNotify(message);
         break;
     }
     // 控制面消息多会改动待确认项/共享关系(设备卡与邀请卡的内容),统一通知一次。

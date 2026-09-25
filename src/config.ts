@@ -90,6 +90,18 @@ export interface SharedFolderConfig {
    * 空/缺省 = 全天同步;格式非法按全天处理(绝不因配置笔误把目录锁死)。
    */
   schedule?: string;
+  /**
+   * Git 提交同步模式:当共享目录是 git 仓库时,检测本地提交并通知其他设备自动提交。
+   *
+   * - 'off'(默认):不启用 git 同步
+   * - 'send':检测并广播本地提交,但不自动提交对端通知
+   * - 'receive':收到通知时自动提交,但不广播本地提交
+   * - 'full':双向 —— 既广播本地提交,也自动提交对端通知
+   *
+   * 缺省 'off'(显式 opt-in),避免对非 git 目录产生不必要的 git 命令调用。
+   * 旧配置缺省(尚未设置)按 'off' 处理。
+   */
+  gitSync?: 'off' | 'send' | 'receive' | 'full';
 }
 
 /** 目录的 wire 标识:优先 id,缺省用 path。 */

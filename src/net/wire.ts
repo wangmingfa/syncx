@@ -86,7 +86,14 @@ export type ControlMessage =
    * 而这一侧又会把它当成远端更新拉一次 —— 一次点击变成两轮无意义传输。
    */
   | { kind: 'file-content-write'; requestId: string; fromDeviceId: string; folderId: string; path: string; data: string; entryVersion: Array<[string, number]>; version?: string; hostname?: string }
-  | { kind: 'file-content-write-result'; requestId: string; fromDeviceId: string; folderId: string; path: string; ok: boolean; error?: string; version?: string; hostname?: string };
+  | { kind: 'file-content-write-result'; requestId: string; fromDeviceId: string; folderId: string; path: string; ok: boolean; error?: string; version?: string; hostname?: string }
+  /**
+   * Git 提交同步:本机在某共享目录检测到新提交,通知对端也执行自动提交。
+   * 接收方按 folderId 找到本地目录,执行 git add -A && git commit,使用相同的提交消息。
+   * commitHash 用于去重(避免同一提交被多次处理);changedFiles 与 diffStat 仅用于日志展示。
+   * 旧版本对端不识别该 kind,直接忽略,不影响既有功能。
+   */
+  | { kind: 'git-commit-notify'; fromDeviceId: string; folderId: string; commitHash: string; commitMessage: string; changedFiles: string[]; diffStat?: string; parentHash: string; version?: string; hostname?: string };
 
 export function encodeWireMessage(message: WireMessage): string {
   return JSON.stringify(message);
