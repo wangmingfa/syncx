@@ -73,10 +73,8 @@ export interface StatusContext extends FolderDiffApi {
   conflictsFolder: Ref<FolderInfo | null>;
   /** 打开某目录的文件版本弹窗(拉取与展示在 VersionsModal 内)。 */
   openVersions: (f: FolderInfo) => void;
-  /** 打开某目录的浏览器内文件管理器(FilesModal;浏览/下载/删除)。 */
+  /** 打开某目录的浏览器内文件管理器(独立路由页 /files,新开标签页;浏览/下载仅需登录,删除需提权)。 */
   openFiles: (f: FolderInfo) => void;
-  /** 非空 = 打开该目录的文件管理器(StatusPage 挂 FilesModal 用)。 */
-  filesFolder: Ref<FolderInfo | null>;
   copy: (text: string) => Promise<void>;
   hoverFolderKey: Ref<string>;
   onFolderEnter: (f: { id?: string; path: string; devices: string[] }) => void;

@@ -2,7 +2,6 @@ import { ref, type Ref } from 'vue';
 import { useToast } from './useToast';
 import { apiJson, errText } from '../utils/api';
 import { folderKey } from '../utils/format';
-import { ensureElevated } from '../utils/elevation';
 import type { CoreDeps } from './statusContext';
 import type { FolderInfo, GitSyncMode } from '../types';
 
@@ -31,7 +30,7 @@ export function useFolders(deps: CoreDeps): {
   openConflicts: (f: FolderInfo) => void;
   /** 打开某目录的文件版本弹窗(拉取与展示在 VersionsModal 内)。 */
   openVersions: (f: FolderInfo) => void;
-  /** 打开某目录的浏览器内文件管理器(FilesModal;浏览/下载/删除)。 */
+  /** 打开某目录的浏览器内文件管理器(独立路由页 /files;浏览/下载仅需登录,删除需提权)。 */
   openFiles: (f: FolderInfo) => void;
   editDevicesOpen: Ref<boolean>;
   editFolder: Ref<FolderInfo | null>;
@@ -42,8 +41,6 @@ export function useFolders(deps: CoreDeps): {
   conflictsFolder: Ref<FolderInfo | null>;
   /** 非空 = 打开该目录的文件版本弹窗。 */
   versionsFolder: Ref<FolderInfo | null>;
-  /** 非空 = 打开该目录的文件管理器。 */
-  filesFolder: Ref<FolderInfo | null>;
   saveEditDevices: (payload: { path: string; devices: string[]; gitignore: boolean; schedule: string; gitSync: GitSyncMode }) => Promise<void>;
   toggleFolderPaused: (f: FolderInfo, paused: boolean) => Promise<void>;
   toggleGlobalPaused: (paused: boolean) => Promise<void>;
@@ -267,13 +264,10 @@ export function useFolders(deps: CoreDeps): {
     versionsFolder.value = f;
   }
 
-  // 浏览器内文件管理器:非空 = 打开该目录的文件浏览(列表/下载/删除在 FilesModal 内)
-  const filesFolder = ref<FolderInfo | null>(null);
+  // 浏览器内文件管理器:独立路由页 /files(与终端 /terminal 同套路,新开标签页)。
+  // 浏览/下载只需登录,不再进页前弹提权门;删除在页内二次确认后走 ensureElevated。
   function openFiles(f: FolderInfo): void {
-    // 列盘面/下载/删除是高危操作:先过敏感操作验证门,通过后再进弹窗
-    void ensureElevated('浏览共享目录文件(含下载/删除)', () => {
-      filesFolder.value = f;
-    });
+    window.open(`/files?folder=${encodeURIComponent(f.id ?? f.path)}`, '_blank');
   }
 
   // ---- 暂停同步(目录卡开关 + 全局开关):数据面停摆,控制面照常 ----
@@ -358,7 +352,6 @@ export function useFolders(deps: CoreDeps): {
     historyGlobal,
     conflictsFolder,
     versionsFolder,
-    filesFolder,
     toggleFolderPaused,
     toggleGlobalPaused,
     reAdoptIdentity,

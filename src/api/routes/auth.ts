@@ -99,6 +99,7 @@ export async function tryPublicAuthRoutes(
 
   // GET /compare/* : 双栏对比页(纯 CSR,路径里带目录 id、设备走查询参数)。
   // GET /terminal : 浏览器内终端页(完整 PTY + xterm.js,独立全屏页面)。
+  // GET /files    : 文件管理器页(独立路由;浏览/下载仅需登录,删除需提权;目录 id 走 ?folder=)。
   // 用路径路由而不是哈希路由,链接可分享、可刷新 —— 代价是服务端必须对这些路径
   // 回页面壳,否则刷新直接 404。刻意只放行这几棵子树:其余未知路径仍按原样 404,
   // 不让「任何路径都回首页」把拼错的 API 路径掩盖成一张空页面。
@@ -107,7 +108,9 @@ export async function tryPublicAuthRoutes(
     (path === '/compare' ||
       path.startsWith('/compare/') ||
       path === '/terminal' ||
-      path.startsWith('/terminal/'))
+      path.startsWith('/terminal/') ||
+      path === '/files' ||
+      path.startsWith('/files/'))
   ) {
     sendHtml(res, UI_SHELL);
     return true;

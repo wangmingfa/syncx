@@ -37,7 +37,6 @@ import UploadUpdateModal from './components/UploadUpdateModal.vue';
 import DropOverlay from './components/DropOverlay.vue';
 import ToastView from './components/ToastView.vue';
 import SettingsModal from './components/SettingsModal.vue';
-import FilesModal from './components/FilesModal.vue';
 import ElevateGateModal from './components/ElevateGateModal.vue';
 import StatusTopbar from './components/StatusTopbar.vue';
 import StatusPills from './components/StatusPills.vue';
@@ -86,7 +85,7 @@ watchEffect(() => {
 });
 
 // 需要本页模板双向绑定的模态状态:必须提到顶层,否则 <script setup> 模板不会自动拆包 Ref
-const { historyFolder, historyGlobal, versionsFolder, conflictsFolder, filesFolder, editDevicesOpen, editFolder, saveEditDevices } = folders;
+const { historyFolder, historyGlobal, versionsFolder, conflictsFolder, editDevicesOpen, editFolder, saveEditDevices } = folders;
 const { upgrading, askSelfUpdate, uploadOpen, openUpload, selectUploadFile } = selfUpdate;
 const { showToast } = useToast();
 
@@ -260,9 +259,6 @@ provide(StatusContextKey, {
 
     <!-- 敏感操作验证门(终端/文件管理器共用的提权弹窗,状态在 utils/elevation) -->
     <ElevateGateModal />
-
-    <!-- 浏览器内文件管理器(目录卡「浏览文件」触发;浏览/下载/删除) -->
-    <FilesModal :folder="filesFolder" @close="filesFolder = null" />
 
     <!-- 日志弹窗 -->
     <LogsModal :open="logsOpen" @close="logsOpen = false" />

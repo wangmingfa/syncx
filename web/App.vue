@@ -5,6 +5,7 @@ import StatusPage from './StatusPage.vue';
 import LoginForm from './LoginForm.vue';
 import ComparePage from './ComparePage.vue';
 import TerminalPage from './TerminalPage.vue';
+import FileManagerPage from './FileManagerPage.vue';
 import { route } from './utils/route';
 import { useTheme } from './composables/useTheme';
 import type { StatusData } from './types';
@@ -47,8 +48,9 @@ onMounted(async () => {
 
 <template>
   <n-config-provider :theme="naiveTheme" :theme-overrides="themeOverrides" :locale="zhCN" :date-locale="dateZhCN">
-    <!-- 路由优先于状态页:终端页不依赖 status(自带登录预检),对比页需要 status 渲染 -->
+    <!-- 路由优先于状态页:终端页/文件管理器页不依赖本页 status(各自拉取,401 自行处理) -->
     <TerminalPage v-if="route.name === 'terminal'" />
+    <FileManagerPage v-else-if="route.name === 'files'" />
     <ComparePage
       v-else-if="status && route.name === 'compare' && route.folderId"
       :status="status"

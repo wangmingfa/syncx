@@ -22,17 +22,17 @@ function sendErr(res: ServerResponse, e: unknown): void {
 }
 
 /**
- * 文件管理器域(需认证 + **需提权**):
- * - GET    /api/folder-files?folderId&path&limit  列举目录(目录在前,超限截断)
- * - GET    /api/folder-files/download?folderId&path 下载单个文件(流式,不动索引)
- * - DELETE /api/folder-files?folderId&path        删除文件或整个子目录
+ * 文件管理器域(需认证;删除额外**需提权**):
+ * - GET    /api/folder-files?folderId&path&limit  列举目录(目录在前,超限截断)——仅需登录
+ * - GET    /api/folder-files/download?folderId&path 下载单个文件(流式,不动索引)——仅需登录
+ * - DELETE /api/folder-files?folderId&path        删除文件或整个子目录——需提权
  *
- * 列真实盘面、能下载任意文件、能删任何子目录 —— 比一般控制 API 危险一档,
- * 因此在登录之外还要求一次性提权(POST /api/elevate,终端同一条门)。每个
- * 放行的请求顺手续期提权 cookie(滑动),只要一直在用就不用反复验证;
- * 闲置过期后由前端引导重新验证。
+ * 鉴权分两档:浏览与下载是只读操作,登录会话(401 门)即可放行;删除会真实变更
+ * 文件系统并作为本地删除传播给对端,属敏感操作,在登录之外还要求一次性提权
+ * (POST /api/elevate,终端同一条门)。提权的 10 分钟窗口、滑动续期、失败限流等
+ * 频率逻辑保持不变 —— 只要持有有效提权 cookie,任意放行的请求顺手续期(滑动),
+ * 一直在用就不用反复验证;闲置过期后由前端在删除前引导重新验证。
  *
- * 删除走的是真实文件系统 —— 下一轮扫描会把它作为本地删除传播给对端;
  * 这与「移除共享目录只摘配置、不删文件」不同,路由注释与 UI 文案都已写明。
  */
 export async function tryFileRoutes(
@@ -47,17 +47,20 @@ export async function tryFileRoutes(
   const isFiles = path === '/api/folder-files' || path === '/api/folder-files/download';
 
   if (!isFiles) return false;
-  if (!elevated) {
-    sendJson(res, 403, { error: '敏感操作需要验证:请先用控制令牌或密码完成验证' });
-    return true;
-  }
   if (!listFolderDirectory || !resolveFolderFile || !deleteFolderEntry) {
     sendJson(res, 503, { error: 'file browser not available' });
     return true;
   }
 
-  // 放行即滑动续期:setHeader 必须在 writeHead/sendJson 之前,下载分支尤其注意
-  reissueElevation(res);
+  // 删除是变更操作:必须有有效提权 cookie。列举/下载只需登录(401 门已在上游把关)。
+  if (req.method === 'DELETE' && !elevated) {
+    sendJson(res, 403, { error: '敏感操作需要验证:请先用控制令牌或密码完成验证' });
+    return true;
+  }
+
+  // 放行即滑动续期(仅当本次确实带了有效提权 cookie):setHeader 必须在
+  // writeHead/sendJson 之前,下载分支尤其注意。
+  if (elevated) reissueElevation(res);
 
   // ---- GET /api/folder-files : 目录列举 ----
   if (req.method === 'GET' && path === '/api/folder-files') {
