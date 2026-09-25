@@ -313,6 +313,14 @@ function onWindowResize(): void {
   }
 }
 
+// 活跃心跳:仅在页面就绪且未闲置超限时,给每条存活会话发一帧 ping,
+// 作为「用户在动」的服务端凭证。标签页被挂起/后台节流/无人看管时 ping 断流,
+// 后端闲置门到点主动收 shell —— 把「10 分钟无人操作即断」变成服务端保证。
+const keepaliveTimer = window.setInterval(() => {
+  if (pageState.value !== 'ready' || idleExpired()) return;
+  for (const s of sessions.value) sendTo(s.id, { t: 'ping' });
+}, 30_000);
+
 onMounted(async () => {
   window.addEventListener('resize', onWindowResize);
   if (!(await checkAuth())) {
@@ -325,6 +333,7 @@ onMounted(async () => {
 
   // 闲置回收:超过 10 分钟没有任何操作,杀掉所有会话回到验证门。
   // 整机 shell 不该在无人看管的浏览器里一直开着 —— 这是本页对提权规则的落实。
+  // 注意这是前端 UX 层;真正的服务端保证见 src/api/terminal.ts 的存活巡检。
   window.setInterval(() => {
     if (pageState.value === 'ready' && sessions.value.length > 0 && idleExpired()) {
       gateNow();
@@ -334,6 +343,7 @@ onMounted(async () => {
 
 onUnmounted(() => {
   window.removeEventListener('resize', onWindowResize);
+  window.clearInterval(keepaliveTimer);
   for (const [, rt] of runtime) {
     rt.ws?.close();
     rt.term.dispose();
