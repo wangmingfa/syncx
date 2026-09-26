@@ -58,6 +58,8 @@ function startDaemon(
     peers?: string[];
     knownDevices?: Array<{ id: string }>;
     sharedFolders?: Array<{ id: string; path: string; devices: string[] }>;
+    /** 追加/覆盖子进程 env(如 LOG_LEVEL=debug 验证投递回执路径)。 */
+    env?: Record<string, string>;
   },
 ): void {
   writeFileSync(
@@ -71,7 +73,7 @@ function startDaemon(
   const child = spawn(
     process.execPath,
     ['--import', 'tsx', 'src/main.ts', 'start', '--config', setup.configPath, '--port', String(setup.peerPort), '--control-port', String(setup.controlPort)],
-    { cwd: process.cwd(), stdio: ['ignore', 'pipe', 'pipe'], env: cleanDaemonEnv() },
+    { cwd: process.cwd(), stdio: ['ignore', 'pipe', 'pipe'], env: cleanDaemonEnv(opts.env) },
   );
   child.stdout?.pipe(createWriteStream(join(setup.dir, 'daemon.out.log')));
   child.stderr?.pipe(createWriteStream(join(setup.dir, 'daemon.err.log')));
@@ -159,20 +161,13 @@ describe('Phase 2 remote confirmation (offer channel)', () => {
       startDaemon(a, {
         peers: [`ws://127.0.0.1:${b.peerPort}`],
         sharedFolders: [{ id: 'main', path: a.share, devices: [b.deviceId] }],
+        // A 侧开 debug:验证邀请投递回执(offer-receipt)闭环 —— 台账销账日志是
+        // 重发自愈机制「正常停止」而非「默默耗尽」的证据
+        env: { LOG_LEVEL: 'debug' },
       });
       await waitForDaemonReady(a);
       startDaemon(b, { peers: [`ws://127.0.0.1:${a.peerPort}`] });
       await waitForDaemonReady(b);
-      try {
-        console.log('[dbg] A out:', readFileSync(join(a.dir, 'daemon.out.log'), 'utf8'));
-      } catch { console.log('[dbg] A out: (missing)'); }
-      try {
-        console.log('[dbg] B out:', readFileSync(join(b.dir, 'daemon.out.log'), 'utf8'));
-      } catch { console.log('[dbg] B out: (missing)'); }
-      try {
-        const st = (await apiCall(a, 'GET', '/api/status')) as { deviceId: string; devices: unknown[] };
-        console.log('[dbg] A status devices:', JSON.stringify(st.devices));
-      } catch (e) { console.log('[dbg] A status err:', e instanceof Error ? e.message : String(e)); }
 
       // 等 B 连上 A(B 出站连接被 A 接受,因为 A 的目录已把 B 列入 devices)
       await waitFor(async () => {
@@ -187,6 +182,13 @@ describe('Phase 2 remote confirmation (offer channel)', () => {
       }, 20000, 'T1: B 收到 folder 邀请')) as { id: string; folderId?: string };
       expect(folderOffer).toBeTruthy();
       expect(folderOffer.folderId).toBe('main');
+
+      // 投递回执闭环:B 处理邀请后立即回 offer-receipt,A 台账销账(debug 日志)。
+      // 这条断言证明「至少一次」链路端到端工作:若无回执,A 会每 5s 重发至上限 5 次。
+      await waitFor(async () => {
+        const log = readFileSync(join(a.dir, 'daemon.out.log'), 'utf8');
+        return log.includes('offer receipt from');
+      }, 10000, 'T1: A 收到 B 的邀请投递回执(台账销账)');
 
       // B 接受目录共享邀请并选好本地路径
       await apiCall(b, 'POST', `/api/offers/${folderOffer.id}/accept`, { localPath: b.share });

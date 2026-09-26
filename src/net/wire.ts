@@ -30,6 +30,13 @@ export type ControlMessage =
   | { kind: 'folder-invitation-ack'; offerId: string; fromDeviceId: string; accepted: boolean; version?: string; hostname?: string; platform?: string }
   | { kind: 'pairing-request'; offerId: string; fromDeviceId: string; version?: string; hostname?: string; platform?: string }
   | { kind: 'pairing-ack'; offerId: string; fromDeviceId: string; accepted: boolean; version?: string; hostname?: string; platform?: string }
+  /**
+   * 邀请投递回执(控制面「至少一次」的第二道锁):接收方**处理了** folder-invitation /
+   * pairing-request(无论新建待确认、去重命中还是已互信跳过)即回此帧,与用户是否
+   * 决策无关 —— 用户决策走 `*-ack`,可能迟到很久,不能驱动重发。发送方
+   * (OfferRetryLedger)据此销账;旧版本对端不回此帧,发送方重发至上限自动放弃。
+   */
+  | { kind: 'offer-receipt'; offerId: string; fromDeviceId: string; version?: string; hostname?: string; platform?: string }
   /** 会话建立与共享关系变更时互发的「本机当前与你在同步的目录清单」,
    *  接收方据此在 UI 上区分设备标签的 同步中 / 已停止共享 状态。
    *  pendingFolderIds:本机仍待确认的、来自对方的目录邀请 id 集合,

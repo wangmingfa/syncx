@@ -25,10 +25,10 @@ export function allocatePort(): Promise<number> {
  * 经 SYNCX_SCAN_INTERVAL_MS / SYNCX_SERVE_LEASE_MS 覆盖)。慢测试的时间大头
  * 就是「等下一个 5s 扫描 tick」和「等 15s 租约过期」。
  */
-export function cleanDaemonEnv(): NodeJS.ProcessEnv {
+export function cleanDaemonEnv(extra?: Record<string, string>): NodeJS.ProcessEnv {
   const env = { ...process.env };
   delete env.NODE_OPTIONS;
   env.SYNCX_SCAN_INTERVAL_MS = '250';
   env.SYNCX_SERVE_LEASE_MS = '1200';
-  return env;
+  return { ...env, ...extra };
 }

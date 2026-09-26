@@ -60,6 +60,7 @@ import { hostname as osHostname } from 'node:os';
 import { RateLimiter } from './ratelimit.js';
 import { isPeerAllowed, addPeer, setFolderPaused, setGlobalPaused, setFolderSchedule as persistFolderSchedule, setFolderGitSync as persistFolderGitSync, setFolderConflictPolicy as persistFolderConflictPolicy, setFolderOnDemand as persistFolderOnDemand, setFolderOnDemandDir as persistFolderOnDemandDir, setFolderPausedFile as persistFolderPausedFile, setFolderE2E as persistFolderE2E, setFolderGitLastCommitHash, setGlobalSettings as persistGlobalSettings, type GlobalSettingsPatch, type FolderE2EPatch } from './devices.js';
 import { receiveOffer, makeOfferId, pruneRevokedOffers } from './offers.js';
+import { OfferRetryLedger, type TrackedOffer } from './net/offer-retry.js';
 import type { DeviceIdentity } from './identity.js';
 import type { ProgressCounts, RelayActivity, TransferFile } from './status.js';
 import { isBundledRuntime, packSelfTgz, runSelfUpdate, runtimeVersion, sha256Hex } from './selfupdate.js';
@@ -387,6 +388,15 @@ export class SyncSessionManager {
   private static readonly RELAY_ACTIVITY_CAP = 100;
   /** 等待对端 self-binary-response 的挂起请求(requestId → resolver)。 */
   private readonly pendingBinary = new Map<string, (resp: Extract<ControlMessage, { kind: 'self-binary-response' }>) => void>();
+  /**
+   * 出站邀请的「至少一次」投递台账(见 net/offer-retry.ts):把邀请自愈窗口从
+   * 「等下次会话重播」缩到 5 秒。接收方处理邀请即回 offer-receipt;旧版本对端
+   * 不回,重发 5 次自动放弃,接收侧幂等去重使重发无害。
+   */
+  private readonly offerLedger = new OfferRetryLedger({
+    send: (message, target) => this.sendControlTo(target, message),
+    log: (text) => this.logger.info(`[offer-retry] ${text}`),
+  });
   /**
    * 等待对端索引快照的挂起请求(requestId → 累积分片)。内容对比功能用:
    * 快照按片返回,集齐 total 片才 resolve;超时或对端明确报错则 reject。
@@ -1394,6 +1404,18 @@ export class SyncSessionManager {
     return { ...message, version: runtimeVersion(), hostname: osHostname(), platform: process.platform };
   }
 
+  /**
+   * 发送一条出站邀请(folder-invitation / pairing-request)并记入重发台账。
+   * 首发自标:真发出去才 track(离线失败时由调用点决定补发时机——新会话建立
+   * 本来就会重播);台账在 offer-receipt 到达前每 5s 重发、至多 5 次。
+   */
+  private sendOffer(targetDeviceId: string, message: TrackedOffer): boolean {
+    const ok = this.sendControlTo(targetDeviceId, message);
+    // 台账键从 offerId 推导(内嵌目标设备 id,与 targetDeviceId 恒等),重发时按它寻址
+    if (ok) this.offerLedger.track(message);
+    return ok;
+  }
+
   /** 收到对端 control 消息:把配对 / 目录共享邀请落成待确认项;确认回执触发会话对账。 */
   private onControl(message: ControlMessage): void {
     // 邀请来源的网络信息(主机名 + 入站源 IP),供 UI 在配对 / 共享邀请卡上展示来源。
@@ -1411,6 +1433,12 @@ export class SyncSessionManager {
           fromDeviceId: message.fromDeviceId,
           ...srcMeta,
         });
+        // 投递回执(无论新建/去重/互信跳过,处理到即回):发送方台账据此销账
+        this.sendControlTo(message.fromDeviceId, {
+          kind: 'offer-receipt',
+          offerId: message.offerId,
+          fromDeviceId: this.identity.deviceId,
+        });
         this.logger.info(`pairing request received from ${message.fromDeviceId}${fromHostname ? ` (host ${fromHostname})` : ''}`);
         break;
       case 'folder-invitation': {
@@ -1422,16 +1450,30 @@ export class SyncSessionManager {
           folderName: message.folderName,
           ...srcMeta,
         });
+        this.sendControlTo(message.fromDeviceId, {
+          kind: 'offer-receipt',
+          offerId: message.offerId,
+          fromDeviceId: this.identity.deviceId,
+        });
         // 新落成一个待确认项后立即向对方反推目录清单(带 pendingFolderIds),
         // 让对方设备标签马上从「已停止共享」切到「待对方确认」,不等下次会话事件
         if (offer) this.pushFolderSyncList(message.fromDeviceId);
         this.logger.info(`folder invitation received from ${message.fromDeviceId}: ${message.folderId}`);
         break;
       }
+      case 'offer-receipt':
+        // 投递层回执:邀请已到达并被处理,停止重发(与用户是否决策无关)
+        if (this.offerLedger.confirm(message.offerId)) {
+          this.logger.debug(`offer receipt from ${message.fromDeviceId}: ${message.offerId}`);
+        }
+        break;
       case 'pairing-ack':
+        // 用户已表态 = 必然已送达,顺带销账(ack 可能晚于/代替 receipt 到达,如旧版本对端)
+        this.offerLedger.confirm(message.offerId);
         this.logger.info(`pairing ${message.accepted ? 'accepted' : 'declined'} by ${message.fromDeviceId}`);
         break;
       case 'folder-invitation-ack':
+        this.offerLedger.confirm(message.offerId);
         this.logger.info(`folder invitation ${message.accepted ? 'accepted' : 'declined'} by ${message.fromDeviceId}`);
         // 对端确认接受:立即对账本机会话,把 devices 含对端的目录补挂上去(互发索引,
         // 内容开始流动)。此前这里只打日志,导致「邀请发出后 A 侧会话一直没有该目录的
@@ -2169,7 +2211,7 @@ export class SyncSessionManager {
     const current = loadConfig(this.configPath);
     for (const f of current.sharedFolders) {
       if ((f.devices ?? []).includes(session.remoteDeviceId)) {
-        this.sendControlTo(session.remoteDeviceId, {
+        this.sendOffer(session.remoteDeviceId, {
           kind: 'folder-invitation',
           offerId: makeOfferId('folder', session.remoteDeviceId, folderIdFor(f)),
           fromDeviceId: this.identity.deviceId,
@@ -2179,7 +2221,7 @@ export class SyncSessionManager {
       }
     }
     if (current.knownDevices.some((d) => d.id === session.remoteDeviceId)) {
-      this.sendControlTo(session.remoteDeviceId, {
+      this.sendOffer(session.remoteDeviceId, {
         kind: 'pairing-request',
         offerId: makeOfferId('pair', session.remoteDeviceId),
         fromDeviceId: this.identity.deviceId,
@@ -2190,7 +2232,7 @@ export class SyncSessionManager {
   /** 对端已在线时立即补发配对请求与既有目录邀请(addDevice 等信任动作后调用)。 */
   notifyPairingIntent(deviceId: string): void {
     if (!this.isPeerConnected(deviceId)) return;
-    this.sendControlTo(deviceId, {
+    this.sendOffer(deviceId, {
       kind: 'pairing-request',
       offerId: makeOfferId('pair', deviceId),
       fromDeviceId: this.identity.deviceId,
@@ -2427,7 +2469,7 @@ export class SyncSessionManager {
       this.logger.info(`folder invitation deferred: ${deviceId} offline (will push on reconnect)`);
       return;
     }
-    const ok = this.sendControlTo(deviceId, {
+    const ok = this.sendOffer(deviceId, {
       kind: 'folder-invitation',
       offerId: makeOfferId('folder', deviceId, folderId),
       fromDeviceId: this.identity.deviceId,
@@ -3105,6 +3147,8 @@ export class SyncSessionManager {
     }
     for (const timer of this.reconnectTimers.values()) clearTimeout(timer);
     this.reconnectTimers.clear();
+    // 邀请重发台账:清掉全部定时器(daemon 退出路径上不能再留挂起重发)
+    this.offerLedger.destroy();
     // 挂起的对比请求:拒绝掉,别让调用方(HTTP 路由)空等到超时
     for (const pending of this.pendingSnapshots.values()) {
       clearTimeout(pending.timer);
