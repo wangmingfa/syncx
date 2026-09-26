@@ -8,6 +8,7 @@ import { migrateLegacyTrash } from './trash.js';
 import { openIndexStore } from './indexstore.js';
 
 import { getSyncHistory, getGlobalSyncHistory, clearSyncHistory, getHistoryMaxEvents } from './history.js';
+import { collectWeeklyReport } from './report.js';
 import { listConflictCopies, resolveConflictCopy, applyConflictMerge } from './conflicts.js';
 import { readFileSync, readdirSync, existsSync, statSync, writeFileSync, watch, unlinkSync, copyFileSync, mkdirSync, rmSync } from 'node:fs';
 import { relative, isAbsolute } from 'node:path';
@@ -746,6 +747,12 @@ export async function run(args: ParsedArgs): Promise<void> {
         loadConfig(configPath).sharedFolders.map((f) => ({ id: folderIdFor(f), path: f.path })),
         limit,
         filter,
+      ),
+    // 同步周报:与全局时间线同一目录口径(wire id 兜 path),聚合近 7 天记录
+    getWeeklyReport: () =>
+      collectWeeklyReport(
+        configPath,
+        loadConfig(configPath).sharedFolders.map((f) => ({ id: folderIdFor(f), path: f.path })),
       ),
     clearFolderHistory: (folderId) => clearSyncHistory(configPath, folderId),
     // 冲突收件箱:列举走实时扫盘(权威口径,手动删掉的副本不会误报);处理做完

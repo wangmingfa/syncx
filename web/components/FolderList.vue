@@ -3,6 +3,7 @@ import { computed, ref } from 'vue';
 import { NButton, NInput, NCheckbox, NCheckboxGroup, NTooltip } from 'naive-ui';
 import { useStatusContext } from '../composables/statusContext';
 import ActionRail from './ActionRail.vue';
+import WeeklyReportModal from './WeeklyReportModal.vue';
 import { folderPathPlaceholder, visibleTransferFiles, XFER_FILE_LIMIT } from '../utils/format';
 import { outsideSchedule } from '../utils/schedule';
 import type { RailAction } from '../utils/action-rail';
@@ -109,6 +110,8 @@ const pathPlaceholder = computed(() => folderPathPlaceholder(status.value.platfo
  */
 const headHover = ref(false);
 const headPinned = ref(false);
+/** 同步周报弹窗开关:入口在栏头动作,弹窗本体挂在组件根部。 */
+const reportOpen = ref(false);
 
 function onHeadLeave(): void {
   headHover.value = false;
@@ -120,6 +123,7 @@ const headActions = computed<RailAction[]>(() => {
   const actions: RailAction[] = [
     { key: 'rescan', icon: 'rescan', disabled: b, tooltip: '扫描全部目录', onClick: () => rescan() },
     { key: 'global-history', icon: 'history', tooltip: '全局同步记录:跨目录的归并时间线', onClick: () => openGlobalHistory() },
+    { key: 'report', icon: 'report', tooltip: '同步周报:近 7 天变更趋势 / 目录贡献 / 冲突汇总', onClick: () => (reportOpen.value = true) },
   ];
   if (status.value.folders.length > 0) {
     actions.push({
@@ -466,4 +470,7 @@ function visibleFiles(f: FolderInfo): TransferFile[] {
       </div>
     </div>
   </section>
+
+  <!-- 同步周报:入口在栏头动作;弹窗本体就近挂在组件尾(ModalShell 自带遮罩定位) -->
+  <WeeklyReportModal :open="reportOpen" @close="reportOpen = false" />
 </template>

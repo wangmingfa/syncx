@@ -12,6 +12,7 @@ export type ActionIconName =
   | 'compare'
   | 'diff'
   | 'history'
+  | 'report'
   | 'versions'
   | 'trash'
   | 'browse'

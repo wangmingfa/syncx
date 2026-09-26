@@ -101,6 +101,8 @@ export interface ControlServerDeps {
    * limit/filter 语义与 getFolderHistory 一致;total/matched 为各目录之和。
    */
   getGlobalHistory?: (limit?: number, filter?: SyncHistoryFilter) => unknown;
+  /** 同步周报:近 7 天各目录变更/冲突/对端活跃度汇总(见 report.ts)。 */
+  getWeeklyReport?: () => unknown;
   /** 清空某共享目录的同步记录(不可逆)。参数为目录 ID。 */
   clearFolderHistory?: (folderId: string) => unknown;
   /** 冲突收件箱:实时扫描共享目录内残留的 .sync-conflict-* 副本,返回 { conflicts, truncated }。 */

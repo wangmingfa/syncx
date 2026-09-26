@@ -56,6 +56,14 @@ defineProps<{ name: ActionIconName }>();
       <path d="M12 7.5V12l3 2" />
     </template>
 
+    <!-- 同步周报:柱状图 -->
+    <template v-else-if="name === 'report'">
+      <line x1="4" y1="19.5" x2="20" y2="19.5" />
+      <line x1="7.5" y1="19.5" x2="7.5" y2="12.5" />
+      <line x1="12" y1="19.5" x2="12" y2="6.5" />
+      <line x1="16.5" y1="19.5" x2="16.5" y2="9.5" />
+    </template>
+
     <!-- 版本留档:三层叠片 -->
     <template v-else-if="name === 'versions'">
       <path d="M4 8.5 12 4.5l8 4" />

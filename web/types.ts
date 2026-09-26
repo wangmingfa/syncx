@@ -180,8 +180,23 @@ export interface GlobalSettingsData {
   webhookSecretSet?: boolean;
 }
 
-/** 一个采样窗口的流量增量。 */
-export interface TrafficSampleItem {
+/** GET /api/report/weekly 的响应(与后端 report.ts WeeklyReport 同形)。 */
+export interface WeeklyReportData {
+  fromTs: number;
+  toTs: number;
+  /** 近 7 天逐日计数,旧→新,恒 7 项。 */
+  days: Array<{ day: string; add: number; update: number; delete: number; conflict: number }>;
+  totals: { add: number; update: number; delete: number; conflict: number; total: number };
+  /** 各目录汇总,按 total 降序。 */
+  folders: Array<{ id: string; path: string; add: number; update: number; delete: number; conflict: number; total: number }>;
+  activeDevices: Array<{ deviceId: string; count: number }>;
+  /** 窗口内冲突明细(最新在前,后端封顶 50 条)。 */
+  conflicts: Array<{ ts: number; folderPath: string; path: string; deviceId?: string }>;
+  /** 保留上限可能截断过窗口内数据时为 true(展示口径提示)。 */
+  truncated: boolean;
+}
+
+/** 一个采样窗口的流量增量。 */export interface TrafficSampleItem {
   /** 窗口结束时刻(毫秒时间戳)。 */
   at: number;
   sent: number;
