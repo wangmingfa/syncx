@@ -85,7 +85,7 @@ async function waitForDaemonReady(setup: DaemonSetup): Promise<void> {
     } catch {
       return false;
     }
-  });
+  }, 30000, 'daemon 启动日志出现');
 }
 
 async function apiCall(
@@ -105,7 +105,7 @@ async function apiCall(
   return text ? JSON.parse(text) : null;
 }
 
-function waitFor(condition: () => Promise<unknown>, timeoutMs = 30000): Promise<unknown> {
+function waitFor(condition: () => Promise<unknown>, timeoutMs = 30000, label = 'condition'): Promise<unknown> {
   return new Promise((resolve, reject) => {
     const start = Date.now();
     const check = async (): Promise<void> => {
@@ -119,7 +119,8 @@ function waitFor(condition: () => Promise<unknown>, timeoutMs = 30000): Promise<
         console.log('[waitFor] condition threw:', err instanceof Error ? err.message : String(err));
       }
       if (Date.now() - start > timeoutMs) {
-        reject(new Error('timed out waiting for condition'));
+        // 带阶段标签与耗时:偶发超时能一眼定位卡在哪一步(负载慢 vs 真不推进)
+        reject(new Error(`timed out after ${Date.now() - start}ms waiting for: ${label}`));
         return;
       }
       setTimeout(check, 200);
@@ -177,13 +178,13 @@ describe('Phase 2 remote confirmation (offer channel)', () => {
       await waitFor(async () => {
         const st = (await apiCall(a, 'GET', '/api/status')) as { devices: Array<{ deviceId: string; online: boolean }> };
         return st.devices.some((d) => d.deviceId === b.deviceId && d.online);
-      }, 30000);
+      }, 30000, 'T1: B 在 A 侧显示在线');
 
       // A 连接建立时 pushSharesTo 推送 folder-invitation → B 弹出待确认
       const folderOffer = (await waitFor(async () => {
         const st = (await apiCall(b, 'GET', '/api/status')) as { offers: Array<{ kind: string; fromDeviceId: string; folderId?: string }> };
         return st.offers.find((o) => o.kind === 'folder' && o.fromDeviceId === a.deviceId) ?? null;
-      }, 20000)) as { id: string; folderId?: string };
+      }, 20000, 'T1: B 收到 folder 邀请')) as { id: string; folderId?: string };
       expect(folderOffer).toBeTruthy();
       expect(folderOffer.folderId).toBe('main');
 
@@ -196,7 +197,7 @@ describe('Phase 2 remote confirmation (offer channel)', () => {
         };
         const f = st.folders.find((x) => x.id === 'main');
         return f && f.devices.includes(a.deviceId) ? st : null;
-      }, 20000)) as { folders: Array<{ id: string; devices: string[] }> };
+      }, 20000, 'T1: B 接受邀请后本地目录挂上 A')) as { folders: Array<{ id: string; devices: string[] }> };
       expect(bAfterFolder.folders.find((x) => x.id === 'main')?.devices).toContain(a.deviceId);
 
       // A 再把 B 加为 known device → 通过已建立的会话推送 pairing-request
@@ -204,7 +205,7 @@ describe('Phase 2 remote confirmation (offer channel)', () => {
       const pairingOffer = (await waitFor(async () => {
         const st = (await apiCall(b, 'GET', '/api/status')) as { offers: Array<{ kind: string; fromDeviceId: string }> };
         return st.offers.find((o) => o.kind === 'pairing' && o.fromDeviceId === a.deviceId) ?? null;
-      }, 20000)) as { id: string };
+      }, 20000, 'T1: B 收到 pairing 配对请求')) as { id: string };
       expect(pairingOffer).toBeTruthy();
 
       // B 接受配对请求 → B 把 A 记入 knownDevices
@@ -214,7 +215,7 @@ describe('Phase 2 remote confirmation (offer channel)', () => {
           devices: Array<{ deviceId: string }>;
         };
         return st.devices.some((d) => d.deviceId === a.deviceId);
-      }, 20000);
+      }, 20000, 'T1: B 接受配对后设备列表挂上 A');
       } catch (err) {
         console.log('[offer-flow] FAILED, dumping daemon logs:');
         dumpLogs(a, b);
@@ -253,7 +254,7 @@ describe('Phase 2 remote confirmation (offer channel)', () => {
             offers: Array<{ kind: string; fromDeviceId: string; folderId?: string }>;
           };
           return st.offers.find((o) => o.kind === 'folder' && o.fromDeviceId === a.deviceId) ?? null;
-        }, 20000)) as { id: string; folderId?: string };
+        }, 20000, 'T2: B 收到 folder 邀请')) as { id: string; folderId?: string };
         expect(folderOffer.folderId).toBe('main');
 
         // 关键:不带 localPath 直接确认 —— 后端应按 id 复用 B 已有目录,不再要求填路径
@@ -270,7 +271,7 @@ describe('Phase 2 remote confirmation (offer channel)', () => {
           };
           const f = st.folders.find((x) => (x.id ?? x.path) === 'main');
           return f && f.devices.includes(a.deviceId) ? st : null;
-        }, 20000)) as { folders: Array<{ id?: string; path: string; devices: string[] }> };
+        }, 20000, 'T2: 无 localPath 接受后复用目录挂上 A')) as { folders: Array<{ id?: string; path: string; devices: string[] }> };
 
         // 复用而非新建:同 id 目录必须只有一条,且路径仍是 B 原来的 b.share
         const mains = bFolders.folders.filter((x) => (x.id ?? x.path) === 'main');
@@ -312,7 +313,7 @@ describe('Phase 2 remote confirmation (offer channel)', () => {
             devices: Array<{ deviceId: string; online: boolean }>;
           };
           return st.devices.some((d) => d.deviceId === b.deviceId && d.online);
-        }, 30000);
+        }, 30000, 'T3: B 在 A 侧显示在线');
 
         // A 新建共享目录并直接指派 B——应当即时推送邀请,而非等 B 再建一次目录
         await apiCall(a, 'POST', '/api/folders', {
@@ -327,7 +328,7 @@ describe('Phase 2 remote confirmation (offer channel)', () => {
             offers: Array<{ kind: string; fromDeviceId: string; folderId?: string }>;
           };
           return st.offers.find((o) => o.kind === 'folder' && o.fromDeviceId === a.deviceId) ?? null;
-        }, 20000)) as { id: string; folderId?: string };
+        }, 20000, 'T3: B 收到 addFolder 即时推送的邀请')) as { id: string; folderId?: string };
         expect(folderOffer).toBeTruthy();
         expect(folderOffer.folderId).toBe('main');
 
@@ -339,7 +340,7 @@ describe('Phase 2 remote confirmation (offer channel)', () => {
           };
           const f = st.folders.find((x) => x.id === 'main');
           return f && f.devices.includes(a.deviceId);
-        }, 20000);
+        }, 20000, 'T3: B 接受落地后目录挂上 A');
       } catch (err) {
         console.log('[offer-flow:addFolder] FAILED, dumping daemon logs:');
         dumpLogs(a, b);

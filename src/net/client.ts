@@ -14,6 +14,17 @@ export interface ConnectedPeer {
   remoteDeviceId: string;
   /** AES-256-GCM 会话密钥(协商完成后可用)。 */
   key: Buffer;
+  /**
+   * 取走握手完成后、消息分发器挂上之前「抢先到达」的帧,并停止缓冲。
+   *
+   * 背景(偶发丢邀请的根因):服务端在 kx 应答的**同一 tick** 里还会连发
+   * hello / folder-invitation / folder-sync-list,这些帧常与 kx 应答同批到达。
+   * 客户端若在此窗口无任何 'message' 监听,帧会被静默丢弃(EventEmitter 无监听即丢),
+   * 而恢复分发要等 connectPeer 的 .then 微任务 → startSyncSession → attachPeerMessages。
+   * 修复:握手完成的瞬间转入缓冲模式暂存抢先帧;分发器挂载时经本回调一次性取走回放。
+   * 必须调用,否则缓冲会随对端持续推送而无界增长。
+   */
+  takePendingFrames: () => Buffer[];
 }
 
 /**
@@ -59,8 +70,7 @@ export function connectPeer(
     let remotePublicKeyPem: string | undefined;
 
     const onMainMessage = (data: Buffer): void => {
-      const raw = data instanceof ArrayBuffer ? Buffer.from(data) : Buffer.from(data as Buffer);
-      const text = raw.toString('utf8');
+      const text = toBuffer(data).toString('utf8');
 
       if (remotePublicKeyPem === undefined) {
         // 第一阶段:服务端公钥 → 设备 ID,然后发起密钥交换
@@ -93,7 +103,22 @@ export function connectPeer(
             return;
           }
           settle();
-          resolve({ socket, remoteDeviceId, key: deriveSessionKey(sessionPair.privateKeyPem, peerX25519Pem) });
+          // 分发器挂上前服务端同 tick 连发的帧不能丢:立即转入缓冲模式。
+          // kx 帧的 emit 只快照了当时的监听者,本监听会接管同一批里的后续帧。
+          const pending: Buffer[] = [];
+          const bufferMessage = (data: Buffer | ArrayBuffer): void => {
+            pending.push(toBuffer(data));
+          };
+          socket.on('message', bufferMessage);
+          resolve({
+            socket,
+            remoteDeviceId,
+            key: deriveSessionKey(sessionPair.privateKeyPem, peerX25519Pem),
+            takePendingFrames: () => {
+              socket.off('message', bufferMessage);
+              return pending.splice(0, pending.length);
+            },
+          });
         };
         socket.once('message', (kxData: Buffer) => onKx(kxData));
         return;
@@ -105,4 +130,11 @@ export function connectPeer(
 
 function encodeKx(kx: { type: 'kx'; x25519: string; sig: string }): string {
   return JSON.stringify(kx);
+}
+
+/** ws 'message' 事件的负载在不同二进制片段下可能是 Buffer/ArrayBuffer/TypedArray,统一成 Buffer。 */
+function toBuffer(data: Buffer | ArrayBuffer | Uint8Array): Buffer {
+  if (Buffer.isBuffer(data)) return data;
+  if (data instanceof ArrayBuffer) return Buffer.from(data);
+  return Buffer.from(data.buffer, data.byteOffset, data.byteLength);
 }

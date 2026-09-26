@@ -19,6 +19,8 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { loadOrCreateIdentity } from '../src/identity.js';
 import { WebSocketServer } from 'ws';
+import { attachPeerMessages, sendControlMessage } from '../src/net/wire.js';
+import type { ControlMessage } from '../src/net/wire.js';
 import { learnPeerUrl } from '../src/net/addresses.js';
 
 function makeKeypair() {
@@ -187,18 +189,22 @@ describe('connectPeer handshake', () => {
     rmDir(dir);
   });
 
-  it('cleans up the handshake message listener after a successful handshake', async () => {
+  it('keeps one buffering message listener until takePendingFrames drains it', async () => {
     const dir = mkdtempSync(join(tmpdir(), 'syncx-client-'));
     const identity = loadOrCreateIdentity(dir);
     const server = await startTestPeerServer();
 
-    const { socket } = await connectPeer(identity, `ws://127.0.0.1:${server.port}`);
+    const peer = await connectPeer(identity, `ws://127.0.0.1:${server.port}`);
 
     // 修复前:主 message 处理器在 resolve 后仍是永久 no-op 监听(对每条
-    // 对端连接挂一个永不工作的处理器);修复后应被移除
-    expect(socket.listenerCount('message')).toBe(0);
+    // 对端连接挂一个永不工作的处理器)。
+    // 修复后:握手完成瞬间转为「缓冲模式」——分发器挂上前保留 1 个 message
+    // 监听用来暂存抢先帧;取走帧(takePendingFrames)后应归零,不留残余。
+    expect(peer.socket.listenerCount('message')).toBe(1);
+    peer.takePendingFrames();
+    expect(peer.socket.listenerCount('message')).toBe(0);
 
-    socket.close();
+    peer.socket.close();
     await server.close();
     rmDir(dir);
   });
@@ -284,6 +290,63 @@ describe('peer server reverse discovery (listenPort)', () => {
     await new Promise((r) => setTimeout(r, 50));
 
     expect(receivedPort).toBeUndefined();
+
+    peer.socket.close();
+    server.close();
+    rmDir(serverDir);
+    rmDir(clientDir);
+  });
+});
+
+describe('connectPeer early-frame buffering (regression: 偶发丢失目录邀请)', () => {
+  it('delivers control frames that arrive in the same burst as the kx reply', async () => {
+    const serverDir = mkdtempSync(join(tmpdir(), 'syncx-srv-'));
+    const clientDir = mkdtempSync(join(tmpdir(), 'syncx-cli-'));
+    const serverIdentity = loadOrCreateIdentity(serverDir);
+    const clientIdentity = loadOrCreateIdentity(clientDir);
+
+    const server = startPeerServer(
+      serverIdentity,
+      {
+        onPeerConnected: (socket, deviceId, key) => {
+          // 复刻生产时序:startSyncSession 在 kx 应答的同一 tick 里连发三条控制
+          // 消息(hello / folder-invitation / folder-sync-list),它们常与 kx 应答
+          // 同批到达客户端。修复前这些帧落在无监听的 socket 上被静默丢弃。
+          sendControlMessage(socket, key, { kind: 'hello', fromDeviceId: deviceId, version: 'test' });
+          sendControlMessage(socket, key, {
+            kind: 'folder-invitation',
+            offerId: 'offer-1',
+            fromDeviceId: deviceId,
+            folderId: 'folder-1',
+            folderName: 'demo',
+          });
+          sendControlMessage(socket, key, { kind: 'folder-sync-list', fromDeviceId: deviceId, folderIds: [] });
+        },
+        onError: () => {},
+      },
+      0,
+    );
+
+    const peer = await connectPeer(clientIdentity, `ws://127.0.0.1:${server.port}`);
+    // 模拟生产中 connectPeer resolve 到分发器挂载之间的空窗(微任务 + 日志回调):
+    // 抢先帧要么已在这轮事件循环里投递(被缓冲),要么稍后到达(被实时监听接住)
+    await new Promise((r) => setImmediate(() => setImmediate(r)));
+
+    const received: ControlMessage[] = [];
+    attachPeerMessages(
+      new Map(),
+      peer.socket,
+      peer.key,
+      (message) => received.push(message),
+      peer.takePendingFrames,
+    );
+    await new Promise((r) => setTimeout(r, 100));
+
+    // 三条全到、且保序(缓冲帧都更早到达,回放先于实时帧)
+    expect(received.map((m) => m.kind)).toEqual(['hello', 'folder-invitation', 'folder-sync-list']);
+    const invitation = received.find((m) => m.kind === 'folder-invitation');
+    expect(invitation?.kind).toBe('folder-invitation');
+    if (invitation?.kind === 'folder-invitation') expect(invitation.offerId).toBe('offer-1');
 
     peer.socket.close();
     server.close();

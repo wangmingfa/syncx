@@ -223,14 +223,23 @@ export function sendControlMessage(socket: WebSocket, key: Buffer, message: Cont
  * Receive-side dispatcher: decrypts incoming wire messages and routes each
  * message to the SyncPeer registered for its folder. `control` 类型的消息
  * (配对请求 / 目录共享邀请 / 确认回执)路由到 onControl,不经过 folder 路由。
+ *
+ * `takePending`(可选,客户端连接侧用):握手完成到本函数挂载分发器之间有微任务
+ * 间隙,服务端常在 kx 应答的同一 tick 里连发 hello/invitation/list,这些帧若无人
+ * 监听会被 EventEmitter 静默丢弃 —— 偶发「收不到目录邀请」的根因。connectPeer 在
+ * 握手完成瞬间转入缓冲模式暂存这些帧(见其 takePendingFrames 注释),这里先注册
+ * 实时监听、再同步回放缓冲帧:缓冲帧只可能在注册实时监听前 emit 完,两路不重叠
+ * 不漏发,且回放保序(缓冲的帧都更早到达)。服务端入站侧同步完成挂载,无此窗口,
+ * 不传该参数。
  */
 export function attachPeerMessages(
   peers: Map<string, SyncPeer>,
   socket: WebSocket,
   key: Buffer,
   onControl?: (message: ControlMessage) => void,
+  takePending?: () => Buffer[],
 ): void {
-  socket.on('message', (data) => {
+  const dispatch = (data: Buffer): void => {
     const raw = data instanceof ArrayBuffer ? Buffer.from(data) : Buffer.from(data as Buffer);
     let message: WireMessage;
     try {
@@ -262,5 +271,9 @@ export function attachPeerMessages(
         });
         break;
     }
-  });
+  };
+  socket.on('message', dispatch);
+  if (takePending) {
+    for (const frame of takePending()) dispatch(frame);
+  }
 }

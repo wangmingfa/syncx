@@ -1158,10 +1158,10 @@ export class SyncSessionManager {
     // 在途拨号,与正在关闭的进程竞争。
     if (this.closed) return;
     void connectPeer(this.identity, url, this.peerPort)
-      .then(({ socket, remoteDeviceId, key }) => {
+      .then(({ socket, remoteDeviceId, key, takePendingFrames }) => {
         opts.onConnected?.(remoteDeviceId);
         if (this.acceptPeer()) {
-          this.startSyncSession(socket, remoteDeviceId, key, url);
+          this.startSyncSession(socket, remoteDeviceId, key, url, takePendingFrames);
         }
       })
       .catch((error) => {
@@ -2213,8 +2213,15 @@ export class SyncSessionManager {
     this.pushFolderSyncList(session.remoteDeviceId);
   }
 
-  /** 在一个 socket 上建立同步会话:为每个共享目录建 peer,按 folder 路由;并推送本机共享意图。 */
-  private startSyncSession(socket: WebSocket, remoteDeviceId: string, key: Buffer, url?: string): void {
+  /** 在一个 socket 上建立同步会话:为每个共享目录建 peer,按 folder 路由;并推送本机共享意图。
+   * takePendingFrames 仅客户端出站连接传入:握手帧与分发器挂载间隙里抢先到达的帧经此回放(见 wire.ts)。 */
+  private startSyncSession(
+    socket: WebSocket,
+    remoteDeviceId: string,
+    key: Buffer,
+    url?: string,
+    takePendingFrames?: () => Buffer[],
+  ): void {
     this.registerPeer(remoteDeviceId, url);
     this.peerSockets.add(socket);
     // 心跳探活:初始视为存活,收到 pong 刷新为存活;心跳 tick 会先置 false 再 ping,
@@ -2318,7 +2325,7 @@ export class SyncSessionManager {
         return;
       }
       this.onControl(message);
-    });
+    }, takePendingFrames);
     // 会话建立即改变了在线状态与各目录的同步通道(进度会随之从 0 变成非 0)
     this.notifyStatus();
     socket.on('error', (error) => this.logger.debug(`socket error for peer ${remoteDeviceId}: ${error.message}`));
