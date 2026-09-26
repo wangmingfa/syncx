@@ -8,6 +8,13 @@ interface WireEntry {
   size: number;
   deleted: boolean;
   blocks: string[];
+  /**
+   * 对端落盘该条目时的文件修改时间(毫秒)。**供「冲突自动策略 = newest-wins」跨机比较**。
+   * 可选:旧版对端不发(解码为 undefined,收侧退回 keep-both),新版发到旧对端时被其
+   * 显式字段映射直接丢弃,双向兼容。跨机比较依赖各机时钟,漂移大时判定可能不准 ——
+   * 这是 mtime 语义的固有代价,策略文案中已向用户提示。
+   */
+  mtime?: number;
 }
 
 export function encodeIndex(entries: IndexEntry[]): Buffer {
@@ -17,6 +24,8 @@ export function encodeIndex(entries: IndexEntry[]): Buffer {
     size: e.size,
     deleted: e.deleted,
     blocks: e.blocks,
+    // mtime 随索引出线:供对端 newest-wins 冲突策略比较新旧(见 WireEntry.mtime)
+    mtime: e.mtime,
   }));
   return Buffer.from(JSON.stringify(wire), 'utf8');
 }
@@ -29,6 +38,7 @@ export function decodeIndex(buffer: Buffer): IndexEntry[] {
     size: e.size,
     deleted: e.deleted,
     blocks: e.blocks,
+    mtime: e.mtime,
   }));
 }
 

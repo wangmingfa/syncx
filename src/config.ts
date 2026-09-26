@@ -115,6 +115,21 @@ export interface SharedFolderConfig {
    */
   gitSync?: GitSyncMode;
   /**
+   * 冲突自动处理策略(版本向量并发时,见 peer.ts 的 conflict 分支)。
+   *
+   * - 'keep-both'(默认,存成 undefined):现行为 —— 拉回对端内容,本地保留为
+   *   .sync-conflict 副本,进冲突收件箱等人工合并。
+   * - 'newest-wins':按双方 mtime 判新旧,新者内容胜出、覆盖另一端(不落冲突副本)。
+   *   mtime 经索引协议传给对端;任一侧缺 mtime(旧版对端 / 未扫描)退回 keep-both。
+   *   注意跨设备比较依赖各机时钟,时钟漂移大的环境慎用。
+   * - 'local-wins':本机内容始终胜出,不拉对端块;仅合并版本向量后把本机条目
+   *   推回对端(合并结果支配对端版本,对端下一轮自动拉取本机内容收敛)。
+   *
+   * 仅作用于「真正的版本并发」;中转陈旧副本与接收模式的镜像覆盖仍走各自既有路径。
+   * 旧配置缺省(尚未设置)按 'keep-both' 处理。
+   */
+  conflictPolicy?: ConflictPolicy;
+  /**
    * 上次观测到的 HEAD 提交哈希(**仅本机使用,不进 wire、不跨设备对齐**)。
    *
    * 与 gitSync 配套:扫描时拿当前 HEAD 与它比对,不同即说明产生了新提交。存进配置而不只放
@@ -129,6 +144,16 @@ export interface SharedFolderConfig {
 
 /** Git 提交同步的四种模式;定义见 SharedFolderConfig.gitSync 的注释。 */
 export type GitSyncMode = 'off' | 'send' | 'receive' | 'full';
+
+/** 冲突自动处理策略;定义与语义见 SharedFolderConfig.conflictPolicy 的注释。 */
+export type ConflictPolicy = 'keep-both' | 'newest-wins' | 'local-wins';
+
+const CONFLICT_POLICIES: readonly string[] = ['keep-both', 'newest-wins', 'local-wins'];
+
+/** 校验 conflictPolicy 取值(供设置入口拒绝笔误,非法值 400 而非静默失效)。 */
+export function isConflictPolicy(v: unknown): v is ConflictPolicy {
+  return typeof v === 'string' && CONFLICT_POLICIES.includes(v);
+}
 
 const GIT_SYNC_MODES: readonly string[] = ['off', 'send', 'receive', 'full'];
 

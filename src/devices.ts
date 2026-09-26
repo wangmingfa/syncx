@@ -2,7 +2,7 @@ import { existsSync, mkdirSync, statSync } from 'node:fs';
 import { resolve, isAbsolute, sep, dirname, join } from 'node:path';
 import { homedir } from 'node:os';
 import { randomBytes } from 'node:crypto';
-import { loadConfig, saveConfig, mutateConfig, normalizePeerUrl, DEFAULT_CONFIG, folderIdFor, folderIndexKey, generateFolderInstanceId, purgeFolderIndex, isValidSchedule, isGitSyncMode, type Config, type FolderIdentity, type SharedFolderConfig, type DeviceConfig, type GitSyncMode } from './config.js';
+import { loadConfig, saveConfig, mutateConfig, normalizePeerUrl, DEFAULT_CONFIG, folderIdFor, folderIndexKey, generateFolderInstanceId, purgeFolderIndex, isValidSchedule, isGitSyncMode, isConflictPolicy, type Config, type FolderIdentity, type SharedFolderConfig, type DeviceConfig, type GitSyncMode, type ConflictPolicy } from './config.js';
 import { readFolderIdentity } from './folder-identity.js';
 
 /**
@@ -358,6 +358,22 @@ export function setFolderGitSync(configPath: string, folderId: string, mode: Git
     if (!existing) throw new Error(`未找到共享目录:「${folderId}」`);
     existing.gitSync = mode === 'off' ? undefined : mode;
     existing.gitLastCommitHash = undefined;
+  });
+}
+
+/**
+ * 设置某目录的冲突自动处理策略(目录设置弹窗;按 folderId 定位)。
+ * 'keep-both' 存成 undefined 而非字面量:与「旧配置从未设置过该字段」保持同一种形态,
+ * 且默认语义(保留双方 = 现行为)由代码缺省承载,配置里不留守迹。
+ */
+export function setFolderConflictPolicy(configPath: string, folderId: string, policy: ConflictPolicy): void {
+  if (!isConflictPolicy(policy)) {
+    throw new Error(`冲突策略应为 keep-both / newest-wins / local-wins:「${String(policy)}」`);
+  }
+  mutateConfig(configPath, (config) => {
+    const existing = config.sharedFolders.find((f) => folderIdFor(f) === folderId);
+    if (!existing) throw new Error(`未找到共享目录:「${folderId}」`);
+    existing.conflictPolicy = policy === 'keep-both' ? undefined : policy;
   });
 }
 

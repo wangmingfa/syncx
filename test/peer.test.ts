@@ -1248,3 +1248,201 @@ describe('receive-only mode (只拉不推)', () => {
     rmDir(dir);
   });
 });
+
+describe('conflict auto policy (conflictPolicy)', () => {
+  function fakeTransport() {
+    const sentEntries: IndexEntry[] = [];
+    const requests: BlockRequest[] = [];
+    return {
+      transport: {
+        sendEntries(entries: IndexEntry[]): void {
+          sentEntries.push(...entries);
+        },
+        sendBlockRequest(request: BlockRequest): void {
+          requests.push(request);
+        },
+        sendBlockResponse(): void {},
+      } satisfies PeerTransport,
+      sentEntries,
+      requests,
+    };
+  }
+
+  // 并发版本:本机 [dev-a:2, dev-b:1] vs 对端 [dev-a:1, dev-b:2] → compareFileState = conflict
+  function localSide(mtime?: number): Map<string, IndexEntry> {
+    return new Map([
+      [
+        'doc.txt',
+        { ...entry('doc.txt', [['dev-a', 2], ['dev-b', 1]], ['lh']), ...(mtime !== undefined ? { mtime } : {}) },
+      ],
+    ]);
+  }
+  function remoteSide(mtime?: number): IndexEntry {
+    return {
+      ...entry('doc.txt', [['dev-a', 1], ['dev-b', 2]], ['rh']),
+      ...(mtime !== undefined ? { mtime } : {}),
+    };
+  }
+
+  it('local-wins: keeps local content, pushes merged version back, requests no blocks', async () => {
+    const { transport, sentEntries, requests } = fakeTransport();
+    const local = localSide(1000);
+    const peer = createSyncPeer({
+      transport,
+      localIndex: local,
+      executor: null as never,
+      readLocalBlock: () => Buffer.from(''),
+      deviceId: 'dev-a',
+      remoteDeviceId: 'dev-b',
+      getConflictPolicy: () => 'local-wins',
+    });
+
+    await peer.onPeerIndex([remoteSide(2000)]);
+
+    // 不拉任何块;回推的是本机内容 + 合并版本(支配对端 → 对端来拉我们,自然收敛)
+    expect(requests).toHaveLength(0);
+    expect(sentEntries).toHaveLength(1);
+    expect(sentEntries[0]!.blocks).toEqual(['lh']);
+    expect(sentEntries[0]!.version).toEqual(new Map([['dev-a', 2], ['dev-b', 2]]));
+    expect(local.get('doc.txt')!.version).toEqual(new Map([['dev-a', 2], ['dev-b', 2]]));
+  });
+
+  it('newest-wins with newer local mtime behaves like local-wins (no pulls)', async () => {
+    const { transport, sentEntries, requests } = fakeTransport();
+    const local = localSide(3000);
+    const peer = createSyncPeer({
+      transport,
+      localIndex: local,
+      executor: null as never,
+      readLocalBlock: () => Buffer.from(''),
+      deviceId: 'dev-a',
+      remoteDeviceId: 'dev-b',
+      getConflictPolicy: () => 'newest-wins',
+    });
+
+    await peer.onPeerIndex([remoteSide(2000)]);
+
+    expect(requests).toHaveLength(0);
+    expect(sentEntries).toHaveLength(1);
+    expect(sentEntries[0]!.blocks).toEqual(['lh']);
+  });
+
+  it('newest-wins with missing mtime on either side falls back to keep-both (pulls blocks)', async () => {
+    const { transport, sentEntries, requests } = fakeTransport();
+    const peer = createSyncPeer({
+      transport,
+      localIndex: localSide(1000),
+      executor: null as never,
+      readLocalBlock: () => Buffer.from(''),
+      deviceId: 'dev-a',
+      remoteDeviceId: 'dev-b',
+      getConflictPolicy: () => 'newest-wins',
+    });
+
+    // 对端旧版不发 mtime:判不了新旧,退回 keep-both 拉块走冲突副本路径
+    await peer.onPeerIndex([remoteSide(undefined)]);
+
+    expect(requests).toHaveLength(1);
+    expect(sentEntries).toHaveLength(0);
+  });
+
+  it('newest-wins with newer remote mtime lands remote content without a conflict copy', async () => {
+    const dir = mkdtempSync(join(tmpdir(), 'syncx-peer-'));
+    const root = join(dir, 'share');
+    mkdirSync(root, { recursive: true });
+    const index = openIndexStore(join(dir, 'index.db'));
+    const executor = createLocalExecutor(root, index, join(root, '.syncx-trash'));
+    const { transport, requests, sentEntries } = fakeTransport();
+
+    const localContent = Buffer.from('local older edit');
+    const remoteContent = Buffer.from('remote newer edit');
+    writeFileSync(join(root, 'doc.txt'), localContent);
+    const local = new Map([
+      [
+        'doc.txt',
+        {
+          ...entry('doc.txt', [['dev-a', 2], ['dev-b', 1]], [hashBlock(localContent)], localContent.length),
+          mtime: 1000,
+        },
+      ],
+    ]);
+    index.saveEntry(local.get('doc.txt')!);
+
+    const peer = createSyncPeer({
+      transport,
+      localIndex: local,
+      executor,
+      readLocalBlock: () => Buffer.from(''),
+      deviceId: 'dev-a',
+      remoteDeviceId: 'dev-b',
+      getConflictPolicy: () => 'newest-wins',
+    });
+
+    const remote = {
+      ...entry('doc.txt', [['dev-a', 1], ['dev-b', 2]], [hashBlock(remoteContent)], remoteContent.length),
+      mtime: 2000,
+    };
+    await peer.onPeerIndex([remote]);
+    expect(requests).toHaveLength(1);
+
+    peer.onBlockResponse({
+      deviceId: 'DEV-B',
+      path: 'doc.txt',
+      blockIndex: 0,
+      hash: hashBlock(remoteContent),
+      data: remoteContent,
+    });
+    await new Promise((r) => setTimeout(r, 10));
+
+    // 对端内容直接覆盖落地:无冲突副本、不回推(策略已裁决,对端版本即最终展示版本)
+    expect(readFileSync(join(root, 'doc.txt'))).toEqual(remoteContent);
+    expect(readdirSync(root).filter((n) => n.includes('.sync-conflict-'))).toHaveLength(0);
+    expect(sentEntries).toHaveLength(0);
+    expect(local.get('doc.txt')!.version).toEqual(new Map([['dev-a', 1], ['dev-b', 2]]));
+
+    index.close();
+    rmDir(dir);
+  });
+
+  it('keep-both (explicit default) still pulls blocks and keeps the conflict-copy path', async () => {
+    const { transport, sentEntries, requests } = fakeTransport();
+    const peer = createSyncPeer({
+      transport,
+      localIndex: localSide(1000),
+      executor: null as never,
+      readLocalBlock: () => Buffer.from(''),
+      deviceId: 'dev-a',
+      remoteDeviceId: 'dev-b',
+      getConflictPolicy: () => 'keep-both',
+    });
+
+    await peer.onPeerIndex([remoteSide(9000)]);
+
+    // 远端 mtime 更新也不覆盖:keep-both 只看版本并发,照旧拉块走副本路径
+    expect(requests).toHaveLength(1);
+    expect(sentEntries).toHaveLength(0);
+  });
+
+  it('policy does not intervene when either side is a tombstone (keep-both path)', async () => {
+    const { transport, sentEntries, requests } = fakeTransport();
+    const local = new Map([
+      ['doc.txt', { ...entry('doc.txt', [['dev-a', 2], ['dev-b', 1]], [], 0, true) }],
+    ]);
+    const peer = createSyncPeer({
+      transport,
+      localIndex: local,
+      executor: null as never,
+      readLocalBlock: () => Buffer.from(''),
+      deviceId: 'dev-a',
+      remoteDeviceId: 'dev-b',
+      getConflictPolicy: () => 'local-wins',
+    });
+
+    // 本机墓碑 + 对端活条目且版本并发:交给既有 conflict 路径(executor 有专门处理),
+    // 策略不得把「保留本地」当成保留墓碑后直接回推
+    await peer.onPeerIndex([remoteSide(2000)]);
+
+    expect(requests).toHaveLength(1);
+    expect(sentEntries).toHaveLength(0);
+  });
+});

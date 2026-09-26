@@ -3,7 +3,7 @@ import { useToast } from './useToast';
 import { apiJson, errText } from '../utils/api';
 import { folderKey } from '../utils/format';
 import type { CoreDeps } from './statusContext';
-import type { FolderInfo, GitSyncMode } from '../types';
+import type { ConflictPolicy, FolderInfo, GitSyncMode } from '../types';
 
 /** 文件夹相关:添加/移除(防误删确认)/编辑指派设备/ .gitignore 开关/悬停联动/同步记录。 */
 export function useFolders(deps: CoreDeps): {
@@ -41,7 +41,7 @@ export function useFolders(deps: CoreDeps): {
   conflictsFolder: Ref<FolderInfo | null>;
   /** 非空 = 打开该目录的文件版本弹窗。 */
   versionsFolder: Ref<FolderInfo | null>;
-  saveEditDevices: (payload: { path: string; devices: string[]; gitignore: boolean; schedule: string; gitSync: GitSyncMode }) => Promise<void>;
+  saveEditDevices: (payload: { path: string; devices: string[]; gitignore: boolean; schedule: string; gitSync: GitSyncMode; conflictPolicy: ConflictPolicy }) => Promise<void>;
   toggleFolderPaused: (f: FolderInfo, paused: boolean) => Promise<void>;
   toggleGlobalPaused: (paused: boolean) => Promise<void>;
   /** 「目录不可信」横幅上的重新采集身份(仅更新指纹,索引不动)。 */
@@ -149,10 +149,10 @@ export function useFolders(deps: CoreDeps): {
     editDevicesOpen.value = true;
   }
 
-  /** 弹窗「保存」:设备指派、.gitignore 开关、同步时段与 git 同步模式一起提交,真正的写操作只有这里。 */
-  async function saveEditDevices(payload: { path: string; devices: string[]; gitignore: boolean; schedule: string; gitSync: GitSyncMode }): Promise<void> {
+  /** 弹窗「保存」:设备指派、.gitignore 开关、同步时段、git 同步模式与冲突策略一起提交,真正的写操作只有这里。 */
+  async function saveEditDevices(payload: { path: string; devices: string[]; gitignore: boolean; schedule: string; gitSync: GitSyncMode; conflictPolicy: ConflictPolicy }): Promise<void> {
     await commitFolderDevices(payload.path, payload.devices);
-    // refreshStatus 后按最新 folders 找回该目录,开关/时段/git 模式有变化才额外发请求
+    // refreshStatus 后按最新 folders 找回该目录,开关/时段/git 模式/冲突策略有变化才额外发请求
     const f = status.value.folders.find((x) => x.path === payload.path);
     if (f && (f.useGitignore !== false) !== payload.gitignore) {
       await toggleFolderGitignore(f, payload.gitignore);
@@ -162,6 +162,9 @@ export function useFolders(deps: CoreDeps): {
     }
     if (f && (f.gitSync ?? 'off') !== payload.gitSync) {
       await saveFolderGitSync(f, payload.gitSync);
+    }
+    if (f && (f.conflictPolicy ?? 'keep-both') !== payload.conflictPolicy) {
+      await saveFolderConflictPolicy(f, payload.conflictPolicy);
     }
     editDevicesOpen.value = false;
   }
@@ -185,6 +188,27 @@ export function useFolders(deps: CoreDeps): {
       );
     } catch (e) {
       showToast(errText(e, '设置 Git 同步模式失败'), 'alert');
+    }
+    await refreshStatus();
+  }
+
+  /** 提交某目录的冲突自动处理策略;失败回读后端真实状态。 */
+  async function saveFolderConflictPolicy(f: FolderInfo, policy: ConflictPolicy): Promise<void> {
+    try {
+      await apiJson('/api/folders/conflict-policy', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ folderId: f.id ?? f.path, policy }),
+      });
+      showToast(
+        policy === 'local-wins'
+          ? '冲突策略已设为「本机优先」:冲突时保留本机内容并推回对端'
+          : policy === 'newest-wins'
+            ? '冲突策略已设为「新者胜」:按修改时间自动覆盖旧内容'
+            : '冲突策略已恢复「保留双方」:冲突时生成副本进收件箱',
+      );
+    } catch (e) {
+      showToast(errText(e, '设置冲突策略失败'), 'alert');
     }
     await refreshStatus();
   }

@@ -756,3 +756,41 @@ describe('local executor send', () => {
     rmDir(dir);
   });
 });
+
+describe('conflict policy keep-local (applyConflictKeepLocal)', () => {
+  it('merges the version vectors into the index without touching disk or leaving a copy', async () => {
+    const dir = mkdtempSync(join(tmpdir(), 'syncx-exec-'));
+    const root = join(dir, 'share');
+    mkdirSync(root, { recursive: true });
+    const index = openIndexStore(join(dir, 'index.db'));
+
+    const executor = createLocalExecutor(root, index, join(root, '.syncx-trash'));
+    const localContent = Buffer.from('local edit wins');
+    writeFileSync(join(root, 'doc.txt'), localContent);
+    const local = index.saveEntry(
+      entry('doc.txt', [['dev-a', 2], ['dev-b', 1]], [hashBlock(localContent)], localContent.length),
+    ) ?? index.getEntry('doc.txt')!;
+
+    const remoteContent = Buffer.from('remote edit loses');
+    const remote = entry(
+      'doc.txt',
+      [['dev-a', 1], ['dev-b', 2]],
+      [hashBlock(remoteContent)],
+      remoteContent.length,
+    );
+
+    const keep = await executor.applyConflictKeepLocal(local, remote);
+
+    // 本机内容一字不动,也不生成 .sync-conflict 副本(策略已自动裁决,不进收件箱)
+    expect(readFileSync(join(root, 'doc.txt'))).toEqual(localContent);
+    expect(readdirSync(root).filter((n) => n.includes('.sync-conflict'))).toEqual([]);
+    // 索引采纳合并版本:逐设备取 max,支配对端版本 → 对端转判「我方较新」来拉取
+    expect(keep.version.get('dev-a')).toBe(2);
+    expect(keep.version.get('dev-b')).toBe(2);
+    expect(keep.blocks).toEqual([hashBlock(localContent)]);
+    expect(index.getEntry('doc.txt')).toEqual(keep);
+
+    index.close();
+    rmDir(dir);
+  });
+});

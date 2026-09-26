@@ -36,10 +36,15 @@ export interface FolderInfo {
   schedule?: string;
   /** git 提交同步模式;缺省 = 'off'(未启用)。仅当目录本身是 git 仓库时才有实际作用。 */
   gitSync?: GitSyncMode;
+  /** 冲突自动处理策略;缺省 = 'keep-both'(保留双方:拉回对端 + 本地留冲突副本)。 */
+  conflictPolicy?: ConflictPolicy;
 }
 
 /** 与后端 SharedFolderConfig.gitSync 取值保持一致。 */
 export type GitSyncMode = 'off' | 'send' | 'receive' | 'full';
+
+/** 与后端 SharedFolderConfig.conflictPolicy 取值保持一致。 */
+export type ConflictPolicy = 'keep-both' | 'newest-wins' | 'local-wins';
 
 export interface DeviceInfo {
   deviceId: string;

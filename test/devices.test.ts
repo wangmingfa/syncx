@@ -3,7 +3,7 @@ import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, statSync
 import { rmDir } from './helpers.js';
 import { tmpdir, homedir } from 'node:os';
 import { join, resolve } from 'node:path';
-import { addSharedFolder, removeSharedFolder, isPeerAllowed, addPeer, removePeer, acceptFolderInvitation, setFolderGitSync, setFolderGitLastCommitHash } from '../src/devices.js';
+import { addSharedFolder, removeSharedFolder, isPeerAllowed, addPeer, removePeer, acceptFolderInvitation, setFolderGitSync, setFolderGitLastCommitHash, setFolderConflictPolicy } from '../src/devices.js';
 import type { SharedFolderConfig } from '../src/config.js';
 
 function tempDir(): string {
@@ -554,6 +554,60 @@ describe('git commit sync settings', () => {
     const { dir, configPath } = folderFixture();
     setFolderGitLastCommitHash(configPath, 'removed-folder', 'hash');
     expect('gitLastCommitHash' in readFolder(configPath)).toBe(false);
+    rmDir(dir);
+  });
+});
+
+describe('conflict policy settings', () => {
+  /** 建一个带单个共享目录的配置,返回 configPath 与该目录的 folderId。 */
+  function folderFixture(): { dir: string; configPath: string; folderId: string } {
+    const dir = tempDir();
+    const configPath = join(dir, 'config.json');
+    const docsPath = join(dir, 'docs');
+    mkdirSync(docsPath, { recursive: true });
+    addSharedFolder(configPath, docsPath, ['DEV1234567'], 'cp-1');
+    return { dir, configPath, folderId: 'cp-1' };
+  }
+
+  function readFolder(configPath: string): Record<string, unknown> {
+    return JSON.parse(readFileSync(configPath, 'utf8')).sharedFolders[0];
+  }
+
+  it('persists an enabled policy verbatim', () => {
+    const { dir, configPath, folderId } = folderFixture();
+    setFolderConflictPolicy(configPath, folderId, 'newest-wins');
+    expect(readFolder(configPath).conflictPolicy).toBe('newest-wins');
+    setFolderConflictPolicy(configPath, folderId, 'local-wins');
+    expect(readFolder(configPath).conflictPolicy).toBe('local-wins');
+    rmDir(dir);
+  });
+
+  it("stores 'keep-both' as an absent field rather than the literal string", () => {
+    const { dir, configPath, folderId } = folderFixture();
+    setFolderConflictPolicy(configPath, folderId, 'local-wins');
+    expect(readFolder(configPath).conflictPolicy).toBe('local-wins');
+
+    setFolderConflictPolicy(configPath, folderId, 'keep-both');
+    // 恢复默认不该在 config.json 里永久留 'keep-both':与「从未设置过」保持同一形态
+    expect('conflictPolicy' in readFolder(configPath)).toBe(false);
+    rmDir(dir);
+  });
+
+  it('rejects an unknown policy without touching the config', () => {
+    const { dir, configPath, folderId } = folderFixture();
+    setFolderConflictPolicy(configPath, folderId, 'newest-wins');
+    const before = readFileSync(configPath, 'utf8');
+
+    expect(() => setFolderConflictPolicy(configPath, folderId, 'bogus' as never)).toThrow(
+      /keep-both \/ newest-wins \/ local-wins/,
+    );
+    expect(readFileSync(configPath, 'utf8')).toBe(before);
+    rmDir(dir);
+  });
+
+  it('rejects an unknown folder', () => {
+    const { dir, configPath } = folderFixture();
+    expect(() => setFolderConflictPolicy(configPath, 'nope', 'local-wins')).toThrow(/未找到共享目录/);
     rmDir(dir);
   });
 });

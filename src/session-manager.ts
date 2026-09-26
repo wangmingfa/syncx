@@ -19,7 +19,7 @@ import { randomBytes } from 'node:crypto';
 import type { Logger } from 'pino';
 import { WebSocket } from 'ws';
 
-import { loadConfig, mutateConfig, folderIdFor, folderIndexKey, folderIndexPath, folderTrashPath, folderVersionsPath, purgeFolderIndex, isWithinSchedule, type FolderIdentity, type SharedFolderConfig, type GitSyncMode } from './config.js';
+import { loadConfig, mutateConfig, folderIdFor, folderIndexKey, folderIndexPath, folderTrashPath, folderVersionsPath, purgeFolderIndex, isWithinSchedule, type FolderIdentity, type SharedFolderConfig, type GitSyncMode, type ConflictPolicy } from './config.js';
 import { acceptedDevs, checkFolderIdentity, readFolderIdentity, withAcceptedDev } from './folder-identity.js';
 import { openIndexStore, type IndexStore } from './indexstore.js';
 import { createLocalExecutor, resolveSharePath, type LocalExecutor } from './executor.js';
@@ -43,7 +43,7 @@ import { makePeerTransport, attachPeerMessages, sendControlMessage, type Control
 import { learnPeerUrl, learnPeerIp, getLanAddresses } from './net/addresses.js';
 import { hostname as osHostname } from 'node:os';
 import { RateLimiter } from './ratelimit.js';
-import { isPeerAllowed, addPeer, setFolderPaused, setGlobalPaused, setFolderSchedule as persistFolderSchedule, setFolderGitSync as persistFolderGitSync, setFolderGitLastCommitHash, setGlobalSettings as persistGlobalSettings, type GlobalSettingsPatch } from './devices.js';
+import { isPeerAllowed, addPeer, setFolderPaused, setGlobalPaused, setFolderSchedule as persistFolderSchedule, setFolderGitSync as persistFolderGitSync, setFolderConflictPolicy as persistFolderConflictPolicy, setFolderGitLastCommitHash, setGlobalSettings as persistGlobalSettings, type GlobalSettingsPatch } from './devices.js';
 import { receiveOffer, makeOfferId, pruneRevokedOffers } from './offers.js';
 import type { DeviceIdentity } from './identity.js';
 import type { ProgressCounts, RelayActivity, TransferFile } from './status.js';
@@ -645,6 +645,9 @@ export class SyncSessionManager {
         executor.applyConflict(path, local, remote, provider, deviceId),
       ) as LocalExecutor['applyConflict'],
       applySend: wrap((path, deviceId) => executor.applySend(path, deviceId)) as LocalExecutor['applySend'],
+      applyConflictKeepLocal: wrap((local, remote) =>
+        executor.applyConflictKeepLocal(local, remote),
+      ) as LocalExecutor['applyConflictKeepLocal'],
     };
   }
 
@@ -1153,6 +1156,8 @@ export class SyncSessionManager {
       // 接收模式:本机只收不推(对端索引规划时跳过 send / 本地墓碑外推,
       // 冲突以对端版本覆盖本地)
       receiveOnly: folder.config.receiveOnly ?? false,
+      // 冲突自动策略:取函数是刻意的 —— 设置弹窗改完即生效,无需重连目录通道
+      getConflictPolicy: () => folder.config.conflictPolicy ?? 'keep-both',
       // 中转(ADR-0014):收到并落地远程条目后,转发给同目录其它 transport(排除来源端本身)。
       // 仅增量接收触发(peer.ts 内 gate),full 交换已收敛整网,不中转。
       onLanded: (entries) => {
@@ -2452,6 +2457,19 @@ export class SyncSessionManager {
     const folder = this.folderStates.find((f) => f.id === folderId);
     if (folder) folder.config.gitSync = mode === 'off' ? undefined : mode;
     this.logger.info(`git sync mode updated: ${folderId} -> ${mode}`);
+    this.notifyStatus();
+  }
+
+  /**
+   * 设置某目录的冲突自动处理策略(目录设置弹窗):落盘 + 同步内存 config。
+   * 无需重连即生效:peer 侧经 getConflictPolicy 闭包读的是 folder.config 本体,
+   * 下一轮冲突规划就会用新策略(keep-both 存 undefined,与缺省同形)。
+   */
+  setFolderConflictPolicy(folderId: string, policy: ConflictPolicy): void {
+    persistFolderConflictPolicy(this.configPath, folderId, policy);
+    const folder = this.folderStates.find((f) => f.id === folderId);
+    if (folder) folder.config.conflictPolicy = policy === 'keep-both' ? undefined : policy;
+    this.logger.info(`conflict policy updated: ${folderId} -> ${policy}`);
     this.notifyStatus();
   }
 

@@ -5,6 +5,8 @@ import type { LocalExecutor } from './executor.js';
 import { resolveSharePath, preserveLocalAsConflict } from './executor.js';
 import { verifyBlock, BLOCK_SIZE } from './blockstore.js';
 import { parseIgnoreRules, isIgnoredPath, isHardIgnored, type IgnoreRule } from './ignore.js';
+import { mergeVersions } from './version.js';
+import type { ConflictPolicy } from './config.js';
 import type { ProgressCounts, TransferFile } from './status.js';
 
 /**
@@ -101,6 +103,12 @@ export interface SyncPeerDeps {
    * 直接以对端版本覆盖本地。缺省 false = 双向同步。
    */
   receiveOnly?: boolean;
+  /**
+   * 取该目录**当前生效**的冲突自动处理策略(见 config.SharedFolderConfig.conflictPolicy)。
+   * 与 readIgnoreLines 同理用函数而非快照:策略在设置弹窗改完后无需重连即生效。
+   * 缺省(旧调用方/测试)按 'keep-both' = 现行为(拉回远端 + 本地留冲突副本)。
+   */
+  getConflictPolicy?: () => ConflictPolicy;
 }
 
 export interface SyncPeer {
@@ -171,7 +179,7 @@ const RATE_SPAN_FLOOR_MS = 1000;
  * complete, then apply it via the executor.
  */
 export function createSyncPeer(deps: SyncPeerDeps): SyncPeer {
-  const { transport, localIndex, executor, readLocalBlock, deviceId, remoteDeviceId, root, onEvent, onTraffic, readIgnoreLines, receiveOnly, onHardIgnoredDropped, onLanded, onStallDrop } = deps;
+  const { transport, localIndex, executor, readLocalBlock, deviceId, remoteDeviceId, root, onEvent, onTraffic, readIgnoreLines, receiveOnly, getConflictPolicy, onHardIgnoredDropped, onLanded, onStallDrop } = deps;
   const pending = new Map<string, PendingEntry>();
   // 逐块跟踪超时重试:块响应丢失/丢弃时自动重发,避免文件永远收不齐
   const pendingBlocks = new Map<string, PendingBlockRequest>();
@@ -486,6 +494,61 @@ export function createSyncPeer(deps: SyncPeerDeps): SyncPeer {
                 await completeIfReady(remoteEntry.path);
               }
               break;
+            }
+            // 冲突自动策略(目录配置 conflictPolicy;缺省 keep-both = 下面的冲突副本行为)。
+            // 只介入「真正的双活内容并发」:任一侧是墓碑时不判新旧/胜负,
+            // 走既有 applyConflict 路径(双方删除有专门的墓碑合并)。
+            const policy = getConflictPolicy?.() ?? 'keep-both';
+            if (
+              policy !== 'keep-both' &&
+              remoteEntry &&
+              localEntry &&
+              !remoteEntry.deleted &&
+              !localEntry.deleted
+            ) {
+              // 判胜负:local-wins 无条件保本地;newest-wins 比对双方 mtime ——
+              // 任一侧缺 mtime(旧版对端不发 / 本机条目未记录)或打平都判不了,
+              // remoteWins 保持 undefined,退回 keep-both 留冲突副本。
+              let remoteWins: boolean | undefined;
+              if (policy === 'local-wins') {
+                remoteWins = false;
+              } else if (localEntry.mtime !== undefined && remoteEntry.mtime !== undefined) {
+                if (remoteEntry.mtime > localEntry.mtime) remoteWins = true;
+                else if (localEntry.mtime > remoteEntry.mtime) remoteWins = false;
+              }
+              if (remoteWins === true) {
+                // 对端内容胜出:按 receive 直接落地覆盖本地,不生成冲突副本。
+                // landRemote 覆盖前的 snapshotVersion 旧内容快照仍会留一份兜底。
+                pending.set(remoteEntry.path, {
+                  kind: 'receive',
+                  entry: remoteEntry,
+                  blocks: new Array<Buffer | undefined>(remoteEntry.blocks.length),
+                  received: 0,
+                });
+                livePending.add(remoteEntry.path);
+                landed.push(remoteEntry);
+                requestMissingBlocks(remoteEntry.path, remoteEntry);
+                await completeIfReady(remoteEntry.path);
+                break;
+              }
+              if (remoteWins === false) {
+                // 本机内容胜出:不拉任何块,只在索引里采纳合并后的版本向量。
+                // merged 逐设备取 max、支配对端版本 → 把本机条目回推,对端本轮
+                // 即判「我方较新」来拉本机内容,收敛由协议自然完成、不会乒乓。
+                const keep =
+                  (await executor?.applyConflictKeepLocal(localEntry, remoteEntry)) ??
+                  { ...localEntry, version: mergeVersions(localEntry.version, remoteEntry.version) };
+                localIndex.set(action.path, keep);
+                sends.push(keep);
+                onEvent?.({
+                  ts: Date.now(),
+                  path: action.path,
+                  action: 'conflict',
+                  direction: 'local',
+                  deviceId: remoteDeviceId,
+                });
+                break;
+              }
             }
             if (remoteEntry && localEntry) {
               pending.set(remoteEntry.path, {

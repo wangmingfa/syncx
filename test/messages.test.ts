@@ -45,6 +45,24 @@ describe('index message codec', () => {
     expect(decoded[0]!.version).toBeInstanceOf(Map);
     expect(decoded[0]!.version.get('dev-a')).toBe(3);
   });
+
+  it('round-trips mtime so newest-wins conflict policy can compare across devices', () => {
+    const entries = [{ ...entry('a.txt', [['dev-a', 1]], ['h1']), mtime: 1700000000123 }];
+    const decoded = decodeIndex(encodeIndex(entries));
+
+    expect(decoded[0]!.mtime).toBe(1700000000123);
+  });
+
+  it('decodes a legacy payload without mtime as undefined (backward compatible)', () => {
+    // 旧版对端的 WireEntry 没有 mtime 字段:解码必须宽容,收侧据此退回 keep-both
+    const legacy = [
+      { path: 'a.txt', version: [['dev-a', 1]], size: 10, deleted: false, blocks: ['h1'] },
+    ];
+    const decoded = decodeIndex(Buffer.from(JSON.stringify(legacy), 'utf8'));
+
+    expect(decoded[0]!.mtime).toBeUndefined();
+    expect(decoded[0]!.path).toBe('a.txt');
+  });
 });
 
 describe('block message codec', () => {

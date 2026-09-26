@@ -63,6 +63,8 @@ export interface ControlServerDeps {
   setFolderSchedule?: (folderId: string, schedule: string) => void;
   /** 设置某目录的 git 提交同步模式(off / send / receive / full)。 */
   setFolderGitSync?: (folderId: string, mode: 'off' | 'send' | 'receive' | 'full') => void;
+  /** 设置某目录的冲突自动处理策略(keep-both / newest-wins / local-wins)。 */
+  setFolderConflictPolicy?: (folderId: string, policy: 'keep-both' | 'newest-wins' | 'local-wins') => void;
   /** 写入全局设置(设置弹窗):maxSendKbps / versionsPerPath / historyMaxEvents;null = 回默认。 */
   setGlobalSettings?: (patch: {
     maxSendKbps?: number | null;

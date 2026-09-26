@@ -20,6 +20,14 @@ export interface LocalExecutor {
     provider: BlockProvider,
     remoteDeviceId: string,
   ): Promise<IndexEntry>;
+  /**
+   * 冲突自动策略 local-wins / newest-wins(本机 mtime 更新)的落地:内容不动、
+   * 不生成冲突副本,只把版本向量合并进本地条目并持久化。
+   *
+   * 合并结果支配对端版本(mergeVersions 取逐设备最大值),对端下一轮规划会判
+   * 「本地较新」并主动来拉本机内容 —— 收敛由协议自然完成,这里无需额外推送。
+   */
+  applyConflictKeepLocal(local: IndexEntry, remote: IndexEntry): Promise<IndexEntry>;
   applySend(path: string, deviceId: string): Promise<IndexEntry>;
 }
 
@@ -321,6 +329,16 @@ export function createLocalExecutor(
       };
       index.saveEntry(landed);
       return landed;
+    },
+    async applyConflictKeepLocal(local: IndexEntry, remote: IndexEntry): Promise<IndexEntry> {
+      // 本地内容胜出:磁盘一字不动,只在索引里采纳合并后的版本向量。
+      // 保留本地 mtime(文件没变);merged 支配双方,对端自然转判「我方较新」来拉取。
+      const keep: IndexEntry = {
+        ...local,
+        version: mergeVersions(local.version, remote.version),
+      };
+      index.saveEntry(keep);
+      return keep;
     },
     async applySend(path: string, deviceId: string): Promise<IndexEntry> {
       const target = resolvePath(path);

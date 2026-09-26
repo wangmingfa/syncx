@@ -700,6 +700,10 @@ export async function run(args: ParsedArgs): Promise<void> {
       // 校验(非法模式 400)+ 落盘 + 内存生效都在 manager 内完成
       manager.setFolderGitSync(folderId, mode);
     },
+    setFolderConflictPolicy: (folderId, policy) => {
+      // 校验(非法策略 400)+ 落盘 + 内存生效都在 manager 内完成
+      manager.setFolderConflictPolicy(folderId, policy);
+    },
     setGlobalSettings: (patch) => {
       // 落盘 + 按需热生效(重建通道/执行器/历史上限)都在 manager 内完成
       manager.setGlobalSettings(patch);

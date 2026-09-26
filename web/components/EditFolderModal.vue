@@ -1,7 +1,7 @@
 <script setup lang="ts">
 import { computed, ref, watch } from 'vue';
 import { NButton, NCheckbox, NCheckboxGroup, NSelect, NTimePicker } from 'naive-ui';
-import type { DeviceInfo, FolderInfo, GitSyncMode } from '../types';
+import type { ConflictPolicy, DeviceInfo, FolderInfo, GitSyncMode } from '../types';
 import ModalShell from './ModalShell.vue';
 
 const props = defineProps<{
@@ -13,8 +13,8 @@ const props = defineProps<{
 }>();
 const emit = defineEmits<{
   close: [];
-  /** 「保存」:设备指派、.gitignore 开关、同步时段与 git 同步模式一起提交给父级,真正的写操作只有父级那一处。 */
-  save: [payload: { path: string; devices: string[]; gitignore: boolean; schedule: string; gitSync: GitSyncMode }];
+  /** 「保存」:设备指派、.gitignore 开关、同步时段、git 同步模式与冲突策略一起提交给父级,真正的写操作只有父级那一处。 */
+  save: [payload: { path: string; devices: string[]; gitignore: boolean; schedule: string; gitSync: GitSyncMode; conflictPolicy: ConflictPolicy }];
 }>();
 
 const path = ref('');
@@ -25,12 +25,19 @@ const gitignore = ref(true);
 const scheduleFrom = ref<number | null>(null);
 const scheduleTo = ref<number | null>(null);
 const gitSync = ref<GitSyncMode>('off');
+const conflictPolicy = ref<ConflictPolicy>('keep-both');
 
 const GIT_SYNC_OPTIONS: { label: string; value: GitSyncMode }[] = [
   { label: '关闭', value: 'off' },
   { label: '仅发送(广播本机提交,不自动提交)', value: 'send' },
   { label: '仅接收(自动提交对端通知,不广播)', value: 'receive' },
   { label: '双向(广播本机提交,并自动提交对端通知)', value: 'full' },
+];
+
+const CONFLICT_POLICY_OPTIONS: { label: string; value: ConflictPolicy }[] = [
+  { label: '保留双方(默认,生成冲突副本)', value: 'keep-both' },
+  { label: '新者胜(按修改时间覆盖旧内容)', value: 'newest-wins' },
+  { label: '本机优先(本机内容始终保留)', value: 'local-wins' },
 ];
 
 watch(
@@ -44,6 +51,7 @@ watch(
     scheduleFrom.value = parseScheduleTime(from ?? '');
     scheduleTo.value = parseScheduleTime(to ?? '');
     gitSync.value = f.gitSync ?? 'off';
+    conflictPolicy.value = f.conflictPolicy ?? 'keep-both';
   },
 );
 
@@ -69,7 +77,7 @@ function onSave(): void {
     scheduleFrom.value !== null && scheduleTo.value !== null
       ? `${formatScheduleTime(scheduleFrom.value)}-${formatScheduleTime(scheduleTo.value)}`
       : '';
-  emit('save', { path: path.value, devices: [...selected.value], gitignore: gitignore.value, schedule, gitSync: gitSync.value });
+  emit('save', { path: path.value, devices: [...selected.value], gitignore: gitignore.value, schedule, gitSync: gitSync.value, conflictPolicy: conflictPolicy.value });
 }
 
 // 地址(host:port)与主机名合并成一行,在设备 ID 之外提供可辨认的信息;两者都可能缺失
@@ -143,6 +151,19 @@ function deviceAddrLine(p: DeviceInfo): string {
       目录为 git 仓库时生效:一端 commit 后通知其他设备,对端把本地全部改动一次性
       commit(<code>git add -A</code>)并沿用相同提交信息,无需每台设备手动提交。
       首次启用只记录当前 HEAD 作为基线,不会重放历史提交。
+    </p>
+
+    <div class="edit-section-label">冲突处理</div>
+    <n-select
+      v-model:value="conflictPolicy"
+      class="schedule-input"
+      :options="CONFLICT_POLICY_OPTIONS"
+      :disabled="busy"
+    />
+    <p class="confirm-note-extra">
+      两端同时修改同一文件时的自动裁决:保留双方 = 拉回对端版本、本机旧内容存为冲突副本(进冲突收件箱);
+      新者胜 = 修改时间新的一方覆盖(跨机比较依赖各设备时钟,时钟漂移大时判定可能不准);
+      本机优先 = 本机内容始终保留,对端自动拉取本机版本。任一时刻只影响「并发修改」,正常单向同步不受影响。
     </p>
 
     <template #footer>
