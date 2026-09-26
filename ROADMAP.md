@@ -32,11 +32,12 @@
       ② 发送侧按设备去重(broadcast.ts / relay.ts)——同一设备的两条 transport
       只发一份增量,来源设备的反向连接不再收中转回声。
       回归:peer.test.ts「单飞台账」4 例 + broadcast.test.ts 去重 4 例。
-- [ ] **fe80 链路本地反向发现 URL 缺陷**(预存,bb97651 亦在):入站会话学习对端
+- [x] **fe80 链路本地反向发现 URL 缺陷**(预存,bb97651 亦在):入站会话学习对端
       源 IP 时可能拿到 IPv6 link-local 地址(`fe80::…%18`),写进 config peers 后
       主动拨号报 `Invalid URL`——链路本地地址须带 %zone 才有意义,且跨网段本就不可
-      达。修复方向:learnPeerIp 只采纳全局/站点本地地址;无法解析的源地址不写入配
-      置、不外拨。
+      达。已修:`learnPeerUrl` 识别 fe80::/10(含带 zone 与带方括号形态)一律不产出
+      反向 URL(不写 config、不外拨);邀请卡的来源 IP **展示**不受影响,只掐 URL
+      构造一头(handshake.test.ts 3 例)。
 
 ## 中期(特色差异化)
 

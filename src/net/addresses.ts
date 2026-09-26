@@ -62,6 +62,11 @@ export function learnPeerUrl(socket: WebSocket, listenPort?: number): string | u
   if (typeof listenPort !== 'number' || listenPort <= 0 || listenPort > 65535) return undefined;
   const addr = learnPeerIp(socket);
   if (!addr) return undefined;
+  // IPv6 链路本地地址(fe80::/10,可能带 %zone 后缀)不可反向拨号:它只在发起
+  // 那条网卡的链路内有效,写进 config.peers 后本机主动连接直接 `Invalid URL`
+  // (2026-09 混版本实测:双栈监听 + IPv6 入站即触发)。展示侧(邀请卡来源 IP)
+  // 不受影响,只掐 URL 构造这一头。
+  if (/^fe80[:%]/i.test(addr)) return undefined;
   // 仅真正的 IPv6(仍含冒号)才加方括号
   const host = addr.includes(':') && !addr.startsWith('[') ? `[${addr}]` : addr;
   return `ws://${host}:${listenPort}`;

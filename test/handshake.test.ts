@@ -379,6 +379,17 @@ describe('learnPeerUrl address normalization', () => {
     expect(learnPeerUrl(sock, 22000)).toBe('ws://[2001:db8::1]:22000');
   });
 
+  it('refuses an IPv6 link-local address (reverse discovery would produce an undialable URL)', () => {
+    // 2026-09 混版本实测:双栈监听收到 IPv6 入站时学到 fe80::…%18,写进 config.peers
+    // 后主动拨号报 Invalid URL。链路本地地址只在本机那条网卡的链路内有效,不可反向发现。
+    const zone = { remoteAddress: 'fe80::e6f5:1fff:fe12:3456%18' } as unknown as PeerSocket;
+    expect(learnPeerUrl(zone, 22000)).toBeUndefined();
+    const bare = { remoteAddress: 'FE80::1' } as unknown as PeerSocket;
+    expect(learnPeerUrl(bare, 22000)).toBeUndefined();
+    const bracketed = { remoteAddress: '[fe80::1%eth0]' } as unknown as PeerSocket;
+    expect(learnPeerUrl(bracketed, 22000)).toBeUndefined();
+  });
+
   it('falls back to the underlying _socket.remoteAddress', () => {
     const sock = { _socket: { remoteAddress: '::ffff:192.168.1.5' } } as unknown as PeerSocket;
     expect(learnPeerUrl(sock, 22000)).toBe('ws://192.168.1.5:22000');
