@@ -81,11 +81,20 @@ export async function tryDeviceRoutes(
       const raw = await readBody(req);
       const body = raw === '' ? {} : JSON.parse(raw) as Record<string, unknown>;
       // 数字字段逐一校验:非有限数字一律拒绝,不静默吞掉
-      for (const key of ['maxSendKbps', 'versionsPerPath', 'historyMaxEvents'] as const) {
+      for (const key of ['maxSendKbps', 'versionsPerPath', 'historyMaxEvents', 'batteryPauseThreshold'] as const) {
         if (!(key in body)) continue;
         const v = body[key];
         if (v !== null && !Number.isFinite(Number(v))) {
           sendJson(res, 400, { error: `${key} must be a number or null` });
+          return true;
+        }
+      }
+      // 电源守卫开关是布尔(null = 关闭);范围校验在 devices.setGlobalSettings
+      for (const key of ['pauseOnMeteredNetwork', 'pauseOnLowBattery'] as const) {
+        if (!(key in body)) continue;
+        const v = body[key];
+        if (v !== null && typeof v !== 'boolean') {
+          sendJson(res, 400, { error: `${key} must be a boolean or null` });
           return true;
         }
       }
@@ -104,6 +113,9 @@ export async function tryDeviceRoutes(
         ...(('historyMaxEvents' in body) ? { historyMaxEvents: body.historyMaxEvents === null ? null : Number(body.historyMaxEvents) } : {}),
         ...(('webhookUrl' in body) ? { webhookUrl: body.webhookUrl === null ? null : String(body.webhookUrl) } : {}),
         ...(('webhookSecret' in body) ? { webhookSecret: body.webhookSecret === null ? null : String(body.webhookSecret) } : {}),
+        ...(('pauseOnMeteredNetwork' in body) ? { pauseOnMeteredNetwork: body.pauseOnMeteredNetwork === null ? null : Boolean(body.pauseOnMeteredNetwork) } : {}),
+        ...(('pauseOnLowBattery' in body) ? { pauseOnLowBattery: body.pauseOnLowBattery === null ? null : Boolean(body.pauseOnLowBattery) } : {}),
+        ...(('batteryPauseThreshold' in body) ? { batteryPauseThreshold: body.batteryPauseThreshold === null ? null : Number(body.batteryPauseThreshold) } : {}),
       });
       sendJson(res, 200, { ok: true });
     } catch (e) {

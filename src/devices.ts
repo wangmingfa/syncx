@@ -402,6 +402,12 @@ export interface GlobalSettingsPatch {
   webhookUrl?: string | null;
   /** Webhook 签名密钥;null = 清除。 */
   webhookSecret?: string | null;
+  /** 计费网络自动挂起开关;仅 true 落盘(false/null = 关闭,config 不留 false 值)。 */
+  pauseOnMeteredNetwork?: boolean | null;
+  /** 低电量自动挂起开关;同上。 */
+  pauseOnLowBattery?: boolean | null;
+  /** 低电量挂起阈值(%);null = 回默认 20。合法范围 1–99。 */
+  batteryPauseThreshold?: number | null;
 }
 
 /** 校验并收敛一个设置值:null → undefined(清除);负数/非整数拒绝(设置页的输入必须可解释)。 */
@@ -440,6 +446,22 @@ export function setGlobalSettings(configPath: string, patch: GlobalSettingsPatch
       const v = typeof patch.webhookSecret === 'string' ? patch.webhookSecret.trim() : '';
       if (v.length > 200) throw new Error('Webhook 密钥过长(最多 200 字符)');
       config.webhookSecret = v === '' ? undefined : v;
+    }
+    if ('pauseOnMeteredNetwork' in patch) {
+      config.pauseOnMeteredNetwork = patch.pauseOnMeteredNetwork === true ? true : undefined;
+    }
+    if ('pauseOnLowBattery' in patch) {
+      config.pauseOnLowBattery = patch.pauseOnLowBattery === true ? true : undefined;
+    }
+    if ('batteryPauseThreshold' in patch) {
+      // null/undefined = 回默认(UI 清空输入):config 不留值,运行期按 20 兜底
+      if (patch.batteryPauseThreshold === null || patch.batteryPauseThreshold === undefined) {
+        config.batteryPauseThreshold = undefined;
+      } else {
+        const n = sanitizeSetting(patch.batteryPauseThreshold, 1, '低电量阈值');
+        if (n === undefined || n > 99) throw new Error('低电量阈值必须为 1–99 的整数');
+        config.batteryPauseThreshold = n;
+      }
     }
   });
 }

@@ -438,6 +438,12 @@ export class SyncSessionManager {
    */
   private globalPaused = false;
   /**
+   * 电源守卫(powerguard.ts)上报的挂起原因:非空时所有目录数据面视同暂停,
+   * 与 globalPaused 独立叠加(恢复守卫不影响用户手动暂停,反之亦然)。
+   * 由 cli 在 onStateChange 里经 setPowerGuardReason 注入;非 Windows 恒为 null。
+   */
+  private powerGuardReason: string | null = null;
+  /**
    * 全局发送带宽上限(config.maxSendKbps 的内存镜像,KB/s):目录未单独配置
    * maxBandwidthKbps 时的兜底默认。构造时读取,热重载 / setGlobalSettings 时同步;
    * 生效点是 transport 的令牌桶(attach 时创建),改值后由 rebuildRateLimitedTransports
@@ -2473,7 +2479,7 @@ export class SyncSessionManager {
    * 不在配置的同步时段内(见 config.isWithinSchedule),任一命中即停摆。
    */
   private folderPausedNow(folder: FolderState): boolean {
-    return this.globalPaused || folder.config.paused === true || !isWithinSchedule(folder.config.schedule);
+    return this.globalPaused || this.powerGuardReason !== null || folder.config.paused === true || !isWithinSchedule(folder.config.schedule);
   }
 
   /**
@@ -2552,6 +2558,22 @@ export class SyncSessionManager {
     this.globalPaused = paused;
     this.applyPausedState();
     this.logger.info(`global sync ${paused ? 'paused' : 'resumed'}`);
+  }
+
+  /**
+   * 电源守卫挂起原因注入(powerguard.onStateChange):仅变化时生效,
+   * 不落盘(是运行期状态,重启后由守卫重新探测)。挂起/恢复走 applyPausedState
+   * 统一对账,控制面(连接/配对/邀请)不受影响。
+   */
+  setPowerGuardReason(reason: string | null): void {
+    if (reason === this.powerGuardReason) return;
+    this.powerGuardReason = reason;
+    this.applyPausedState();
+  }
+
+  /** 当前电源守卫挂起原因(buildStatus 徽标用;未启用恒为 null)。 */
+  getPowerGuardReason(): string | null {
+    return this.powerGuardReason;
   }
 
   /**

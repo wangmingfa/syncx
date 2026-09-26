@@ -1140,6 +1140,12 @@ html[data-theme='dark'] .chip-menu__item--danger {
   text-decoration: underline;
 }
 
+/* 电源守卫开关:n-checkbox 默认行内,强制一行一个并留行间距 */
+.settings-checkbox {
+  display: flex;
+  margin-top: 8px;
+}
+
 /* 已指派设备的只读标签行(卡片上不可直接改,编辑走弹窗) */
 .device-tags {
   display: flex;

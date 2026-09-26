@@ -143,6 +143,8 @@ export interface StatusPayload {
   settings?: GlobalSettingsStatus;
   /** 局域网内发现、但尚未配对的设备(设备栏「附近发现的设备」;旧后端缺省)。 */
   discovered?: DiscoveredDeviceStatus[];
+  /** 电源守卫当前挂起原因(计费网络/低电量,数据面被自动挂起;旧后端缺省 = null)。 */
+  powerGuard?: string | null;
 }
 
 /** 一个采样窗口的流量增量(窗口内发/收的字节数)。 */
@@ -172,6 +174,12 @@ export interface GlobalSettingsStatus {
   webhookUrl?: string;
   /** 是否已配置 Webhook 签名密钥(不回传密钥本体,UI 展示「已设置」用)。 */
   webhookSecretSet?: boolean;
+  /** 计费网络自动挂起开关(仅 Windows 有实际作用)。 */
+  pauseOnMeteredNetwork?: boolean;
+  /** 低电量自动挂起开关(仅 Windows 有实际作用)。 */
+  pauseOnLowBattery?: boolean;
+  /** 低电量挂起阈值(%);undefined = 默认 20。 */
+  batteryPauseThreshold?: number;
 }
 
 /** buildStatus 的扩展口径:新功能统计一律进这里,不再膨胀位置参数。 */
@@ -190,6 +198,8 @@ export interface StatusExtras {
   settings?: GlobalSettingsStatus;
   /** 局域网内发现、尚未配对的设备(设备栏一键添加;缺省 = 后端旧版本未提供)。 */
   discovered?: DiscoveredDeviceStatus[];
+  /** 电源守卫当前挂起原因(计费网络/低电量;null 或缺省 = 未挂起)。 */
+  powerGuard?: string | null;
 }
 
 export function buildStatus(
@@ -226,5 +236,6 @@ export function buildStatus(
     configDir: extras.configDir,
     settings: extras.settings,
     discovered: extras.discovered,
+    powerGuard: extras.powerGuard ?? null,
   };
 }

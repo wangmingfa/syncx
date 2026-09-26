@@ -74,13 +74,16 @@ export interface ControlServerDeps {
   setFolderIgnoreLines?: (folderId: string, lines: string[]) => void;
   /** 忽略规则编辑器:实时测试一条路径(草稿行给定时按「保存后」预测)。 */
   testFolderIgnore?: (folderId: string, path: string, draftLines?: string[]) => IgnoreVerdict;
-  /** 写入全局设置(设置弹窗):maxSendKbps / versionsPerPath / historyMaxEvents;null = 回默认。 */
+  /** 写入全局设置(设置弹窗):maxSendKbps / versionsPerPath / historyMaxEvents / webhook* / 电源守卫;null = 回默认。 */
   setGlobalSettings?: (patch: {
     maxSendKbps?: number | null;
     versionsPerPath?: number | null;
     historyMaxEvents?: number | null;
     webhookUrl?: string | null;
     webhookSecret?: string | null;
+    pauseOnMeteredNetwork?: boolean | null;
+    pauseOnLowBattery?: boolean | null;
+    batteryPauseThreshold?: number | null;
   }) => void;
   /** 测试 Webhook:真实投递一条测试事件并等回执。 */
   testWebhook?: () => Promise<{ ok: boolean; error?: string }>;

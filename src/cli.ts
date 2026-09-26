@@ -28,6 +28,8 @@ import { getLanAddresses, formatHost } from './net/addresses.js';
 import { createControlServer, type ControlServerDeps } from './api.js';
 import { createStatusHub } from './status-hub.js';
 import { createWebhookNotifier } from './webhook.js';
+import { createPowerGuard } from './powerguard.js';
+import { execFile } from 'node:child_process';
 import { createTerminalHub } from './api/terminal.js';
 import { listDirectory, resolveFolderSubpath, deleteFolderEntry } from './filebrowser.js';
 import { buildStatus, type DeviceStatus, type SyncProgress, type FolderErrorStatus } from './status.js';
@@ -438,6 +440,25 @@ export async function run(args: ParsedArgs): Promise<void> {
   // 无目录提示也延迟到端口绑定成功后输出(与其它启动日志同批)
   const noFoldersAtBoot = manager.folderStates.length === 0;
 
+  // 电源守卫(仅 Windows 启用):每 60s 一次 PowerShell 探测计费联网/电池电量,
+  // 命中条件经 manager.setPowerGuardReason 挂起全部目录数据面,条件解除自动恢复。
+  // 设置每次探测现读 config(设置弹窗改完免重启);非 win32 时 start 是空操作。
+  const powerGuard = createPowerGuard({
+    exec: (script) =>
+      new Promise<string>((res, rej) => {
+        execFile(
+          'powershell.exe',
+          ['-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass', '-Command', script],
+          { timeout: 10_000, windowsHide: true },
+          (err, stdout) => (err ? rej(err) : res(stdout)),
+        );
+      }),
+    getSettings: () => loadConfig(configPath),
+    onStateChange: (reason) => manager.setPowerGuardReason(reason),
+    logger,
+  });
+  powerGuard.start();
+
   // 控制 API 的依赖:在 peer 状态和同步进度可用后创建(deps 提到独立 const 是为了让
   // 上方的状态推送通道能取到同一份 getStatus 实现,避免两处各写一遍状态快照)。
   const controlDeps: ControlServerDeps = {
@@ -609,7 +630,13 @@ export async function run(args: ParsedArgs): Promise<void> {
             // Webhook:地址回显;密钥不回传本体,只告诉 UI「已设置」
             webhookUrl: config.webhookUrl,
             webhookSecretSet: config.webhookSecret !== undefined,
+            // 电源守卫设置(Windows 才有实际作用;其他平台 UI 展示但探测不启用)
+            pauseOnMeteredNetwork: config.pauseOnMeteredNetwork === true,
+            pauseOnLowBattery: config.pauseOnLowBattery === true,
+            batteryPauseThreshold: config.batteryPauseThreshold,
           },
+          // 电源守卫当前挂起原因(顶栏徽标;未挂起为 null)
+          powerGuard: manager.getPowerGuardReason(),
           // 数据目录:日志弹窗等处的示例命令要跟真实目录走(--config-dir 隔离时不误导)
           configDir,
           // 附近发现的设备:过 TTL 的先剪掉;已经配对上的从列表摘除(升格成设备卡)
@@ -1108,6 +1135,7 @@ export async function run(args: ParsedArgs): Promise<void> {
   await new Promise<void>((resolve) => {
 const shutdown = (): void => {
     clearInterval(scanTimer);
+    powerGuard.stop();
     updateChecker?.stop();
     configWatcher?.close();
     // 重连定时器、peer socket、目录索引库的清理在 manager 内完成

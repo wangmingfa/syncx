@@ -250,8 +250,13 @@ function visibleFiles(f: FolderInfo): TransferFile[] {
 
 <template>
   <section class="col col--folders" @mouseenter="headHover = true" @mouseleave="onHeadLeave">
-    <!-- 全局暂停徽标:与目录卡的暂停徽标同款,贴在栏容器顶缘右上角 -->
-    <span v-if="status.paused" class="float-badge paused-badge col-paused" title="全局已暂停:所有目录不扫描、不广播、不接收;连接与配对照常">已暂停</span>
+    <!-- 全局暂停徽标:与目录卡的暂停徽标同款,贴在栏容器顶缘右上角;
+         电源守卫(计费网络/低电量)自动挂起优先级更高,原因放 title 里 -->
+    <span
+      v-if="status.powerGuard || status.paused"
+      class="float-badge paused-badge col-paused"
+      :title="status.powerGuard ? `${status.powerGuard}:电源守卫已自动挂起所有目录同步,条件解除自动恢复;连接与配对照常` : '全局已暂停:所有目录不扫描、不广播、不接收;连接与配对照常'"
+    >{{ status.powerGuard ? '自动挂起' : '已暂停' }}</span>
     <div class="col-head">
       <!-- 标题+徽标绑成一组(.col-head__lead):窄屏 wrap 时两者同进退,
            徽标不会单独掉进按钮行;手机上 lead 整行独占,按钮组落到第二行(见 style.css) -->

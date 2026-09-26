@@ -123,6 +123,8 @@ export interface StatusData {
   configDir?: string;
   /** 全局同步设置当前值(设置弹窗预填;旧后端缺省)。 */
   settings?: GlobalSettingsData;
+  /** 电源守卫挂起原因(计费网络/低电量;非空时所有目录数据面被自动挂起;旧后端缺省 = null)。 */
+  powerGuard?: string | null;
   /** 局域网内 mDNS 发现、但尚未配对的设备(设备栏「附近发现的设备」;旧后端缺省)。 */
   discovered?: DiscoveredDevice[];
 }
@@ -178,6 +180,12 @@ export interface GlobalSettingsData {
   webhookUrl?: string;
   /** 是否已设置 Webhook 签名密钥(密钥本身不回传)。 */
   webhookSecretSet?: boolean;
+  /** 计费网络自动挂起(仅 Windows 探测启用)。 */
+  pauseOnMeteredNetwork?: boolean;
+  /** 低电量自动挂起(仅 Windows 探测启用)。 */
+  pauseOnLowBattery?: boolean;
+  /** 低电量挂起阈值(%);undefined = 默认 20。 */
+  batteryPauseThreshold?: number;
 }
 
 /** GET /api/report/weekly 的响应(与后端 report.ts WeeklyReport 同形)。 */

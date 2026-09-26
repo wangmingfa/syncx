@@ -330,6 +330,15 @@ export interface Config {
   webhookUrl?: string;
   /** Webhook 签名密钥:通用载荷带 x-syncx-signature HMAC 头;飞书按其算法加 timestamp/sign。 */
   webhookSecret?: string;
+  /**
+   * 检测到按流量计费的联网(WinRT CostType,见 powerguard)时自动挂起所有目录数据面。
+   * 仅 Windows 生效;缺省/false = 关闭。
+   */
+  pauseOnMeteredNetwork?: boolean;
+  /** 用电池且电量低于阈值时自动挂起数据面;仅 Windows 生效;缺省 = 关闭。 */
+  pauseOnLowBattery?: boolean;
+  /** 低电量挂起阈值(%),1–99;缺省 20。 */
+  batteryPauseThreshold?: number;
 }
 
 export const DEFAULT_CONFIG: Config = {
@@ -430,7 +439,18 @@ export function loadConfig(configPath: string): Config {
     // Webhook:手改 config.json 填了非字符串/空串时丢弃,与全局设置同一套「坏值回退」口径
     webhookUrl: normalizeWebhookString(parsed.webhookUrl, 500),
     webhookSecret: normalizeWebhookString(parsed.webhookSecret, 200),
+    // 电源守卫:布尔开关只认 true(缺省/false 都不落 true);阈值非法丢弃回默认 20
+    pauseOnMeteredNetwork: parsed.pauseOnMeteredNetwork === true ? true : undefined,
+    pauseOnLowBattery: parsed.pauseOnLowBattery === true ? true : undefined,
+    batteryPauseThreshold: sanitizePercent(parsed.batteryPauseThreshold),
   };
+}
+
+/** 清洗百分比配置(1–99):非有限数/越界返回 undefined(调用方走内置默认)。 */
+function sanitizePercent(v: unknown): number | undefined {
+  if (typeof v !== 'number' || !Number.isFinite(v)) return undefined;
+  const n = Math.floor(v);
+  return n >= 1 && n <= 99 ? n : undefined;
 }
 
 /** 清洗一个 Webhook 字符串配置:非字符串/空白/超长返回 undefined。 */
