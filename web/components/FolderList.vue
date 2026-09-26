@@ -366,7 +366,7 @@ function visibleFiles(f: FolderInfo): TransferFile[] {
           <div class="folder-error__msg break">{{ folderErrorOf(f)!.message }}</div>
           <div class="folder-error__time">
             {{ fmtTime(folderErrorOf(f)!.ts) }} ·
-            {{ folderErrorOf(f)!.kind === 'identity-missing' ? '接回正确的盘后下一轮扫描自动恢复' : folderErrorOf(f)!.kind?.startsWith('identity') ? '需人工确认,不会自动恢复' : '下一轮扫描成功后自动清除' }}
+            {{ folderErrorOf(f)!.kind === 'identity-missing' ? '接回正确的盘后下一轮扫描自动恢复' : folderErrorOf(f)!.kind?.startsWith('identity') ? '需人工确认,不会自动恢复' : folderErrorOf(f)!.kind === 'disk-space' ? '释放磁盘空间后自动恢复接收' : '下一轮扫描成功后自动清除' }}
           </div>
         </div>
         <!-- 身份不符(非"目录读不到")才给轻量恢复入口:只更新指纹、不动索引;

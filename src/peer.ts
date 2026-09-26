@@ -109,6 +109,14 @@ export interface SyncPeerDeps {
    * 缺省(旧调用方/测试)按 'keep-both' = 现行为(拉回远端 + 本地留冲突副本)。
    */
   getConflictPolicy?: () => ConflictPolicy;
+  /**
+   * 磁盘空间守卫(见 ROADMAP「磁盘空间守卫」):本轮规划出的接收量(字节,已扣除
+   * 将被覆盖的本地文件将释放的体积)在落盘前问一次上层。返回 false = 空间不足 →
+   * 本轮**跳过全部 receive/conflict 动作**(删除照常应用 —— 删除是释放空间的方向;
+   * send 也照常,推出去不占本机盘),并记下本轮索引,待空间恢复后由上层调
+   * {@link SyncPeer.retryDiskBlocked} 重放。缺省(旧调用方/测试)恒放行。
+   */
+  checkDiskSpace?: (neededBytes: number) => boolean;
 }
 
 export interface SyncPeer {
@@ -116,6 +124,11 @@ export interface SyncPeer {
   onBlockRequest(request: BlockRequest): void;
   onBlockResponse(response: BlockResponse): Promise<void>;
   getSyncProgress(): ProgressCounts;
+  /**
+   * 磁盘守卫放行后重放被拦下的那轮索引(见 deps.checkDiskSpace)。
+   * 没有积压(未拦截过 / 已重放)时是空操作;重放轮再次空间不足会重新挂起等待下次重放。
+   */
+  retryDiskBlocked(): void;
 }
 
 interface PendingEntry {
@@ -179,10 +192,13 @@ const RATE_SPAN_FLOOR_MS = 1000;
  * complete, then apply it via the executor.
  */
 export function createSyncPeer(deps: SyncPeerDeps): SyncPeer {
-  const { transport, localIndex, executor, readLocalBlock, deviceId, remoteDeviceId, root, onEvent, onTraffic, readIgnoreLines, receiveOnly, getConflictPolicy, onHardIgnoredDropped, onLanded, onStallDrop } = deps;
+  const { transport, localIndex, executor, readLocalBlock, deviceId, remoteDeviceId, root, onEvent, onTraffic, readIgnoreLines, receiveOnly, getConflictPolicy, checkDiskSpace, onHardIgnoredDropped, onLanded, onStallDrop } = deps;
   const pending = new Map<string, PendingEntry>();
   // 逐块跟踪超时重试:块响应丢失/丢弃时自动重发,避免文件永远收不齐
   const pendingBlocks = new Map<string, PendingBlockRequest>();
+  // 磁盘守卫积压:被拦下的那轮索引原文,等上层空间恢复后经 retryDiskBlocked 重放。
+  // 不能只等对端下一轮增量 —— 对端没有新改动就不会再发,接收会无限期停摆。
+  let diskBlockedRetry: { entries: IndexEntry[]; opts?: PeerIndexOptions } | null = null;
   // 正在向外供块的路径 → 最后一次发出该文件块的时间,用于展示「发送中」(见 SERVE_LEASE_MS)
   const serving = new Map<string, number>();
   // 文件级发送进度:每个供块路径累计 已发字节 / 总字节。servedBlocks 记录已发出的块下标,
@@ -372,7 +388,7 @@ export function createSyncPeer(deps: SyncPeerDeps): SyncPeer {
     }
   }
 
-  return {
+  const self: SyncPeer = {
     async onPeerIndex(entries: IndexEntry[], opts?: PeerIndexOptions): Promise<void> {
       // 缺省按 delta 处理。旧版对端不带 full 字段,而它**确实**会发增量索引
       // (扫描到改动就只广播那几条);把增量当全量做并集规划,就会为「它没提到的
@@ -421,6 +437,27 @@ export function createSyncPeer(deps: SyncPeerDeps): SyncPeer {
       }
 
       const actions = full ? buildPlan(localIndex, remote) : buildDeltaPlan(localIndex, remote);
+      // 磁盘空间守卫:先预估本轮入向体积(扣除被覆盖的本地文件将释放的空间),
+      // 不足就整轮跳过 receive/conflict —— 宁可推迟,也不要写到一半失败。
+      // 删除照常应用(它是释放空间的方向),send 照常外推(不占本机盘);
+      // 本轮索引原文记下,空间恢复后由上层调 retryDiskBlocked 重放。
+      let diskSkipsReceive = false;
+      if (checkDiskSpace) {
+        let needed = 0;
+        for (const action of actions) {
+          if (action.kind !== 'receive' && action.kind !== 'conflict') continue;
+          const incoming = action.kind === 'receive' ? action.entry : action.remote;
+          const current = localIndex.get(action.path);
+          needed += Math.max(0, incoming.size - (current && !current.deleted ? current.size : 0));
+        }
+        if (needed > 0 && !checkDiskSpace(needed)) {
+          diskSkipsReceive = true;
+          diskBlockedRetry = { entries, opts };
+        } else {
+          // 本轮放行:清掉此前的积压,避免重连/新改动后旧索引被重复重放
+          diskBlockedRetry = null;
+        }
+      }
       const sends: IndexEntry[] = [];
       // 本轮索引实际引用的 pending 路径:仅用于全量轮次清理上一轮遗留的陈旧条目
       const livePending = new Set<string>();
@@ -428,6 +465,7 @@ export function createSyncPeer(deps: SyncPeerDeps): SyncPeer {
       const landed: IndexEntry[] = [];
 
       for (const action of actions) {
+        if (diskSkipsReceive && (action.kind === 'receive' || action.kind === 'conflict')) continue;
         switch (action.kind) {
           case 'send':
             // 接收模式:本地较新的变更绝不外推,仅作为镜像忽略
@@ -718,5 +756,14 @@ export function createSyncPeer(deps: SyncPeerDeps): SyncPeer {
       if (files.length) result.files = files;
       return result;
     },
+    retryDiskBlocked(): void {
+      // 空间恢复后重放被拦下的那轮:与首次规划完全同路径(守卫再判一次,
+      // 仍不足会重新挂起等下次重放,所以这里不必预判)。
+      const saved = diskBlockedRetry;
+      if (!saved) return;
+      diskBlockedRetry = null;
+      void self.onPeerIndex(saved.entries, saved.opts);
+    },
   };
+  return self;
 }

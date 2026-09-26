@@ -25,6 +25,7 @@ import { openIndexStore, type IndexStore } from './indexstore.js';
 import { createLocalExecutor, resolveSharePath, type LocalExecutor } from './executor.js';
 import { filterIndexedEntries, HARD_IGNORE_NAMES, isHardIgnored, parseIgnoreRules, readFolderIgnoreLines } from './ignore.js';
 import { createSyncPeer, type PeerTransport, type SyncPeer } from './peer.js';
+import { freeBytesAt, DISK_GUARD_MIN_FREE_BYTES } from './disk.js';
 import { scanFolder } from './scanner.js';
 import type { IndexEntry } from './index.js';
 import { hashBlock, splitIntoBlocks, readBlockAt } from './blockstore.js';
@@ -99,6 +100,11 @@ export interface FolderState {
    * 只用来抑制「每轮扫描都打一遍」的重复日志,不参与判定。
    */
   gitBroadcastPending: boolean;
+  /**
+   * 磁盘守卫当前是否拦着入向接收(checkFolderDiskSpace 判不足时置位)。
+   * 解除由守卫复检/扫描心跳完成:空间恢复 → 清目录错误 → 重放各 peer 的积压索引。
+   */
+  diskBlocked: boolean;
 }
 
 /** 一条存活的对端会话:配置热重载新增/移除目录时,对现有连接补建或摘除对应 peer。 */
@@ -566,7 +572,7 @@ export class SyncSessionManager {
     // 索引为空 → 首扫是建基线(存量文件不算新增);索引有存量 → 首扫 diff 是
     // daemon 离线期间的真实改动,要写同步记录
     const baselinePending = usable.length === 0;
-    return { id, indexKey, path: f.path, index, executor, localIndex, ignoreLines, transports: [], peers: new Map(), transportDevice: new Map(), config: f, baselinePending, conflictCount: 0, lastCommitHash: f.gitLastCommitHash ?? null, processedRemoteCommits: new Set(), gitBroadcastPending: false };
+    return { id, indexKey, path: f.path, index, executor, localIndex, ignoreLines, transports: [], peers: new Map(), transportDevice: new Map(), config: f, baselinePending, conflictCount: 0, lastCommitHash: f.gitLastCommitHash ?? null, processedRemoteCommits: new Set(), gitBroadcastPending: false, diskBlocked: false };
   }
 
   /**
@@ -618,9 +624,57 @@ export class SyncSessionManager {
     this.notifyStatus();
   }
 
-  private clearFolderError(folderId: string): void {
+  private clearFolderError(folderId: string, opts?: { exceptKind?: string }): void {
+    // exceptKind:该 kind 的错误生命周期由专门状态机维护(如磁盘守卫),扫描的
+    // 「本轮干净」不算它恢复 —— 否则横幅每 5s 闪现闪灭
+    if (opts?.exceptKind) {
+      const cur = this.folderErrorsState.get(folderId);
+      if (cur?.kind === opts.exceptKind) return;
+    }
     // 内容未变时不打扰推送通道(clearFolderError 每轮扫描都会对每个目录调用)
     if (this.folderErrorsState.delete(folderId)) this.notifyStatus();
+  }
+
+  /**
+   * 磁盘守卫判定:本轮接收需要 needed 字节,所在盘可用空间须同时覆盖它并保留
+   * 水位线(DISK_GUARD_MIN_FREE_BYTES),否则拦下整轮入向(见 peer.checkDiskSpace)。
+   *
+   * 错误横幅只在状态迁移时记/清:每轮索引与 5s 扫描心跳都会复检,若每次都
+   * recordFolderError 就是推送风暴。statfs 读不到(free undefined)按放行处理 ——
+   * 守卫不能因为自己失明的比没有守卫更糟,真写失败仍会走既有 apply* 错误通道。
+   */
+  private checkFolderDiskSpace(folder: FolderState, needed: number): boolean {
+    const free = freeBytesAt(folder.path);
+    const ok = free === undefined || free >= needed + DISK_GUARD_MIN_FREE_BYTES;
+    if (ok) {
+      if (folder.diskBlocked) {
+        folder.diskBlocked = false;
+        // 解除归守卫管:立刻清错误(不等下一轮扫描的 clear),并重放积压
+        this.clearFolderError(folder.id);
+        this.logger.info(`disk space recovered: ${folder.id}, resuming inbound`);
+        for (const peer of folder.peers.values()) peer.retryDiskBlocked();
+      }
+      return true;
+    }
+    if (!folder.diskBlocked) {
+      folder.diskBlocked = true;
+      this.recordFolderError(
+        folder.id,
+        new Error(
+          `磁盘空间不足:准备接收约 ${Math.max(1, Math.ceil(needed / 1048576))} MB,` +
+            '低于保留水位,已暂停入向同步;释放空间后自动恢复(出向与删除不受影响)',
+        ),
+        undefined,
+        'disk-space',
+      );
+    } else {
+      // 已在拦:仅静默刷新时间戳,让横幅显示的「最近一次确认」不显旧,不再推送
+      const prev = this.folderErrorsState.get(folder.id);
+      if (prev?.kind === 'disk-space') {
+        this.folderErrorsState.set(folder.id, { ...prev, ts: Date.now() });
+      }
+    }
+    return false;
   }
 
   /**
@@ -704,8 +758,12 @@ export class SyncSessionManager {
       // 控制面照常(连接保持在线),恢复后由下一轮扫描 / reconcile 继续同步。
       if (this.folderPausedNow(folder)) continue;
       // 一轮扫描走到这里且后续无错误即视为「干净」:清除该目录上一次的错误提示,
-      // 让问题自愈后目录卡上的错误横幅自动消失
-      this.clearFolderError(folder.id);
+      // 让问题自愈后目录卡上的错误横幅自动消失。磁盘守卫错误除外 —— 它的解除
+      // 只认磁盘实际可用空间(下面复检),扫描干净不代表盘有空间。
+      this.clearFolderError(folder.id, { exceptKind: 'disk-space' });
+      // 磁盘守卫复检:扫描是必然存在的低频心跳。被拦期间若空间已恢复,
+      // checkFolderDiskSpace(0) 会顺带解除拦截、清错误并重放各 peer 的积压索引。
+      if (folder.diskBlocked) this.checkFolderDiskSpace(folder, 0);
       // 目录身份门禁:共享根的 dev/ino 与首次纳入同步时记录的不一致 = 换盘 / 重新挂载 /
       // 目录被删了重建 → 跳过本轮扫描、绝不产生墓碑。这是「盘不见了 / 目录被换掉了」与
       // 「用户真的删光了文件」之间唯一可靠的区分点(后者根目录身份不变)。
@@ -1158,6 +1216,9 @@ export class SyncSessionManager {
       receiveOnly: folder.config.receiveOnly ?? false,
       // 冲突自动策略:取函数是刻意的 —— 设置弹窗改完即生效,无需重连目录通道
       getConflictPolicy: () => folder.config.conflictPolicy ?? 'keep-both',
+      // 磁盘空间守卫:本轮入向体积预估不足则整轮拦下接收(目录卡挂错误横幅),
+      // 空间恢复由扫描心跳复检触发,重放各 peer 积压(见 checkFolderDiskSpace)
+      checkDiskSpace: (needed) => this.checkFolderDiskSpace(folder, needed),
       // 中转(ADR-0014):收到并落地远程条目后,转发给同目录其它 transport(排除来源端本身)。
       // 仅增量接收触发(peer.ts 内 gate),full 交换已收敛整网,不中转。
       onLanded: (entries) => {

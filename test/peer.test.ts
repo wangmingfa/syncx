@@ -1446,3 +1446,158 @@ describe('conflict auto policy (conflictPolicy)', () => {
     expect(sentEntries).toHaveLength(0);
   });
 });
+
+describe('disk space guard (checkDiskSpace)', () => {
+  function fakeTransport() {
+    const sentEntries: IndexEntry[] = [];
+    const requests: BlockRequest[] = [];
+    return {
+      transport: {
+        sendEntries(entries: IndexEntry[]): void {
+          sentEntries.push(...entries);
+        },
+        sendBlockRequest(request: BlockRequest): void {
+          requests.push(request);
+        },
+        sendBlockResponse(): void {},
+      } satisfies PeerTransport,
+      sentEntries,
+      requests,
+    };
+  }
+
+  it('holds receive actions back when space is insufficient, and replays them after retryDiskBlocked', async () => {
+    const { transport, requests } = fakeTransport();
+    let enough = false;
+    const calls: number[] = [];
+    const peer = createSyncPeer({
+      transport,
+      localIndex: new Map(),
+      executor: null as never,
+      readLocalBlock: () => Buffer.from(''),
+      deviceId: 'dev-a',
+      remoteDeviceId: 'dev-b',
+      checkDiskSpace: (needed) => {
+        calls.push(needed);
+        return enough;
+      },
+    });
+
+    const remote = entry('big.bin', [['dev-b', 1]], ['h1'], 5000);
+    await peer.onPeerIndex([remote]);
+
+    // 拦下:一个块都不请求,也不落任何 pending(进度保持干净)
+    expect(requests).toHaveLength(0);
+    expect(calls).toEqual([5000]); // 预估量 = 整文件体积(本地无同路径旧文件可扣)
+
+    // 空间恢复:重放被记下的那轮索引,与首次规划同路径
+    enough = true;
+    peer.retryDiskBlocked();
+    await new Promise((r) => setTimeout(r, 0));
+    expect(requests).toEqual([{ deviceId: 'dev-a', path: 'big.bin', blockIndex: 0, hash: 'h1' }]);
+
+    // 积压是一次性的:重放后不得再重放(否则会按旧快照反复拉块)
+    requests.length = 0;
+    peer.retryDiskBlocked();
+    await new Promise((r) => setTimeout(r, 0));
+    expect(requests).toHaveLength(0);
+  });
+
+  it('subtracts the local file being overwritten from the estimate', async () => {
+    const { transport, requests } = fakeTransport();
+    const calls: number[] = [];
+    const peer = createSyncPeer({
+      transport,
+      localIndex: new Map([['doc.txt', entry('doc.txt', [['dev-b', 1]], ['old'], 3000)]]),
+      executor: null as never,
+      readLocalBlock: () => Buffer.from(''),
+      deviceId: 'dev-a',
+      checkDiskSpace: (needed) => {
+        calls.push(needed);
+        return true;
+      },
+    });
+
+    // remote-newer(本机条目版本更旧)→ receive;预估只算增量体积
+    await peer.onPeerIndex([entry('doc.txt', [['dev-b', 2]], ['new'], 5000)]);
+
+    expect(calls).toEqual([2000]);
+    expect(requests).toHaveLength(1);
+  });
+
+  it('still applies deletes and outbound sends while receives are blocked', async () => {
+    const { transport, sentEntries, requests } = fakeTransport();
+    const peer = createSyncPeer({
+      transport,
+      localIndex: new Map([
+        ['mine.txt', entry('mine.txt', [['dev-a', 2]], ['m'])],
+        ['gone.txt', entry('gone.txt', [['dev-b', 1]], ['g'], 10, false)],
+      ]),
+      executor: null as never,
+      readLocalBlock: () => Buffer.from(''),
+      deviceId: 'dev-a',
+      checkDiskSpace: () => false,
+    });
+
+    // full 交换:local-newer(外推)+ remote 墓碑(删除)+ remote-newer(接收,应被拦)
+    await peer.onPeerIndex(
+      [
+        entry('mine.txt', [['dev-a', 1]], ['m']),
+        entry('gone.txt', [['dev-b', 2]], [], 0, true),
+        entry('incoming.bin', [['dev-b', 1]], ['i1', 'i2'], 8000),
+      ],
+      { full: true },
+    );
+
+    // 发送照常(不占本机盘)、删除照常(它是释放空间的方向)、接收被拦(不请求块)
+    expect(sentEntries.map((e) => e.path)).toEqual(['mine.txt']);
+    expect(requests).toHaveLength(0);
+    expect(peer.getSyncProgress().pending).toBe(0);
+  });
+
+  it('retryDiskBlocked is a no-op when nothing was held back', async () => {
+    const { transport, requests } = fakeTransport();
+    const peer = createSyncPeer({
+      transport,
+      localIndex: new Map(),
+      executor: null as never,
+      readLocalBlock: () => Buffer.from(''),
+      deviceId: 'dev-a',
+    });
+
+    // 未配置守卫 → 从未拦截;调用重放不应凭空造出请求,也不应抛错
+    peer.retryDiskBlocked();
+    await new Promise((r) => setTimeout(r, 0));
+    expect(requests).toHaveLength(0);
+  });
+
+  it('releases the held-back snapshot when a later round passes the guard', async () => {
+    const { transport, requests } = fakeTransport();
+    let enough = false;
+    const peer = createSyncPeer({
+      transport,
+      localIndex: new Map(),
+      executor: null as never,
+      readLocalBlock: () => Buffer.from(''),
+      deviceId: 'dev-a',
+      checkDiskSpace: () => enough,
+    });
+
+    await peer.onPeerIndex([entry('a.bin', [['dev-b', 1]], ['h1'], 4000)]);
+    expect(requests).toHaveLength(0);
+
+    // 新一轮(仍缺空间)到达:积压替换为最新一轮,旧的自动作废
+    await peer.onPeerIndex([entry('b.bin', [['dev-b', 1]], ['h2'], 4000)]);
+    enough = true;
+    peer.retryDiskBlocked();
+    await new Promise((r) => setTimeout(r, 0));
+
+    expect(requests.map((r) => r.path)).toEqual(['b.bin']);
+
+    // 放行轮清积压:成功接收之后重放是空操作
+    requests.length = 0;
+    peer.retryDiskBlocked();
+    await new Promise((r) => setTimeout(r, 0));
+    expect(requests).toHaveLength(0);
+  });
+});
