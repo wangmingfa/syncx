@@ -6,8 +6,8 @@
     <link rel="icon" type="image/svg+xml" href="/favicon.svg" />
     <title>SYNCX</title>
     <script>
-      // 首绘前定主题:Vue 挂载在 <body> 末尾,等它再切会白闪一下(深色偏好用户尤甚)。
-      // 键位与 composables/useTheme.ts 的 LS_KEY 一致,两处改必须同步。
+      // 首绘前定主题与皮肤:Vue 挂载在 <body> 末尾,等它再切会白闪一下(深色偏好用户尤甚)。
+      // 键位与 composables/useTheme.ts / useSkin.ts 的 LS_KEY 一致,多处改必须同步。
       (function () {
         try {
           var m = localStorage.getItem('syncx:theme');
@@ -15,8 +15,10 @@
             m === 'dark' ||
             ((!m || m === 'system') && window.matchMedia('(prefers-color-scheme: dark)').matches);
           document.documentElement.dataset.theme = dark ? 'dark' : 'light';
+          document.documentElement.dataset.skin =
+            localStorage.getItem('syncx:skin') === 'glass' ? 'glass' : 'slate';
         } catch (e) {
-          /* 读不到 localStorage:保持浅色默认 */
+          /* 读不到 localStorage:保持浅色 + 板岩默认 */
         }
       })();
     </script>

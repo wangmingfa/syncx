@@ -6,17 +6,26 @@ import type { DropdownOption } from 'naive-ui';
 import OsIcon from './OsIcon.vue';
 import { useStatusContext } from '../composables/statusContext';
 import { useTheme, type ThemeMode } from '../composables/useTheme';
+import { useSkin, type SkinMode } from '../composables/useSkin';
 import { formatBytes } from '../utils/bytes';
 import { osIconLabel } from '../utils/os-icon';
 
 const { status, busy, checkForUpdate, openUpload, openLogs, openTopology, openTraffic, openGuide, openSettings, openTerminal, openFleet, openAuth, logout, copy, notifSupported, notifEnabled, toggleNotifications } = useStatusContext();
 const { mode: themeMode, resolved: themeResolved, setMode } = useTheme();
+const { mode: skinMode, setMode: setSkinMode } = useSkin();
 
 const themeOptions: DropdownOption[] = [
   { label: '跟随系统', key: 'system' },
   { label: '浅色', key: 'light' },
   { label: '深色', key: 'dark' },
 ];
+
+/** 皮肤(材质语言)与主题正交:这里选「板岩 / 液态玻璃」,深浅仍由上面那组决定 */
+const skinOptions: DropdownOption[] = [
+  { label: '板岩', key: 'slate' },
+  { label: '液态玻璃', key: 'glass' },
+];
+const SKIN_LABELS: Record<SkinMode, string> = { slate: '板岩', glass: '液态玻璃' };
 
 /** 当前模式在菜单里画 ✓(配合 n-dropdown 的 value 高亮,一眼看清现在用的是哪档)。
     这版 naive-ui 的 renderLabel 只收 option 一个参数(不传 selected 状态),
@@ -33,6 +42,19 @@ function renderThemeLabel(option: DropdownOption): VNodeChild {
 
 function onThemeSelect(key: string): void {
   setMode(key as ThemeMode);
+}
+
+/** 风格菜单复用主题菜单同款 ✓ 槽位画法(见 renderThemeLabel 注释)。 */
+function renderSkinLabel(option: DropdownOption): VNodeChild {
+  const selected = option.key === skinMode.value;
+  return h('span', { style: 'display:flex;align-items:center;gap:8px' }, [
+    h('span', { style: 'width:12px;flex:none;text-align:center;color:var(--accent)' }, selected ? '✓' : ''),
+    h('span', { style: 'flex:1 1 auto' }, String(option.label ?? option.key)),
+  ]);
+}
+
+function onSkinSelect(key: string): void {
+  setSkinMode(key as SkinMode);
 }
 
 /** 累计收发(流量按钮直接把这组数当标签用:不点开也扫一眼可见)。 */
@@ -150,6 +172,26 @@ function runChipRow(row: ChipRow): void {
           <svg v-else viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
             <circle cx="12" cy="12" r="4" />
             <path d="M12 2v2M12 20v2M2 12h2M20 12h2M4.9 4.9l1.4 1.4M17.7 17.7l1.4 1.4M19.1 4.9l-1.4 1.4M6.3 17.7l-1.4 1.4" />
+          </svg>
+        </template>
+      </n-button>
+    </n-dropdown>
+
+    <!-- 风格(材质语言)切换:与主题正交 —— 这里选「板岩 / 液态玻璃」,深浅仍由主题那组管。
+         图标是一枚菱形切面(玻璃的直观联想) -->
+    <n-dropdown
+      trigger="hover"
+      placement="bottom-end"
+      :options="skinOptions"
+      :value="skinMode"
+      :render-label="renderSkinLabel"
+      @select="onSkinSelect"
+    >
+      <n-button tertiary circle :title="`风格:${SKIN_LABELS[skinMode]}`">
+        <template #icon>
+          <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+            <path d="M12 3 21 12 12 21 3 12Z" />
+            <path d="M12 3v18M3 12h18" opacity="0.55" />
           </svg>
         </template>
       </n-button>
