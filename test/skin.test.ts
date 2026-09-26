@@ -23,8 +23,8 @@ const GLASS_LIGHT = "html[data-skin='glass']";
 const GLASS_DARK = "html[data-skin='glass'][data-theme='dark']";
 const PLAIN_DARK = "html[data-theme='dark'] {";
 
-/** 两版玻璃浅色块都不重定义、深浅通用的 token(圆角与磨砂参数刻意共用)。 */
-const SHARED_TOKENS = new Set(['--radius', '--glass-blur']);
+/** 玻璃深色块现已重定义浅色块的每一个 token(含 --radius/--glass-blur),无需豁免。 */
+const SHARED_TOKENS = new Set<string>([]);
 
 /**
  * 皮肤(skin)与主题(theme)是正交维度,靠三条纸质约定撑住,全部容易在重构中静默断裂:
@@ -76,6 +76,27 @@ describe('skin:板岩 / 液态玻璃两档皮肤', () => {
     const fallback = css.slice(css.indexOf('@supports not (backdrop-filter'));
     expect(fallback).toContain('--card: #f7f9fc');
     expect(fallback).toContain('--card: #1a2029');
+  });
+
+  it('动光底光:极光走 body::before,可漂移且尊重 prefers-reduced-motion', () => {
+    const aurora = ruleBlock(`${GLASS_LIGHT} body::before`);
+    expect(aurora).not.toBeNull();
+    expect(aurora).toContain('position: fixed');
+    // 光斑挂伪元素(而非 body)是为能 transform 漂移重排;body 只剩细噪数据 URI
+    expect(aurora).toContain('radial-gradient');
+    expect(css).toContain('@keyframes glass-aurora-drift');
+    expect(css).toContain('@media (prefers-reduced-motion: no-preference)');
+    // 深色极光要单独重给 body::before,否则深色页仍漂浅冷白光斑
+    expect(css).toContain("html[data-skin='glass'][data-theme='dark'] body::before");
+  });
+
+  it('Tooltip 玻璃态:深色磨砂气泡 + 浅色字,用 !important 压过内联注入的半透明底', () => {
+    // tooltip 复用 Popover 主题,App.vue 的半透明 Popover 底会盖掉它自带深气泡 →
+    // 浅底配浅字直接糊掉;这里必须 !important 直写深色底 + 浅色字救回可读性。
+    const tip = ruleBlock(`${GLASS_LIGHT} body .n-popover.n-tooltip`);
+    expect(tip).not.toBeNull();
+    expect(tip).toMatch(/background-color:[^;]+!important/);
+    expect(tip).toMatch(/color:[^;]+!important/);
   });
 
   it(':root 仍是文件里第一个规则块(theme-tokens 抽取的前提,皮肤块不得插队)', () => {

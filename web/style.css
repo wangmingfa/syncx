@@ -3803,7 +3803,9 @@ html[data-theme='dark'] .diff-item__warn { color: #e0b45f; }
      (0,2,1)收尾 —— 它必须排最后,且**重定义玻璃浅色块改过的每一个 token**,
      漏一个就会在深底上漏出浅白;
    - naive 浮层的底色走 App.vue 的 themeOverrides(naive 把主题变量注入为内联
-     自定义属性,CSS 覆盖不动),这里只补它的 backdrop-filter。
+     自定义属性,CSS 覆盖不动),这里补它们的 backdrop-filter;tooltip 是唯一的例外
+     —— 它复用 Popover 主题会被半透明浅色底盖掉自带深气泡,只能在 CSS 里用
+     !important 直写深色底 + 浅色字救回可读性(见下方 .n-popover.n-tooltip)。
    ========================================================================== */
 
 html[data-skin='glass'] {
@@ -3818,21 +3820,44 @@ html[data-skin='glass'] {
   --border-strong: rgb(96 116 148 / 0.42);
   --accent-soft: rgb(234 241 251 / 0.65);
   --shadow: 0 1px 2px rgb(22 32 52 / 0.06), 0 16px 42px -20px rgb(22 32 52 / 0.32);
-  --radius: 16px;
-  /* 本皮肤私有参数:磨砂(饱和度回补让透出来的底更鲜) + 玻璃切面的镜面内边 */
-  --glass-blur: saturate(1.5) blur(16px);
-  --glass-edge: inset 0 1px 0 rgb(255 255 255 / 0.7), inset 0 0 0 1px rgb(255 255 255 / 0.25);
+  --radius: 18px;
+  /* 本皮肤私有参数:磨砂(深 blur + 饱和回补,透出底色的「折射感」) + 玻璃切面
+     的三段边:顶缘镜面高光、整周细亮边、底缘内投影(厚玻璃下沿聚影) */
+  --glass-blur: saturate(1.8) blur(26px) brightness(1.05);
+  --glass-edge: inset 0 1px 0 rgb(255 255 255 / 0.85), inset 0 0 0 1px rgb(255 255 255 / 0.35),
+    inset 0 -22px 36px -28px rgb(84 110 160 / 0.5);
 }
 
-/* 底光:三团极光从边角洇开 —— 半透明面板要有可透之物,否则「玻璃」名不副实。
-   background-attachment: fixed 把渐变钉在视口上,滚动时玻璃滑过静止光斑,磨砂感
-   最强;代价是移动端 Safari 不认 fixed,退化为随页滚动,可接受。 */
+/* 底光分两层:body 铺一层细噪(去渐变色带纹,玻璃质感的隐形一半来自颗粒),
+   body::before 挂极光光斑 —— 用伪元素是为了能 transform 缓慢漂移(GPU 合成,
+   不重绘渐变),光斑在磨砂下缓缓流动才「液」得起来。inset 负值留位移余量。 */
 html[data-skin='glass'] body {
+  background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='140' height='140'%3E%3Cfilter id='n'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='0.8' numOctaves='2' stitchTiles='stitch'/%3E%3C/filter%3E%3Crect width='140' height='140' filter='url(%23n)' opacity='0.05'/%3E%3C/svg%3E");
+}
+
+html[data-skin='glass'] body::before {
+  content: '';
+  position: fixed;
+  inset: -14vmax;
+  z-index: -1;
   background-image:
-    radial-gradient(920px 620px at 6% -8%, rgb(122 170 232 / 0.55), transparent 62%),
-    radial-gradient(820px 560px at 102% 4%, rgb(78 200 190 / 0.4), transparent 58%),
-    radial-gradient(760px 640px at 50% 112%, rgb(168 138 224 / 0.35), transparent 62%);
-  background-attachment: fixed;
+    radial-gradient(52% 46% at 12% 4%, rgb(116 168 238 / 0.62), transparent 66%),
+    radial-gradient(46% 42% at 92% 10%, rgb(70 206 196 / 0.5), transparent 62%),
+    radial-gradient(52% 48% at 50% 104%, rgb(172 136 232 / 0.45), transparent 64%),
+    radial-gradient(38% 34% at 74% 62%, rgb(238 176 138 / 0.3), transparent 60%);
+  will-change: transform;
+}
+
+@media (prefers-reduced-motion: no-preference) {
+  html[data-skin='glass'] body::before {
+    animation: glass-aurora-drift 34s ease-in-out infinite;
+  }
+}
+
+@keyframes glass-aurora-drift {
+  from { transform: translate3d(-2.4%, -1.6%, 0) scale(1.05); }
+  50% { transform: translate3d(2.2%, 1.4%, 0) scale(1.12); }
+  to { transform: translate3d(-1%, 2.2%, 0) scale(1.06); }
 }
 
 /* 磨砂名单:凡是整块铺 var(--card) 当「板面」的元素。逐行的小表面(文件对照行、
@@ -3869,13 +3894,29 @@ html[data-skin='glass'] .modal {
 /* 遮罩跟着换打法:压暗更轻、模糊更深 —— 弹窗浮起时后景整片化开,玻璃感来自对比 */
 html[data-skin='glass'] .modal-overlay {
   background: rgb(20 28 42 / 0.28);
-  backdrop-filter: blur(10px) saturate(1.3);
+  backdrop-filter: blur(16px) saturate(1.4);
 }
 
 /* naive 浮层(弹层/下拉)底色已由 App.vue themeOverrides 给成半透明,只补磨砂 */
 html[data-skin='glass'] body .n-popover,
 html[data-skin='glass'] body .n-dropdown-menu {
   backdrop-filter: var(--glass-blur);
+}
+
+/* Tooltip 单独处理:它内部复用 Popover 主题,而 App.vue 给 Popover 定的半透明底
+   在合并序里压过了 tooltip 自带的深气泡色 —— 于是浅色主题下变成「白底 + 我们设的
+   浅色字」= 看不见。macOS 的 tooltip 本就是深磨砂,这里一律拉回深色,并把文字钉成
+   浅色。naive 把底色注入为内联 --n-color,普通类规则盖不动,必须 !important 直写
+   background-color/color;箭头无独立类,靠 `:has(.n-popover-arrow)` 命中带箭头的
+   tooltip 宿主再重给 --n-color(箭头自身读该变量),尽力而为不影响无箭头弹层。 */
+html[data-skin='glass'] body .n-popover.n-tooltip {
+  background-color: rgb(24 29 39 / 0.82) !important;
+  color: rgb(243 246 252 / 0.97) !important;
+  box-shadow: 0 10px 30px -12px rgb(8 12 20 / 0.55), var(--glass-edge);
+}
+
+html[data-skin='glass'] body .n-popover.n-tooltip:has(.n-popover-arrow) {
+  --n-color: rgb(24 29 39 / 0.82) !important;
 }
 
 /* ---------- 玻璃 × 深色 ----------
@@ -3890,14 +3931,21 @@ html[data-skin='glass'][data-theme='dark'] {
   --border-strong: rgb(150 170 200 / 0.36);
   --accent-soft: rgb(66 96 142 / 0.4);
   --shadow: 0 1px 2px rgb(0 0 0 / 0.4), 0 16px 42px -20px rgb(0 0 0 / 0.65);
-  --glass-edge: inset 0 1px 0 rgb(255 255 255 / 0.16), inset 0 0 0 1px rgb(255 255 255 / 0.07);
+  --radius: 18px;
+  /* 深底要更用力地提亮才透得出发光底光;镜面边整体压暗,只留「切面可辨」的量 */
+  --glass-blur: saturate(1.7) blur(26px) brightness(1.12);
+  --glass-edge: inset 0 1px 0 rgb(255 255 255 / 0.18), inset 0 0 0 1px rgb(255 255 255 / 0.08),
+    inset 0 -22px 36px -28px rgb(0 0 0 / 0.55);
 }
 
-html[data-skin='glass'][data-theme='dark'] body {
+/* 深色极光:换掉浅色 body::before 的四团冷白光,改成深底上的暗色相辉光。
+   细噪颗粒层(浅色 body 规则的数据 URI)在此沿用,不改 —— 深色同样需要去渐变色带。 */
+html[data-skin='glass'][data-theme='dark'] body::before {
   background-image:
-    radial-gradient(920px 620px at 6% -8%, rgb(78 124 190 / 0.35), transparent 62%),
-    radial-gradient(820px 560px at 102% 4%, rgb(32 130 124 / 0.28), transparent 58%),
-    radial-gradient(760px 640px at 50% 112%, rgb(106 82 160 / 0.3), transparent 62%);
+    radial-gradient(52% 46% at 12% 4%, rgb(62 112 182 / 0.4), transparent 66%),
+    radial-gradient(46% 42% at 92% 10%, rgb(26 118 112 / 0.34), transparent 62%),
+    radial-gradient(52% 48% at 50% 104%, rgb(92 68 148 / 0.36), transparent 64%),
+    radial-gradient(38% 34% at 74% 62%, rgb(158 96 66 / 0.22), transparent 60%);
 }
 
 html[data-skin='glass'][data-theme='dark'] .modal-overlay {

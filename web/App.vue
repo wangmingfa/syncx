@@ -35,8 +35,13 @@ const themeOverrides = computed<GlobalThemeOverrides>(() => {
   const dark = resolved.value === 'dark';
   return {
     ...base,
-    Popover: { color: dark ? 'rgba(27, 33, 44, 0.72)' : 'rgba(255, 255, 255, 0.72)' },
-    Dropdown: { color: dark ? 'rgba(27, 33, 44, 0.8)' : 'rgba(255, 255, 255, 0.8)' },
+    // 浮层气泡跟着主题走:浅色页=磨砂白气泡(配 naive 浅色深字),深色页=磨砂墨气泡
+    // (配 darkTheme 亮字)。一版不分深浅统一白气泡,深色页里 naive 亮字压在白底上直接糊掉。
+    // Tooltip 例外:它复用 Popover 的主题,气泡色在 style.css 玻璃段用 !important 定向
+    // 成 macOS 式深色磨砂(它的 textColor 没有同名竞争者,在这里给亮白即可读)。
+    Popover: { color: dark ? 'rgba(26, 32, 43, 0.66)' : 'rgba(255, 255, 255, 0.72)' },
+    Dropdown: { color: dark ? 'rgba(26, 32, 43, 0.74)' : 'rgba(255, 255, 255, 0.8)' },
+    Tooltip: { textColor: 'rgba(244, 247, 252, 0.96)' },
   };
 });
 
