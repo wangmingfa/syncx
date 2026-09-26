@@ -39,6 +39,14 @@
 ## 远期(底层增强)
 
 - [ ] **QUIC 传输**:弱网/丢包链路下比 TCP 明显更稳,块传输协议可平移。
+      2026-09 调研结论:暂缓。① Node 官方二进制(24 LTS/26 current)均未编译
+      `node:quic`(`process.features.quic=false`),内置路线不存在;
+      ② js-quic(`@matrixai/quic`)是唯一有 win32-x64 预编译的通用绑定,
+      主线停更于 2025-03,且原生 .node 无法进单文件发行物(同 node-pty,
+      只在旁挂 node_modules 的开发安装形态可用,发行形态不可测);
+      ③ `@chainsafe/libp2p-quic` 活跃且带 win32-msvc,但深绑 libp2p
+      (multiaddr/Ed25519/libp2p-TLS),无法独立取用。
+      等 Node 内置 QUIC 进入官方发行版后重启此项。
 - [x] **按需同步(稀疏文件)**:先同步索引不落盘,打开文件时再拉块——
       小盘设备(如 Android)的刚需大功能。
 - [x] **多实例集中管理**:一个 UI 管理多个 daemon(fleet 视图),
