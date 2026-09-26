@@ -25,6 +25,12 @@ export async function tryPreAuthRoutes(req: IncomingMessage, res: ServerResponse
     sendJson(res, 200, { ok: true, msg: 'syncx is ok', uptime: Math.floor(process.uptime()) });
     return true;
   }
+  // GET /healthz : 同一探活的 k8s/Prometheus 黑盒惯例别名(路径名标准化,载荷同款)。
+  // 指标本身走 /metrics(需登录);这里只回答「进程活着吗」。
+  if (req.method === 'GET' && path === '/healthz') {
+    sendJson(res, 200, { ok: true, msg: 'syncx is ok', uptime: Math.floor(process.uptime()) });
+    return true;
+  }
   // 浏览器在无 <link rel="icon"> 时会自动请求 .ico;这里显式给 204,
   // 否则会落到下方未认证分支返回 401,在控制台里误导排查。
   if (req.method === 'GET' && path === '/favicon.ico') {

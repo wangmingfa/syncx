@@ -7,6 +7,7 @@ import { tryPreAuthRoutes } from './api/routes/public.js';
 import { tryPublicAuthRoutes, tryAccountRoutes } from './api/routes/auth.js';
 import { tryElevationRoutes } from './api/routes/elevation.js';
 import { trySystemRoutes } from './api/routes/system.js';
+import { tryMetricsRoutes } from './api/routes/metrics.js';
 import { tryFolderRoutes } from './api/routes/folders.js';
 import { tryDeviceRoutes } from './api/routes/devices.js';
 import { tryOfferRoutes } from './api/routes/offers.js';
@@ -69,6 +70,8 @@ export function createControlServer(deps: ControlServerDeps): Server {
         // 已认证业务域;每域未命中返回 false,落到下一个域,最后 404
         if (await tryElevationRoutes(req, res, deps, auth)) return;
         if (await trySystemRoutes(req, res, deps)) return;
+        // Prometheus 抓取端点:走登录门(Bearer 令牌或会话 cookie),不进提权域
+        if (await tryMetricsRoutes(req, res, deps)) return;
         if (await tryAccountRoutes(req, res, deps, auth)) return;
         if (await tryFolderRoutes(req, res, deps)) return;
         if (await tryDeviceRoutes(req, res, deps)) return;

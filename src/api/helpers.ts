@@ -56,7 +56,8 @@ export function pathname(rawUrl: string): string {
  */
 export function isControlRoute(method: string, path: string): boolean {
   if (path.startsWith('/api/')) return true;
-  if (path === '/health') return true; // dev 模式下探活也命中控制服务,而不是被重定向到 vite
+  if (path === '/health' || path === '/healthz') return true; // dev 模式下探活也命中控制服务,而不是被重定向到 vite
+  if (path === '/metrics') return true; // Prometheus 抓取端点同理(见 routes/metrics.ts)
   // 表单提交走 control server:登录写 cookie,目录增删写配置。
   return method === 'POST' && (path === '/login' || path === '/folders' || path === '/actions');
 }
