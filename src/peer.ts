@@ -22,7 +22,8 @@ export type IndexMode = 'full' | 'delta';
 export interface PeerTransport {
   sendEntries(entries: IndexEntry[], mode: IndexMode, opts?: { relayed?: boolean }): void;
   sendBlockRequest(request: BlockRequest): void;
-  sendBlockResponse(response: BlockResponse): void;
+  /** opts.priority = 源块请求带「优先同步」标记:实现侧据此把响应插到发送队列最前。 */
+  sendBlockResponse(response: BlockResponse, opts?: { priority?: boolean }): void;
 }
 
 /** 对端索引到达时的附加说明。缺省(undefined)按 delta 处理,见 IndexMode。 */
@@ -129,6 +130,15 @@ export interface SyncPeer {
    * 没有积压(未拦截过 / 已重放)时是空操作;重放轮再次空间不足会重新挂起等待下次重放。
    */
   retryDiskBlocked(): void;
+  /**
+   * 「优先同步」(传输优先级):用户点名某在传文件插队。
+   *
+   * 本端能做两件事:①为该路径全部未收齐的块**重发**带 priority 标记的块请求 ——
+   * 发送端据此把这些文件的块响应插到限速队列最前(重复响应在接收闸门处去重,安全);
+   * ②记住该路径直到落地/中止,后续超时重试同样带标记,并在传输进度里透出 priority。
+   * 不在接收中的路径调用是空操作(还没开传的文件本就按规划顺序进行,无需插队)。
+   */
+  markPriority(path: string): void;
 }
 
 interface PendingEntry {
@@ -199,6 +209,9 @@ export function createSyncPeer(deps: SyncPeerDeps): SyncPeer {
   // 磁盘守卫积压:被拦下的那轮索引原文,等上层空间恢复后经 retryDiskBlocked 重放。
   // 不能只等对端下一轮增量 —— 对端没有新改动就不会再发,接收会无限期停摆。
   let diskBlockedRetry: { entries: IndexEntry[]; opts?: PeerIndexOptions } | null = null;
+  // 「优先同步」点名中的接收路径:块请求(含超时重试)都带 priority 标记,
+  // 直到该文件落地 / 中止 / 被放弃才清除(见 completeIfReady / abortPending / dropIfUnservable)。
+  const priorities = new Set<string>();
   // 正在向外供块的路径 → 最后一次发出该文件块的时间,用于展示「发送中」(见 SERVE_LEASE_MS)
   const serving = new Map<string, number>();
   // 文件级发送进度:每个供块路径累计 已发字节 / 总字节。servedBlocks 记录已发出的块下标,
@@ -251,6 +264,7 @@ export function createSyncPeer(deps: SyncPeerDeps): SyncPeer {
    *  而且迟到的块响应会把刚删除的文件临时复活。 */
   function abortPending(path: string): void {
     pending.delete(path);
+    priorities.delete(path);
     for (const [key, request] of pendingBlocks) {
       if (key.slice(0, key.lastIndexOf(':')) !== path) continue;
       clearTimeout(request.timeout);
@@ -272,6 +286,7 @@ export function createSyncPeer(deps: SyncPeerDeps): SyncPeer {
       if (key.slice(0, key.lastIndexOf(':')) === path) return; // 还有别的块在途
     }
     pending.delete(path);
+    priorities.delete(path);
     onStallDrop?.(path, item.entry.blocks.length - item.received);
   }
 
@@ -291,7 +306,14 @@ export function createSyncPeer(deps: SyncPeerDeps): SyncPeer {
       return;
     }
 
-    transport.sendBlockRequest({ deviceId, path, blockIndex, hash });
+    transport.sendBlockRequest({
+      deviceId,
+      path,
+      blockIndex,
+      hash,
+      // 被「优先同步」点名的路径:请求带标记,让对端发送队列把这些块插到最前
+      ...(priorities.has(path) ? { priority: true } : {}),
+    });
     const nextRetries = retries + 1;
     // 快速重试(5s×3)覆盖瞬时故障(丢包/对端短暂忙碌),之后退避到 30s 长间隔,
     // 给对端较长故障(重启、文件被锁)留恢复窗口;超过总上限才放弃。
@@ -340,6 +362,7 @@ export function createSyncPeer(deps: SyncPeerDeps): SyncPeer {
     if (!item || item.received !== item.entry.blocks.length) return;
 
     pending.delete(path);
+    priorities.delete(path); // 已落地:优先标记的使命完成,后续该路径的新传输回到默认排队
     const provider = {
       getBlocks: async (): Promise<Buffer[]> => item.blocks.map((b) => b ?? Buffer.alloc(0)),
     };
@@ -671,13 +694,17 @@ export function createSyncPeer(deps: SyncPeerDeps): SyncPeer {
       }
       // 块确实发出去了:记一笔发送字节,供瞬时速率统计
       recordBytes(data.length, 0);
-      transport.sendBlockResponse({
-        deviceId,
-        path: request.path,
-        blockIndex: request.blockIndex,
-        hash: request.hash,
-        data,
-      });
+      // 源请求带「优先同步」标记 → 本端发送队列把这个响应插到最前(见 wire.ts)
+      transport.sendBlockResponse(
+        {
+          deviceId,
+          path: request.path,
+          blockIndex: request.blockIndex,
+          hash: request.hash,
+          data,
+        },
+        { priority: request.priority === true },
+      );
     },
 
     async onBlockResponse(response: BlockResponse): Promise<void> {
@@ -722,7 +749,14 @@ export function createSyncPeer(deps: SyncPeerDeps): SyncPeer {
         if (item.kind !== 'receive') continue;
         let done = 0;
         for (const b of item.blocks) done += b?.length ?? 0;
-        files.push({ path, direction: 'receive', bytesDone: done, bytesTotal: item.entry.size });
+        files.push({
+          path,
+          direction: 'receive',
+          bytesDone: done,
+          bytesTotal: item.entry.size,
+          // 被「优先同步」点名中的行:UI 据此显示已提队状态,再点一次也无妨(幂等)
+          ...(priorities.has(path) ? { priority: true } : {}),
+        });
       }
       let receiving = 0;
       for (const item of pending.values()) {
@@ -763,6 +797,17 @@ export function createSyncPeer(deps: SyncPeerDeps): SyncPeer {
       if (!saved) return;
       diskBlockedRetry = null;
       void self.onPeerIndex(saved.entries, saved.opts);
+    },
+    markPriority(path: string): void {
+      const item = pending.get(path);
+      if (!item) return; // 不在接收中:无队可插(还没开传的文件本就按规划顺序进行)
+      priorities.add(path);
+      // 为该路径全部未收齐的块**重发**带标记的块请求:发送端按请求标记把对应
+      // 响应插到限速队列最前。重复块响应在 onBlockResponse 的闸门处去重,安全;
+      // requestBlock 自身会清旧定时器,重试链不重复叠加。
+      for (let i = 0; i < item.entry.blocks.length; i++) {
+        if (item.blocks[i] === undefined) requestBlock(path, i, item.entry.blocks[i]!);
+      }
     },
   };
   return self;

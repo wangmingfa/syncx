@@ -1601,3 +1601,123 @@ describe('disk space guard (checkDiskSpace)', () => {
     expect(requests).toHaveLength(0);
   });
 });
+
+describe('transfer priority (markPriority)', () => {
+  /** 记录 sendBlockResponse 的 opts,验证「优先同步」标记传到发送侧。 */
+  function fakeTransport() {
+    const sentEntries: IndexEntry[] = [];
+    const requests: BlockRequest[] = [];
+    const responses: Array<{ response: BlockResponse; priority: boolean }> = [];
+    return {
+      transport: {
+        sendEntries(entries: IndexEntry[]): void {
+          sentEntries.push(...entries);
+        },
+        sendBlockRequest(request: BlockRequest): void {
+          requests.push(request);
+        },
+        sendBlockResponse(response: BlockResponse, opts?: { priority?: boolean }): void {
+          responses.push({ response, priority: opts?.priority === true });
+        },
+      } satisfies PeerTransport,
+      sentEntries,
+      requests,
+      responses,
+    };
+  }
+
+  it('re-requests the missing blocks with the priority flag and surfaces it in progress', async () => {
+    const { transport, requests } = fakeTransport();
+    const peer = createSyncPeer({
+      transport,
+      localIndex: new Map(),
+      executor: null as never,
+      readLocalBlock: () => Buffer.from(''),
+      deviceId: 'dev-a',
+      remoteDeviceId: 'dev-b',
+    });
+
+    await peer.onPeerIndex([entry('big.bin', [['dev-b', 1]], ['h1', 'h2'], 5000)]);
+    // 常规规划的块请求不带 priority 字段(旧对端字节级不变)
+    expect(requests.map((r) => r.priority)).toEqual([undefined, undefined]);
+
+    peer.markPriority('big.bin');
+    expect(requests).toHaveLength(4);
+    const reissued = requests.slice(2);
+    expect(reissued.map((r) => r.blockIndex)).toEqual([0, 1]);
+    expect(reissued.every((r) => r.priority === true)).toBe(true);
+    expect(reissued.every((r) => r.path === 'big.bin')).toBe(true);
+
+    // 进度行透出 priority,UI 据此显示「已插队」
+    const row = peer.getSyncProgress().files?.find((f) => f.path === 'big.bin');
+    expect(row?.direction).toBe('receive');
+    expect(row?.priority).toBe(true);
+  });
+
+  it('is a no-op for paths that are not being received', async () => {
+    const { transport, requests } = fakeTransport();
+    const peer = createSyncPeer({
+      transport,
+      localIndex: new Map(),
+      executor: null as never,
+      readLocalBlock: () => Buffer.from(''),
+      deviceId: 'dev-a',
+    });
+
+    // 还没开传(不在 pending)的路径:无队可插,不抛错、不造请求
+    peer.markPriority('ghost.bin');
+    expect(requests).toHaveLength(0);
+    expect(peer.getSyncProgress().files ?? []).toEqual([]);
+  });
+
+  it('clears the priority mark once the file lands, so later transfers queue normally', async () => {
+    const { transport, requests } = fakeTransport();
+    const c0 = Buffer.from('first-block');
+    const c1 = Buffer.from('second-block');
+    const h0 = hashBlock(c0);
+    const h1 = hashBlock(c1);
+    const localIndex = new Map<string, IndexEntry>();
+    const peer = createSyncPeer({
+      transport,
+      localIndex,
+      executor: null as never,
+      readLocalBlock: () => Buffer.from(''),
+      deviceId: 'dev-a',
+      remoteDeviceId: 'dev-b',
+    });
+
+    await peer.onPeerIndex([entry('f.bin', [['dev-b', 1]], [h0, h1], c0.length + c1.length)]);
+    peer.markPriority('f.bin');
+    requests.length = 0;
+
+    await peer.onBlockResponse({ deviceId: 'dev-b', path: 'f.bin', blockIndex: 0, hash: h0, data: c0 });
+    await peer.onBlockResponse({ deviceId: 'dev-b', path: 'f.bin', blockIndex: 1, hash: h1, data: c1 });
+
+    // 落地后再次传输同路径(对端出新版,块全换):块请求不得再带 priority —— 标记是一次传输的,不是永久的
+    await peer.onPeerIndex([entry('f.bin', [['dev-b', 2]], ['h3', 'h4'], c0.length + c1.length)]);
+    const secondRound = requests.filter((r) => r.path === 'f.bin');
+    expect(secondRound.length).toBeGreaterThan(0);
+    expect(secondRound.every((r) => r.priority === undefined)).toBe(true);
+  });
+
+  it('passes the source request flag through to the responder transport as send opts', () => {
+    const { transport, responses } = fakeTransport();
+    const peer = createSyncPeer({
+      transport,
+      localIndex: new Map(),
+      executor: null as never,
+      readLocalBlock: (): Buffer => Buffer.from('payload'),
+      deviceId: 'dev-a',
+    });
+
+    peer.onBlockRequest({ deviceId: 'dev-b', path: 'a.bin', blockIndex: 0, hash: 'h' });
+    expect(responses).toHaveLength(1);
+    expect(responses[0]!.priority).toBe(false);
+
+    peer.onBlockRequest({ deviceId: 'dev-b', path: 'a.bin', blockIndex: 1, hash: 'h', priority: true });
+    expect(responses).toHaveLength(2);
+    expect(responses[1]!.priority).toBe(true);
+    // priority 是给本端排队决策用的,不进响应载荷本身
+    expect((responses[1]!.response as BlockResponse & { priority?: boolean }).priority).toBeUndefined();
+  });
+});

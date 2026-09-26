@@ -77,6 +77,22 @@ describe('block message codec', () => {
     expect(decodeBlockRequest(encodeBlockRequest(request))).toEqual(request);
   });
 
+  it('round-trips the priority flag on a block request, and stays byte-identical without it', () => {
+    const request = {
+      deviceId: 'DEV1234567',
+      path: 'docs/plan.md',
+      blockIndex: 1,
+      hash: 'abc123',
+      priority: true,
+    };
+
+    expect(decodeBlockRequest(encodeBlockRequest(request))).toEqual(request);
+    // 未提队的请求不带该字段(旧对端看到的字节不变)
+    expect(
+      encodeBlockRequest({ deviceId: 'D', path: 'a', blockIndex: 0, hash: 'h' }).toString('utf8'),
+    ).not.toContain('priority');
+  });
+
   it('round-trips a block response with binary data', () => {
     const response = {
       deviceId: 'DEV1234567',

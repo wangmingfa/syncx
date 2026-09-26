@@ -65,6 +65,8 @@ export interface ControlServerDeps {
   setFolderGitSync?: (folderId: string, mode: 'off' | 'send' | 'receive' | 'full') => void;
   /** 设置某目录的冲突自动处理策略(keep-both / newest-wins / local-wins)。 */
   setFolderConflictPolicy?: (folderId: string, policy: 'keep-both' | 'newest-wins' | 'local-wins') => void;
+  /** 「优先同步」:把该目录某个在传文件的块请求插到对端发送队列最前。 */
+  prioritizeTransfer?: (folderId: string, path: string) => void;
   /** 写入全局设置(设置弹窗):maxSendKbps / versionsPerPath / historyMaxEvents;null = 回默认。 */
   setGlobalSettings?: (patch: {
     maxSendKbps?: number | null;

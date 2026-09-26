@@ -2535,6 +2535,26 @@ export class SyncSessionManager {
   }
 
   /**
+   * 「优先同步」(传输优先级):用户点名该目录某个在传文件插队。
+   *
+   * 逐个在线对端 peer 调 markPriority:接收方向为自己重发带标记的块请求,
+   * 供块方向…本端只是应答者,提队由**发起方**标记块请求完成,所以这里覆盖
+   * 的正是「本机在收」的文件;对没有该文件在传的对端是空操作,天然幂等。
+   */
+  prioritizeTransfer(folderId: string, path: string): void {
+    const folder = this.folderStates.find((f) => f.id === folderId);
+    if (!folder) throw new Error('共享目录不存在(可能刚被移除)');
+    if (!path) throw new Error('path is required');
+    let marked = 0;
+    for (const peer of folder.peers.values()) {
+      peer.markPriority(path);
+      marked += 1;
+    }
+    this.logger.info(`transfer prioritized: ${folderId} ${path} (${marked} peers)`);
+    // 下一帧状态快照会把 priority 标记带上(files 行),无需在此额外推送
+  }
+
+  /**
    * 全局设置(设置弹窗提交):落盘后按需热生效 ——
    *  - maxSendKbps 变化:重建「未单独限速」目录的传输通道(令牌桶挂在 transport 上);
    *  - versionsPerPath 变化:重建全部执行器(版本上限是 executor 闭包常量);

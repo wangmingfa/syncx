@@ -879,10 +879,10 @@ html[data-theme='dark'] .chip-menu__item--danger {
 
 .xfer-file {
   display: grid;
-  grid-template-columns: 14px 1fr auto;
+  grid-template-columns: 14px 1fr auto auto;
   grid-template-areas:
-    'dir name pct'
-    'bar bar bar';
+    'dir name pct prio'
+    'bar bar bar bar';
   align-items: center;
   gap: 2px 6px;
   font-size: 11.5px;
@@ -907,6 +907,30 @@ html[data-theme='dark'] .chip-menu__item--danger {
   grid-area: pct;
   color: var(--muted-strong);
   font-variant-numeric: tabular-nums;
+}
+
+/* 「优先同步」提队按钮(仅接收方向的行显示):未提队时是暗色小箭头,
+   点过 / 已提队(tf.priority)转成实色,提示幂等无需再点。 */
+.xfer-file__prio {
+  grid-area: prio;
+  border: none;
+  background: none;
+  padding: 0 2px;
+  cursor: pointer;
+  font-size: 11px;
+  line-height: 1;
+  color: var(--muted-strong);
+  opacity: 0.65;
+}
+
+.xfer-file__prio:hover {
+  opacity: 1;
+}
+
+.xfer-file__prio.is-on {
+  color: var(--accent, #e8a33d);
+  opacity: 1;
+  cursor: default;
 }
 
 .xfer-file__bar {

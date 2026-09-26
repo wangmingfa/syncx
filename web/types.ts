@@ -7,6 +7,8 @@ export interface TransferFile {
   direction: 'send' | 'receive';
   bytesDone: number;
   bytesTotal: number;
+  /** 已被「优先同步」点名插队(仅接收方向);缺省 = 未提队。 */
+  priority?: boolean;
 }
 
 export interface SyncProgressItem {

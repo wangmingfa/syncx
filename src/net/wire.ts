@@ -144,15 +144,20 @@ export function makePeerTransport(
   rateLimiter?: RateLimiter,
 ): PeerTransport {
   const limiter = rateLimiter ?? new RateLimiter(0);
-  // 串行化限速发送:队列中每条消息都等待前一条消耗完令牌后再计算等待,
-  // 避免多条消息基于同一令牌快照同时醒来,造成约 2 倍速率的突发发送。
-  let sendQueue: Promise<void> = Promise.resolve();
+  // 限速发送队列(数组):令牌等待天然串行 —— 每条消息都在轮到自己时重新评估
+  // 等待,不会基于同一令牌快照同时醒来造成约 2 倍速率的突发发送。
+  // 「优先同步」的块响应插到队首(见 enqueue 的 priority),让被大队列卡住的
+  // 小文件越过普通消息先走;限速语义不变(插队不省令牌,只换个位置等)。
+  const outbox: Array<{ data: string; priority: boolean }> = [];
+  let draining = false;
 
-  /** 按限速发送一条消息:令牌不足时排队等待,等待后重新评估并消耗令牌。 */
-  function sendRateLimited(data: string): void {
-    const bytes = Buffer.byteLength(data);
-    sendQueue = sendQueue
-      .then(async () => {
+  async function drainOutbox(): Promise<void> {
+    if (draining) return;
+    draining = true;
+    try {
+      while (outbox.length > 0) {
+        const item = outbox.shift()!;
+        const bytes = Buffer.byteLength(item.data);
         const wait = limiter.waitTime(bytes);
         if (wait > 0) {
           await new Promise((resolve) => setTimeout(resolve, wait));
@@ -162,11 +167,21 @@ export function makePeerTransport(
         if (!limiter.tryConsume(bytes)) {
           limiter.drain();
         }
-        socket.send(data);
-      })
-      .catch(() => {
-        // socket 可能在排队期间已关闭;忽略发送失败,后续消息不受影响
-      });
+        socket.send(item.data);
+      }
+    } finally {
+      draining = false;
+    }
+  }
+
+  /** 按限速发送一条消息:入队(priority = true 插队到队首)并由 drain 循环串行发出。 */
+  function sendRateLimited(data: string, priority = false): void {
+    if (priority) {
+      outbox.unshift({ data, priority: true });
+    } else {
+      outbox.push({ data, priority: false });
+    }
+    void drainOutbox();
   }
 
   return {
@@ -184,13 +199,16 @@ export function makePeerTransport(
     sendBlockRequest(request: BlockRequest): void {
       sendRateLimited(encryptMessage(key, { type: 'block-request', folder: folderPath, payload: request }));
     },
-    sendBlockResponse(response: BlockResponse): void {
+    sendBlockResponse(response: BlockResponse, opts?: { priority?: boolean }): void {
+      // 响应上线前不带 priority:它只是本端排队决策(源块请求的标记),对端无需感知
+      const { priority: _drop, ...payload } = response as BlockResponse & { priority?: boolean };
       sendRateLimited(
         encryptMessage(key, {
           type: 'block-response',
           folder: folderPath,
-          payload: { ...response, data: response.data.toString('base64') },
+          payload: { ...payload, data: response.data.toString('base64') },
         }),
+        opts?.priority === true,
       );
     },
   };

@@ -83,6 +83,8 @@ export interface StatusContext extends FolderDiffApi {
   toggleFolderPaused: (f: FolderInfo, paused: boolean) => Promise<void>;
   /** 「目录不可信」横幅上的重新采集身份(仅更新指纹,索引不动)。 */
   reAdoptIdentity: (f: FolderInfo) => Promise<void>;
+  /** 「优先同步」:把该目录某个在收文件的块请求插到对端发送队列最前(幂等)。 */
+  prioritizeFile: (f: FolderInfo, path: string) => Promise<void>;
   /** 全局暂停/恢复同步:所有目录一起停摆,各目录自己的暂停状态独立保留。 */
   toggleGlobalPaused: (paused: boolean) => Promise<void>;
 

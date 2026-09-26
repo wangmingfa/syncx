@@ -56,7 +56,7 @@ export async function tryFolderRoutes(
   res: ServerResponse,
   deps: ControlServerDeps,
 ): Promise<boolean> {
-  const { addFolder, removeFolder, setFolderDevices, setFolderUseGitignore, setFolderPaused, setFolderSchedule, setFolderGitSync, setFolderConflictPolicy, reAdoptFolderIdentity, getFolderHistory, getGlobalHistory, clearFolderHistory, listFolderConflicts, resolveFolderConflict, conflictFilePair, applyConflictMerge, cleanIdenticalConflicts, diffFolder, compareFolder, readFilePair, applyFileSync, listFolderVersions, restoreFolderVersion, deleteFolderVersion } = deps;
+  const { addFolder, removeFolder, setFolderDevices, setFolderUseGitignore, setFolderPaused, setFolderSchedule, setFolderGitSync, setFolderConflictPolicy, prioritizeTransfer, reAdoptFolderIdentity, getFolderHistory, getGlobalHistory, clearFolderHistory, listFolderConflicts, resolveFolderConflict, conflictFilePair, applyConflictMerge, cleanIdenticalConflicts, diffFolder, compareFolder, readFilePair, applyFileSync, listFolderVersions, restoreFolderVersion, deleteFolderVersion } = deps;
   const path = req.url ? pathname(req.url) : '/';
 
   // Form POST /folders : add or (via _method=DELETE) remove a folder
@@ -223,6 +223,30 @@ export async function tryFolderRoutes(
       sendJson(res, 200, { ok: true });
     } catch (e) {
       sendJson(res, 400, { error: e instanceof Error ? e.message : '设置冲突策略失败' });
+    }
+    return true;
+  }
+
+  // POST /api/folders/prioritize { folderId, path } : 「优先同步」某个在传文件。
+  // 幂等:该文件此刻没在收就是空操作;在收则让对端发送队列把它的块插到最前。
+  if (req.method === 'POST' && path === '/api/folders/prioritize' && prioritizeTransfer) {
+    try {
+      const raw = await readBody(req);
+      const body = raw === '' ? {} : JSON.parse(raw);
+      const folderId = (body as { folderId?: unknown }).folderId;
+      const p = (body as { path?: unknown }).path;
+      if (typeof folderId !== 'string' || folderId === '') {
+        sendJson(res, 400, { error: 'folderId is required' });
+        return true;
+      }
+      if (typeof p !== 'string' || p === '') {
+        sendJson(res, 400, { error: 'path is required' });
+        return true;
+      }
+      prioritizeTransfer(folderId, p);
+      sendJson(res, 200, { ok: true });
+    } catch (e) {
+      sendJson(res, 400, { error: e instanceof Error ? e.message : '优先同步请求失败' });
     }
     return true;
   }

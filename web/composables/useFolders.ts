@@ -42,6 +42,8 @@ export function useFolders(deps: CoreDeps): {
   /** 非空 = 打开该目录的文件版本弹窗。 */
   versionsFolder: Ref<FolderInfo | null>;
   saveEditDevices: (payload: { path: string; devices: string[]; gitignore: boolean; schedule: string; gitSync: GitSyncMode; conflictPolicy: ConflictPolicy }) => Promise<void>;
+  /** 「优先同步」:把该目录某个在传文件的块请求插到对端发送队列最前(幂等)。 */
+  prioritizeFile: (f: FolderInfo, path: string) => Promise<void>;
   toggleFolderPaused: (f: FolderInfo, paused: boolean) => Promise<void>;
   toggleGlobalPaused: (paused: boolean) => Promise<void>;
   /** 「目录不可信」横幅上的重新采集身份(仅更新指纹,索引不动)。 */
@@ -213,6 +215,24 @@ export function useFolders(deps: CoreDeps): {
     await refreshStatus();
   }
 
+  /**
+   * 「优先同步」:让该目录某个在收文件插队到对端发送队列最前。
+   * 幂等 —— 此刻没在收就是空操作,点了没反应等下一轮状态推送自然会显示。
+   */
+  async function prioritizeFile(f: FolderInfo, path: string): Promise<void> {
+    try {
+      await apiJson('/api/folders/prioritize', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ folderId: f.id ?? f.path, path }),
+      });
+      showToast(`已请求优先同步「${path.split('/').pop() ?? path}」`);
+    } catch (e) {
+      showToast(errText(e, '优先同步请求失败'), 'alert');
+    }
+    await refreshStatus();
+  }
+
   /** 提交某目录的同步时段(空串 = 清除,全天同步);失败回读后端真实状态。 */
   async function saveFolderSchedule(f: FolderInfo, schedule: string): Promise<void> {
     try {
@@ -372,6 +392,7 @@ export function useFolders(deps: CoreDeps): {
     editDevicesOpen,
     editFolder,
     saveEditDevices,
+    prioritizeFile,
     historyFolder,
     historyGlobal,
     conflictsFolder,

@@ -63,6 +63,13 @@ export interface BlockRequest {
   path: string;
   blockIndex: number;
   hash: string;
+  /**
+   * 「优先同步」标记:接收方手动提队某文件后,为该文件重发的块请求带上它。
+   * 发送方据此把该文件的块响应插到限速发送队列最前(见 wire.ts),让被卡住的
+   * 小文件越过排在前面的一大块。可选字段,JSON 协议旧版对端直接忽略 —— 只是
+   * 少了插队能力,正确性不受影响。
+   */
+  priority?: boolean;
 }
 
 export interface BlockResponse {

@@ -41,6 +41,11 @@ export interface TransferFile {
   bytesDone: number;
   /** 文件总字节数。 */
   bytesTotal: number;
+  /**
+   * 该行已被用户「优先同步」点名(仅接收方向会出现):块请求带优先标记,对端
+   * 发送队列已把这些块插到最前。缺省 = 未提队。
+   */
+  priority?: boolean;
 }
 
 export interface ProgressCounts {

@@ -78,6 +78,7 @@ const {
   toggleFolderPaused,
   toggleGlobalPaused,
   reAdoptIdentity,
+  prioritizeFile,
   askConfirm,
   copy,
   hoverFolderKey,
@@ -424,6 +425,15 @@ function visibleFiles(f: FolderInfo): TransferFile[] {
             <span class="xfer-file__dir" :title="tf.direction === 'receive' ? '下载中' : '上传中'">{{ tf.direction === 'receive' ? '↓' : '↑' }}</span>
             <span class="xfer-file__name" :title="tf.path">{{ basename(tf.path) }}</span>
             <span class="xfer-file__pct">{{ filePercent(tf) }}%</span>
+            <!-- 「优先同步」:让对端把该文件的块插到其限速发送队列最前(幂等,仅接收方向可提) -->
+            <button
+              v-if="tf.direction === 'receive'"
+              class="xfer-file__prio"
+              :class="{ 'is-on': tf.priority }"
+              :title="tf.priority ? '已优先:对端正把它的块插队发送' : '优先同步:插队到对端发送队列最前'"
+              :aria-label="tf.priority ? '已优先同步' : '优先同步'"
+              @click="prioritizeFile(f, tf.path)"
+            >▲</button>
             <div class="progress-bar xfer-file__bar">
               <div class="progress-fill" :style="{ width: filePercent(tf) + '%' }"></div>
             </div>
