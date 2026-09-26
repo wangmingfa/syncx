@@ -103,6 +103,11 @@ const settingsOpen = ref(false);
 function openTerminal(): void {
   window.open('/terminal', '_blank');
 }
+// 多实例集中管理:独立页(本机 daemon 代理探测远端),同样新开标签,
+// 不顶掉当前状态页。
+function openFleet(): void {
+  window.open('/fleet', '_blank');
+}
 function openGuide(): void {
   showGuide.value = true;
 }
@@ -190,6 +195,7 @@ provide(StatusContextKey, {
   settingsOpen,
   openSettings,
   openTerminal,
+  openFleet,
   notifSupported: notifications.notifSupported,
   notifEnabled: notifications.notifEnabled,
   toggleNotifications: notifications.toggleNotifications,

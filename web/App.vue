@@ -6,6 +6,7 @@ import LoginForm from './LoginForm.vue';
 import ComparePage from './ComparePage.vue';
 import TerminalPage from './TerminalPage.vue';
 import FileManagerPage from './FileManagerPage.vue';
+import FleetPage from './FleetPage.vue';
 import { route } from './utils/route';
 import { useTheme } from './composables/useTheme';
 import type { StatusData } from './types';
@@ -51,6 +52,7 @@ onMounted(async () => {
     <!-- 路由优先于状态页:终端页/文件管理器页不依赖本页 status(各自拉取,401 自行处理) -->
     <TerminalPage v-if="route.name === 'terminal'" />
     <FileManagerPage v-else-if="route.name === 'files'" />
+    <FleetPage v-else-if="route.name === 'fleet'" />
     <ComparePage
       v-else-if="status && route.name === 'compare' && route.folderId"
       :status="status"

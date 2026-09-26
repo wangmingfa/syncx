@@ -9,7 +9,7 @@ import { useTheme, type ThemeMode } from '../composables/useTheme';
 import { formatBytes } from '../utils/bytes';
 import { osIconLabel } from '../utils/os-icon';
 
-const { status, busy, checkForUpdate, openUpload, openLogs, openTopology, openTraffic, openGuide, openSettings, openTerminal, openAuth, logout, copy, notifSupported, notifEnabled, toggleNotifications } = useStatusContext();
+const { status, busy, checkForUpdate, openUpload, openLogs, openTopology, openTraffic, openGuide, openSettings, openTerminal, openFleet, openAuth, logout, copy, notifSupported, notifEnabled, toggleNotifications } = useStatusContext();
 const { mode: themeMode, resolved: themeResolved, setMode } = useTheme();
 
 const themeOptions: DropdownOption[] = [
@@ -72,6 +72,7 @@ type ChipRow =
 const chipRows = computed<ChipRow[]>(() => [
   { kind: 'item', label: '全局设置', run: openSettings },
   { kind: 'item', label: '终端', run: openTerminal },
+  { kind: 'item', label: '多实例', run: openFleet },
   { kind: 'item', label: '日志', run: openLogs },
   { kind: 'item', label: '拓扑', run: openTopology, disabled: busy.value },
   { kind: 'divider' },

@@ -152,6 +152,8 @@ export interface StatusContext extends FolderDiffApi {
   openSettings: () => void;
   /** 浏览器内终端(独立全屏页 /terminal):顶栏本机 chip 菜单「终端」触发。 */
   openTerminal: () => void;
+  /** 多实例集中管理(独立页 /fleet):顶栏 chip 菜单「多实例」触发。 */
+  openFleet: () => void;
   /** 桌面通知:浏览器偏好(localStorage),开关在顶栏铃铛。 */
   notifSupported: boolean;
   notifEnabled: Ref<boolean>;

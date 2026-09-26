@@ -10,6 +10,7 @@ import { trySystemRoutes } from './api/routes/system.js';
 import { tryFolderRoutes } from './api/routes/folders.js';
 import { tryDeviceRoutes } from './api/routes/devices.js';
 import { tryOfferRoutes } from './api/routes/offers.js';
+import { tryFleetRoutes } from './api/routes/fleet.js';
 import { tryFileRoutes } from './api/routes/files.js';
 import { TERMINAL_PATH } from './api/terminal.js';
 
@@ -72,6 +73,8 @@ export function createControlServer(deps: ControlServerDeps): Server {
         if (await tryFolderRoutes(req, res, deps)) return;
         if (await tryDeviceRoutes(req, res, deps)) return;
         if (await tryOfferRoutes(req, res, deps)) return;
+        // fleet 代理:多实例集中管理页经本机 daemon 转发远端 daemon(白名单收紧,见 routes/fleet.ts)
+        if (await tryFleetRoutes(req, res)) return;
         // 文件管理器是敏感域:除了登录,还要一次性提权(终端/文件管理器共用)
         if (await tryFileRoutes(req, res, deps, auth.elevateOk(readCookie(req, ELEVATE_COOKIE)), auth.issueElevation)) return;
 
