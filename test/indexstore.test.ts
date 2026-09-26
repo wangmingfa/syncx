@@ -126,4 +126,48 @@ describe('index store', () => {
 
     rmDir(dir);
   });
+
+  it('CDC 视图(cdh/clens)随条目往返;未写入的读回 undefined', () => {
+    const store = openIndexStore(':memory:');
+    const withCdc = {
+      ...entry('big.bin', [['dev-a', 1]]),
+      cdh: ['h1', 'h2'],
+      clens: [700000, 300000],
+    };
+    store.saveEntry(withCdc);
+    expect(store.getEntry('big.bin')).toEqual(withCdc);
+    expect(store.listEntries()).toEqual([withCdc]);
+
+    // 不带 CDC 视图的条目(旧版路径):读回保持缺省,不得冒出空数组
+    store.saveEntry(entry('plain.bin', [['dev-a', 1]]));
+    const plain = store.getEntry('plain.bin');
+    expect(plain?.cdh).toBeUndefined();
+    expect(plain?.clens).toBeUndefined();
+    store.close();
+  });
+
+  it('旧库行(无 CDC 数据)在新代码下读回 undefined;坏 JSON 不炸整库读', () => {
+    const dir = mkdtempSync(join(tmpdir(), 'syncx-index-cdc-'));
+    const dbPath = join(dir, 'index.db');
+    const store = openIndexStore(dbPath);
+    // 模拟旧库:直接 SQL 写入不含 cdh/clens 的行(DEFAULT '' 即「无视图」)
+    store.close();
+    const raw = new DatabaseSync(dbPath);
+    raw.exec(
+      "INSERT OR REPLACE INTO entries (path, version, size, deleted, blocks, mtime, placeholder) VALUES ('old.bin', '[]', 9, 0, '[]', 0, 0)",
+    );
+    // 模拟坏数据:列里塞了非法 JSON(库被外部写坏)——读回按无视图处理而非抛错
+    raw.exec(
+      "INSERT OR REPLACE INTO entries (path, version, size, deleted, blocks, mtime, placeholder, cdh, clens) VALUES ('bad.bin', '[]', 9, 0, '[\"h\"]', 0, 0, '{oops', '[1]')",
+    );
+    raw.close();
+
+    const reopened = openIndexStore(dbPath);
+    expect(reopened.getEntry('old.bin')?.cdh).toBeUndefined();
+    const bad = reopened.getEntry('bad.bin');
+    expect(bad?.cdh).toBeUndefined();
+    expect(bad?.blocks).toEqual(['h']); // 坏 CDC 视图不连累条目本身
+    reopened.close();
+    rmDir(dir);
+  });
 });

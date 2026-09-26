@@ -15,6 +15,13 @@ interface WireEntry {
    * 这是 mtime 语义的固有代价,策略文案中已向用户提示。
    */
   mtime?: number;
+  /**
+   * CDC 块哈希/块长(见 IndexEntry.cdh)。**纯附加**字段:旧版对端的解码是显式
+   * 字段映射,不认识它就直接丢弃 → 自动退回定长块口径;新版↔新版双方都有时才
+   * 启用按内容分块的差集规划。正因为是纯附加,这里**不需要任何能力协商**。
+   */
+  cdh?: string[];
+  clens?: number[];
 }
 
 export function encodeIndex(entries: IndexEntry[]): Buffer {
@@ -29,6 +36,9 @@ export function encodeIndex(entries: IndexEntry[]): Buffer {
     blocks: e.blocks,
     // mtime 随索引出线:供对端 newest-wins 冲突策略比较新旧(见 WireEntry.mtime)
     mtime: e.mtime,
+    // CDC 视图随条目出线(纯附加,旧对端忽略,见 WireEntry.cdh)
+    cdh: e.cdh,
+    clens: e.clens,
   }));
   return Buffer.from(JSON.stringify(wire), 'utf8');
 }
@@ -42,6 +52,10 @@ export function decodeIndex(buffer: Buffer): IndexEntry[] {
     deleted: e.deleted,
     blocks: e.blocks,
     mtime: e.mtime,
+    // cdh 与 clens 必须等长且非空才算有 CDC 视图(对端数据不可信,宽进严出)
+    ...(e.cdh && e.clens && e.cdh.length > 0 && e.cdh.length === e.clens.length
+      ? { cdh: e.cdh, clens: e.clens }
+      : {}),
   }));
 }
 
@@ -73,6 +87,14 @@ export interface BlockRequest {
    * 少了插队能力,正确性不受影响。
    */
   priority?: boolean;
+  /**
+   * 块口径标记:true = blockIndex/hash 按 **CDC 内容分块**口径
+   * (该路径条目 cdh/clens 列表的下标与偏移,响应块长可达 CDC_MAX_CHUNK)。
+   * 可选字段:不带 = 定长 1MB 块(旧版对端、或本条目没有 CDC 视图),双向兼容,
+   * 无需协商 —— 旧对端收到带标记的请求也只会按定长供块,接收端哈希校验不过自然
+   * 退回重试/下轮收敛(效率退化,数据不会坏)。
+   */
+  cdc?: boolean;
 }
 
 export interface BlockResponse {
@@ -81,6 +103,8 @@ export interface BlockResponse {
   blockIndex: number;
   hash: string;
   data: Buffer;
+  /** 回显请求的 CDC 口径标记(见 BlockRequest.cdc),接收端据此选择校验列表。 */
+  cdc?: boolean;
 }
 
 export function encodeBlockRequest(request: BlockRequest): Buffer {
@@ -99,6 +123,7 @@ export function encodeBlockResponse(response: BlockResponse): Buffer {
       blockIndex: response.blockIndex,
       hash: response.hash,
       data: response.data.toString('base64'),
+      cdc: response.cdc,
     }),
     'utf8',
   );
@@ -114,5 +139,6 @@ export function decodeBlockResponse(buffer: Buffer): BlockResponse {
     blockIndex: wire.blockIndex,
     hash: wire.hash,
     data: Buffer.from(wire.data, 'base64'),
+    ...(wire.cdc === true ? { cdc: true } : {}),
   };
 }

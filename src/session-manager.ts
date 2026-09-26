@@ -41,7 +41,7 @@ import { createSyncPeer, type PeerTransport, type SyncPeer } from './peer.js';
 import { freeBytesAt, DISK_GUARD_MIN_FREE_BYTES } from './disk.js';
 import { scanFolder } from './scanner.js';
 import type { IndexEntry } from './index.js';
-import { hashBlock, splitIntoBlocks, readBlockAt } from './blockstore.js';
+import { hashBlock, splitIntoBlocks, readBlockAt, chunkHashes, readChunkAt } from './blockstore.js';
 import { createVersionVector, incrementVersion, mergeVersions, type VersionVector } from './version.js';
 import { recordSyncEvent, setHistoryMaxEvents } from './history.js';
 import { parseConflictCopy } from './conflicts.js';
@@ -1256,6 +1256,9 @@ export class SyncSessionManager {
         // 控制面网页假死),见 readBlockAt 的注释。
         return readBlockAt(resolveSharePath(folder.path, path), blockIndex);
       },
+      // CDC 口径的本地读块(预填/供块共用,见 peer.ts):按 (偏移, 块长) 只读那一块
+      readLocalChunk: (path, offset, length) =>
+        readChunkAt(resolveSharePath(folder.path, path), offset, length),
       deviceId: this.identity.deviceId,
       remoteDeviceId: session.remoteDeviceId,
       // 块请求服务侧路径校验(经符号链接逃逸的路径不响应)
@@ -1979,6 +1982,7 @@ export class SyncSessionManager {
     const tmp = `${abs}.syncx-tmp`;
     writeFileSync(tmp, data);
     renameSync(tmp, abs);
+    const { hashes: cdh, lengths: clens } = chunkHashes(data);
     const entry: IndexEntry = {
       path,
       version,
@@ -1986,6 +1990,7 @@ export class SyncSessionManager {
       deleted: false,
       blocks: splitIntoBlocks(data).map(hashBlock),
       mtime: statSync(abs).mtimeMs,
+      ...(cdh.length > 0 ? { cdh, clens } : {}),
     };
     folder.index.saveEntry(entry);
     folder.localIndex.set(path, entry);

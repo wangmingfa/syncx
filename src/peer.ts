@@ -3,7 +3,7 @@ import { buildPlan, buildDeltaPlan } from './plan.js';
 import type { BlockRequest, BlockResponse } from './messages.js';
 import type { LocalExecutor } from './executor.js';
 import { resolveSharePath, preserveLocalAsConflict } from './executor.js';
-import { verifyBlock, hashBlock, BLOCK_SIZE } from './blockstore.js';
+import { verifyBlock, hashBlock, splitIntoBlocks, BLOCK_SIZE, CDC_MAX_CHUNK } from './blockstore.js';
 import { decPathFor, encryptBlock } from './e2e.js';
 import { parseIgnoreRules, isIgnoredPath, isHardIgnored, type IgnoreRule } from './ignore.js';
 import { mergeVersions } from './version.js';
@@ -53,6 +53,12 @@ export interface SyncPeerDeps {
   localIndex: Map<string, IndexEntry>;
   executor?: LocalExecutor;
   readLocalBlock(path: string, blockIndex: number): Buffer;
+  /**
+   * CDC 口径的本地读块:按 (偏移, 长度) 只读内容分块列表里的某一块(预填与供块共用)。
+   * 可选:旧调用方/测试没提供时,CDC 视图整体退化为定长块口径(只损失差集收益,
+   * 不影响正确性)。实现侧须与 readLocalBlock 同样做符号链接越界守卫。
+   */
+  readLocalChunk?(path: string, offset: number, length: number): Buffer;
   deviceId: string;
   /** Peer device ID, used to name conflict copies. */
   remoteDeviceId?: string;
@@ -179,12 +185,22 @@ interface PendingEntry {
   local?: IndexEntry;
   blocks: Array<Buffer | undefined>;
   received: number;
+  /**
+   * 本次接收按 CDC 内容分块口径规划:true 时 blocks 槽位与块下标对应
+   * entry.cdh/clens(而不是 entry.blocks);落地前拼接还原后按定长口径重新切块,
+   * 执行器与校验完全不用感知两种布局(见 completeIfReady)。
+   */
+  cdc: boolean;
 }
 
 /** 单个块请求的超时与重试状态。 */
 interface PendingBlockRequest {
   timeout: ReturnType<typeof setTimeout>;
   retries: number;
+  /** 所属接收路径(键只做身份、不做结构:清路径在途项按字段匹配)。 */
+  path: string;
+  /** 该在途请求的块口径(与所属 PendingEntry.cdc 一致),用于键消歧与重试闭包。 */
+  cdc: boolean;
 }
 
 const BLOCK_REQUEST_TIMEOUT_MS = 5000;
@@ -232,7 +248,7 @@ const RATE_SPAN_FLOOR_MS = 1000;
  * complete, then apply it via the executor.
  */
 export function createSyncPeer(deps: SyncPeerDeps): SyncPeer {
-  const { transport, localIndex, executor, readLocalBlock, deviceId, remoteDeviceId, root, onEvent, onTraffic, readIgnoreLines, receiveOnly, getConflictPolicy, getOnDemand, isPausedPath, checkDiskSpace, onHardIgnoredDropped, onLanded, onStallDrop, e2eKey } = deps;
+  const { transport, localIndex, executor, readLocalBlock, readLocalChunk, deviceId, remoteDeviceId, root, onEvent, onTraffic, readIgnoreLines, receiveOnly, getConflictPolicy, getOnDemand, isPausedPath, checkDiskSpace, onHardIgnoredDropped, onLanded, onStallDrop, e2eKey } = deps;
   const pending = new Map<string, PendingEntry>();
   // 逐块跟踪超时重试:块响应丢失/丢弃时自动重发,避免文件永远收不齐
   const pendingBlocks = new Map<string, PendingBlockRequest>();
@@ -286,8 +302,14 @@ export function createSyncPeer(deps: SyncPeerDeps): SyncPeer {
     return cachedIgnoreRules;
   }
 
-  function blockKey(path: string, blockIndex: number): string {
-    return `${path}:${blockIndex}`;
+  /**
+   * 在途块请求的键:路径 + 块下标 + 块口径。cdc 参与键构造,因为同一路径下
+   * 「定长第 i 块」与「CDC 第 i 块」是两个不同的东西(重规划切换口径时
+   * 两套重试不能互相顶掉)。path/cdc 同时存进记录本体,清路径在途项按字段
+   * 匹配而不是解析键字符串(路径可含冒号,键只做身份、不做结构)。
+   */
+  function blockKey(path: string, blockIndex: number, cdc: boolean): string {
+    return `${cdc ? 'c' : 'b'}:${path}:${blockIndex}`;
   }
 
   /** 中止某路径的在途接收与块重试:对端声明它已删除时,继续拉块毫无意义,
@@ -296,7 +318,7 @@ export function createSyncPeer(deps: SyncPeerDeps): SyncPeer {
     pending.delete(path);
     priorities.delete(path);
     for (const [key, request] of pendingBlocks) {
-      if (key.slice(0, key.lastIndexOf(':')) !== path) continue;
+      if (request.path !== path) continue;
       clearTimeout(request.timeout);
       pendingBlocks.delete(key);
     }
@@ -312,17 +334,17 @@ export function createSyncPeer(deps: SyncPeerDeps): SyncPeer {
   function dropIfUnservable(path: string): void {
     const item = pending.get(path);
     if (!item) return;
-    for (const key of pendingBlocks.keys()) {
-      if (key.slice(0, key.lastIndexOf(':')) === path) return; // 还有别的块在途
+    for (const request of pendingBlocks.values()) {
+      if (request.path === path) return; // 还有别的块在途
     }
     pending.delete(path);
     priorities.delete(path);
-    onStallDrop?.(path, item.entry.blocks.length - item.received);
+    onStallDrop?.(path, slotCount(item) - item.received);
   }
 
-  /** 发送单个块请求并设置超时重试。 */
-  function requestBlock(path: string, blockIndex: number, hash: string): void {
-    const key = blockKey(path, blockIndex);
+  /** 发送单个块请求并设置超时重试。cdc = 请求按内容分块口径索块(见 BlockRequest.cdc)。 */
+  function requestBlock(path: string, blockIndex: number, hash: string, cdc: boolean): void {
+    const key = blockKey(path, blockIndex, cdc);
     const existing = pendingBlocks.get(key);
     const retries = existing?.retries ?? 0;
     if (existing) clearTimeout(existing.timeout);
@@ -343,27 +365,83 @@ export function createSyncPeer(deps: SyncPeerDeps): SyncPeer {
       hash,
       // 被「优先同步」点名的路径:请求带标记,让对端发送队列把这些块插到最前
       ...(priorities.has(path) ? { priority: true } : {}),
+      // CDC 口径请求:对端(须是新版)按该条目的 clens 前缀和算偏移供块
+      ...(cdc ? { cdc: true } : {}),
     });
     const nextRetries = retries + 1;
     // 快速重试(5s×3)覆盖瞬时故障(丢包/对端短暂忙碌),之后退避到 30s 长间隔,
     // 给对端较长故障(重启、文件被锁)留恢复窗口;超过总上限才放弃。
     const timeout = setTimeout(
-      () => requestBlock(path, blockIndex, hash),
+      () => requestBlock(path, blockIndex, hash, cdc),
       nextRetries > MAX_BLOCK_RETRIES ? BLOCK_RETRY_LONG_MS : BLOCK_REQUEST_TIMEOUT_MS,
     );
-    pendingBlocks.set(key, { retries: nextRetries, timeout });
+    pendingBlocks.set(key, { retries: nextRetries, timeout, path, cdc });
   }
 
   /**
-   * 请求一个文件缺失的块:先与本地索引按下标比对块哈希,哈希相同的块直接从
-   * 本地文件读取填充(免网络重传),其余才向对端发块请求。
-   * 本地条目为墓碑(文件已删)或读取/校验失败时回退为网络请求,正确性不受影响。
-   * 仅改文件尾部块、追加、逐块对齐修改等场景可显著减少传输量;文件头部插入
-   * 导致块整体错位时哈希全不匹配,退化为全量请求(与原行为一致)。
+   * 条目是否具备可用的 CDC 视图:cdh 与 clens 等长且非空。
+   * decodeIndex 已按同一口径做过严进(见 IndexEntry.clens),这里直接复用判定。
+   */
+  function cdcUsable(entry: IndexEntry): entry is IndexEntry & { cdh: string[]; clens: number[] } {
+    return !!entry.cdh && !!entry.clens && entry.cdh.length > 0 && entry.cdh.length === entry.clens.length;
+  }
+
+  /** 一条待接收的块槽位数:按规划口径(CDC / 定长)取对应列表长度。 */
+  function slotCount(item: PendingEntry): number {
+    return item.cdc ? item.entry.cdh!.length : item.entry.blocks.length;
+  }
+
+  /** 待接收在某槽位上的期望哈希(口径跟随规划)。 */
+  function slotHashes(item: PendingEntry): string[] {
+    return item.cdc ? item.entry.cdh! : item.entry.blocks;
+  }
+
+  /**
+   * 本轮接收是否按 CDC 口径规划。判据全在「本端能不能差集」:对端条目带 cdh/clens
+   * 而本机对应条目也有 CDC 视图(实体文件在盘上)才启用 —— 能算出差集才有收益。
+   * 「对端供不出 CDC 块」不构成风险:对端能把 cdh 宣告出来,就必然能按自己算的
+   * clens 供块(同一份内容的纯函数);真对不上(旧数据/竞态)接收端哈希闸门会拦下,
+   * 走既有的有界重试 + 放弃 + 下轮收敛,退化的是效率,不是正确性。
+   * 占位条目(盘上无实体)按定长口径:materialize 本就要拉全部内容,无差集可言。
+   */
+  function planCdc(remoteEntry: IndexEntry): boolean {
+    if (!cdcUsable(remoteEntry) || readLocalChunk === undefined) return false;
+    const local = localIndex.get(remoteEntry.path);
+    return !!local && !local.deleted && !local.placeholder && cdcUsable(local);
+  }
+
+  /**
+   * 开启某路径的待接收:规划时刻定块口径(CDC / 定长),槽位数随口径取对应
+   * 列表长度;此后请求、响应校验、收齐判定都用 slotCount/slotHashes 统一换算,
+   * 落地时再还原成定长内容交给执行器(见 completeIfReady)。
+   */
+  function openPending(kind: 'receive' | 'conflict', remoteEntry: IndexEntry, local?: IndexEntry): void {
+    const cdc = planCdc(remoteEntry);
+    pending.set(remoteEntry.path, {
+      kind,
+      entry: remoteEntry,
+      ...(local ? { local } : {}),
+      blocks: new Array<Buffer | undefined>(cdc ? remoteEntry.cdh!.length : remoteEntry.blocks.length),
+      received: 0,
+      cdc,
+    });
+  }
+
+  /**
+   * 请求一个文件缺失的块:先与本地索引比对块哈希,哈希相同的块直接从本地文件
+   * 读取填充(免网络重传),其余才向对端发块请求。两种口径:
+   *  - 定长:按**下标**对齐(本地第 i 块 vs 对端第 i 块)。改尾部块/追加受益,
+   *    中部插入会让其后块整体错位、全不匹配,退化为全量请求(旧行为,原样保留);
+   *  - CDC:按**哈希集合成员**对齐(见 requestMissingChunks)—— 边界随内容浮动,
+   *    中部小改只让插入点附近的块变新哈希,其余块在本地文件里原样存在,直接预填。
    */
   function requestMissingBlocks(path: string, entry: IndexEntry): void {
     const item = pending.get(path);
     if (!item) return;
+    if (item.cdc) {
+      requestMissingChunks(path, item);
+      return;
+    }
     const localEntry = localIndex.get(path);
     // 墓碑条目内容不可信(文件已删,块哈希指向旧内容):整体走网络请求
     const localBlocks = localEntry && !localEntry.deleted ? localEntry.blocks : undefined;
@@ -382,19 +460,65 @@ export function createSyncPeer(deps: SyncPeerDeps): SyncPeer {
           // 文件被移动/删除/暂时不可读:回退网络请求
         }
       }
-      requestBlock(path, blockIndex, hash);
+      requestBlock(path, blockIndex, hash, false);
     });
+  }
+
+  /**
+   * CDC 口径的缺失块请求(见 requestMissingBlocks)。本地块按「哈希 → 偏移」的
+   * **集合成员**匹配:块边界由内容决定,插入/删除让整体错位后,块自身的哈希
+   * 依然与本地文件里同一段字节吻合 —— 这正是定长下标匹配做不到的差集。
+   * 同哈希多块(重复内容)取最先出现的一处;读出的块仍逐块 verifyBlock 校验,
+   * 本地文件在两处状态之间被改写时校验不过,自然回退网络请求。
+   */
+  function requestMissingChunks(path: string, item: PendingEntry): void {
+    const entry = item.entry;
+    const cdh = entry.cdh!;
+    const clens = entry.clens!;
+    const local = localIndex.get(path);
+    const localHits = new Map<string, { offset: number; length: number }>();
+    if (local && !local.deleted && !local.placeholder && cdcUsable(local)) {
+      let lo = 0;
+      for (let i = 0; i < local.cdh.length; i++) {
+        const h = local.cdh[i]!;
+        if (!localHits.has(h)) localHits.set(h, { offset: lo, length: local.clens[i]! });
+        lo += local.clens[i]!;
+      }
+    }
+    for (let i = 0; i < cdh.length; i++) {
+      const hash = cdh[i]!;
+      if (item.blocks[i] === undefined) {
+        const hit = localHits.get(hash);
+        if (hit) {
+          try {
+            const data = readLocalChunk!(path, hit.offset, hit.length);
+            if (verifyBlock(data, hash)) {
+              item.blocks[i] = data;
+              item.received += 1;
+            }
+          } catch {
+            // 文件被移动/删除/暂时不可读:回退网络请求
+          }
+        }
+      }
+      if (item.blocks[i] === undefined) requestBlock(path, i, hash, true);
+    }
   }
 
   /** 收齐全部块(或空文件本身)后把条目落地;未就绪则无操作。 */
   async function completeIfReady(path: string): Promise<void> {
     const item = pending.get(path);
-    if (!item || item.received !== item.entry.blocks.length) return;
+    if (!item || item.received !== slotCount(item)) return;
 
     pending.delete(path);
     priorities.delete(path); // 已落地:优先标记的使命完成,后续该路径的新传输回到默认排队
     const provider = {
-      getBlocks: async (): Promise<Buffer[]> => item.blocks.map((b) => b ?? Buffer.alloc(0)),
+      getBlocks: async (): Promise<Buffer[]> => {
+        const bufs = item.blocks.map((b) => b ?? Buffer.alloc(0));
+        // CDC 口径收来的块先拼接还原,再按定长口径重切:执行器的逐块校验
+        // (对 entry.blocks)与落地逻辑因此完全不用感知两种布局,内容对了哈希就对。
+        return item.cdc ? splitIntoBlocks(Buffer.concat(bufs)) : bufs;
+      },
     };
 
     if (item.kind === 'conflict' && item.local) {
@@ -450,6 +574,9 @@ export function createSyncPeer(deps: SyncPeerDeps): SyncPeer {
    */
   function serveE2EBlock(request: BlockRequest): void {
     if (e2eKey === undefined) return;
+    // 盲区视图永远不带 cdh/clens(块长序列是内容侧信道,见 IndexEntry.cdh),
+    // 盲区端也就只可能按定长口径索块;带 CDC 标记的请求不属于该会话的协议,忽略。
+    if (request.cdc) return;
     let realPath: string;
     try {
       realPath = decPathFor(e2eKey, request.path);
@@ -618,12 +745,7 @@ export function createSyncPeer(deps: SyncPeerDeps): SyncPeer {
                 });
                 break;
               }
-              pending.set(remoteEntry.path, {
-                kind: 'receive',
-                entry: remoteEntry,
-                blocks: new Array<Buffer | undefined>(remoteEntry.blocks.length),
-                received: 0,
-              });
+              openPending('receive', remoteEntry);
               livePending.add(remoteEntry.path);
               landed.push(remoteEntry);
               requestMissingBlocks(remoteEntry.path, remoteEntry);
@@ -642,12 +764,7 @@ export function createSyncPeer(deps: SyncPeerDeps): SyncPeer {
             // (ADR-0014)。接收模式本就镜像覆盖。这两种都走 receive 落地,不保留冲突副本。
             if (receiveOnly || (opts?.relayed === true && !genuineLocalEdit)) {
               if (remoteEntry) {
-                pending.set(remoteEntry.path, {
-                  kind: 'receive',
-                  entry: remoteEntry,
-                  blocks: new Array<Buffer | undefined>(remoteEntry.blocks.length),
-                  received: 0,
-                });
+                openPending('receive', remoteEntry);
                 livePending.add(remoteEntry.path);
                 landed.push(remoteEntry);
                 requestMissingBlocks(remoteEntry.path, remoteEntry);
@@ -679,12 +796,7 @@ export function createSyncPeer(deps: SyncPeerDeps): SyncPeer {
               if (remoteWins === true) {
                 // 对端内容胜出:按 receive 直接落地覆盖本地,不生成冲突副本。
                 // landRemote 覆盖前的 snapshotVersion 旧内容快照仍会留一份兜底。
-                pending.set(remoteEntry.path, {
-                  kind: 'receive',
-                  entry: remoteEntry,
-                  blocks: new Array<Buffer | undefined>(remoteEntry.blocks.length),
-                  received: 0,
-                });
+                openPending('receive', remoteEntry);
                 livePending.add(remoteEntry.path);
                 landed.push(remoteEntry);
                 requestMissingBlocks(remoteEntry.path, remoteEntry);
@@ -711,13 +823,7 @@ export function createSyncPeer(deps: SyncPeerDeps): SyncPeer {
               }
             }
             if (remoteEntry && localEntry) {
-              pending.set(remoteEntry.path, {
-                kind: 'conflict',
-                entry: remoteEntry,
-                local: localEntry,
-                blocks: new Array<Buffer | undefined>(remoteEntry.blocks.length),
-                received: 0,
-              });
+              openPending('conflict', remoteEntry, localEntry);
               livePending.add(remoteEntry.path);
               landed.push(remoteEntry);
               requestMissingBlocks(remoteEntry.path, remoteEntry);
@@ -776,12 +882,32 @@ export function createSyncPeer(deps: SyncPeerDeps): SyncPeer {
         }
       }
       let data: Buffer;
-      try {
-        data = readLocalBlock(request.path, request.blockIndex);
-      } catch {
-        // 本地文件可能在块请求在途时被删除或重命名(如同步冲突处理),
-        // 对端会在下一轮索引交换中收敛;忽略该请求即可。
-        return;
+      let layoutHash: string;
+      if (request.cdc) {
+        // CDC 口径:按本机条目 clens 前缀和定位偏移,只供那一块。
+        // 本机没有该路径的 CDC 视图(旧数据/版本错位)时静默忽略 —— 对端走
+        // 超时重试;错位是有界的(本机扫描重算后下一轮宣告就带上 cdh),且对端
+        // 若真是旧版口径混发,哈希闸门自会拦下,不会落错内容。
+        const entry = localIndex.get(request.path);
+        if (readLocalChunk === undefined || !entry || entry.deleted || !cdcUsable(entry)) return;
+        if (request.blockIndex >= entry.cdh.length) return;
+        let offset = 0;
+        for (let i = 0; i < request.blockIndex; i++) offset += entry.clens[i]!;
+        try {
+          data = readLocalChunk(request.path, offset, entry.clens[request.blockIndex]!);
+        } catch {
+          return;
+        }
+        layoutHash = entry.cdh[request.blockIndex]!;
+      } else {
+        try {
+          data = readLocalBlock(request.path, request.blockIndex);
+        } catch {
+          // 本地文件可能在块请求在途时被删除或重命名(如同步冲突处理),
+          // 对端会在下一轮索引交换中收敛;忽略该请求即可。
+          return;
+        }
+        layoutHash = request.hash;
       }
       // 块确实发出去了 → 该路径进入「发送中」,并按最后一个块续期租约
       serving.set(request.path, Date.now());
@@ -804,8 +930,10 @@ export function createSyncPeer(deps: SyncPeerDeps): SyncPeer {
           deviceId,
           path: request.path,
           blockIndex: request.blockIndex,
-          hash: request.hash,
+          // CDC 响应回填的是块的真实哈希(clens 若与对端认知有错位,接收端校验自然不过)
+          hash: layoutHash,
           data,
+          ...(request.cdc ? { cdc: true } : {}),
         },
         { priority: request.priority === true },
       );
@@ -814,18 +942,22 @@ export function createSyncPeer(deps: SyncPeerDeps): SyncPeer {
     async onBlockResponse(response: BlockResponse): Promise<void> {
       const item = pending.get(response.path);
       if (!item) return;
+      // 口径以 pending 规划时定下的为准(响应里的 cdc 回显只是线索,不作判据):
+      // 期望哈希与槽位边界都从对应列表取,任何口径的迟到/杂散响应都过不了哈希闸门
+      const hashes = slotHashes(item);
       // 边界校验:非法/越界 blockIndex 会撑大 pending.blocks 数组,造成内存耗尽型 DoS
       if (
         !Number.isInteger(response.blockIndex) ||
         response.blockIndex < 0 ||
-        response.blockIndex >= item.entry.blocks.length
+        response.blockIndex >= hashes.length
       ) {
         return;
       }
       // 块内容必须与本次请求期望的哈希一致(防对端回填自洽但错误的块)
-      if (response.hash !== item.entry.blocks[response.blockIndex]) return;
-      // 大小上限:合法块不会超过 BLOCK_SIZE,超大块直接丢弃,避免哈希前先撑爆内存
-      if (response.data.length > BLOCK_SIZE) return;
+      if (response.hash !== hashes[response.blockIndex]) return;
+      // 大小上限:定长块不超过 BLOCK_SIZE,CDC 块不超过 CDC_MAX_CHUNK;
+      // 超大响应直接丢弃,避免哈希前先撑爆内存
+      if (response.data.length > (item.cdc ? CDC_MAX_CHUNK : BLOCK_SIZE)) return;
       if (!verifyBlock(response.data, response.hash)) return;
       // 重复响应(如重传)不重复计数,避免虚增提前落地不完整文件
       if (item.blocks[response.blockIndex] !== undefined) return;
@@ -836,7 +968,7 @@ export function createSyncPeer(deps: SyncPeerDeps): SyncPeer {
       recordBytes(0, response.data.length);
 
       // 块已收到,清除对应的超时重试
-      const bKey = blockKey(response.path, response.blockIndex);
+      const bKey = blockKey(response.path, response.blockIndex, item.cdc);
       const bReq = pendingBlocks.get(bKey);
       if (bReq) {
         clearTimeout(bReq.timeout);
@@ -908,9 +1040,10 @@ export function createSyncPeer(deps: SyncPeerDeps): SyncPeer {
       priorities.add(path);
       // 为该路径全部未收齐的块**重发**带标记的块请求:发送端按请求标记把对应
       // 响应插到限速队列最前。重复块响应在 onBlockResponse 的闸门处去重,安全;
-      // requestBlock 自身会清旧定时器,重试链不重复叠加。
-      for (let i = 0; i < item.entry.blocks.length; i++) {
-        if (item.blocks[i] === undefined) requestBlock(path, i, item.entry.blocks[i]!);
+      // requestBlock 自身会清旧定时器,重试链不重复叠加。口径跟随该条待接收的规划。
+      const hashes = slotHashes(item);
+      for (let i = 0; i < hashes.length; i++) {
+        if (item.blocks[i] === undefined) requestBlock(path, i, hashes[i]!, item.cdc);
       }
     },
     materialize(path: string): boolean {
@@ -920,13 +1053,9 @@ export function createSyncPeer(deps: SyncPeerDeps): SyncPeer {
       if (pending.has(path)) return true; // 已在拉取中:幂等
       // 去占位标志后走标准接收管线(pending → 块请求 → completeIfReady 落盘并 saveEntry,
       // 落地的 entry 不带 placeholder,索引自动从占位转实体)。
+      // 口径必为定长:占位态盘上没有实体文件,planCdc 对占位条目判 false(无差集可言)。
       const target: IndexEntry = { ...entry, placeholder: undefined };
-      pending.set(path, {
-        kind: 'receive',
-        entry: target,
-        blocks: new Array<Buffer | undefined>(target.blocks.length),
-        received: 0,
-      });
+      openPending('receive', target);
       requestMissingBlocks(path, target);
       return true;
     },

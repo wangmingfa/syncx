@@ -37,6 +37,25 @@ function deserializeVersion(raw: string): VersionVector {
 }
 
 function rowToEntry(row: Record<string, unknown>): IndexEntry {
+  // cdh/clens:空串 = 无 CDC 视图(旧库行 DEFAULT ''、旧条目未写)。非法 JSON
+  // (库被写坏)按无视图处理,而不是让整库读崩 —— CDC 只是加速视图,丢了
+  // 最多退化成定长块传输,不影响正确性。
+  let cdh: string[] | undefined;
+  let clens: number[] | undefined;
+  const cdhRaw = row.cdh as string | null | undefined;
+  const clensRaw = row.clens as string | null | undefined;
+  if (cdhRaw && clensRaw) {
+    try {
+      const h = JSON.parse(cdhRaw) as string[];
+      const l = JSON.parse(clensRaw) as number[];
+      if (h.length > 0 && h.length === l.length) {
+        cdh = h;
+        clens = l;
+      }
+    } catch {
+      /* 坏数据按无 CDC 视图处理 */
+    }
+  }
   return {
     path: row.path as string,
     version: deserializeVersion(row.version as string),
@@ -47,6 +66,7 @@ function rowToEntry(row: Record<string, unknown>): IndexEntry {
       ? (row.mtime as number)
       : undefined,
     placeholder: row.placeholder === 1 ? true : undefined,
+    ...(cdh ? { cdh, clens } : {}),
   };
 }
 
@@ -90,12 +110,29 @@ export function openIndexStore(dbPath: string): IndexStore {
         throw error;
       }
     }
+    // CDC 块视图(与 blocks 并存的另一套切块口径,见 IndexEntry.cdh),旧库安全追加
+    try {
+      db.exec("ALTER TABLE entries ADD COLUMN cdh TEXT NOT NULL DEFAULT ''");
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      if (!message.includes('duplicate column name')) {
+        throw error;
+      }
+    }
+    try {
+      db.exec("ALTER TABLE entries ADD COLUMN clens TEXT NOT NULL DEFAULT ''");
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      if (!message.includes('duplicate column name')) {
+        throw error;
+      }
+    }
 
     const saveEntry = db.prepare(
-      'INSERT OR REPLACE INTO entries (path, version, size, deleted, blocks, mtime, placeholder) VALUES (?, ?, ?, ?, ?, ?, ?)',
+      'INSERT OR REPLACE INTO entries (path, version, size, deleted, blocks, mtime, placeholder, cdh, clens) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)',
     );
-    const getEntry = db.prepare('SELECT path, version, size, deleted, blocks, mtime, placeholder FROM entries WHERE path = ?');
-    const listEntries = db.prepare('SELECT path, version, size, deleted, blocks, mtime, placeholder FROM entries');
+    const getEntry = db.prepare('SELECT path, version, size, deleted, blocks, mtime, placeholder, cdh, clens FROM entries WHERE path = ?');
+    const listEntries = db.prepare('SELECT path, version, size, deleted, blocks, mtime, placeholder, cdh, clens FROM entries');
     const countLive = db.prepare('SELECT COUNT(*) AS n FROM entries WHERE deleted = 0');
     const countTombstones = db.prepare('SELECT COUNT(*) AS n FROM entries WHERE deleted = 1');
     const removeEntry = db.prepare('DELETE FROM entries WHERE path = ?');
@@ -110,6 +147,8 @@ export function openIndexStore(dbPath: string): IndexStore {
           JSON.stringify(entry.blocks),
           entry.mtime ?? 0,
           entry.placeholder ? 1 : 0,
+          entry.cdh ? JSON.stringify(entry.cdh) : '',
+          entry.clens ? JSON.stringify(entry.clens) : '',
         );
       },
       saveEntries(entries: IndexEntry[]): void {
@@ -124,6 +163,8 @@ export function openIndexStore(dbPath: string): IndexStore {
               JSON.stringify(entry.blocks),
               entry.mtime ?? 0,
               entry.placeholder ? 1 : 0,
+              entry.cdh ? JSON.stringify(entry.cdh) : '',
+              entry.clens ? JSON.stringify(entry.clens) : '',
             );
           }
           db.exec('COMMIT');

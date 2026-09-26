@@ -177,6 +177,9 @@ export function scanFolder(
       version: incrementVersion(entry.version, deviceId),
       deleted: true,
       blocks: [],
+      // 墓碑不指向任何内容:CDC 视图与块长一并清掉(留着只会白白撑大索引与线路)
+      cdh: undefined,
+      clens: undefined,
     });
   }
 

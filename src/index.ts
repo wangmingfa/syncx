@@ -9,6 +9,20 @@ export interface IndexEntry {
   /** SHA-256 hashes of the 1MB blocks that make up the file content. */
   blocks: string[];
   /**
+   * CDC(内容定义分块)视图的块哈希,与 `blocks` **并存**:同一份内容的另一套
+   * 切块方式(见 blockstore.chunkContent)。两者都是该内容的事实,定长列表继续
+   * 服务旧对端与全部既有链路,CDC 列表让新对端间的「中部小改」只传改动附近的块。
+   * 可选:旧库/旧对端送来的条目没有它,此时本机照常按定长口径规划(零收益零风险)。
+   * 端到端加密的盲区视图**永远不带**它 —— 明文块长序列本身就是内容侧信道,
+   * 且盲区端只有定长口径可用(见 e2e.toBlindEntries)。
+   */
+  cdh?: string[];
+  /**
+   * CDC 块长度列表(与 cdh 一一对应):偏移 = 前缀和。随 cdh 同生同灭 ——
+   * 判定「该条目是否有 CDC 视图」的口径就是 `cdh 与 clens 等长且非空`。
+   */
+  clens?: number[];
+  /**
    * 本地文件的修改时间(毫秒),由扫描/落盘时记录,用于免哈希快速跳过未变更文件。
    * 可选:跨设备的索引(线上协议)不带此字段,旧数据缺省为 undefined。
    */

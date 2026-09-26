@@ -2,7 +2,7 @@ import { mkdirSync, renameSync, writeFileSync, rmSync, existsSync, statSync, rea
 import { dirname, basename, join, relative, isAbsolute, extname, sep } from 'node:path';
 import type { IndexEntry } from './index.js';
 import type { IndexStore } from './indexstore.js';
-import { verifyBlock, splitIntoBlocks, hashBlock } from './blockstore.js';
+import { verifyBlock, splitIntoBlocks, hashBlock, chunkHashes } from './blockstore.js';
 import { isHardIgnored } from './ignore.js';
 import { mergeVersions, incrementVersion, createVersionVector } from './version.js';
 
@@ -357,6 +357,9 @@ export function createLocalExecutor(
 
       const data = readFileSync(target);
       const blocks = splitIntoBlocks(data).map(hashBlock);
+      // CDC 视图与定长视图同时算好、一起入索引(纯附加,见 IndexEntry.cdh):
+      // 本机改动的文件从此具备内容分块口径,新对端间小改动只传改动附近的块。
+      const { hashes: cdh, lengths: clens } = chunkHashes(data);
       const previous = index.getEntry(path);
       const version = incrementVersion(previous?.version ?? createVersionVector(), deviceId);
 
@@ -367,6 +370,8 @@ export function createLocalExecutor(
         deleted: false,
         blocks,
         mtime: statSync(target).mtimeMs,
+        // 空文件没有块可言:cdh/clens 留空,与「无 CDC 视图」同口径(见 IndexEntry.clens)
+        ...(cdh.length > 0 ? { cdh, clens } : {}),
       };
       index.saveEntry(updated);
       return updated;

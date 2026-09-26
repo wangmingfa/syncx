@@ -15,7 +15,14 @@ import { createSyncPeer, type PeerTransport, type IndexMode } from '../src/peer.
 import type { BlockRequest, BlockResponse } from '../src/messages.js';
 import { createLocalExecutor, type LocalExecutor } from '../src/executor.js';
 import { openIndexStore } from '../src/indexstore.js';
-import { hashBlock, BLOCK_SIZE } from '../src/blockstore.js';
+import {
+  hashBlock,
+  BLOCK_SIZE,
+  splitIntoBlocks,
+  readBlockAt,
+  readChunkAt,
+  chunkHashes,
+} from '../src/blockstore.js';
 import { mergeVersions } from '../src/version.js';
 import type { IndexEntry } from '../src/index.js';
 
@@ -1719,5 +1726,296 @@ describe('transfer priority (markPriority)', () => {
     expect(responses[1]!.priority).toBe(true);
     // priority 是给本端排队决策用的,不进响应载荷本身
     expect((responses[1]!.response as BlockResponse & { priority?: boolean }).priority).toBeUndefined();
+  });
+});
+
+describe('CDC 内容定义分块(纯附加口径)', () => {
+  function fakeTransport() {
+    const requests: BlockRequest[] = [];
+    const responses: BlockResponse[] = [];
+    return {
+      transport: {
+        sendEntries(): void {},
+        sendBlockRequest(request: BlockRequest): void {
+          requests.push(request);
+        },
+        sendBlockResponse(response: BlockResponse): void {
+          responses.push(response);
+        },
+      } satisfies PeerTransport,
+      requests,
+      responses,
+    };
+  }
+
+  /** 确定性伪随机字节:块边界完全可复现,断言里的「只缺 1 块」不是运气。 */
+  function rand(size: number, seed = 0x2468ace): Buffer {
+    const buf = Buffer.allocUnsafe(size);
+    let a = seed >>> 0;
+    for (let i = 0; i < size; i++) {
+      a = (a + 0x6d2b79f5) >>> 0;
+      let t = Math.imul(a ^ (a >>> 15), 1 | a);
+      t = (t + Math.imul(t ^ (t >>> 7), 61 | t)) ^ t;
+      buf[i] = ((t ^ (t >>> 14)) >>> 0) & 0xff;
+    }
+    return buf;
+  }
+
+  function cdcFields(data: Buffer) {
+    const { hashes, lengths } = chunkHashes(data);
+    return { cdh: hashes, clens: lengths };
+  }
+
+  /** 6MB 确定性内容 + 中部插 10KB:实测只有 1 个 CDC 块哈希变化。 */
+  function oldAndNew() {
+    const oldData = rand(6_000_000);
+    const newData = Buffer.concat([
+      oldData.subarray(0, 3_000_000),
+      Buffer.alloc(10_240, 0x5c),
+      oldData.subarray(3_000_000),
+    ]);
+    return { oldData, newData };
+  }
+
+  it('接收按 CDC 口径规划:中部插入只请求变化的块,其余本地哈希集合命中预填', async () => {
+    const dir = mkdtempSync(join(tmpdir(), 'syncx-cdc-recv-'));
+    try {
+      const root = join(dir, 'share');
+      mkdirSync(root, { recursive: true });
+      const { oldData, newData } = oldAndNew();
+      writeFileSync(join(root, 'f.bin'), oldData);
+
+      const index = openIndexStore(join(dir, 'index.db'));
+      const executor = createLocalExecutor(root, index, join(dir, 'trash'));
+      const localEntry: IndexEntry = {
+        path: 'f.bin',
+        version: new Map([['dev-b', 1]]),
+        size: oldData.length,
+        deleted: false,
+        blocks: splitIntoBlocks(oldData).map(hashBlock),
+        mtime: 1,
+        ...cdcFields(oldData),
+      };
+      index.saveEntry(localEntry);
+      const remoteEntry: IndexEntry = {
+        ...localEntry,
+        version: new Map([['dev-b', 2]]),
+        size: newData.length,
+        blocks: splitIntoBlocks(newData).map(hashBlock),
+        ...cdcFields(newData),
+      };
+
+      const { transport, requests } = fakeTransport();
+      const peer = createSyncPeer({
+        transport,
+        localIndex: new Map([['f.bin', localEntry]]),
+        executor,
+        readLocalBlock: (p, i) => readBlockAt(join(root, p), i),
+        readLocalChunk: (p, o, l) => readChunkAt(join(root, p), o, l),
+        deviceId: 'dev-a',
+        remoteDeviceId: 'dev-b',
+        root,
+      });
+
+      await peer.onPeerIndex([remoteEntry], { full: true });
+
+      // 定长口径下这将是 6 个整块(≈6MB)全部重求;CDC 下只有插入点所在的块
+      expect(requests.length).toBeGreaterThan(0);
+      expect(requests.length).toBeLessThanOrEqual(2);
+      expect(requests.every((r) => r.cdc === true)).toBe(true);
+      expect(requests.every((r) => remoteEntry.cdh!.includes(r.hash))).toBe(true);
+
+      // 回放对端块:收齐 → 拼接还原 → 定长口径重切校验 → 原样落地,CDC 对执行器透明
+      let off = 0;
+      const chunkBufs: Buffer[] = [];
+      for (const l of remoteEntry.clens!) {
+        chunkBufs.push(newData.subarray(off, off + l));
+        off += l;
+      }
+      for (const req of requests) {
+        await peer.onBlockResponse({
+          deviceId: 'dev-b',
+          path: 'f.bin',
+          blockIndex: req.blockIndex,
+          hash: remoteEntry.cdh![req.blockIndex]!,
+          data: chunkBufs[req.blockIndex]!,
+          cdc: true,
+        });
+      }
+      // 大缓冲逐字节比较用 .equals(toEqual 对 MB 级 Buffer 走通用深比,慢一个数量级)
+      expect(readFileSync(join(root, 'f.bin')).equals(newData)).toBe(true);
+      const landed = index.getEntry('f.bin');
+      expect(landed?.cdh).toEqual(remoteEntry.cdh);
+      expect(landed?.clens).toEqual(remoteEntry.clens);
+      index.close();
+    } finally {
+      rmDir(dir);
+    }
+  });
+
+  it('供块按本机 clens 前缀和定位;本机无 CDC 视图时忽略 CDC 请求', () => {
+    const dir = mkdtempSync(join(tmpdir(), 'syncx-cdc-serve-'));
+    try {
+      const root = join(dir, 'share');
+      mkdirSync(root, { recursive: true });
+      const { oldData } = oldAndNew();
+      writeFileSync(join(root, 'f.bin'), oldData);
+      const fields = cdcFields(oldData);
+      const chunks: Buffer[] = [];
+      {
+        let off = 0;
+        for (const l of fields.clens) {
+          chunks.push(oldData.subarray(off, off + l));
+          off += l;
+        }
+      }
+      const withCdc: IndexEntry = {
+        path: 'f.bin',
+        version: new Map([['dev-b', 1]]),
+        size: oldData.length,
+        deleted: false,
+        blocks: splitIntoBlocks(oldData).map(hashBlock),
+        ...fields,
+      };
+      const { transport, responses } = fakeTransport();
+      const peer = createSyncPeer({
+        transport,
+        localIndex: new Map([['f.bin', withCdc]]),
+        executor: null as never,
+        readLocalBlock: (p, i) => readBlockAt(join(root, p), i),
+        readLocalChunk: (p, o, l) => readChunkAt(join(root, p), o, l),
+        deviceId: 'dev-a',
+        root,
+      });
+
+      peer.onBlockRequest({ deviceId: 'dev-b', path: 'f.bin', blockIndex: 1, hash: fields.cdh[1]!, cdc: true });
+      expect(responses).toHaveLength(1);
+      expect(responses[0]!.data.equals(chunks[1]!)).toBe(true);
+      expect(responses[0]!.cdc).toBe(true);
+      expect(responses[0]!.hash).toBe(fields.cdh[1]);
+
+      // 越界块号:忽略
+      peer.onBlockRequest({ deviceId: 'dev-b', path: 'f.bin', blockIndex: fields.cdh.length, hash: 'x', cdc: true });
+      expect(responses).toHaveLength(1);
+
+      // 本机条目没有 CDC 视图:绝不按对端要的 CDC 下标瞎供定长块
+      const noCdc: IndexEntry = { ...withCdc, cdh: undefined, clens: undefined };
+      const t2 = fakeTransport();
+      const peer2 = createSyncPeer({
+        transport: t2.transport,
+        localIndex: new Map([['f.bin', noCdc]]),
+        executor: null as never,
+        readLocalBlock: (p, i) => readBlockAt(join(root, p), i),
+        readLocalChunk: (p, o, l) => readChunkAt(join(root, p), o, l),
+        deviceId: 'dev-a',
+        root,
+      });
+      peer2.onBlockRequest({ deviceId: 'dev-b', path: 'f.bin', blockIndex: 1, hash: fields.cdh[1]!, cdc: true });
+      expect(t2.responses).toHaveLength(0);
+    } finally {
+      rmDir(dir);
+    }
+  });
+
+  it('对端没有 CDC 视图(旧版):自然退回定长口径,请求不带 cdc 标记', async () => {
+    const { oldData } = oldAndNew();
+    const localEntry: IndexEntry = {
+      path: 'f.bin',
+      version: new Map([['dev-b', 1]]),
+      size: oldData.length,
+      deleted: false,
+      blocks: splitIntoBlocks(oldData).map(hashBlock),
+      ...cdcFields(oldData),
+    };
+    // 旧版对端的宣告:只有 blocks(它的 WireEntry 映射根本不认识 cdh)
+    const remoteEntry: IndexEntry = {
+      ...localEntry,
+      version: new Map([['dev-b', 2]]),
+      cdh: undefined,
+      clens: undefined,
+    };
+    const { transport, requests } = fakeTransport();
+    const peer = createSyncPeer({
+      transport,
+      localIndex: new Map([['f.bin', localEntry]]),
+      executor: null as never,
+      readLocalBlock: () => Buffer.alloc(0),
+      readLocalChunk: () => {
+        throw new Error('不该被调用');
+      },
+      deviceId: 'dev-a',
+    });
+    await peer.onPeerIndex([remoteEntry], { full: true });
+    expect(requests.length).toBe(remoteEntry.blocks.length);
+    expect(requests.every((r) => r.cdc === undefined)).toBe(true);
+  });
+
+  it('占位条目 materialize 走定长口径:盘上无实体,预填与差集都无从谈起', async () => {
+    const { oldData } = oldAndNew();
+    const fields = cdcFields(oldData);
+    const placeholder: IndexEntry = {
+      path: 'f.bin',
+      version: new Map([['dev-b', 1]]),
+      size: oldData.length,
+      deleted: false,
+      blocks: splitIntoBlocks(oldData).map(hashBlock),
+      placeholder: true,
+      ...fields,
+    };
+    const { transport, requests } = fakeTransport();
+    const peer = createSyncPeer({
+      transport,
+      localIndex: new Map([['f.bin', placeholder]]),
+      executor: null as never,
+      readLocalBlock: () => Buffer.alloc(0),
+      readLocalChunk: () => {
+        throw new Error('不该被调用');
+      },
+      deviceId: 'dev-a',
+    });
+    expect(peer.materialize('f.bin')).toBe(true);
+    expect(requests.length).toBe(placeholder.blocks.length);
+    expect(requests.every((r) => r.cdc === undefined)).toBe(true);
+  });
+
+  it('本地内容与索引 CDC 视图不符(在途被改写):预填校验不过,逐块回退网络请求', async () => {
+    const dir = mkdtempSync(join(tmpdir(), 'syncx-cdc-stale-'));
+    try {
+      const root = join(dir, 'share');
+      mkdirSync(root, { recursive: true });
+      const { oldData, newData } = oldAndNew();
+      // 盘上是「另一份内容」:与本地条目登记的 cdh 对不上
+      writeFileSync(join(root, 'f.bin'), Buffer.alloc(oldData.length, 0xa5));
+      const localEntry: IndexEntry = {
+        path: 'f.bin',
+        version: new Map([['dev-b', 1]]),
+        size: oldData.length,
+        deleted: false,
+        blocks: splitIntoBlocks(oldData).map(hashBlock),
+        ...cdcFields(oldData),
+      };
+      const remoteEntry: IndexEntry = {
+        ...localEntry,
+        version: new Map([['dev-b', 2]]),
+        size: newData.length,
+        blocks: splitIntoBlocks(newData).map(hashBlock),
+        ...cdcFields(newData),
+      };
+      const { transport, requests } = fakeTransport();
+      const peer = createSyncPeer({
+        transport,
+        localIndex: new Map([['f.bin', localEntry]]),
+        executor: null as never,
+        readLocalBlock: (p, i) => readBlockAt(join(root, p), i),
+        readLocalChunk: (p, o, l) => readChunkAt(join(root, p), o, l),
+        deviceId: 'dev-a',
+      });
+      await peer.onPeerIndex([remoteEntry], { full: true });
+      // 全部 CDC 块都要网络请求:预填一块没成(读出的字节哈希与期望不符)
+      expect(requests.length).toBe(remoteEntry.cdh!.length);
+      expect(requests.every((r) => r.cdc === true)).toBe(true);
+    } finally {
+      rmDir(dir);
+    }
   });
 });
