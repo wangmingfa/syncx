@@ -7,6 +7,7 @@ import ComparePage from './ComparePage.vue';
 import TerminalPage from './TerminalPage.vue';
 import FileManagerPage from './FileManagerPage.vue';
 import FleetPage from './FleetPage.vue';
+import TrashPage from './TrashPage.vue';
 import { route } from './utils/route';
 import { useTheme } from './composables/useTheme';
 import type { StatusData } from './types';
@@ -53,6 +54,7 @@ onMounted(async () => {
     <TerminalPage v-if="route.name === 'terminal'" />
     <FileManagerPage v-else-if="route.name === 'files'" />
     <FleetPage v-else-if="route.name === 'fleet'" />
+    <TrashPage v-else-if="route.name === 'trash'" />
     <ComparePage
       v-else-if="status && route.name === 'compare' && route.folderId"
       :status="status"

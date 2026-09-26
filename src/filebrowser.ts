@@ -25,6 +25,11 @@ export interface DirEntry {
    * 提供「下载」而非直接打开。普通盘面条目缺省(不写该字段)。
    */
   placeholder?: boolean;
+  /**
+   * true = 该文件被「单文件暂停」冻结(目录配置 pausedFiles):双向停摆,盘上有实体
+   * 但不再同步。UI 标「已暂停」并提供「继续同步」。缺省 = 正常同步。
+   */
+  paused?: boolean;
 }
 
 export interface DirListing {

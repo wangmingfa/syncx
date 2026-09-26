@@ -13,12 +13,13 @@ import {
   applyRollback,
   listTrashRefs,
   listVersionRefs,
+  parseTrashName,
   planRollback,
   walkCurrentFiles,
   type RollbackInputs,
 } from './rollback.js';
 import { listConflictCopies, resolveConflictCopy, applyConflictMerge } from './conflicts.js';
-import { readFileSync, readdirSync, existsSync, statSync, writeFileSync, watch, unlinkSync, copyFileSync, mkdirSync, rmSync } from 'node:fs';
+import { readFileSync, readdirSync, existsSync, statSync, writeFileSync, watch, unlinkSync, copyFileSync, mkdirSync, rmSync, renameSync } from 'node:fs';
 import { relative, isAbsolute } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { startPeerServer } from './net/server.js';
@@ -738,6 +739,10 @@ export async function run(args: ParsedArgs): Promise<void> {
       // 落盘 + 对账存活会话 + notifyStatus 都在 manager 内完成
       manager.setFolderPaused(folderId, paused);
     },
+    setFolderFilePaused: (folderId, path, paused) => {
+      // 落盘 + 内存 config 同步 + notifyStatus 都在 manager 内完成(peer 闭包即时生效)
+      manager.setFolderFilePaused(folderId, path, paused);
+    },
     setFolderSchedule: (folderId, schedule) => {
       // 校验(非法格式 400)+ 落盘 + 立即对账都在 manager 内完成
       manager.setFolderSchedule(folderId, schedule);
@@ -845,6 +850,13 @@ export async function run(args: ParsedArgs): Promise<void> {
     listFolderDirectory: (folderId, relPath, limit) => {
       const folder = findConfigFolder(configPath, folderId);
       const listing = listDirectory(folder.path, relPath, limit);
+      // 单文件暂停:命中的文件行打标(前端据此显示「已暂停」与「继续同步」按钮)
+      if (folder.pausedFiles?.length) {
+        const paused = new Set(folder.pausedFiles);
+        for (const e of listing.entries) {
+          if (!e.dir && paused.has(e.path)) e.paused = true;
+        }
+      }
       // 按需同步的占位文件盘上不存在,listDirectory 天然列不到 —— 按索引补进
       // 当前层的「未下载」行(dir:false + placeholder:true,大小取索引宣告值)。
       // 拉取中途盘上已有实体(tmp 落地前一刻)时跳过,不重复出行。
@@ -872,6 +884,57 @@ export async function run(args: ParsedArgs): Promise<void> {
       deleteFolderEntry(folder.path, relPath);
       // 删除已改变盘面:立刻触发一轮扫描,把删除尽快作为墓碑广播给对端
       void manager.runScan();
+    },
+    // 回收站:目录的回收站副本在 <configDir>/trash/<indexKey>/,命名 <relPath>.<ts36>,
+    // 与时间机器共用 rollback.ts 的解析/列举(那里也负责还原的搬运动作)。
+    listFolderTrash: (folderId) => {
+      const folder = findConfigFolder(configPath, folderId);
+      const trashDir = folderTrashPath(configDir, folderIndexKey(folder));
+      return listTrashRefs(trashDir)
+        .map((t) => {
+          let size = 0;
+          try {
+            size = statSync(join(trashDir, t.file)).size;
+          } catch {
+            // 列举与 stat 之间被清空/损坏:体积报 0,行仍在(可还原时再校验)
+          }
+          return { file: t.file, path: t.relPath, ts: t.ts, size };
+        })
+        .sort((a, b) => b.ts - a.ts);
+    },
+    restoreFolderTrash: (folderId, file) => {
+      const folder = findConfigFolder(configPath, folderId);
+      const trashDir = folderTrashPath(configDir, folderIndexKey(folder));
+      const src = resolveSharePath(trashDir, file); // 越界防护(../ 与绝对路径都会抛)
+      if (!existsSync(src) || !statSync(src).isFile()) throw new Error('回收站里没有这个副本');
+      // file 形如 <relPath>.<ts36>(listTrashRefs 返回时保留目录层级),整体反解:
+      // parsed.relPath 即完整相对路径(含原目录),与 executor.moveToTrash 的命名严格互逆
+      const parsed = parseTrashName(file.replace(/\\/g, '/'));
+      if (!parsed) throw new Error('回收站副本命名无法识别');
+      const relPath = parsed.relPath;
+      const dest = resolveSharePath(folder.path, relPath);
+      if (existsSync(dest)) {
+        // 同名实体已在(还原期间新建/同步来):先挪进回收站,还原动作本身可逆
+        const stamp = Date.now().toString(36);
+        const backup = join(trashDir, `${relPath}.${stamp}`);
+        mkdirSync(dirname(backup), { recursive: true });
+        renameSync(dest, backup);
+      }
+      mkdirSync(dirname(dest), { recursive: true });
+      renameSync(src, dest);
+      // 落回盘面即产生「本地新增/修改」:扫描会以新版本广播给对端
+      void manager.runScan();
+    },
+    purgeFolderTrash: (folderId, file) => {
+      const folder = findConfigFolder(configPath, folderId);
+      const trashDir = folderTrashPath(configDir, folderIndexKey(folder));
+      if (file === undefined || file === '') {
+        rmSync(trashDir, { recursive: true, force: true });
+        return;
+      }
+      const target = resolveSharePath(trashDir, file);
+      if (!existsSync(target)) throw new Error('回收站里没有这个副本');
+      rmSync(target);
     },
     // 文件版本:列出 / 恢复 / 删除。恢复 = 把旧版本拷回共享目录原路径,
     // 恢复前把当前内容也拷一份进版本目录(操作可逆),随后触发一轮扫描让恢复

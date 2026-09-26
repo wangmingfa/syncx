@@ -2,7 +2,7 @@ import { createReadStream } from 'node:fs';
 import { stat } from 'node:fs/promises';
 import type { IncomingMessage, ServerResponse } from 'node:http';
 import type { ControlServerDeps } from '../deps.js';
-import { pathname, sendJson } from '../helpers.js';
+import { pathname, readBody, sendJson } from '../helpers.js';
 import { PathUnsafeError } from '../../filebrowser.js';
 
 /** 提取 folderId/path 查询参数;缺 path 视为根目录。 */
@@ -44,6 +44,12 @@ export async function tryFileRoutes(
 ): Promise<boolean> {
   const { listFolderDirectory, resolveFolderFile, deleteFolderEntry } = deps;
   const path = req.url ? pathname(req.url) : '/';
+
+  // 回收站域(/api/trash*)与本域同一条鉴权骨架(登录门 + 变更操作提权门),拆独立函数
+  if (path === '/api/trash' || path === '/api/trash/restore' || path === '/api/trash/purge') {
+    return tryTrashRoutes(req, res, deps, elevated, reissueElevation);
+  }
+
   const isFiles = path === '/api/folder-files' || path === '/api/folder-files/download';
 
   if (!isFiles) return false;
@@ -123,6 +129,101 @@ export async function tryFileRoutes(
         return true;
       }
       deleteFolderEntry(folderId, rel);
+      sendJson(res, 200, { ok: true });
+    } catch (e) {
+      sendErr(res, e);
+    }
+    return true;
+  }
+
+  return false;
+}
+
+/**
+ * 回收站域(由 tryFileRoutes 分派进来,共用同一条鉴权骨架):
+ * - GET  /api/trash?folderId=                    列出已删副本(新删在前)——仅需登录
+ * - POST /api/trash/restore { folderId, file }   副本搬回原路径;同名实体先挪进回收站
+ *                                                (操作可逆),还原经扫描广播给对端——需提权
+ * - POST /api/trash/purge   { folderId, file? }  彻底删除;file 缺省 = 清空该目录整个
+ *                                                回收站(不可逆)——需提权
+ *
+ * file 是回收站内相对名(`<原路径>.<base36 时间戳>`,可含目录层级),由后端
+ * listTrashRefs 生成,还原/彻底删除时经 resolveSharePath 防越界。
+ */
+export async function tryTrashRoutes(
+  req: IncomingMessage,
+  res: ServerResponse,
+  deps: ControlServerDeps,
+  elevated: boolean,
+  reissueElevation: (res: ServerResponse) => void,
+): Promise<boolean> {
+  const { listFolderTrash, restoreFolderTrash, purgeFolderTrash } = deps;
+  const path = req.url ? pathname(req.url) : '/';
+  if (!listFolderTrash || !restoreFolderTrash || !purgeFolderTrash) {
+    sendJson(res, 503, { error: 'trash not available' });
+    return true;
+  }
+
+  // 只读列举仅需登录;还原/清空是变更操作,与文件管理器删除同一道提权门
+  const isMutate = req.method === 'POST' && (path === '/api/trash/restore' || path === '/api/trash/purge');
+  if (isMutate && !elevated) {
+    sendJson(res, 403, { error: '敏感操作需要验证:请先用控制令牌或密码完成验证' });
+    return true;
+  }
+  if (elevated) reissueElevation(res);
+
+  if (req.method === 'GET' && path === '/api/trash') {
+    try {
+      const url = new URL(req.url ?? '/api/trash', 'http://localhost');
+      const folderId = url.searchParams.get('folderId') ?? '';
+      if (!folderId) {
+        sendJson(res, 400, { error: 'folderId is required' });
+        return true;
+      }
+      sendJson(res, 200, { entries: listFolderTrash(folderId) });
+    } catch (e) {
+      sendErr(res, e);
+    }
+    return true;
+  }
+
+  if (req.method === 'POST' && path === '/api/trash/restore') {
+    try {
+      const raw = await readBody(req);
+      const body = raw === '' ? {} : JSON.parse(raw);
+      const folderId = (body as { folderId?: unknown }).folderId;
+      const file = (body as { file?: unknown }).file;
+      if (typeof folderId !== 'string' || folderId === '') {
+        sendJson(res, 400, { error: 'folderId is required' });
+        return true;
+      }
+      if (typeof file !== 'string' || file === '') {
+        sendJson(res, 400, { error: 'file is required' });
+        return true;
+      }
+      restoreFolderTrash(folderId, file);
+      sendJson(res, 200, { ok: true });
+    } catch (e) {
+      sendErr(res, e);
+    }
+    return true;
+  }
+
+  if (req.method === 'POST' && path === '/api/trash/purge') {
+    try {
+      const raw = await readBody(req);
+      const body = raw === '' ? {} : JSON.parse(raw);
+      const folderId = (body as { folderId?: unknown }).folderId;
+      const file = (body as { file?: unknown }).file;
+      if (typeof folderId !== 'string' || folderId === '') {
+        sendJson(res, 400, { error: 'folderId is required' });
+        return true;
+      }
+      if (file !== undefined && typeof file !== 'string') {
+        sendJson(res, 400, { error: 'file must be a string' });
+        return true;
+      }
+      purgeFolderTrash(folderId, file);
       sendJson(res, 200, { ok: true });
     } catch (e) {
       sendErr(res, e);

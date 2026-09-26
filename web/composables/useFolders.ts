@@ -36,6 +36,8 @@ export function useFolders(deps: CoreDeps): {
   openE2E: (f: FolderInfo) => void;
   /** 打开某目录的浏览器内文件管理器(独立路由页 /files;浏览/下载仅需登录,删除需提权)。 */
   openFiles: (f: FolderInfo) => void;
+  /** 打开某目录的 Web 回收站(独立路由页 /trash;列表仅需登录,还原/彻底删除需提权)。 */
+  openTrash: (f: FolderInfo) => void;
   editDevicesOpen: Ref<boolean>;
   editFolder: Ref<FolderInfo | null>;
   historyFolder: Ref<FolderInfo | null>;
@@ -356,6 +358,12 @@ export function useFolders(deps: CoreDeps): {
     window.open(`/files?folder=${encodeURIComponent(f.id ?? f.path)}`, '_blank');
   }
 
+  // Web 回收站:独立路由页 /trash(与文件管理器 /files 同套路,新开标签页)。
+  // 列本机删过的副本;还原/彻底删除在页内过提权门。
+  function openTrash(f: FolderInfo): void {
+    window.open(`/trash?folder=${encodeURIComponent(f.id ?? f.path)}`, '_blank');
+  }
+
   // ---- 暂停同步(目录卡开关 + 全局开关):数据面停摆,控制面照常 ----
   /** 暂停/恢复单个目录的同步。暂停 = 不扫描、不广播、不接收;连接与配对不受影响。 */
   async function toggleFolderPaused(f: FolderInfo, paused: boolean): Promise<void> {
@@ -435,6 +443,7 @@ export function useFolders(deps: CoreDeps): {
     openE2E,
     e2eFolder,
     openFiles,
+    openTrash,
     editDevicesOpen,
     editFolder,
     saveEditDevices,

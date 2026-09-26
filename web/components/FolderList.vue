@@ -77,6 +77,7 @@ const {
   openIgnoreEditor,
   openE2E,
   openFiles,
+  openTrash,
   openDiff,
   toggleFolderPaused,
   toggleGlobalPaused,
@@ -164,6 +165,13 @@ function folderActions(f: FolderInfo): RailAction[] {
       disabled: b,
       tooltip: '浏览文件:查看本机目录内容,可下载单个文件或删除',
       onClick: () => openFiles(f),
+    },
+    {
+      key: 'trash',
+      icon: 'restore',
+      disabled: b,
+      tooltip: '回收站:本机删过的文件副本可还原或彻底删除',
+      onClick: () => openTrash(f),
     },
     {
       key: 'compare',

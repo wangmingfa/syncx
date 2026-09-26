@@ -128,6 +128,12 @@ export interface SyncPeerDeps {
    */
   getOnDemand?: () => boolean;
   /**
+   * 单文件暂停(见 config.SharedFolderConfig.pausedFiles):该路径在本连接上**双向冻结**
+   * —— send/receive/conflict/delete 动作一律跳过,本地索引不前移。恢复后下一轮索引
+   * 交换自然收敛(两侧仍以各自的索引版本为准)。取函数:设置即生效,无需重连。
+   */
+  isPausedPath?: (path: string) => boolean;
+  /**
    * 端到端加密视图(对不可信peer的盲区口径,见 src/e2e.ts):该目录为此对端设了口令时,
    * 上层交给它的 transport 已是密文变换壳(sendEntries 前条目被换成密文视图)。SyncPeer
    * 再补两道:①对端索引宣告**整轮忽略**(盲区端只有密文副本,它的「回推」会把密文当
@@ -225,7 +231,7 @@ const RATE_SPAN_FLOOR_MS = 1000;
  * complete, then apply it via the executor.
  */
 export function createSyncPeer(deps: SyncPeerDeps): SyncPeer {
-  const { transport, localIndex, executor, readLocalBlock, deviceId, remoteDeviceId, root, onEvent, onTraffic, readIgnoreLines, receiveOnly, getConflictPolicy, getOnDemand, checkDiskSpace, onHardIgnoredDropped, onLanded, onStallDrop, e2eKey } = deps;
+  const { transport, localIndex, executor, readLocalBlock, deviceId, remoteDeviceId, root, onEvent, onTraffic, readIgnoreLines, receiveOnly, getConflictPolicy, getOnDemand, isPausedPath, checkDiskSpace, onHardIgnoredDropped, onLanded, onStallDrop, e2eKey } = deps;
   const pending = new Map<string, PendingEntry>();
   // 逐块跟踪超时重试:块响应丢失/丢弃时自动重发,避免文件永远收不齐
   const pendingBlocks = new Map<string, PendingBlockRequest>();
@@ -559,6 +565,9 @@ export function createSyncPeer(deps: SyncPeerDeps): SyncPeer {
       const landed: IndexEntry[] = [];
 
       for (const action of actions) {
+        // 单文件暂停:该路径在本连接上双向冻结 —— 不外推、不落地、不应用删除,
+        // 本地索引保持原版本;解冻后下一轮交换自然收敛
+        if (isPausedPath?.(action.path)) continue;
         if (diskSkipsReceive && (action.kind === 'receive' || action.kind === 'conflict')) continue;
         switch (action.kind) {
           case 'send':

@@ -80,6 +80,15 @@ defineProps<{ name: ActionIconName }>();
       <path d="M14 11v6" />
     </template>
 
+    <!-- 回收站(浏览/还原删除副本):垃圾桶 + 上箭,与「移除」的空桶区分 -->
+    <template v-else-if="name === 'restore'">
+      <path d="M4.5 7h15" />
+      <path d="M9.5 7V4.5h5V7" />
+      <path d="M6.5 7l.8 12a2 2 0 0 0 2 1.8h5.4a2 2 0 0 0 2-1.8l.8-12" />
+      <path d="M12 17v-6" />
+      <path d="M9.5 13 12 10.5 14.5 13" />
+    </template>
+
     <!-- 浏览文件(文件管理器):打开的文件夹 -->
     <template v-else-if="name === 'browse'">
       <path d="M3.5 6.5A1.5 1.5 0 0 1 5 5h4l2 2.5h8A1.5 1.5 0 0 1 20.5 9v8A1.5 1.5 0 0 1 19 18.5H5A1.5 1.5 0 0 1 3.5 17Z" />

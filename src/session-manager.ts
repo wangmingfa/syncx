@@ -58,7 +58,7 @@ import { learnPeerUrl, learnPeerIp, getLanAddresses } from './net/addresses.js';
 import { e2eKeyForPeer, wrapTransportBlind } from './e2e.js';
 import { hostname as osHostname } from 'node:os';
 import { RateLimiter } from './ratelimit.js';
-import { isPeerAllowed, addPeer, setFolderPaused, setGlobalPaused, setFolderSchedule as persistFolderSchedule, setFolderGitSync as persistFolderGitSync, setFolderConflictPolicy as persistFolderConflictPolicy, setFolderOnDemand as persistFolderOnDemand, setFolderE2E as persistFolderE2E, setFolderGitLastCommitHash, setGlobalSettings as persistGlobalSettings, type GlobalSettingsPatch, type FolderE2EPatch } from './devices.js';
+import { isPeerAllowed, addPeer, setFolderPaused, setGlobalPaused, setFolderSchedule as persistFolderSchedule, setFolderGitSync as persistFolderGitSync, setFolderConflictPolicy as persistFolderConflictPolicy, setFolderOnDemand as persistFolderOnDemand, setFolderPausedFile as persistFolderPausedFile, setFolderE2E as persistFolderE2E, setFolderGitLastCommitHash, setGlobalSettings as persistGlobalSettings, type GlobalSettingsPatch, type FolderE2EPatch } from './devices.js';
 import { receiveOffer, makeOfferId, pruneRevokedOffers } from './offers.js';
 import type { DeviceIdentity } from './identity.js';
 import type { ProgressCounts, RelayActivity, TransferFile } from './status.js';
@@ -900,6 +900,9 @@ export class SyncSessionManager {
           );
           continue;
         }
+        // 单文件暂停:冻结路径连本地删除也不外推(索引保持原样,恢复后下一轮
+        // 扫描重新发现缺失并正常墓碑化 —— 暂停期间盘面动作不丢,只是推迟)
+        if (folder.config.pausedFiles?.includes(tomb.path)) continue;
         try {
           await folder.executor.applyDelete(tomb.path, tomb);
           folder.localIndex.set(tomb.path, tomb);
@@ -917,8 +920,13 @@ export class SyncSessionManager {
           this.recordFolderError(folder.id, error, `删除 ${tomb.path} 失败`);
         }
       }
-      const sends: IndexEntry[] = [...diff.tombstones];
+      // 暂停路径的墓碑上面已跳过执行,广播侧同样要摘掉(否则"本地冻结、对端照删")
+      const sends: IndexEntry[] = diff.tombstones.filter(
+        (t) => !folder.config.pausedFiles?.includes(t.path),
+      );
       for (const path of diff.changed) {
+        // 单文件暂停:本机改动不外推(索引不前移,恢复后重新 diff 即同步)
+        if (folder.config.pausedFiles?.includes(path)) continue;
         const isNew = !folder.localIndex.has(path);
         try {
           const updated = await folder.executor.applySend(path, this.identity.deviceId);
@@ -1282,6 +1290,9 @@ export class SyncSessionManager {
       // 按需同步:同样取函数(弹窗改完下一轮索引即到占位)。e2e 通道优先 ——
       // 盲区端本来就不收明文条目,对它的 peer 不存在「接收落地」,无需占位逻辑
       getOnDemand: () => folder.config.onDemand === true && e2eKey === undefined,
+      // 单文件暂停:命中路径在本连接上双向冻结(send/receive/conflict/delete
+      // 全部跳过)。取函数 = 文件管理器点「暂停」后下一轮索引交换即生效,无需重连
+      isPausedPath: (p) => folder.config.pausedFiles?.includes(p) === true,
       // 磁盘空间守卫:本轮入向体积预估不足则整轮拦下接收(目录卡挂错误横幅),
       // 空间恢复由扫描心跳复检触发,重放各 peer 积压(见 checkFolderDiskSpace)
       checkDiskSpace: (needed) => this.checkFolderDiskSpace(folder, needed),
@@ -2663,6 +2674,29 @@ export class SyncSessionManager {
     const folder = this.folderStates.find((f) => f.id === folderId);
     if (folder) folder.config.onDemand = on ? true : undefined;
     this.logger.info(`on-demand sync updated: ${folderId} -> ${on ? 'on' : 'off'}`);
+    this.notifyStatus();
+  }
+
+  /**
+   * 单文件暂停(文件管理器行内开关):落盘 + 同步内存 config,即时生效 ——
+   * peer 经 isPausedPath 闭包、扫描经 folder.config 现读,解冻后下一轮交换自然收敛。
+   * 只冻结该路径本身;同名前后缀路径不受牵连(精确匹配,非前缀)。
+   */
+  setFolderFilePaused(folderId: string, relPath: string, paused: boolean): void {
+    const norm = relPath.replace(/\\/g, '/');
+    if (!norm) throw new Error('path is required');
+    persistFolderPausedFile(this.configPath, folderId, norm, paused);
+    const folder = this.folderStates.find((f) => f.id === folderId);
+    if (folder) {
+      const current = folder.config.pausedFiles ?? [];
+      const next = paused
+        ? Array.from(new Set([...current, norm]))
+        : current.filter((p) => p !== norm);
+      folder.config.pausedFiles = next.length > 0 ? next : undefined;
+    }
+    this.logger.info(`file paused updated: ${folderId} ${norm} -> ${paused ? 'paused' : 'resumed'}`);
+    // 恢复同步时立刻补一轮扫描:本机侧积压的改动不必等 5 秒心跳
+    if (!paused) void this.runScan();
     this.notifyStatus();
   }
 

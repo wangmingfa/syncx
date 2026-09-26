@@ -15,6 +15,7 @@ export type ActionIconName =
   | 'report'
   | 'versions'
   | 'trash'
+  | 'restore'
   | 'browse'
   | 'ignore'
   | 'lock'

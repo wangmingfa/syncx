@@ -167,6 +167,25 @@ export interface FolderDirEntry {
   mtime: number;
   /** true = 按需同步的占位文件(盘上无实体,「未下载」):只能拉取,不能直接打开。 */
   placeholder?: boolean;
+  /** true = 该文件已「单文件暂停」(双向冻结):UI 提供「继续同步」而非暂停。 */
+  paused?: boolean;
+}
+
+/** 回收站的一条删除副本(GET /api/trash):由文件名反解,不落额外元数据。 */
+export interface TrashEntry {
+  /** 回收站内相对文件名(含目录层级);还原/彻底删除按此寻址。 */
+  file: string;
+  /** 还原回共享目录的相对路径(原路径,'/' 分隔)。 */
+  path: string;
+  /** 删除时刻(毫秒,从文件名反解)。 */
+  ts: number;
+  /** 副本字节数;stat 失败为 0。 */
+  size: number;
+}
+
+/** GET /api/trash 的响应。 */
+export interface TrashListing {
+  entries: TrashEntry[];
 }
 
 /** GET /api/folder-files 的响应。 */

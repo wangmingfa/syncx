@@ -392,6 +392,25 @@ export function setFolderOnDemand(configPath: string, folderId: string, onDemand
 }
 
 /**
+ * 单文件暂停:把某路径加入/移出目录的冻结名单(pausedFiles)。路径归一为 '/'
+ * 分隔并去重;列表清空存成 undefined(缺省承载默认语义,同 onDemand)。
+ * 冻结本身在同步两侧生效(peer.isPausedPath 与 session-manager 的扫描闸门),
+ * 这里只管持久化。
+ */
+export function setFolderPausedFile(configPath: string, folderId: string, relPath: string, paused: boolean): void {
+  const norm = relPath.replace(/\\/g, '/');
+  mutateConfig(configPath, (config) => {
+    const existing = config.sharedFolders.find((f) => folderIdFor(f) === folderId);
+    if (!existing) throw new Error(`未找到共享目录:「${folderId}」`);
+    const current = existing.pausedFiles ?? [];
+    const next = paused
+      ? Array.from(new Set([...current, norm]))
+      : current.filter((p) => p !== norm);
+    existing.pausedFiles = next.length > 0 ? next : undefined;
+  });
+}
+
+/**
  * 设置某目录的端到端加密口令与不可信节点名单(目录设置弹窗;按 folderId 定位)。
  * patch 语义与全局设置同款:键出现才改。
  *  - passphrase:新口令(≥4 字符)→ scrypt 派生新密钥;null/'' → 清除密钥**并连带清空名单**

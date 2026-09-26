@@ -60,6 +60,8 @@ export interface ControlServerDeps {
   setFolderUseGitignore?: (path: string, enabled: boolean) => void;
   /** 设置某共享目录是否暂停同步(按 folderId;暂停 = 数据面停摆,控制面照常)。 */
   setFolderPaused?: (folderId: string, paused: boolean) => void;
+  /** 单文件暂停:冻结/解冻目录内的某一个路径(双向:本机不外推、对端不落地)。 */
+  setFolderFilePaused?: (folderId: string, path: string, paused: boolean) => void;
   /** 设置某目录的同步时段(HH:MM-HH:MM,支持跨午夜;空串 = 清除,全天同步)。 */
   setFolderSchedule?: (folderId: string, schedule: string) => void;
   /** 设置某目录的 git 提交同步模式(off / send / receive / full)。 */
@@ -221,6 +223,12 @@ export interface ControlServerDeps {
   resolveFolderFile?: (folderId: string, relPath: string) => string;
   /** 删除共享目录内单个文件或整个子目录(递归);真实删除,扫描后传播给对端。 */
   deleteFolderEntry?: (folderId: string, relPath: string) => void;
+  /** 回收站:列出某目录已删除落盘的条目(按删除时间倒序;file 是回收站内相对名)。 */
+  listFolderTrash?: (folderId: string) => Array<{ file: string; path: string; ts: number; size: number }>;
+  /** 回收站:把一份回收站副本放回共享目录原路径(当前同名文件先挪进回收站,操作可逆);触发扫描广播。 */
+  restoreFolderTrash?: (folderId: string, file: string) => void;
+  /** 回收站:彻底删除一份副本(file 缺省 = 清空该目录全部回收站;不可逆)。 */
+  purgeFolderTrash?: (folderId: string, file?: string) => void;
   /**
    * 浏览器内终端(`WS /api/terminal`)。传入后在 upgrade 阶段完成鉴权并把连接交给它;
    * 不传则对 /api/terminal 的握手一律拒绝。见 src/api/terminal.ts。

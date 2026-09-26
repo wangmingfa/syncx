@@ -79,6 +79,8 @@ export interface StatusContext extends FolderDiffApi {
   openE2E: (f: FolderInfo) => void;
   /** 打开某目录的浏览器内文件管理器(独立路由页 /files,新开标签页;浏览/下载仅需登录,删除需提权)。 */
   openFiles: (f: FolderInfo) => void;
+  /** 打开某目录的 Web 回收站(独立路由页 /trash,新开标签页;还原/彻底删除在页内过提权门)。 */
+  openTrash: (f: FolderInfo) => void;
   copy: (text: string) => Promise<void>;
   hoverFolderKey: Ref<string>;
   onFolderEnter: (f: { id?: string; path: string; devices: string[] }) => void;

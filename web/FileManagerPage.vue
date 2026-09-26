@@ -135,6 +135,30 @@ async function materialize(entry: FolderDirEntry): Promise<void> {
 }
 
 /**
+ * 单文件暂停/继续:POST /api/folders/pause-file 切换该路径的双向冻结。
+ * 暂停后本机改动不外推、对端改动(含删除)不落地,但文件仍在索引与盘上;
+ * 恢复后下一轮索引交换自然收敛。仅需登录会话(非敏感:不改盘上内容),不过提权门。
+ */
+async function togglePause(entry: FolderDirEntry): Promise<void> {
+  if (busy.value) return;
+  busy.value = true;
+  const next = !entry.paused;
+  try {
+    await apiJson('/api/folders/pause-file', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ folderId: folderId.value, path: entry.path, paused: next }),
+    });
+    entry.paused = next;
+    showToast(next ? `已暂停「${entry.name}」的同步` : `已恢复「${entry.name}」的同步`);
+  } catch (e) {
+    showToast(errText(e, '设置单文件暂停失败'), 'alert');
+  } finally {
+    busy.value = false;
+  }
+}
+
+/**
  * 删除入口:先落二次确认卡(写明会同步传播给对端),确认后再过提权门 ——
  * 顺序刻意如此:取消确认就不该白弹一次验证。提权通过与后端 DELETE 403 门对应。
  */
@@ -277,11 +301,11 @@ onMounted(async () => {
             <span class="fm-col-ops">操作</span>
           </div>
           <div class="fm-rows">
-            <div v-for="entry in listing.entries" :key="entry.path" class="fm-row">
+            <div v-for="entry in listing.entries" :key="entry.path" class="fm-row" :class="{ 'is-paused': entry.paused }">
               <button
                 type="button"
                 class="fm-col-name fm-name"
-                :title="entry.dir ? '打开目录' : entry.placeholder ? '未下载(按需同步占位),点击开始拉取' : entry.name"
+                :title="entry.dir ? '打开目录' : entry.paused ? '已暂停同步(双向冻结)' : entry.placeholder ? '未下载(按需同步占位),点击开始拉取' : entry.name"
                 @click="entry.dir ? enter(entry) : entry.placeholder ? materialize(entry) : download(entry)"
               >
                 <svg v-if="entry.dir" class="fm-icon is-dir" viewBox="0 0 24 24" width="15" height="15" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
@@ -292,13 +316,15 @@ onMounted(async () => {
                   <path d="M14 3.5V8h4" />
                 </svg>
                 <span class="mono">{{ entry.name }}</span>
-                <span v-if="entry.placeholder" class="fm-badge-unloaded">未下载</span>
+                <span v-if="entry.paused" class="fm-badge-paused">已暂停</span>
+                <span v-else-if="entry.placeholder" class="fm-badge-unloaded">未下载</span>
               </button>
               <span class="fm-col-meta fm-meta-txt">{{ entry.dir ? '—' : formatBytes(entry.size) }}</span>
               <span class="fm-col-meta fm-meta-txt fm-time">{{ entry.placeholder ? '—' : fmtTime(entry.mtime) }}</span>
               <span class="fm-col-ops">
                 <n-button v-if="entry.placeholder" size="tiny" tertiary :disabled="busy" @click="materialize(entry)">下载</n-button>
                 <n-button v-else-if="!entry.dir" size="tiny" tertiary :disabled="busy" @click="download(entry)">下载</n-button>
+                <n-button v-if="!entry.dir" size="tiny" tertiary :disabled="busy" @click="togglePause(entry)">{{ entry.paused ? '继续同步' : '暂停同步' }}</n-button>
                 <n-button v-if="!entry.placeholder" size="tiny" tertiary type="error" :disabled="busy" @click="askDelete(entry)">删除</n-button>
               </span>
             </div>
@@ -454,7 +480,7 @@ onMounted(async () => {
 .fm-head,
 .fm-row {
   display: grid;
-  grid-template-columns: minmax(0, 1fr) 90px 150px 130px;
+  grid-template-columns: minmax(0, 1fr) 84px 140px 210px;
   align-items: center;
   gap: 10px;
 }
@@ -515,6 +541,21 @@ onMounted(async () => {
   background: var(--bg-soft);
   border: 1px solid var(--border);
 }
+
+.fm-badge-paused {
+  flex: none;
+  font-size: 10.5px;
+  line-height: 1;
+  padding: 3px 6px;
+  border-radius: 999px;
+  color: #b8860b;
+  background: rgb(184 134 11 / 0.12);
+  border: 1px solid rgb(184 134 11 / 0.4);
+}
+
+/* 已暂停行:名称淡出,提示该路径双向冻结 */
+.fm-row.is-paused .fm-name span.mono { opacity: 0.5; }
+.fm-row.is-paused .fm-meta-txt { opacity: 0.6; }
 
 .fm-meta-txt {
   font-size: 12px;

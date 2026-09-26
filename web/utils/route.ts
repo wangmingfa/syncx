@@ -8,16 +8,17 @@
  *  - `/terminal`      → 浏览器内终端(完整 PTY + xterm.js)
  *  - `/files`         → 文件管理器(?folder=<id> 直接进入该共享目录)
  *  - `/fleet`         → 多实例集中管理(fleet 视图,实例注册表存浏览器本地)
+ *  - `/trash`         → Web 回收站(?folder=<id> 直接进入该共享目录的删除副本)
  *
  * 用**路径路由**而不是哈希路由:链接可分享、可刷新、可收藏。代价是服务端必须为
- * `/compare/*`、`/terminal`、`/files` 与 `/fleet` 回页面壳(已在 api/routes/auth.ts 处理),
+ * `/compare/*`、`/terminal`、`/files`、`/fleet` 与 `/trash` 回页面壳(已在 api/routes/auth.ts 处理),
  * 否则刷新直接 404。
  */
 import { ref, type Ref } from 'vue';
 
 export interface Route {
-  name: 'status' | 'compare' | 'terminal' | 'files' | 'fleet';
-  /** 对比页 / 文件管理器页的目录 id(已 URI 解码)。 */
+  name: 'status' | 'compare' | 'terminal' | 'files' | 'fleet' | 'trash';
+  /** 对比页 / 文件管理器页 / 回收站页的目录 id(已 URI 解码)。 */
   folderId?: string;
   /** 预选的对比设备(来自 ?device=);未给则由页面让用户选。 */
   device?: string;
@@ -40,6 +41,13 @@ function parse(): Route {
   }
   if (pathname === '/fleet' || pathname === '/fleet/') {
     return { name: 'fleet' };
+  }
+  if (pathname === '/trash' || pathname === '/trash/') {
+    const folder = new URLSearchParams(search).get('folder');
+    return {
+      name: 'trash',
+      ...(folder ? { folderId: decodeURIComponent(folder) } : {}),
+    };
   }
   const m = COMPARE_RE.exec(pathname);
   if (m && m[1]) {
