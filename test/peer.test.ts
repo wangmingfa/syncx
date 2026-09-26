@@ -2019,3 +2019,166 @@ describe('CDC 内容定义分块(纯附加口径)', () => {
     }
   });
 });
+
+describe('双连接重复落地闸门(receiveLedger 单飞台账)', () => {
+  function fakeTransport() {
+    const requests: BlockRequest[] = [];
+    return {
+      transport: {
+        sendEntries(): void {},
+        sendBlockRequest(request: BlockRequest): void {
+          requests.push(request);
+        },
+        sendBlockResponse(): void {},
+      } satisfies PeerTransport,
+      requests,
+    };
+  }
+
+  function makeEntry(path: string, counter: number, data: Buffer): IndexEntry {
+    return entry(path, [['dev-b', counter]], [hashBlock(data)], data.length);
+  }
+
+  /** 两条 SyncPeer 共享 localIndex / executor / 台账 —— 与真机「同一目录双向两条
+   *  连接各挂一份 peer」的接线一致(session-manager.attachFolderToSession)。 */
+  function harness() {
+    const dir = mkdtempSync(join(tmpdir(), 'syncx-ledger-'));
+    const root = join(dir, 'share');
+    mkdirSync(root, { recursive: true });
+    const index = openIndexStore(join(dir, 'index.db'));
+    const executor = createLocalExecutor(root, index, join(root, '.syncx-trash'));
+    const localIndex = new Map<string, IndexEntry>();
+    const receiveLedger = new Map<string, import('../src/peer.js').ReceiveClaim>();
+    const events: string[] = [];
+    const mkPeer = (peerName: string) => {
+      const f = fakeTransport();
+      const peer = createSyncPeer({
+        transport: f.transport,
+        localIndex,
+        executor,
+        readLocalBlock: (p, i) => readBlockAt(join(root, p), i),
+        deviceId: 'DEV-A',
+        remoteDeviceId: peerName,
+        receiveLedger,
+        onEvent: (ev) => events.push(`${ev.action}:${ev.path}`),
+      });
+      return { peer, requests: f.requests };
+    };
+    return { dir, root, index, localIndex, receiveLedger, events, mkPeer };
+  }
+
+  it('同一版本经两条连接各到一次:只有一条管线拉块落地,另一条跳过', async () => {
+    const h = harness();
+    try {
+      const a = h.mkPeer('DEV-B');
+      const b = h.mkPeer('DEV-B'); // 同一对端的第二条连接(反方向)
+      const data = Buffer.from('remote-v1-payload');
+      const remote = makeEntry('doc.bin', 1, data);
+
+      // 两条 ws 消息同 tick 到达:两个 onPeerIndex 并发跑(与 wire.ts 的
+      // fire-and-forget 分发同形),闸门须让后者让位
+      await Promise.all([a.peer.onPeerIndex([remote]), b.peer.onPeerIndex([remote])]);
+
+      const blockHash = hashBlock(data);
+      expect(a.requests).toEqual([
+        { deviceId: 'DEV-A', path: 'doc.bin', blockIndex: 0, hash: blockHash },
+      ]);
+      expect(b.requests).toEqual([]);
+
+      await a.peer.onBlockResponse({
+        deviceId: 'DEV-B',
+        path: 'doc.bin',
+        blockIndex: 0,
+        hash: blockHash,
+        data,
+      });
+      await new Promise((r) => setTimeout(r, 10));
+
+      expect(readFileSync(join(h.root, 'doc.bin'))).toEqual(data);
+      // 只落一次:一次事件、一份索引条目
+      expect(h.events).toEqual(['add:doc.bin']);
+      // 落地终局:认领交还,台账不悬仓
+      expect(h.receiveLedger.size).toBe(0);
+      h.index.close();
+    } finally {
+      rmDir(h.dir);
+    }
+  });
+
+  it('不同版本不互挡:新版本的另一条管线照常拉块', async () => {
+    const h = harness();
+    try {
+      const a = h.mkPeer('DEV-B');
+      const b = h.mkPeer('DEV-B');
+      const v1 = Buffer.from('v1');
+      const v2 = Buffer.from('v2-longer');
+      await a.peer.onPeerIndex([makeEntry('doc.bin', 1, v1)]);
+      // A 认领 v1 且尚未收块;B 此时收到更新版本 v2 → 不能被 v1 的认领挡住
+      await b.peer.onPeerIndex([makeEntry('doc.bin', 2, v2)]);
+      expect(b.requests).toEqual([
+        { deviceId: 'DEV-A', path: 'doc.bin', blockIndex: 0, hash: hashBlock(v2) },
+      ]);
+      // B 收块落地 v2 后,台账由 B 的接收终局释放
+      await b.peer.onBlockResponse({
+        deviceId: 'DEV-B',
+        path: 'doc.bin',
+        blockIndex: 0,
+        hash: hashBlock(v2),
+        data: v2,
+      });
+      await new Promise((r) => setTimeout(r, 10));
+      expect(readFileSync(join(h.root, 'doc.bin'))).toEqual(v2);
+      // A 的 v1 在途接收被拆会话口径收场:显式释放后不留死仓
+      a.peer.releaseClaims();
+      expect(h.receiveLedger.size).toBe(0);
+      h.index.close();
+    } finally {
+      rmDir(h.dir);
+    }
+  });
+
+  it('连接拆除 releaseClaims:活着的另一条连接立即接手,不等保鲜期', async () => {
+    const h = harness();
+    try {
+      const a = h.mkPeer('DEV-B');
+      const b = h.mkPeer('DEV-B');
+      const data = Buffer.from('payload-x');
+      const remote = makeEntry('doc.bin', 1, data);
+      await a.peer.onPeerIndex([remote]);
+      expect(a.requests.length).toBe(1);
+      expect(b.requests.length).toBe(0);
+      // A 所在会话断开:台账里 A 的认领必须交还
+      a.peer.releaseClaims();
+      await b.peer.onPeerIndex([remote]);
+      expect(b.requests).toEqual([
+        { deviceId: 'DEV-A', path: 'doc.bin', blockIndex: 0, hash: hashBlock(data) },
+      ]);
+      h.index.close();
+    } finally {
+      rmDir(h.dir);
+    }
+  });
+
+  it('对端墓碑中止在途接收时同步交还认领', async () => {
+    const h = harness();
+    try {
+      const a = h.mkPeer('DEV-B');
+      const data = Buffer.from('payload-y');
+      // 本地已有一版 v1(实体在盘 + 在索引),否则「本地无 → 对端墓碑」会被
+      // buildDeltaPlan 判 equal 直接无动作,走不到 delete 分支
+      const v1 = makeEntry('doc.bin', 1, data);
+      h.localIndex.set('doc.bin', v1);
+      writeFileSync(join(h.root, 'doc.bin'), data);
+      const v2 = { ...makeEntry('doc.bin', 2, Buffer.from('other')), deleted: false };
+      await a.peer.onPeerIndex([v2]);
+      expect(h.receiveLedger.size).toBe(1);
+      // 对端删了该文件:墓碑增量 → delete 分支 applyDelete + abortPending
+      const tombstone = { ...makeEntry('doc.bin', 3, data), deleted: true };
+      await a.peer.onPeerIndex([tombstone]);
+      expect(h.receiveLedger.size).toBe(0);
+      h.index.close();
+    } finally {
+      rmDir(h.dir);
+    }
+  });
+});

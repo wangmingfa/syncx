@@ -48,6 +48,25 @@ export interface SyncEventInput {
   deviceId?: string;
 }
 
+/**
+ * 接收认领台账(目录级共享)里的一条记录:该路径的这个版本正被某条 SyncPeer
+ * 管线接收中。claimId 标识认领者 —— 同一连接对同版本重规划(磁盘守卫重放、
+ * 重复增量)不该被自己的认领挡住;连接拆除时按它精确释放,死认领者不卡活管线。
+ */
+export interface ReceiveClaim {
+  claimId: number;
+  /** 版本指纹(尺寸+全部块哈希的摘要):只对「同一版本」去重,不同版本照常规划 */
+  key: string;
+  ts: number;
+}
+
+/**
+ * 认领的保鲜期:超过此时长的认领视作死认领,不再挡住其它管线。取值须大于一条
+ * 健康接收的最坏时长:块级放弃上限(5s×3 快重试 + 30s 长重试)约 105s,再给
+ * 大文件收块与落地留余量。连接拆除本就主动释放,这里只是进程内异常路径的兜底。
+ */
+const RECEIVE_CLAIM_TTL_MS = 5 * 60_000;
+
 export interface SyncPeerDeps {
   transport: PeerTransport;
   localIndex: Map<string, IndexEntry>;
@@ -148,6 +167,16 @@ export interface SyncPeerDeps {
    * 全程不出明文内容。缺省 undefined = 普通双向同步,一切照旧。
    */
   e2eKey?: Buffer;
+  /**
+   * 接收认领台账(同一共享目录的**所有** SyncPeer 共享同一个 Map,由上层创建传入):
+   * 设备对之间至多两条连接(每方向一条,设计内),每条会话各挂一份 SyncPeer,
+   * 同一份增量会在两条连接各到一次 —— 两条管线并发比对同一份尚未前移的
+   * localIndex、各自拉块落地,第二次落地把窗口期的本地编辑原样打回(旧内容被
+   * snapshotVersion 存档,事后两侧索引一致、扫描无感 = 静默永久分叉,2026-09
+   * 混版本实测坐实)。规划接收前先在此认领:同版本已被**其它管线**认领(保鲜期内)
+   * 就跳过。缺省(旧调用方/单测)不设闸门,行为与从前一致。
+   */
+  receiveLedger?: Map<string, ReceiveClaim>;
 }
 
 export interface SyncPeer {
@@ -175,6 +204,12 @@ export interface SyncPeer {
    * 该路径此刻不在占位态(不是占位/不存在/已落地)时是空操作;已在拉取中则幂等。
    */
   materialize(path: string): boolean;
+  /**
+   * 释放本管线在接收认领台账(见 deps.receiveLedger)中的**全部**在手持仓。
+   * 连接拆除时必须调用:死掉的管线不落地也不重试,若留着认领,另一条(活着的)
+   * 连接对同一版本会一直跳到保鲜期过,把一次普通的断开演变成分钟级的收敛延迟。
+   */
+  releaseClaims(): void;
 }
 
 interface PendingEntry {
@@ -242,13 +277,19 @@ const RATE_WINDOW_MS = 5000;
 const RATE_SPAN_FLOOR_MS = 1000;
 
 /**
+ * 接收认领者的进程内身份发号:每条 SyncPeer 建出来分一个,台账据此区分
+ * 「自己的重规划」与「另一条管线的同版本接收」。
+ */
+let NEXT_CLAIM_ID = 1;
+
+/**
  * Wire one sync round over an injected transport: on receiving the peer's
  * index, send newer local entries, request missing blocks, apply deletions
  * and prepare conflict copies; collect block responses until a file is
  * complete, then apply it via the executor.
  */
 export function createSyncPeer(deps: SyncPeerDeps): SyncPeer {
-  const { transport, localIndex, executor, readLocalBlock, readLocalChunk, deviceId, remoteDeviceId, root, onEvent, onTraffic, readIgnoreLines, receiveOnly, getConflictPolicy, getOnDemand, isPausedPath, checkDiskSpace, onHardIgnoredDropped, onLanded, onStallDrop, e2eKey } = deps;
+  const { transport, localIndex, executor, readLocalBlock, readLocalChunk, deviceId, remoteDeviceId, root, onEvent, onTraffic, readIgnoreLines, receiveOnly, getConflictPolicy, getOnDemand, isPausedPath, checkDiskSpace, onHardIgnoredDropped, onLanded, onStallDrop, e2eKey, receiveLedger } = deps;
   const pending = new Map<string, PendingEntry>();
   // 逐块跟踪超时重试:块响应丢失/丢弃时自动重发,避免文件永远收不齐
   const pendingBlocks = new Map<string, PendingBlockRequest>();
@@ -258,6 +299,9 @@ export function createSyncPeer(deps: SyncPeerDeps): SyncPeer {
   // 「优先同步」点名中的接收路径:块请求(含超时重试)都带 priority 标记,
   // 直到该文件落地 / 中止 / 被放弃才清除(见 completeIfReady / abortPending / dropIfUnservable)。
   const priorities = new Set<string>();
+  // 本管线的台账身份 + 当前持有的接收认领路径集(见 deps.receiveLedger)
+  const claimId = NEXT_CLAIM_ID++;
+  const myClaims = new Set<string>();
   // 正在向外供块的路径 → 最后一次发出该文件块的时间,用于展示「发送中」(见 SERVE_LEASE_MS)
   const serving = new Map<string, number>();
   // 文件级发送进度:每个供块路径累计 已发字节 / 总字节。servedBlocks 记录已发出的块下标,
@@ -312,11 +356,54 @@ export function createSyncPeer(deps: SyncPeerDeps): SyncPeer {
     return `${cdc ? 'c' : 'b'}:${path}:${blockIndex}`;
   }
 
+  /**
+   * 条目的版本指纹:尺寸 + 全部块哈希(CDC 视图一并计入)的摘要。只用于台账里
+   * 「是否同一版本」的相等比较 —— 同一设备经两条连接发来的同一份宣告,结构相等,
+   * 指纹必相等;任何真实改动(尺寸/块/边界变)指纹即变,新照收不误。
+   */
+  function versionKey(entry: IndexEntry): string {
+    if (entry.deleted) return 'tombstone';
+    return hashBlock(Buffer.from(`${entry.size}|${entry.blocks.join(',')}|${entry.cdh?.join(',') ?? ''}`, 'utf8'));
+  }
+
+  /**
+   * 单飞闸门(主锁,见 deps.receiveLedger):该路径的这个版本若已被**另一条管线**
+   * 认领且仍在保鲜期,返回 false —— 本管线跳过规划,杜绝双份落地互相覆盖;
+   * 否则认领并返回 true。自己重认领同版本(磁盘守卫重放/重复增量)放行,
+   * 不同版本覆盖认领(带保鲜期戳),台账里永远至多一条新鲜认领。
+   */
+  function tryClaim(path: string, entry: IndexEntry): boolean {
+    if (!receiveLedger) return true;
+    const key = versionKey(entry);
+    const holder = receiveLedger.get(path);
+    if (
+      holder &&
+      holder.claimId !== claimId &&
+      holder.key === key &&
+      Date.now() - holder.ts < RECEIVE_CLAIM_TTL_MS
+    ) {
+      return false;
+    }
+    receiveLedger.set(path, { claimId, key, ts: Date.now() });
+    myClaims.add(path);
+    return true;
+  }
+
+  /**
+   * 释放本管线对该路径的认领(接收有了确定结局:落地/中止/放弃,或短动作即时释放)。
+   * 台账已被其它管线的更新版本认领覆盖时不动它 —— 那条认领属于新持有者。
+   */
+  function releaseClaim(path: string): void {
+    if (!receiveLedger || !myClaims.delete(path)) return;
+    if (receiveLedger.get(path)?.claimId === claimId) receiveLedger.delete(path);
+  }
+
   /** 中止某路径的在途接收与块重试:对端声明它已删除时,继续拉块毫无意义,
    *  而且迟到的块响应会把刚删除的文件临时复活。 */
   function abortPending(path: string): void {
     pending.delete(path);
     priorities.delete(path);
+    releaseClaim(path);
     for (const [key, request] of pendingBlocks) {
       if (request.path !== path) continue;
       clearTimeout(request.timeout);
@@ -339,6 +426,7 @@ export function createSyncPeer(deps: SyncPeerDeps): SyncPeer {
     }
     pending.delete(path);
     priorities.delete(path);
+    releaseClaim(path);
     onStallDrop?.(path, slotCount(item) - item.received);
   }
 
@@ -521,47 +609,53 @@ export function createSyncPeer(deps: SyncPeerDeps): SyncPeer {
       },
     };
 
-    if (item.kind === 'conflict' && item.local) {
-      // 落地时重新读取本地最新条目:冲突规划到块收齐之间,本地可能已被
-      // 新一轮扫描更新(A:1→A:2),用规划时捕获的旧版本合并会回退版本向量
-      const currentLocal = localIndex.get(path) ?? item.local;
-      const landed = await executor?.applyConflict(
-        path,
-        currentLocal,
-        item.entry,
-        provider,
-        remoteDeviceId ?? '',
-      );
-      // 同步内存索引,使后续规划基于最新本地状态:以实际落盘结果为准
-      if (landed) {
-        localIndex.set(path, landed);
-      }
-      onEvent?.({ ts: Date.now(), path, action: 'conflict', direction: 'remote', deviceId: remoteDeviceId });
-    } else {
-      const isNew = !localIndex.has(path);
-      // 冷启动保护:本机磁盘已有同名文件、但本机索引尚未记录(对端“热”且先于本机
-      // 首扫推送)时,先保留为 .sync-conflict 副本,避免被对端版本静默覆盖。
-      // 忽略规则命中的文件不保护(旧行为即会接收覆盖,避免把被忽略文件反向同步出去)。
-      let preserved = false;
-      if (isNew && root !== undefined && remoteDeviceId) {
-        try {
-          if (!isIgnoredPath(currentIgnoreRules(), path, false)) {
-            preserved = preserveLocalAsConflict(root, path, remoteDeviceId);
-          }
-        } catch {
-          // 路径校验 / 重命名失败不阻断接收,退回旧行为(覆盖);保护仅为防丢数据增强
-          preserved = false;
+    try {
+      if (item.kind === 'conflict' && item.local) {
+        // 落地时重新读取本地最新条目:冲突规划到块收齐之间,本地可能已被
+        // 新一轮扫描更新(A:1→A:2),用规划时捕获的旧版本合并会回退版本向量
+        const currentLocal = localIndex.get(path) ?? item.local;
+        const landed = await executor?.applyConflict(
+          path,
+          currentLocal,
+          item.entry,
+          provider,
+          remoteDeviceId ?? '',
+        );
+        // 同步内存索引,使后续规划基于最新本地状态:以实际落盘结果为准
+        if (landed) {
+          localIndex.set(path, landed);
         }
+        onEvent?.({ ts: Date.now(), path, action: 'conflict', direction: 'remote', deviceId: remoteDeviceId });
+      } else {
+        const isNew = !localIndex.has(path);
+        // 冷启动保护:本机磁盘已有同名文件、但本机索引尚未记录(对端“热”且先于本机
+        // 首扫推送)时,先保留为 .sync-conflict 副本,避免被对端版本静默覆盖。
+        // 忽略规则命中的文件不保护(旧行为即会接收覆盖,避免把被忽略文件反向同步出去)。
+        let preserved = false;
+        if (isNew && root !== undefined && remoteDeviceId) {
+          try {
+            if (!isIgnoredPath(currentIgnoreRules(), path, false)) {
+              preserved = preserveLocalAsConflict(root, path, remoteDeviceId);
+            }
+          } catch {
+            // 路径校验 / 重命名失败不阻断接收,退回旧行为(覆盖);保护仅为防丢数据增强
+            preserved = false;
+          }
+        }
+        await executor?.applyReceive(item.entry, provider);
+        localIndex.set(path, item.entry);
+        onEvent?.({
+          ts: Date.now(),
+          path,
+          action: preserved ? 'conflict' : isNew ? 'add' : 'update',
+          direction: 'remote',
+          deviceId: remoteDeviceId,
+        });
       }
-      await executor?.applyReceive(item.entry, provider);
-      localIndex.set(path, item.entry);
-      onEvent?.({
-        ts: Date.now(),
-        path,
-        action: preserved ? 'conflict' : isNew ? 'add' : 'update',
-        direction: 'remote',
-        deviceId: remoteDeviceId,
-      });
+    } finally {
+      // 接收有了确定结局(成功落地,或抛错半途而废——pending 已删不会续传):
+      // 交还认领,让同一设备的另一条连接在后续轮次仍能接手这一版本
+      releaseClaim(path);
     }
   }
 
@@ -727,6 +821,9 @@ export function createSyncPeer(deps: SyncPeerDeps): SyncPeer {
           case 'receive': {
             const remoteEntry = remote.get(action.path);
             if (remoteEntry) {
+              // 单飞闸门:同一设备的另一条连接已在接收这一版本 → 本管线跳过
+              // (双份落地互相覆盖是静默分叉的根因,见 deps.receiveLedger)
+              if (!tryClaim(remoteEntry.path, remoteEntry)) break;
               // 按需同步:非空文件先只记占位条目(块哈希齐备、盘上无实体),
               // 不发块请求、不落盘 —— 用户点「下载」时经 materialize() 再拉。
               // 空文件(blocks=0)无盘可省,照常即时落地。占位不进 landed(不中转),
@@ -743,6 +840,8 @@ export function createSyncPeer(deps: SyncPeerDeps): SyncPeer {
                   direction: 'remote',
                   deviceId: remoteDeviceId,
                 });
+                // 占位是即时短动作(不进 pending),做完即交还认领
+                releaseClaim(remoteEntry.path);
                 break;
               }
               openPending('receive', remoteEntry);
@@ -757,6 +856,9 @@ export function createSyncPeer(deps: SyncPeerDeps): SyncPeer {
           case 'conflict': {
             const remoteEntry = remote.get(action.path);
             const localEntry = localIndex.get(action.path);
+            // 单飞闸门:冲突动作同样会拉块+落地(或外推合并版本),双管线并发动手
+            // 会刷出两份冲突副本/重演覆盖,与 receive 同闸
+            if (remoteEntry && !tryClaim(action.path, remoteEntry)) break;
             // 本端是否真的改过这条文件:版本向量里带本机 deviceId 计数器 > 0 才算。
             // 否则只是「之前从别处同步来的陈旧副本」,与中转来的并发版本不构成真冲突。
             const genuineLocalEdit = !!localEntry && (localEntry.version.get(deviceId) ?? 0) > 0;
@@ -819,6 +921,8 @@ export function createSyncPeer(deps: SyncPeerDeps): SyncPeer {
                   direction: 'local',
                   deviceId: remoteDeviceId,
                 });
+                // 保本地不拉块,即时短动作:做完即交还认领
+                releaseClaim(action.path);
                 break;
               }
             }
@@ -828,6 +932,9 @@ export function createSyncPeer(deps: SyncPeerDeps): SyncPeer {
               landed.push(remoteEntry);
               requestMissingBlocks(remoteEntry.path, remoteEntry);
               await completeIfReady(remoteEntry.path);
+            } else if (remoteEntry) {
+              // 认领了却没动手(本地条目缺失,冲突分支落空):交还认领不留悬仓
+              releaseClaim(action.path);
             }
             break;
           }
@@ -850,6 +957,7 @@ export function createSyncPeer(deps: SyncPeerDeps): SyncPeer {
         for (const path of pending.keys()) {
           if (!livePending.has(path)) {
             pending.delete(path);
+            releaseClaim(path);
           }
         }
       }
@@ -1055,9 +1163,20 @@ export function createSyncPeer(deps: SyncPeerDeps): SyncPeer {
       // 落地的 entry 不带 placeholder,索引自动从占位转实体)。
       // 口径必为定长:占位态盘上没有实体文件,planCdc 对占位条目判 false(无差集可言)。
       const target: IndexEntry = { ...entry, placeholder: undefined };
+      // 认领同一版本:否则另一条连接在拉取窗口内规划同版本会双份落地(见 tryClaim)。
+      // 落地终局由 completeIfReady 的 finally 交还;半途放弃(块重试耗尽)由 dropIfUnservable 交还。
+      if (!tryClaim(path, target)) return true; // 他人在拉:幂等返回,不重复起头
       openPending('receive', target);
       requestMissingBlocks(path, target);
       return true;
+    },
+
+    releaseClaims(): void {
+      if (!receiveLedger) return;
+      for (const path of myClaims) {
+        if (receiveLedger.get(path)?.claimId === claimId) receiveLedger.delete(path);
+      }
+      myClaims.clear();
     },
   };
   return self;

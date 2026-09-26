@@ -37,7 +37,7 @@ import {
   type IgnoreVerdict,
 } from './ignore.js';
 import type { WebhookEvent } from './webhook.js';
-import { createSyncPeer, type PeerTransport, type SyncPeer } from './peer.js';
+import { createSyncPeer, type PeerTransport, type ReceiveClaim, type SyncPeer } from './peer.js';
 import { freeBytesAt, DISK_GUARD_MIN_FREE_BYTES } from './disk.js';
 import { scanFolder } from './scanner.js';
 import type { IndexEntry } from './index.js';
@@ -84,8 +84,15 @@ export interface FolderState {
   transports: PeerTransport[];
   peers: Map<string, SyncPeer>;
   /** transport → 对端设备 id 的映射(attach 时写入,detach 时清理);
-   *  仅用于中转遥测记录(把中继目标的对端 id 解析出来),不影响同步逻辑。 */
+   *  用于中转遥测(把中继目标的对端 id 解析出来)与广播/中转的**按设备去重**
+   *  (同一设备至多两条连接,同一份增量只发一份,见 broadcast.ts / relay.ts)。 */
   transportDevice: Map<PeerTransport, string>;
+  /**
+   * 接收认领台账(本目录所有 SyncPeer 共享):同一设备双向两条连接会把同一份
+   * 增量各送一次,两条管线并排双落地时,后一次 rename 会覆盖窗口期的本地编辑
+   * (静默分叉,2026-09 混版本实测)。规划接收前先认领,已被他人认领则跳过。
+   */
+  receiveLedger: Map<string, ReceiveClaim>;
   config: SharedFolderConfig;
   /**
    * 首轮扫描是否只建基线(不写同步记录):索引为空(新目录)时为 true,
@@ -617,7 +624,7 @@ export class SyncSessionManager {
     // 索引为空 → 首扫是建基线(存量文件不算新增);索引有存量 → 首扫 diff 是
     // daemon 离线期间的真实改动,要写同步记录
     const baselinePending = usable.length === 0;
-    return { id, indexKey, path: f.path, index, executor, localIndex, ignoreLines, transports: [], peers: new Map(), transportDevice: new Map(), config: f, baselinePending, conflictCount: 0, lastCommitHash: f.gitLastCommitHash ?? null, processedRemoteCommits: new Set(), gitBroadcastPending: false, diskBlocked: false };
+    return { id, indexKey, path: f.path, index, executor, localIndex, ignoreLines, transports: [], peers: new Map(), transportDevice: new Map(), receiveLedger: new Map(), config: f, baselinePending, conflictCount: 0, lastCommitHash: f.gitLastCommitHash ?? null, processedRemoteCommits: new Set(), gitBroadcastPending: false, diskBlocked: false };
   }
 
   /**
@@ -1313,11 +1320,13 @@ export class SyncSessionManager {
       checkDiskSpace: (needed) => this.checkFolderDiskSpace(folder, needed),
       // 端到端加密视图(不可信对端):同一份密钥,peer 内忽略盲区回推 + 密文供块
       e2eKey,
+      // 接收认领台账:本目录全部 SyncPeer 共用一份,挡住双向连接重复落地(见 FolderState)
+      receiveLedger: folder.receiveLedger,
       // 中转(ADR-0014):收到并落地远程条目后,转发给同目录其它 transport(排除来源端本身)。
       // 仅增量接收触发(peer.ts 内 gate),full 交换已收敛整网,不中转。
       onLanded: (entries) => {
         // 先原样执行中转,绝不被遥测记录影响(记录失败也必须照常中转)
-        relayToSiblings(folder.transports, transport, entries);
+        relayToSiblings(folder.transports, transport, entries, folder.transportDevice);
         // 遥测:把「本机作为枢纽,把 from 的变更中转给同目录其它设备」记录下来供拓扑视图展示。
         // 完全旁路、独立 try/catch,任何异常都不允许冒泡到中转路径。
         try {
@@ -1362,6 +1371,9 @@ export class SyncSessionManager {
       folder.transportDevice.delete(t);
     }
     folder.peers.delete(session.remoteDeviceId);
+    // 摘除即终局:交还该 peer 在台账里的全部接收认领,否则死仓会让同设备的另一条
+    // 连接跳过这一版本,直到保鲜期过(见 peer.ts tryClaim)
+    session.peers.get(folder.id)?.releaseClaims();
     session.peers.delete(folder.id);
   }
 
@@ -2385,6 +2397,9 @@ export class SyncSessionManager {
       for (const { folder, transport } of session.transports) {
         const idx = folder.transports.indexOf(transport);
         if (idx >= 0) folder.transports.splice(idx, 1);
+        // 会话已死:它持有的接收认领全部交还台账,让同设备另一条活连接(或重连后的
+        // 新会话)能立即接手,而不是等保鲜期(见 peer.ts receiveLedger)
+        session.peers.get(folder.id)?.releaseClaims();
         // 仅当 folder.peers 里登记的仍是本会话的 peer 时才删除:
         // 会话被新连接接管后,新会话可能已登记了自己的 peer,不能误删
         const myPeer = session.peers.get(folder.id);
