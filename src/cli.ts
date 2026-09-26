@@ -7,8 +7,16 @@ import { readFolderIdentity, removeLegacyFolderMarker } from './folder-identity.
 import { migrateLegacyTrash } from './trash.js';
 import { openIndexStore } from './indexstore.js';
 
-import { getSyncHistory, getGlobalSyncHistory, clearSyncHistory, getHistoryMaxEvents } from './history.js';
+import { getSyncHistory, getGlobalSyncHistory, clearSyncHistory, getHistoryMaxEvents, flushSyncHistory } from './history.js';
 import { collectWeeklyReport } from './report.js';
+import {
+  applyRollback,
+  listTrashRefs,
+  listVersionRefs,
+  planRollback,
+  walkCurrentFiles,
+  type RollbackInputs,
+} from './rollback.js';
 import { listConflictCopies, resolveConflictCopy, applyConflictMerge } from './conflicts.js';
 import { readFileSync, readdirSync, existsSync, statSync, writeFileSync, watch, unlinkSync, copyFileSync, mkdirSync, rmSync } from 'node:fs';
 import { relative, isAbsolute } from 'node:path';
@@ -852,6 +860,40 @@ export async function run(args: ParsedArgs): Promise<void> {
       const folder = findConfigFolder(configPath, folderId);
       const versionsDir = folderVersionsPath(configDir, folderIndexKey(folder));
       rmSync(locateVersionFile(versionsDir, file));
+    },
+    // 时间机器:读单个版本文件内容(任意两版对比)。超 1MB 只报大小,含 \0 判二进制。
+    getFolderVersionContent: (folderId, file) => {
+      const folder = findConfigFolder(configPath, folderId);
+      const versionsDir = folderVersionsPath(configDir, folderIndexKey(folder));
+      const abs = locateVersionFile(versionsDir, file);
+      if (!existsSync(abs) || !statSync(abs).isFile()) return { exists: false };
+      const size = statSync(abs).size;
+      if (size > 1_000_000) return { exists: true, size, tooLarge: true };
+      const buf = readFileSync(abs);
+      if (buf.includes(0)) return { exists: true, size, binary: true };
+      return { exists: true, size, text: buf.toString('utf8') };
+    },
+    // 时间机器:整目录回滚。证据 = 版本快照 + 回收站 + 同步记录(先 flush 攒批);
+    // dryRun 出计划,执行时当前内容先进版本/回收站,回滚本身可逆。
+    rollbackFolder: (folderId, targetTs, dryRun) => {
+      const folder = findConfigFolder(configPath, folderId);
+      const key = folderIndexKey(folder);
+      const versionsDir = folderVersionsPath(configDir, key);
+      const trashDir = folderTrashPath(configDir, key);
+      flushSyncHistory(configPath, folderId);
+      const inputs: RollbackInputs = {
+        versions: listVersionRefs(versionsDir),
+        trash: listTrashRefs(trashDir),
+        history: getSyncHistory(configPath, folderId, Number.MAX_SAFE_INTEGER)
+          .events
+          .map((e) => ({ ts: e.ts, path: e.path, action: e.action })),
+        current: walkCurrentFiles(folder.path),
+      };
+      const plan = planRollback(inputs, targetTs);
+      if (dryRun) return { dryRun: true, plan };
+      const result = applyRollback(plan, { root: folder.path, versionsDir, trashDir });
+      void manager.runScan();
+      return { dryRun: false, plan, result };
     },
     // 内容对比(诊断,只读):向对端索取同一目录 id 的索引快照并分类差异
     diffFolder: (folderId, deviceId) => manager.diffFolder(folderId, deviceId),

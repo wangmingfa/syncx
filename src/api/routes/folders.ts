@@ -56,7 +56,7 @@ export async function tryFolderRoutes(
   res: ServerResponse,
   deps: ControlServerDeps,
 ): Promise<boolean> {
-  const { addFolder, removeFolder, setFolderDevices, setFolderUseGitignore, setFolderPaused, setFolderSchedule, setFolderGitSync, setFolderConflictPolicy, prioritizeTransfer, getFolderIgnoreInfo, setFolderIgnoreLines, testFolderIgnore, reAdoptFolderIdentity, getFolderHistory, getGlobalHistory, getWeeklyReport, clearFolderHistory, listFolderConflicts, resolveFolderConflict, conflictFilePair, applyConflictMerge, cleanIdenticalConflicts, diffFolder, compareFolder, readFilePair, applyFileSync, listFolderVersions, restoreFolderVersion, deleteFolderVersion } = deps;
+  const { addFolder, removeFolder, setFolderDevices, setFolderUseGitignore, setFolderPaused, setFolderSchedule, setFolderGitSync, setFolderConflictPolicy, prioritizeTransfer, getFolderIgnoreInfo, setFolderIgnoreLines, testFolderIgnore, reAdoptFolderIdentity, getFolderHistory, getGlobalHistory, getWeeklyReport, clearFolderHistory, listFolderConflicts, resolveFolderConflict, conflictFilePair, applyConflictMerge, cleanIdenticalConflicts, diffFolder, compareFolder, readFilePair, applyFileSync, listFolderVersions, restoreFolderVersion, deleteFolderVersion, getFolderVersionContent, rollbackFolder } = deps;
   const path = req.url ? pathname(req.url) : '/';
 
   // Form POST /folders : add or (via _method=DELETE) remove a folder
@@ -528,6 +528,52 @@ export async function tryFolderRoutes(
       sendJson(res, 200, { ok: true });
     } catch (e) {
       sendJson(res, 400, { error: e instanceof Error ? e.message : '删除失败' });
+    }
+    return true;
+  }
+
+  // GET /api/folders/versions/content?folderId=xxx&file=yyy : 读取单个版本文件内容
+  // (时间机器:任意两版对比)。超大/二进制只回状态不回内容,与文件对比页同一口径。
+  if (req.method === 'GET' && req.url && path === '/api/folders/versions/content' && getFolderVersionContent) {
+    const url = new URL(req.url, 'http://localhost');
+    const folderId = url.searchParams.get('folderId');
+    const file = url.searchParams.get('file');
+    if (!folderId || !file) {
+      sendJson(res, 400, { error: 'folderId and file are required' });
+      return true;
+    }
+    try {
+      sendJson(res, 200, getFolderVersionContent(folderId, file));
+    } catch (e) {
+      sendJson(res, 400, { error: e instanceof Error ? e.message : '读取版本内容失败' });
+    }
+    return true;
+  }
+
+  // POST /api/folders/rollback : 文件时间机器 —— 整目录回滚到目标时刻。
+  // dryRun(缺省即 true)只回计划;显式 dryRun:false 才执行。ts 为毫秒时间戳。
+  if (req.method === 'POST' && path === '/api/folders/rollback' && rollbackFolder) {
+    try {
+      const raw = await readBody(req);
+      const body = raw === '' ? {} : (JSON.parse(raw) as Record<string, unknown>);
+      const folderId = body.folderId;
+      const ts = body.ts;
+      if (typeof folderId !== 'string' || folderId === '') {
+        sendJson(res, 400, { error: 'folderId is required' });
+        return true;
+      }
+      if (typeof ts !== 'number' || !Number.isFinite(ts) || ts <= 0) {
+        sendJson(res, 400, { error: 'ts must be a positive number (ms)' });
+        return true;
+      }
+      if (ts > Date.now() + 60_000) {
+        sendJson(res, 400, { error: '目标时间不能晚于现在' });
+        return true;
+      }
+      const dryRun = body.dryRun !== false;
+      sendJson(res, 200, rollbackFolder(folderId, ts, dryRun));
+    } catch (e) {
+      sendJson(res, 400, { error: e instanceof Error ? e.message : '回滚失败' });
     }
     return true;
   }

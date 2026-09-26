@@ -126,6 +126,16 @@ export interface ControlServerDeps {
   /** 删除单个版本文件(不可逆)。 */
   deleteFolderVersion?: (folderId: string, file: string) => void;
   /**
+   * 文件时间机器:读取单个版本文件内容(时间轴上任意两版对比用)。
+   * 返回 FileCompareData 单侧形状:{ exists, size, text? , binary? , tooLarge? }。
+   */
+  getFolderVersionContent?: (folderId: string, file: string) => unknown;
+  /**
+   * 文件时间机器:把整个目录回滚到目标时刻(证据=版本快照+回收站+同步记录,全启发式)。
+   * dryRun 只回计划;执行时当前内容一律先进版本/回收站(回滚本身可逆)。
+   */
+  rollbackFolder?: (folderId: string, targetTs: number, dryRun: boolean) => unknown;
+  /**
    * 内容对比(诊断):把本机某共享目录与指定对端的**同一目录 id** 逐条比对,
    * 返回分类后的差异报告(见 diff.ts)。全程只读,不改动任何一端的状态。
    * 设备离线 / 该目录未共享给对端 / 对端版本过旧时抛错,路由转成 400。
