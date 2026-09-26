@@ -23,7 +23,19 @@ import { loadConfig, mutateConfig, folderIdFor, folderIndexKey, folderIndexPath,
 import { acceptedDevs, checkFolderIdentity, readFolderIdentity, withAcceptedDev } from './folder-identity.js';
 import { openIndexStore, type IndexStore } from './indexstore.js';
 import { createLocalExecutor, resolveSharePath, type LocalExecutor } from './executor.js';
-import { filterIndexedEntries, HARD_IGNORE_NAMES, isHardIgnored, parseIgnoreRules, readFolderIgnoreLines } from './ignore.js';
+import {
+  filterIndexedEntries,
+  HARD_IGNORE_NAMES,
+  isHardIgnored,
+  parseIgnoreRules,
+  readFolderIgnoreLines,
+  composeIgnoreLines,
+  readSyncxIgnoreLines,
+  writeSyncxIgnoreLines,
+  explainIgnore,
+  BUILTIN_IGNORE_LINES,
+  type IgnoreVerdict,
+} from './ignore.js';
 import { createSyncPeer, type PeerTransport, type SyncPeer } from './peer.js';
 import { freeBytesAt, DISK_GUARD_MIN_FREE_BYTES } from './disk.js';
 import { scanFolder } from './scanner.js';
@@ -2552,6 +2564,71 @@ export class SyncSessionManager {
     }
     this.logger.info(`transfer prioritized: ${folderId} ${path} (${marked} peers)`);
     // 下一帧状态快照会把 priority 标记带上(files 行),无需在此额外推送
+  }
+
+  /* ==================== 忽略规则可视化编辑 ==================== */
+
+  /**
+   * 忽略规则编辑器的打开数据:`.syncxignore` 原始行(用户可编辑)+ 内置默认行
+   * (只读展示,可被负向规则在文本层面覆盖但硬闸门仍在)+ 是否并入 .gitignore。
+   */
+  getFolderIgnoreInfo(folderId: string): { lines: string[]; builtin: string[]; useGitignore: boolean } {
+    const folder = this.folderStates.find((f) => f.id === folderId);
+    if (!folder) throw new Error('共享目录不存在(可能刚被移除)');
+    return {
+      lines: readSyncxIgnoreLines(folder.path),
+      builtin: BUILTIN_IGNORE_LINES,
+      useGitignore: folder.config.useGitignore !== false,
+    };
+  }
+
+  /**
+   * 保存 `.syncxignore` 并**立即生效**(不重读配置文件,而是直接刷新该目录的
+   * 规则文本与内存索引 —— 与 refreshFolderIgnoreRules 同语义,按 id 定位更准)。
+   * 被新规则忽略的存量条目从内存索引剔除后会在下一轮扫描里生成墓碑广播出去,
+   * 这正是「加一条规则 = 让对端也停同步它」的预期行为。
+   */
+  setFolderIgnoreLines(folderId: string, lines: string[]): void {
+    const folder = this.folderStates.find((f) => f.id === folderId);
+    if (!folder) throw new Error('共享目录不存在(可能刚被移除)');
+    if (
+      !Array.isArray(lines) ||
+      lines.length > 500 ||
+      lines.some((l) => typeof l !== 'string' || l.length > 1024)
+    ) {
+      throw new Error('忽略规则需为字符串数组:最多 500 行,每行最长 1024 字符');
+    }
+    writeSyncxIgnoreLines(folder.path, lines);
+    folder.ignoreLines = readFolderIgnoreLines(folder.path, folder.config.useGitignore !== false);
+    folder.localIndex = new Map(
+      filterIndexedEntries(parseIgnoreRules(folder.ignoreLines), folder.index.listEntries()).map((e) => [
+        e.path,
+        e,
+      ]),
+    );
+    this.logger.info(`ignore rules updated: ${folderId} (${lines.length} lines)`);
+    this.notifyStatus();
+  }
+
+  /**
+   * 实时测试器:路径会不会被忽略、由哪条规则决定。传 draftLines(编辑器里未保存
+   * 的草稿)按「保存后会发生什么」预测,否则按磁盘当前 `.syncxignore` 判定。
+   * 路径以 `/` 结尾按目录语义测试(目录规则 `foo/` 只挡目录不挡同名文件)。
+   */
+  testFolderIgnore(folderId: string, testPath: string, draftLines?: string[]): IgnoreVerdict {
+    const folder = this.folderStates.find((f) => f.id === folderId);
+    if (!folder) throw new Error('共享目录不存在(可能刚被移除)');
+    const normalized = String(testPath ?? '').trim().replace(/\\/g, '/').replace(/^\/+/, '');
+    if (!normalized) throw new Error('path is required');
+    const isDir = normalized.endsWith('/');
+    const rel = isDir ? normalized.slice(0, -1) : normalized;
+    if (!rel) throw new Error('path is required');
+    const lines = composeIgnoreLines(
+      folder.path,
+      folder.config.useGitignore !== false,
+      draftLines ?? readSyncxIgnoreLines(folder.path),
+    );
+    return explainIgnore(parseIgnoreRules(lines), rel, isDir);
   }
 
   /**

@@ -73,6 +73,8 @@ export interface StatusContext extends FolderDiffApi {
   conflictsFolder: Ref<FolderInfo | null>;
   /** 打开某目录的文件版本弹窗(拉取与展示在 VersionsModal 内)。 */
   openVersions: (f: FolderInfo) => void;
+  /** 打开某目录的忽略规则编辑器(编辑 .syncxignore + 实时测试器,IgnoreModal 内)。 */
+  openIgnoreEditor: (f: FolderInfo) => void;
   /** 打开某目录的浏览器内文件管理器(独立路由页 /files,新开标签页;浏览/下载仅需登录,删除需提权)。 */
   openFiles: (f: FolderInfo) => void;
   copy: (text: string) => Promise<void>;

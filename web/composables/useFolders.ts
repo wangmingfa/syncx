@@ -30,6 +30,8 @@ export function useFolders(deps: CoreDeps): {
   openConflicts: (f: FolderInfo) => void;
   /** 打开某目录的文件版本弹窗(拉取与展示在 VersionsModal 内)。 */
   openVersions: (f: FolderInfo) => void;
+  /** 打开某目录的忽略规则编辑器(编辑 .syncxignore + 实时测试器)。 */
+  openIgnoreEditor: (f: FolderInfo) => void;
   /** 打开某目录的浏览器内文件管理器(独立路由页 /files;浏览/下载仅需登录,删除需提权)。 */
   openFiles: (f: FolderInfo) => void;
   editDevicesOpen: Ref<boolean>;
@@ -41,6 +43,8 @@ export function useFolders(deps: CoreDeps): {
   conflictsFolder: Ref<FolderInfo | null>;
   /** 非空 = 打开该目录的文件版本弹窗。 */
   versionsFolder: Ref<FolderInfo | null>;
+  /** 非空 = 打开该目录的忽略规则编辑器。 */
+  ignoreFolder: Ref<FolderInfo | null>;
   saveEditDevices: (payload: { path: string; devices: string[]; gitignore: boolean; schedule: string; gitSync: GitSyncMode; conflictPolicy: ConflictPolicy }) => Promise<void>;
   /** 「优先同步」:把该目录某个在传文件的块请求插到对端发送队列最前(幂等)。 */
   prioritizeFile: (f: FolderInfo, path: string) => Promise<void>;
@@ -308,6 +312,12 @@ export function useFolders(deps: CoreDeps): {
     versionsFolder.value = f;
   }
 
+  // 忽略规则编辑器:非空 = 打开该目录的 .syncxignore 编辑弹窗(拉取/保存/测试在 IgnoreModal 内)
+  const ignoreFolder = ref<FolderInfo | null>(null);
+  function openIgnoreEditor(f: FolderInfo): void {
+    ignoreFolder.value = f;
+  }
+
   // 浏览器内文件管理器:独立路由页 /files(与终端 /terminal 同套路,新开标签页)。
   // 浏览/下载只需登录,不再进页前弹提权门;删除在页内二次确认后走 ensureElevated。
   function openFiles(f: FolderInfo): void {
@@ -388,6 +398,8 @@ export function useFolders(deps: CoreDeps): {
     openGlobalHistory,
     openConflicts,
     openVersions,
+    openIgnoreEditor,
+    ignoreFolder,
     openFiles,
     editDevicesOpen,
     editFolder,

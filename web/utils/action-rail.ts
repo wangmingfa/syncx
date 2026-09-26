@@ -15,6 +15,7 @@ export type ActionIconName =
   | 'versions'
   | 'trash'
   | 'browse'
+  | 'ignore'
   | 'more';
 
 /**

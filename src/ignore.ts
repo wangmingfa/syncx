@@ -1,4 +1,4 @@
-import { readFileSync } from 'node:fs';
+import { readFileSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 
 import type { IndexEntry } from './index.js';
@@ -312,6 +312,15 @@ export function isIgnoredPath(rules: IgnoreRule[], relPath: string, isDir: boole
  * 同步判定时必须走 isIgnoredPath(含硬忽略闸门),否则 `!.git` 会把 .git 重新放开。
  */
 export function readFolderIgnoreLines(folderPath: string, useGitignore: boolean): string[] {
+  return composeIgnoreLines(folderPath, useGitignore, readSyncxIgnoreLines(folderPath));
+}
+
+/**
+ * 组装完整规则文本:内置默认 + `.gitignore`(按配置)+ 给定的 `.syncxignore` 行。
+ * 与 readFolderIgnoreLines 同一优先级顺序(后者覆盖前者),供「忽略规则编辑器」
+ * 用**未保存的草稿行**预测生效结果,而不是必须先落盘。
+ */
+export function composeIgnoreLines(folderPath: string, useGitignore: boolean, syncxLines: string[]): string[] {
   const lines: string[] = [...BUILTIN_IGNORE_LINES];
   if (useGitignore) {
     try {
@@ -320,10 +329,53 @@ export function readFolderIgnoreLines(folderPath: string, useGitignore: boolean)
       // 无 .gitignore
     }
   }
-  try {
-    lines.push(...readFileSync(join(folderPath, '.syncxignore'), 'utf8').split('\n'));
-  } catch {
-    // 无 .syncxignore
-  }
+  lines.push(...syncxLines);
   return lines;
+}
+
+/** 读 `.syncxignore` 的原始用户规则行(编辑器数据源;不含内置与 .gitignore)。 */
+export function readSyncxIgnoreLines(folderPath: string): string[] {
+  try {
+    const text = readFileSync(join(folderPath, '.syncxignore'), 'utf8').replace(/\r\n/g, '\n');
+    if (text === '') return [];
+    // 去掉文件尾换行 split 出的末尾空行:编辑器回填后保存不应让行数单调增长
+    if (text.endsWith('\n')) return text.slice(0, -1).split('\n');
+    return text.split('\n');
+  } catch {
+    return [];
+  }
+}
+
+/** 写 `.syncxignore`(编辑器落盘目标)。行尾统一 LF;空数组写出空文件(=清空)。 */
+export function writeSyncxIgnoreLines(folderPath: string, lines: string[]): void {
+  const clean = lines.map((l) => l.replace(/\r/g, '').replace(/[ \t]+$/, ''));
+  writeFileSync(join(folderPath, '.syncxignore'), clean.length > 0 ? clean.join('\n') + '\n' : '', 'utf8');
+}
+
+/** 忽略判定解释(测试器返回值):是否被忽略、由谁决定。 */
+export interface IgnoreVerdict {
+  ignored: boolean;
+  /** 命中硬忽略闸门(.git/.hg/.svn/同步元数据/冲突副本),任何规则都解不开。 */
+  hard: boolean;
+  /** 决定「忽略」的那条规则文本(最后命中的非负向规则)。 */
+  rule?: string;
+  /** 决定「放行」的那条负向规则文本(如 `!logs/`,最后命中的 `!` 规则)。 */
+  negatedRule?: string;
+}
+
+/**
+ * 判定路径并**解释命中来源**:与 isIgnored 的 last-match-wins 严格同序
+ * (逐条扫过所有规则,记住最后命中的一条),额外给出硬忽略闸门结果。
+ * 忽略规则编辑器的实时测试器用它回答「粘这条路径进来,到底哪一行挡住了它」。
+ */
+export function explainIgnore(rules: IgnoreRule[], relPath: string, isDir: boolean): IgnoreVerdict {
+  let last: IgnoreRule | undefined;
+  for (const rule of rules) {
+    if (ruleMatches(rule, relPath, isDir)) last = rule;
+  }
+  const hard = isHardIgnored(relPath);
+  const verdict: IgnoreVerdict = { ignored: hard || (last ? !last.negated : false), hard };
+  if (last && !last.negated) verdict.rule = last.pattern;
+  if (last && last.negated) verdict.negatedRule = last.pattern;
+  return verdict;
 }

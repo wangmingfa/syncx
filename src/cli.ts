@@ -708,6 +708,12 @@ export async function run(args: ParsedArgs): Promise<void> {
       // 向该目录所有在线对端 peer 转发「优先同步」标记(幂等,详见 manager)
       manager.prioritizeTransfer(folderId, path);
     },
+    getFolderIgnoreInfo: (folderId) => manager.getFolderIgnoreInfo(folderId),
+    setFolderIgnoreLines: (folderId, lines) => {
+      // 落盘 .syncxignore + 规则即时生效都在 manager 内完成
+      manager.setFolderIgnoreLines(folderId, lines);
+    },
+    testFolderIgnore: (folderId, path, draftLines) => manager.testFolderIgnore(folderId, path, draftLines),
     setGlobalSettings: (patch) => {
       // 落盘 + 按需热生效(重建通道/执行器/历史上限)都在 manager 内完成
       manager.setGlobalSettings(patch);

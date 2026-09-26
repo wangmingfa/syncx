@@ -1,5 +1,20 @@
 import { describe, expect, it } from 'vitest';
-import { parseIgnoreRules, isIgnored, isHardIgnored, isIgnoredPath } from '../src/ignore.js';
+import { mkdtempSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+import { rmDir } from './helpers.js';
+import {
+  parseIgnoreRules,
+  isIgnored,
+  isHardIgnored,
+  isIgnoredPath,
+  readFolderIgnoreLines,
+  composeIgnoreLines,
+  readSyncxIgnoreLines,
+  writeSyncxIgnoreLines,
+  explainIgnore,
+  BUILTIN_IGNORE_LINES,
+} from '../src/ignore.js';
 
 describe('ignore rules', () => {
   it('parses patterns, comments and blank lines', () => {
@@ -184,5 +199,84 @@ describe('hard ignore', () => {
     expect(isIgnoredPath(rules, 'src/main.ts', false)).toBe(false);
     // 内置行 + 负向覆盖:普通路径的「后读覆盖先读」不受硬忽略改动影响
     expect(isIgnoredPath(parseIgnoreRules(['built/**', '!built/keep.ts']), 'built/keep.ts', false)).toBe(false);
+  });
+});
+
+describe('ignore editor helpers (read/write .syncxignore, compose, explain)', () => {
+  function tempFolder(): string {
+    const dir = mkdtempSync(join(tmpdir(), 'syncx-ignore-editor-'));
+    return dir;
+  }
+
+  it('round-trips .syncxignore lines; missing file reads as empty', () => {
+    const dir = tempFolder();
+    expect(readSyncxIgnoreLines(dir)).toEqual([]);
+
+    writeSyncxIgnoreLines(dir, ['build/', '*.tmp', '!keep.tmp']);
+    expect(readSyncxIgnoreLines(dir)).toEqual(['build/', '*.tmp', '!keep.tmp']);
+
+    // CRLF 草稿(Windows 编辑器粘贴)落盘统一成 LF,回读不带 \r
+    writeSyncxIgnoreLines(dir, ['a/\r', 'b\r']);
+    expect(readSyncxIgnoreLines(dir)).toEqual(['a/', 'b']);
+
+    // 清空 = 写空文件,回读为空数组
+    writeSyncxIgnoreLines(dir, []);
+    expect(readSyncxIgnoreLines(dir)).toEqual([]);
+    rmDir(dir);
+  });
+
+  it('composeIgnoreLines keeps the readFolderIgnoreLines priority order', () => {
+    const dir = tempFolder();
+    writeFileSync(join(dir, '.gitignore'), 'dist/\n', 'utf8');
+    const lines = composeIgnoreLines(dir, true, ['*.tmp']);
+    // 内置在最前、.gitignore 居中、.syncxignore 草稿在最后(后读覆盖先读)
+    expect(lines.slice(0, BUILTIN_IGNORE_LINES.length)).toEqual(BUILTIN_IGNORE_LINES);
+    expect(lines.indexOf('dist/')).toBeGreaterThan(BUILTIN_IGNORE_LINES.length - 1);
+    expect(lines[lines.length - 1]).toBe('*.tmp');
+    // 关掉 gitignore 开关后不再并入 .gitignore
+    const noGit = composeIgnoreLines(dir, false, ['*.tmp']);
+    expect(noGit).toEqual([...BUILTIN_IGNORE_LINES, '*.tmp']);
+    rmDir(dir);
+  });
+
+  it('readFolderIgnoreLines picks up the written .syncxignore', () => {
+    const dir = tempFolder();
+    writeSyncxIgnoreLines(dir, ['secret/']);
+    const lines = readFolderIgnoreLines(dir, false);
+    expect(lines).toContain('secret/');
+    rmDir(dir);
+  });
+
+  it('explainIgnore tells which rule decided: hard / rule / negation / none', () => {
+    const rules = parseIgnoreRules(['build/', '*.tmp', '!keep.tmp']);
+
+    const byRule = explainIgnore(rules, 'build/app.js', false);
+    expect(byRule).toEqual({ ignored: true, hard: false, rule: 'build/' });
+
+    const byNegation = explainIgnore(rules, 'keep.tmp', false);
+    expect(byNegation).toEqual({ ignored: false, hard: false, negatedRule: 'keep.tmp' });
+
+    const free = explainIgnore(rules, 'src/main.ts', false);
+    expect(free).toEqual({ ignored: false, hard: false });
+
+    // 硬忽略独立于规则文本:`!.git` 也放不开,且 hard 标记可见
+    const hard = explainIgnore(parseIgnoreRules(['!.git']), '.git/config', false);
+    expect(hard.ignored).toBe(true);
+    expect(hard.hard).toBe(true);
+  });
+
+  it('explainIgnore stays semantically equal to isIgnoredPath for rule hits', () => {
+    const cases: Array<[string[], string, boolean]> = [
+      [['*.log'], 'a.log', false],
+      [['*.log'], 'a.log', true],
+      [['logs/'], 'logs/x.txt', false],
+      [['logs/'], 'logs', true],
+      [['node_modules/'], 'pkg/node_modules/y.js', false],
+      [['*.o'], 'build.o', false],
+    ];
+    for (const [lines, path, isDir] of cases) {
+      const rules = parseIgnoreRules(lines);
+      expect(explainIgnore(rules, path, isDir).ignored).toBe(isIgnoredPath(rules, path, isDir));
+    }
   });
 });

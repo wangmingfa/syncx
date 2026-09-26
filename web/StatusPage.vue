@@ -26,6 +26,7 @@ import UpdateBanner from './components/UpdateBanner.vue';
 import GuideModal from './components/GuideModal.vue';
 import HistoryModal from './components/HistoryModal.vue';
 import VersionsModal from './components/VersionsModal.vue';
+import IgnoreModal from './components/IgnoreModal.vue';
 import ConflictModal from './components/ConflictModal.vue';
 import TrafficModal from './components/TrafficModal.vue';
 import ConfirmModal from './components/ConfirmModal.vue';
@@ -85,7 +86,7 @@ watchEffect(() => {
 });
 
 // 需要本页模板双向绑定的模态状态:必须提到顶层,否则 <script setup> 模板不会自动拆包 Ref
-const { historyFolder, historyGlobal, versionsFolder, conflictsFolder, editDevicesOpen, editFolder, saveEditDevices } = folders;
+const { historyFolder, historyGlobal, versionsFolder, ignoreFolder, conflictsFolder, editDevicesOpen, editFolder, saveEditDevices } = folders;
 const { upgrading, askSelfUpdate, uploadOpen, openUpload, selectUploadFile } = selfUpdate;
 const { showToast } = useToast();
 
@@ -228,6 +229,9 @@ provide(StatusContextKey, {
 
     <!-- 文件版本弹窗 -->
     <VersionsModal :folder="versionsFolder" :notify="showToast" :changed="refreshStatus" @close="versionsFolder = null" />
+
+    <!-- 忽略规则编辑器弹窗 -->
+    <IgnoreModal :folder="ignoreFolder" :notify="showToast" :changed="refreshStatus" @close="ignoreFolder = null" />
 
     <!-- 冲突收件箱弹窗 -->
     <ConflictModal :folder="conflictsFolder" :notify="showToast" :changed="refreshStatus" @close="conflictsFolder = null" />

@@ -73,6 +73,7 @@ const {
   openGlobalHistory,
   openConflicts,
   openVersions,
+  openIgnoreEditor,
   openFiles,
   openDiff,
   toggleFolderPaused,
@@ -180,6 +181,13 @@ function folderActions(f: FolderInfo): RailAction[] {
       disabled: b,
       tooltip: '查看文件版本:被对端覆盖修改前的旧内容会自动留档,可恢复或删除',
       onClick: () => openVersions(f),
+    },
+    {
+      key: 'ignore',
+      icon: 'ignore',
+      disabled: b,
+      tooltip: '忽略规则:编辑 .syncxignore,粘贴路径即可测试命中哪条规则',
+      onClick: () => openIgnoreEditor(f),
     },
     {
       key: 'remove',

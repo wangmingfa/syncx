@@ -56,7 +56,7 @@ export async function tryFolderRoutes(
   res: ServerResponse,
   deps: ControlServerDeps,
 ): Promise<boolean> {
-  const { addFolder, removeFolder, setFolderDevices, setFolderUseGitignore, setFolderPaused, setFolderSchedule, setFolderGitSync, setFolderConflictPolicy, prioritizeTransfer, reAdoptFolderIdentity, getFolderHistory, getGlobalHistory, clearFolderHistory, listFolderConflicts, resolveFolderConflict, conflictFilePair, applyConflictMerge, cleanIdenticalConflicts, diffFolder, compareFolder, readFilePair, applyFileSync, listFolderVersions, restoreFolderVersion, deleteFolderVersion } = deps;
+  const { addFolder, removeFolder, setFolderDevices, setFolderUseGitignore, setFolderPaused, setFolderSchedule, setFolderGitSync, setFolderConflictPolicy, prioritizeTransfer, getFolderIgnoreInfo, setFolderIgnoreLines, testFolderIgnore, reAdoptFolderIdentity, getFolderHistory, getGlobalHistory, clearFolderHistory, listFolderConflicts, resolveFolderConflict, conflictFilePair, applyConflictMerge, cleanIdenticalConflicts, diffFolder, compareFolder, readFilePair, applyFileSync, listFolderVersions, restoreFolderVersion, deleteFolderVersion } = deps;
   const path = req.url ? pathname(req.url) : '/';
 
   // Form POST /folders : add or (via _method=DELETE) remove a folder
@@ -247,6 +247,74 @@ export async function tryFolderRoutes(
       sendJson(res, 200, { ok: true });
     } catch (e) {
       sendJson(res, 400, { error: e instanceof Error ? e.message : '优先同步请求失败' });
+    }
+    return true;
+  }
+
+  // GET /api/folders/ignore?folderId=xxx : 忽略规则编辑器数据(.syncxignore 原始行 +
+  // 内置默认行 + useGitignore)。规则本体在磁盘上,这里只读不回写配置。
+  if (req.method === 'GET' && req.url && path === '/api/folders/ignore' && getFolderIgnoreInfo) {
+    const url = new URL(req.url, 'http://localhost');
+    const folderId = url.searchParams.get('folderId');
+    if (!folderId) {
+      sendJson(res, 400, { error: 'folderId is required' });
+      return true;
+    }
+    try {
+      sendJson(res, 200, getFolderIgnoreInfo(folderId));
+    } catch (e) {
+      sendJson(res, 400, { error: e instanceof Error ? e.message : '读取忽略规则失败' });
+    }
+    return true;
+  }
+
+  // POST /api/folders/ignore { folderId, lines } : 保存 .syncxignore 并立即生效。
+  if (req.method === 'POST' && path === '/api/folders/ignore' && setFolderIgnoreLines) {
+    try {
+      const raw = await readBody(req);
+      const body = raw === '' ? {} : JSON.parse(raw);
+      const folderId = (body as { folderId?: unknown }).folderId;
+      const lines = (body as { lines?: unknown }).lines;
+      if (typeof folderId !== 'string' || folderId === '') {
+        sendJson(res, 400, { error: 'folderId is required' });
+        return true;
+      }
+      if (!Array.isArray(lines) || lines.some((l) => typeof l !== 'string')) {
+        sendJson(res, 400, { error: 'lines must be an array of strings' });
+        return true;
+      }
+      setFolderIgnoreLines(folderId, lines as string[]);
+      sendJson(res, 200, { ok: true });
+    } catch (e) {
+      sendJson(res, 400, { error: e instanceof Error ? e.message : '保存忽略规则失败' });
+    }
+    return true;
+  }
+
+  // POST /api/folders/ignore/test { folderId, path, lines? } : 实时测试器。
+  // 带 lines(编辑器草稿)时预测「按这份规则保存后」的结果,不带则按磁盘现状。
+  if (req.method === 'POST' && path === '/api/folders/ignore/test' && testFolderIgnore) {
+    try {
+      const raw = await readBody(req);
+      const body = raw === '' ? {} : JSON.parse(raw);
+      const folderId = (body as { folderId?: unknown }).folderId;
+      const p = (body as { path?: unknown }).path;
+      const lines = (body as { lines?: unknown }).lines;
+      if (typeof folderId !== 'string' || folderId === '') {
+        sendJson(res, 400, { error: 'folderId is required' });
+        return true;
+      }
+      if (typeof p !== 'string' || p === '') {
+        sendJson(res, 400, { error: 'path is required' });
+        return true;
+      }
+      if (lines !== undefined && (!Array.isArray(lines) || lines.some((l) => typeof l !== 'string'))) {
+        sendJson(res, 400, { error: 'lines must be an array of strings' });
+        return true;
+      }
+      sendJson(res, 200, testFolderIgnore(folderId, p, lines as string[] | undefined));
+    } catch (e) {
+      sendJson(res, 400, { error: e instanceof Error ? e.message : '忽略规则测试失败' });
     }
     return true;
   }

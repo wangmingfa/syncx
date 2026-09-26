@@ -1,5 +1,6 @@
 import type { IncomingMessage, ServerResponse } from 'node:http';
 import type { SyncHistoryFilter } from '../history.js';
+import type { IgnoreVerdict } from '../ignore.js';
 
 export interface ControlServerDeps {
   token: string;
@@ -67,6 +68,12 @@ export interface ControlServerDeps {
   setFolderConflictPolicy?: (folderId: string, policy: 'keep-both' | 'newest-wins' | 'local-wins') => void;
   /** 「优先同步」:把该目录某个在传文件的块请求插到对端发送队列最前。 */
   prioritizeTransfer?: (folderId: string, path: string) => void;
+  /** 忽略规则编辑器:读 .syncxignore 原始行 + 内置默认 + 是否并入 .gitignore。 */
+  getFolderIgnoreInfo?: (folderId: string) => { lines: string[]; builtin: string[]; useGitignore: boolean };
+  /** 忽略规则编辑器:保存 .syncxignore 并让该目录规则立即生效。 */
+  setFolderIgnoreLines?: (folderId: string, lines: string[]) => void;
+  /** 忽略规则编辑器:实时测试一条路径(草稿行给定时按「保存后」预测)。 */
+  testFolderIgnore?: (folderId: string, path: string, draftLines?: string[]) => IgnoreVerdict;
   /** 写入全局设置(设置弹窗):maxSendKbps / versionsPerPath / historyMaxEvents;null = 回默认。 */
   setGlobalSettings?: (patch: {
     maxSendKbps?: number | null;
