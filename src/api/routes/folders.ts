@@ -56,7 +56,7 @@ export async function tryFolderRoutes(
   res: ServerResponse,
   deps: ControlServerDeps,
 ): Promise<boolean> {
-  const { addFolder, removeFolder, setFolderDevices, setFolderUseGitignore, setFolderPaused, setFolderSchedule, setFolderGitSync, setFolderConflictPolicy, prioritizeTransfer, getFolderIgnoreInfo, setFolderIgnoreLines, testFolderIgnore, reAdoptFolderIdentity, getFolderHistory, getGlobalHistory, getWeeklyReport, clearFolderHistory, listFolderConflicts, resolveFolderConflict, conflictFilePair, applyConflictMerge, cleanIdenticalConflicts, diffFolder, compareFolder, readFilePair, applyFileSync, listFolderVersions, restoreFolderVersion, deleteFolderVersion, getFolderVersionContent, rollbackFolder } = deps;
+  const { addFolder, removeFolder, setFolderDevices, setFolderUseGitignore, setFolderPaused, setFolderSchedule, setFolderGitSync, setFolderConflictPolicy, setFolderE2E, prioritizeTransfer, getFolderIgnoreInfo, setFolderIgnoreLines, testFolderIgnore, reAdoptFolderIdentity, getFolderHistory, getGlobalHistory, getWeeklyReport, clearFolderHistory, listFolderConflicts, resolveFolderConflict, conflictFilePair, applyConflictMerge, cleanIdenticalConflicts, diffFolder, compareFolder, readFilePair, applyFileSync, listFolderVersions, restoreFolderVersion, deleteFolderVersion, getFolderVersionContent, rollbackFolder } = deps;
   const path = req.url ? pathname(req.url) : '/';
 
   // Form POST /folders : add or (via _method=DELETE) remove a folder
@@ -223,6 +223,43 @@ export async function tryFolderRoutes(
       sendJson(res, 200, { ok: true });
     } catch (e) {
       sendJson(res, 400, { error: e instanceof Error ? e.message : '设置冲突策略失败' });
+    }
+    return true;
+  }
+
+  // POST /api/folders/e2e { folderId, passphrase?, untrusted? } : 端到端加密口令 / 不可信名单。
+  // 键出现才改:passphrase 传新口令(≥4 字符)或 null/'' 清除;untrusted 传字符串数组或 null 清空。
+  // 口令校验/名单校验(须在 devices 内)在 devices.setFolderE2E,错误原样透出 400。
+  if (req.method === 'POST' && path === '/api/folders/e2e' && setFolderE2E) {
+    try {
+      const raw = await readBody(req);
+      const body = raw === '' ? {} : (JSON.parse(raw) as Record<string, unknown>);
+      const folderId = body.folderId;
+      if (typeof folderId !== 'string' || folderId === '') {
+        sendJson(res, 400, { error: 'folderId is required' });
+        return true;
+      }
+      const patch: { passphrase?: string | null; untrusted?: string[] | null } = {};
+      if ('passphrase' in body) {
+        const p = body.passphrase;
+        if (p !== null && typeof p !== 'string') {
+          sendJson(res, 400, { error: 'passphrase must be a string or null' });
+          return true;
+        }
+        patch.passphrase = p === null ? '' : p;
+      }
+      if ('untrusted' in body) {
+        const u = body.untrusted;
+        if (u !== null && (!Array.isArray(u) || u.some((x) => typeof x !== 'string'))) {
+          sendJson(res, 400, { error: 'untrusted must be an array of device ids or null' });
+          return true;
+        }
+        patch.untrusted = u === null ? null : (u as string[]);
+      }
+      setFolderE2E(folderId, patch);
+      sendJson(res, 200, { ok: true });
+    } catch (e) {
+      sendJson(res, 400, { error: e instanceof Error ? e.message : '设置端到端加密失败' });
     }
     return true;
   }

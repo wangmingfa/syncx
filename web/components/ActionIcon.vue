@@ -93,6 +93,13 @@ defineProps<{ name: ActionIconName }>();
       <line x1="4" y1="20" x2="20" y2="4" />
     </template>
 
+    <!-- 端到端加密:挂锁 -->
+    <template v-else-if="name === 'lock'">
+      <rect x="5" y="10.5" width="14" height="9.5" rx="2" />
+      <path d="M8.5 10.5V8a3.5 3.5 0 0 1 7 0v2.5" />
+      <circle cx="12" cy="15" r="1.2" fill="currentColor" stroke="none" />
+    </template>
+
     <!-- 更多(收起态占位):三个点。刻意不用「⚙/滑块」那类图标 —— 占位图标只负责
          说「这里还有东西」,不该长得像某个具体动作,否则会被读成「这是一个设置按钮」。 -->
     <template v-else>

@@ -40,6 +40,10 @@ export interface FolderInfo {
   gitSync?: GitSyncMode;
   /** 冲突自动处理策略;缺省 = 'keep-both'(保留双方:拉回对端 + 本地留冲突副本)。 */
   conflictPolicy?: ConflictPolicy;
+  /** 该目录是否已设置端到端口令(密钥本体绝不出 daemon,状态只回显此标志)。 */
+  e2eKeySet?: boolean;
+  /** 被标记为「不可信」的设备 id 列表:对这些设备只发密文视图,永不回源明文。 */
+  e2eUntrusted?: string[];
 }
 
 /** 与后端 SharedFolderConfig.gitSync 取值保持一致。 */

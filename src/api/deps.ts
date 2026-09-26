@@ -66,6 +66,11 @@ export interface ControlServerDeps {
   setFolderGitSync?: (folderId: string, mode: 'off' | 'send' | 'receive' | 'full') => void;
   /** 设置某目录的冲突自动处理策略(keep-both / newest-wins / local-wins)。 */
   setFolderConflictPolicy?: (folderId: string, policy: 'keep-both' | 'newest-wins' | 'local-wins') => void;
+  /**
+   * 设置某目录的端到端加密口令 / 不可信节点名单(键出现才改;passphrase null/'' = 清除,
+   * 连带清空名单)。生效靠 manager 内部摘挂数据通道,见 devices.setFolderE2E 与 e2e.ts。
+   */
+  setFolderE2E?: (folderId: string, patch: { passphrase?: string | null; untrusted?: string[] | null }) => void;
   /** 「优先同步」:把该目录某个在传文件的块请求插到对端发送队列最前。 */
   prioritizeTransfer?: (folderId: string, path: string) => void;
   /** 忽略规则编辑器:读 .syncxignore 原始行 + 内置默认 + 是否并入 .gitignore。 */

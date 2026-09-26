@@ -75,6 +75,7 @@ const {
   openConflicts,
   openVersions,
   openIgnoreEditor,
+  openE2E,
   openFiles,
   openDiff,
   toggleFolderPaused,
@@ -192,6 +193,16 @@ function folderActions(f: FolderInfo): RailAction[] {
       disabled: b,
       tooltip: '忽略规则:编辑 .syncxignore,粘贴路径即可测试命中哪条规则',
       onClick: () => openIgnoreEditor(f),
+    },
+    {
+      key: 'e2e',
+      icon: 'lock',
+      active: f.e2eKeySet === true,
+      disabled: b,
+      tooltip: f.e2eKeySet
+        ? `端到端加密已启用${f.e2eUntrusted?.length ? `(不可信节点 ${f.e2eUntrusted.length} 台,只收密文)` : '(尚未勾选不可信节点)'}:点击管理口令与节点`
+        : '端到端加密:给不可信备份节点设置口令,路径与内容发出前加密、只存密文',
+      onClick: () => openE2E(f),
     },
     {
       key: 'remove',

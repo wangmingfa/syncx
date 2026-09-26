@@ -750,6 +750,11 @@ export async function run(args: ParsedArgs): Promise<void> {
       // 校验(非法策略 400)+ 落盘 + 内存生效都在 manager 内完成
       manager.setFolderConflictPolicy(folderId, policy);
     },
+    setFolderE2E: (folderId, patch) => {
+      // 口令/名单校验在 devices.setFolderE2E(错误 400 原样透出);
+      // 生效后 manager 摘挂该目录全部数据通道,新入名单的盲区端即刻开始密文铺底
+      manager.setFolderE2E(folderId, patch);
+    },
     prioritizeTransfer: (folderId, path) => {
       // 向该目录所有在线对端 peer 转发「优先同步」标记(幂等,详见 manager)
       manager.prioritizeTransfer(folderId, path);

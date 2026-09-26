@@ -3,7 +3,8 @@ import { buildPlan, buildDeltaPlan } from './plan.js';
 import type { BlockRequest, BlockResponse } from './messages.js';
 import type { LocalExecutor } from './executor.js';
 import { resolveSharePath, preserveLocalAsConflict } from './executor.js';
-import { verifyBlock, BLOCK_SIZE } from './blockstore.js';
+import { verifyBlock, hashBlock, BLOCK_SIZE } from './blockstore.js';
+import { decPathFor, encryptBlock } from './e2e.js';
 import { parseIgnoreRules, isIgnoredPath, isHardIgnored, type IgnoreRule } from './ignore.js';
 import { mergeVersions } from './version.js';
 import type { ConflictPolicy } from './config.js';
@@ -118,6 +119,14 @@ export interface SyncPeerDeps {
    * {@link SyncPeer.retryDiskBlocked} 重放。缺省(旧调用方/测试)恒放行。
    */
   checkDiskSpace?: (neededBytes: number) => boolean;
+  /**
+   * 端到端加密视图(对不可信peer的盲区口径,见 src/e2e.ts):该目录为此对端设了口令时,
+   * 上层交给它的 transport 已是密文变换壳(sendEntries 前条目被换成密文视图)。SyncPeer
+   * 再补两道:①对端索引宣告**整轮忽略**(盲区端只有密文副本,它的「回推」会把密文当
+   * 明文塞进本机共享目录);②块请求按「密文路径→解回明文路径→读明文块→现场加密」响应,
+   * 全程不出明文内容。缺省 undefined = 普通双向同步,一切照旧。
+   */
+  e2eKey?: Buffer;
 }
 
 export interface SyncPeer {
@@ -202,7 +211,7 @@ const RATE_SPAN_FLOOR_MS = 1000;
  * complete, then apply it via the executor.
  */
 export function createSyncPeer(deps: SyncPeerDeps): SyncPeer {
-  const { transport, localIndex, executor, readLocalBlock, deviceId, remoteDeviceId, root, onEvent, onTraffic, readIgnoreLines, receiveOnly, getConflictPolicy, checkDiskSpace, onHardIgnoredDropped, onLanded, onStallDrop } = deps;
+  const { transport, localIndex, executor, readLocalBlock, deviceId, remoteDeviceId, root, onEvent, onTraffic, readIgnoreLines, receiveOnly, getConflictPolicy, checkDiskSpace, onHardIgnoredDropped, onLanded, onStallDrop, e2eKey } = deps;
   const pending = new Map<string, PendingEntry>();
   // 逐块跟踪超时重试:块响应丢失/丢弃时自动重发,避免文件永远收不齐
   const pendingBlocks = new Map<string, PendingBlockRequest>();
@@ -411,8 +420,54 @@ export function createSyncPeer(deps: SyncPeerDeps): SyncPeer {
     }
   }
 
+  /**
+   * 端到端加密视图下的供块(见 deps.e2eKey):盲区按预告的「encPath + 密文块哈希」来索块,
+   * 本端解回真实路径读明文、现场加密、以密文块响应 —— 明文内容永不上线。
+   * 任一校验不过(encPath 解不开 / 本地无此条目 / 块号越界 / 对方要的哈希与我现算的
+   * 密文哈希不符)一律静默忽略:不符说明宣告与请求之间内容变过,或对端在乱问,
+   * 让它的超时重试 + 下轮索引自然收敛即可。
+   */
+  function serveE2EBlock(request: BlockRequest): void {
+    if (e2eKey === undefined) return;
+    let realPath: string;
+    try {
+      realPath = decPathFor(e2eKey, request.path);
+    } catch {
+      return;
+    }
+    const local = localIndex.get(realPath);
+    if (!local || local.deleted) return;
+    if (!Number.isInteger(request.blockIndex) || request.blockIndex < 0 || request.blockIndex >= local.blocks.length) return;
+    let plain: Buffer;
+    try {
+      plain = readLocalBlock(realPath, request.blockIndex);
+    } catch {
+      return;
+    }
+    const cipher = encryptBlock(e2eKey, request.path, request.blockIndex, plain);
+    if (hashBlock(cipher) !== request.hash) return;
+    serving.set(request.path, Date.now());
+    const sentSet = servedBlocks.get(request.path) ?? new Set<number>();
+    if (!sentSet.has(request.blockIndex)) {
+      sentSet.add(request.blockIndex);
+      servedBlocks.set(request.path, sentSet);
+      const rec = servingBytes.get(request.path) ?? { done: 0, total: 0 };
+      rec.done += cipher.length;
+      servingBytes.set(request.path, rec);
+    }
+    recordBytes(cipher.length, 0);
+    transport.sendBlockResponse(
+      { deviceId, path: request.path, blockIndex: request.blockIndex, hash: request.hash, data: cipher },
+      { priority: request.priority === true },
+    );
+  }
+
   const self: SyncPeer = {
     async onPeerIndex(entries: IndexEntry[], opts?: PeerIndexOptions): Promise<void> {
+      // 端到端加密视图(不可信对端):本机对该对端**只出不进**。盲区端回推的索引全是
+      // 密文视图条目(路径是密文名、块哈希是密文块的),若当真接收会把密文当明文写进
+      // 共享目录;它也没有本机没有的东西,整轮直接忽略最安全。
+      if (e2eKey !== undefined) return;
       // 缺省按 delta 处理。旧版对端不带 full 字段,而它**确实**会发增量索引
       // (扫描到改动就只广播那几条);把增量当全量做并集规划,就会为「它没提到的
       // 本地条目」回推变更 → 两端互为回声、无限循环。反过来把全量当增量最多是
@@ -660,6 +715,11 @@ export function createSyncPeer(deps: SyncPeerDeps): SyncPeer {
     },
 
     onBlockRequest(request: BlockRequest): void {
+      // 端到端加密视图:盲区按「密文路径 + 密文块哈希」索块,服务路径完全不同,整支移交
+      if (e2eKey !== undefined) {
+        serveE2EBlock(request);
+        return;
+      }
       // 越界/非整数索引直接拒绝,避免对本地文件做无谓的整文件读取
       if (!Number.isInteger(request.blockIndex) || request.blockIndex < 0) return;
       // 读取侧路径防护(与写入侧 resolveSharePath 同款):拒绝 ../ 与经符号链接

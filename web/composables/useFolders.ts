@@ -32,6 +32,8 @@ export function useFolders(deps: CoreDeps): {
   openVersions: (f: FolderInfo) => void;
   /** 打开某目录的忽略规则编辑器(编辑 .syncxignore + 实时测试器)。 */
   openIgnoreEditor: (f: FolderInfo) => void;
+  /** 打开某目录的端到端加密设置弹窗(口令 + 不可信节点勾选)。 */
+  openE2E: (f: FolderInfo) => void;
   /** 打开某目录的浏览器内文件管理器(独立路由页 /files;浏览/下载仅需登录,删除需提权)。 */
   openFiles: (f: FolderInfo) => void;
   editDevicesOpen: Ref<boolean>;
@@ -45,6 +47,8 @@ export function useFolders(deps: CoreDeps): {
   versionsFolder: Ref<FolderInfo | null>;
   /** 非空 = 打开该目录的忽略规则编辑器。 */
   ignoreFolder: Ref<FolderInfo | null>;
+  /** 非空 = 打开该目录的端到端加密设置弹窗。 */
+  e2eFolder: Ref<FolderInfo | null>;
   saveEditDevices: (payload: { path: string; devices: string[]; gitignore: boolean; schedule: string; gitSync: GitSyncMode; conflictPolicy: ConflictPolicy }) => Promise<void>;
   /** 「优先同步」:把该目录某个在传文件的块请求插到对端发送队列最前(幂等)。 */
   prioritizeFile: (f: FolderInfo, path: string) => Promise<void>;
@@ -318,6 +322,12 @@ export function useFolders(deps: CoreDeps): {
     ignoreFolder.value = f;
   }
 
+  // 端到端加密设置:非空 = 打开该目录的口令/不可信节点弹窗(提交在 E2EModal 内)
+  const e2eFolder = ref<FolderInfo | null>(null);
+  function openE2E(f: FolderInfo): void {
+    e2eFolder.value = f;
+  }
+
   // 浏览器内文件管理器:独立路由页 /files(与终端 /terminal 同套路,新开标签页)。
   // 浏览/下载只需登录,不再进页前弹提权门;删除在页内二次确认后走 ensureElevated。
   function openFiles(f: FolderInfo): void {
@@ -400,6 +410,8 @@ export function useFolders(deps: CoreDeps): {
     openVersions,
     openIgnoreEditor,
     ignoreFolder,
+    openE2E,
+    e2eFolder,
     openFiles,
     editDevicesOpen,
     editFolder,

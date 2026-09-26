@@ -1,6 +1,7 @@
 import { existsSync, readdirSync, readFileSync, writeFileSync, renameSync, openSync, closeSync, unlinkSync, statSync } from 'node:fs';
 import { basename, join } from 'node:path';
 import { createHash, randomBytes } from 'node:crypto';
+import type { E2EKeyRecord } from './e2e.js';
 
 /**
  * 共享根的目录身份指纹:根目录的 `dev` + `ino`,以十进制字符串存放。
@@ -140,6 +141,16 @@ export interface SharedFolderConfig {
    * 从当前 HEAD 重新起基线,绝不把启用前积压的历史提交一次性重放出去。
    */
   gitLastCommitHash?: string;
+  /**
+   * 端到端加密密钥记录(passphrase 经 scrypt 派生;salt/key 皆 base64,**口令本体永不落盘**)。
+   * 设置后,列在 e2eUntrusted 里的对端只收密文视图:路径与内容逐块加密,盲区节点「只存块、
+   * 看不懂内容」,且永不回源(可信端忽略其索引宣告)。语义与已知边界见 src/e2e.ts 头注释。
+   */
+  e2eKey?: E2EKeyRecord;
+  /** 不可信对端的设备 id 列表(仅与 e2eKey 同时生效;名单内的 devices 成员走密文视图)。 */
+  e2eUntrusted?: string[];
+  /** 是否已设置口令(buildStatus 出站内存 e2eKey 后置此标志;密钥本体永不出 daemon)。 */
+  e2eKeySet?: boolean;
 }
 
 /** Git 提交同步的四种模式;定义见 SharedFolderConfig.gitSync 的注释。 */

@@ -219,7 +219,8 @@ export function buildStatus(
     deviceId: identity.deviceId,
     version: selfVersion,
     platform: process.platform,
-    folders: config.sharedFolders,
+    // 端到端密钥本体永不出 daemon:有 e2eKey 的目录只外发「已设置」标志(置布尔、抹记录)。
+    folders: config.sharedFolders.map((f) => (f.e2eKey ? { ...f, e2eKey: undefined, e2eKeySet: true } : f)),
     paused: config.paused === true,
     entries: stats.entries,
     tombstones: stats.tombstones,

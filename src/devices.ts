@@ -4,6 +4,7 @@ import { homedir } from 'node:os';
 import { randomBytes } from 'node:crypto';
 import { loadConfig, saveConfig, mutateConfig, normalizePeerUrl, DEFAULT_CONFIG, folderIdFor, folderIndexKey, generateFolderInstanceId, purgeFolderIndex, isValidSchedule, isGitSyncMode, isConflictPolicy, type Config, type FolderIdentity, type SharedFolderConfig, type DeviceConfig, type GitSyncMode, type ConflictPolicy } from './config.js';
 import { readFolderIdentity } from './folder-identity.js';
+import { deriveE2EKey } from './e2e.js';
 
 /**
  * 共享目录黑名单:平台相关。
@@ -374,6 +375,52 @@ export function setFolderConflictPolicy(configPath: string, folderId: string, po
     const existing = config.sharedFolders.find((f) => folderIdFor(f) === folderId);
     if (!existing) throw new Error(`未找到共享目录:「${folderId}」`);
     existing.conflictPolicy = policy === 'keep-both' ? undefined : policy;
+  });
+}
+
+/**
+ * 设置某目录的端到端加密口令与不可信节点名单(目录设置弹窗;按 folderId 定位)。
+ * patch 语义与全局设置同款:键出现才改。
+ *  - passphrase:新口令(≥4 字符)→ scrypt 派生新密钥;null/'' → 清除密钥**并连带清空名单**
+ *    (没密钥的名单是死配置,留着只会在下次误设口令时突然生效);键不出现 → 保持已存密钥。
+ *  - untrusted:必须都在该目录 devices 里(否则 400 提示先共享),去重去空;
+ *    null → 清空名单。非空名单要求已有口令(同一次提交里带了新口令也算)。
+ */
+export interface FolderE2EPatch {
+  passphrase?: string | null;
+  untrusted?: string[] | null;
+}
+
+export function setFolderE2E(configPath: string, folderId: string, patch: FolderE2EPatch): void {
+  mutateConfig(configPath, (config) => {
+    const existing = config.sharedFolders.find((f) => folderIdFor(f) === folderId);
+    if (!existing) throw new Error(`未找到共享目录:「${folderId}」`);
+    if ('passphrase' in patch) {
+      const p = patch.passphrase;
+      if (p === null || p === '') {
+        existing.e2eKey = undefined;
+        existing.e2eUntrusted = undefined;
+      } else {
+        if (typeof p !== 'string' || p.length < 4 || p.length > 512) {
+          throw new Error('端到端口令长度应为 4–512 字符');
+        }
+        existing.e2eKey = deriveE2EKey(p);
+      }
+    }
+    if ('untrusted' in patch) {
+      const list = patch.untrusted;
+      if (list === null || list === undefined) {
+        existing.e2eUntrusted = undefined;
+      } else {
+        if (!existing.e2eKey) throw new Error('请先设置端到端口令,再标记不可信节点');
+        const ids = [...new Set(list.map((s) => String(s).trim()).filter((s) => s !== ''))];
+        if (ids.length > 100) throw new Error('不可信节点过多(上限 100)');
+        for (const id of ids) {
+          if (!existing.devices.includes(id)) throw new Error(`设备尚未共享该目录,不能标记为不可信:「${id}」`);
+        }
+        existing.e2eUntrusted = ids.length > 0 ? ids : undefined;
+      }
+    }
   });
 }
 

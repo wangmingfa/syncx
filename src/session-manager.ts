@@ -55,9 +55,10 @@ import { compareContentLimit, imageMimeOf, TEXT_COMPARE_MAX_BYTES } from './file
 import { connectPeer } from './net/client.js';
 import { makePeerTransport, attachPeerMessages, sendControlMessage, type ControlMessage } from './net/wire.js';
 import { learnPeerUrl, learnPeerIp, getLanAddresses } from './net/addresses.js';
+import { e2eKeyForPeer, wrapTransportBlind } from './e2e.js';
 import { hostname as osHostname } from 'node:os';
 import { RateLimiter } from './ratelimit.js';
-import { isPeerAllowed, addPeer, setFolderPaused, setGlobalPaused, setFolderSchedule as persistFolderSchedule, setFolderGitSync as persistFolderGitSync, setFolderConflictPolicy as persistFolderConflictPolicy, setFolderGitLastCommitHash, setGlobalSettings as persistGlobalSettings, type GlobalSettingsPatch } from './devices.js';
+import { isPeerAllowed, addPeer, setFolderPaused, setGlobalPaused, setFolderSchedule as persistFolderSchedule, setFolderGitSync as persistFolderGitSync, setFolderConflictPolicy as persistFolderConflictPolicy, setFolderE2E as persistFolderE2E, setFolderGitLastCommitHash, setGlobalSettings as persistGlobalSettings, type GlobalSettingsPatch, type FolderE2EPatch } from './devices.js';
 import { receiveOffer, makeOfferId, pruneRevokedOffers } from './offers.js';
 import type { DeviceIdentity } from './identity.js';
 import type { ProgressCounts, RelayActivity, TransferFile } from './status.js';
@@ -1216,7 +1217,12 @@ export class SyncSessionManager {
     // 限速取目录级配置,未配置落到全局 maxSendKbps 兜底(设置页可调)
     const kbps = folder.config.maxBandwidthKbps ?? this.maxSendKbps;
     const rateLimiter = kbps ? new RateLimiter(kbps) : undefined;
-    const transport = makePeerTransport(session.socket, session.key, folder.id, rateLimiter);
+    const rawTransport = makePeerTransport(session.socket, session.key, folder.id, rateLimiter);
+    // 端到端加密(不可信对端):把 transport 包成密文视图壳 —— 本目录×该对端的**所有**索引
+    // 宣告出口(挂接全量 / 扫描增量 / 中转转发)统一经它换路径换哈希;SyncPeer 拿同一份
+    // 密钥,负责忽略盲区回推与「读明文→现场加密→密文供块」(见 e2e.ts)。
+    const e2eKey = e2eKeyForPeer(folder.config, session.remoteDeviceId);
+    const transport = e2eKey ? wrapTransportBlind(rawTransport, e2eKey, folder.path) : rawTransport;
     folder.transports.push(transport);
     folder.transportDevice.set(transport, session.remoteDeviceId);
     session.transports.push({ folder, transport });
@@ -1275,6 +1281,8 @@ export class SyncSessionManager {
       // 磁盘空间守卫:本轮入向体积预估不足则整轮拦下接收(目录卡挂错误横幅),
       // 空间恢复由扫描心跳复检触发,重放各 peer 积压(见 checkFolderDiskSpace)
       checkDiskSpace: (needed) => this.checkFolderDiskSpace(folder, needed),
+      // 端到端加密视图(不可信对端):同一份密钥,peer 内忽略盲区回推 + 密文供块
+      e2eKey,
       // 中转(ADR-0014):收到并落地远程条目后,转发给同目录其它 transport(排除来源端本身)。
       // 仅增量接收触发(peer.ts 内 gate),full 交换已收敛整网,不中转。
       onLanded: (entries) => {
@@ -1572,6 +1580,21 @@ export class SyncSessionManager {
       this.logger.info(`index snapshot denied: folder ${folderId} is not shared with ${deviceId}`);
       return;
     }
+    // 端到端加密目录对不可信对端**不回索引快照**:那是明文路径/哈希清单,
+    // 与「盲区只收密文」的承诺直接矛盾(诊断通道不得成为泄漏入口)。
+    if (e2eKeyForPeer(folder.config, deviceId)) {
+      this.sendControlTo(deviceId, {
+        kind: 'folder-index-snapshot',
+        requestId,
+        fromDeviceId: this.identity.deviceId,
+        folderId,
+        seq: 0,
+        total: 1,
+        error: '该目录已启用端到端加密,不可信设备不提供索引快照',
+      });
+      this.logger.info(`index snapshot denied (e2e untrusted): folder ${folderId} → ${deviceId}`);
+      return;
+    }
     const entries = [...folder.localIndex.values()].map(toSnapshotEntry);
     const total = Math.max(1, Math.ceil(entries.length / SNAPSHOT_CHUNK_ENTRIES));
     const progress = this.folderProgress(folder);
@@ -1779,6 +1802,11 @@ export class SyncSessionManager {
     );
     if (!folder) {
       reply({ error: '该目录未共享给请求方' });
+      return;
+    }
+    // 同上:e2e 目录不对不可信对端回明文内容
+    if (e2eKeyForPeer(folder.config, deviceId)) {
+      reply({ error: '该目录已启用端到端加密,不可信设备不提供文件内容' });
       return;
     }
     // 只认索引里登记在册的活条目:索引之外的文件(被忽略规则排除、或刚被删除)
@@ -2617,6 +2645,33 @@ export class SyncSessionManager {
     const folder = this.folderStates.find((f) => f.id === folderId);
     if (folder) folder.config.conflictPolicy = policy === 'keep-both' ? undefined : policy;
     this.logger.info(`conflict policy updated: ${folderId} -> ${policy}`);
+    this.notifyStatus();
+  }
+
+  /**
+   * 设置某目录的端到端口令 / 不可信节点名单(目录设置弹窗):落盘校验通过后为**所有
+   * 正挂载该目录的对端重建数据通道** —— 密文 transport 壳与 peer 的 e2eKey 都在挂接时
+   * 绑定,开/关/换口令只能靠摘挂生效;重挂即互发全量索引,新列入名单的盲区端由此
+   * 完成首轮密文铺底。校验失败(persistFolderE2E 抛错)时不动任何会话。
+   */
+  setFolderE2E(folderId: string, patch: FolderE2EPatch): void {
+    persistFolderE2E(this.configPath, folderId, patch);
+    const folder = this.folderStates.find((f) => f.id === folderId);
+    if (!folder) return; // 目录恰在此刻被移除:配置已落盘,没有活通道要重建
+    const next = loadConfig(this.configPath).sharedFolders.find((f) => folderIdFor(f) === folderId);
+    folder.config.e2eKey = next?.e2eKey;
+    folder.config.e2eUntrusted = next?.e2eUntrusted;
+    for (const session of [...this.activeSessions]) {
+      if (!session.peers.has(folder.id)) continue;
+      this.detachFolderFromSession(session, folder);
+      // 只给仍在 devices 白名单的对端重挂(与 reconcile 同一判定,暂停目录不挂)
+      const allowed =
+        (folder.config.devices ?? []).includes(session.remoteDeviceId) && !this.folderPausedNow(folder);
+      if (allowed) this.attachFolderToSession(session, folder);
+    }
+    this.logger.info(
+      `e2e settings updated: folder ${folderId}, key=${folder.config.e2eKey ? 'set' : 'cleared'}, untrusted=${(folder.config.e2eUntrusted ?? []).length}`,
+    );
     this.notifyStatus();
   }
 
