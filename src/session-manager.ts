@@ -19,7 +19,7 @@ import { randomBytes } from 'node:crypto';
 import type { Logger } from 'pino';
 import { WebSocket } from 'ws';
 
-import { loadConfig, mutateConfig, folderIdFor, folderIndexKey, folderIndexPath, folderTrashPath, folderVersionsPath, purgeFolderIndex, isWithinSchedule, type FolderIdentity, type SharedFolderConfig, type GitSyncMode, type ConflictPolicy } from './config.js';
+import { loadConfig, mutateConfig, folderIdFor, folderIndexKey, folderIndexPath, folderTrashPath, folderVersionsPath, purgeFolderIndex, isWithinSchedule, isUnderDirPrefix, type FolderIdentity, type SharedFolderConfig, type GitSyncMode, type ConflictPolicy } from './config.js';
 import { acceptedDevs, checkFolderIdentity, readFolderIdentity, withAcceptedDev } from './folder-identity.js';
 import { openIndexStore, type IndexStore } from './indexstore.js';
 import { createLocalExecutor, resolveSharePath, type LocalExecutor } from './executor.js';
@@ -58,7 +58,7 @@ import { learnPeerUrl, learnPeerIp, getLanAddresses } from './net/addresses.js';
 import { e2eKeyForPeer, wrapTransportBlind } from './e2e.js';
 import { hostname as osHostname } from 'node:os';
 import { RateLimiter } from './ratelimit.js';
-import { isPeerAllowed, addPeer, setFolderPaused, setGlobalPaused, setFolderSchedule as persistFolderSchedule, setFolderGitSync as persistFolderGitSync, setFolderConflictPolicy as persistFolderConflictPolicy, setFolderOnDemand as persistFolderOnDemand, setFolderPausedFile as persistFolderPausedFile, setFolderE2E as persistFolderE2E, setFolderGitLastCommitHash, setGlobalSettings as persistGlobalSettings, type GlobalSettingsPatch, type FolderE2EPatch } from './devices.js';
+import { isPeerAllowed, addPeer, setFolderPaused, setGlobalPaused, setFolderSchedule as persistFolderSchedule, setFolderGitSync as persistFolderGitSync, setFolderConflictPolicy as persistFolderConflictPolicy, setFolderOnDemand as persistFolderOnDemand, setFolderOnDemandDir as persistFolderOnDemandDir, setFolderPausedFile as persistFolderPausedFile, setFolderE2E as persistFolderE2E, setFolderGitLastCommitHash, setGlobalSettings as persistGlobalSettings, type GlobalSettingsPatch, type FolderE2EPatch } from './devices.js';
 import { receiveOffer, makeOfferId, pruneRevokedOffers } from './offers.js';
 import type { DeviceIdentity } from './identity.js';
 import type { ProgressCounts, RelayActivity, TransferFile } from './status.js';
@@ -1288,8 +1288,10 @@ export class SyncSessionManager {
       // 冲突自动策略:取函数是刻意的 —— 设置弹窗改完即生效,无需重连目录通道
       getConflictPolicy: () => folder.config.conflictPolicy ?? 'keep-both',
       // 按需同步:同样取函数(弹窗改完下一轮索引即到占位)。e2e 通道优先 ——
-      // 盲区端本来就不收明文条目,对它的 peer 不存在「接收落地」,无需占位逻辑
-      getOnDemand: () => folder.config.onDemand === true && e2eKey === undefined,
+      // 盲区端本来就不收明文条目,对它的 peer 不存在「接收落地」,无需占位逻辑。
+      // 选择性同步:整目录开关之外,路径命中 onDemandDirs 前缀的子树同样按占位接收。
+      getOnDemand: (p) =>
+        (folder.config.onDemand === true || isUnderDirPrefix(p, folder.config.onDemandDirs)) && e2eKey === undefined,
       // 单文件暂停:命中路径在本连接上双向冻结(send/receive/conflict/delete
       // 全部跳过)。取函数 = 文件管理器点「暂停」后下一轮索引交换即生效,无需重连
       isPausedPath: (p) => folder.config.pausedFiles?.includes(p) === true,
@@ -2697,6 +2699,27 @@ export class SyncSessionManager {
     this.logger.info(`file paused updated: ${folderId} ${norm} -> ${paused ? 'paused' : 'resumed'}`);
     // 恢复同步时立刻补一轮扫描:本机侧积压的改动不必等 5 秒心跳
     if (!paused) void this.runScan();
+    this.notifyStatus();
+  }
+
+  /**
+   * 选择性同步(文件管理器目录行「不同步此目录」):落盘 + 同步内存 config,即时生效 ——
+   * peer 经 getOnDemand 闭包按路径现读,下一轮索引起该子树的对端非空文件即改记占位。
+   * 与目录级 onDemand 同款惰性语义:开不删除既有实体,关不落地既有占位。
+   */
+  setFolderOnDemandDir(folderId: string, relPath: string, on: boolean): void {
+    const norm = relPath.replace(/\\/g, '/').replace(/\/+$/, '');
+    if (!norm) throw new Error('不能对整个共享目录设置子目录按需(请用目录级开关)');
+    persistFolderOnDemandDir(this.configPath, folderId, norm, on);
+    const folder = this.folderStates.find((f) => f.id === folderId);
+    if (folder) {
+      const current = folder.config.onDemandDirs ?? [];
+      const next = on
+        ? Array.from(new Set([...current, norm]))
+        : current.filter((p) => p !== norm);
+      folder.config.onDemandDirs = next.length > 0 ? next : undefined;
+    }
+    this.logger.info(`on-demand dir updated: ${folderId} ${norm} -> ${on ? 'on' : 'off'}`);
     this.notifyStatus();
   }
 

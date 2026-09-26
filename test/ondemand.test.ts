@@ -6,8 +6,8 @@ import type { AddressInfo } from 'node:net';
 import { afterEach, describe, expect, it } from 'vitest';
 import { createControlServer } from '../src/api.js';
 import { hashBlock } from '../src/blockstore.js';
-import { loadConfig } from '../src/config.js';
-import { setFolderOnDemand } from '../src/devices.js';
+import { isUnderDirPrefix, loadConfig } from '../src/config.js';
+import { setFolderOnDemand, setFolderOnDemandDir } from '../src/devices.js';
 import { decodeIndex, encodeIndex } from '../src/messages.js';
 import type { IndexEntry } from '../src/index.js';
 import { createLocalExecutor } from '../src/executor.js';
@@ -281,5 +281,112 @@ describe('POST /api/folders/on-demand 与 /api/folders/materialize', () => {
     expect(String(fail.json.error)).toContain('没有在线对端');
     const ok = await post(port, '/api/folders/materialize', { folderId: 'box', path: 'good.bin' });
     expect(ok.status).toBe(200);
+  });
+
+  it('on-demand-dir(选择性同步):folderId/path/onDemand 严格校验,合法值透传', async () => {
+    const calls: Array<[string, string, boolean]> = [];
+    const port = await withServer({
+      setFolderOnDemandDir: (folderId, p, on) => {
+        calls.push([folderId, p, on]);
+      },
+    });
+    expect((await post(port, '/api/folders/on-demand-dir', { path: 'media', onDemand: true })).status).toBe(400);
+    expect((await post(port, '/api/folders/on-demand-dir', { folderId: 'box', onDemand: true })).status).toBe(400);
+    expect(
+      (await post(port, '/api/folders/on-demand-dir', { folderId: 'box', path: 'media', onDemand: 'yes' })).status,
+    ).toBe(400);
+    const ok = await post(port, '/api/folders/on-demand-dir', { folderId: 'box', path: 'media', onDemand: true });
+    expect(ok.status).toBe(200);
+    expect(calls).toEqual([['box', 'media', true]]);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// 选择性同步(子目录级占位):前缀匹配 / 持久化 / peer 按路径占位
+// ---------------------------------------------------------------------------
+
+describe('isUnderDirPrefix', () => {
+  it('目录本身与后代命中;相似前缀不误伤;空列表恒 false', () => {
+    expect(isUnderDirPrefix('media', ['media'])).toBe(true);
+    expect(isUnderDirPrefix('media/a.bin', ['media'])).toBe(true);
+    expect(isUnderDirPrefix('media/sub/a.bin', ['media'])).toBe(true);
+    expect(isUnderDirPrefix('mediax/a.bin', ['media'])).toBe(false);
+    expect(isUnderDirPrefix('other/a.bin', ['media'])).toBe(false);
+    expect(isUnderDirPrefix('a/x.bin', ['b', 'a'])).toBe(true);
+    expect(isUnderDirPrefix('media/a.bin', undefined)).toBe(false);
+    expect(isUnderDirPrefix('media/a.bin', [])).toBe(false);
+  });
+});
+
+describe('devices.setFolderOnDemandDir', () => {
+  function tempConfig(): string {
+    const dir = mkdtempSync(join(tmpdir(), 'syncx-oddir-cfg-'));
+    const file = join(dir, 'config.json');
+    writeFileSync(
+      file,
+      JSON.stringify({
+        sharedFolders: [{ path: '/data/box', devices: ['DEVA'] }],
+        peers: [],
+        knownDevices: [],
+      }),
+    );
+    return file;
+  }
+
+  it('加入去重、反斜杠/尾斜杠归一;移出逐个摘除,清空存 undefined', () => {
+    const file = tempConfig();
+    const list = () => loadConfig(file).sharedFolders[0]?.onDemandDirs;
+    setFolderOnDemandDir(file, '/data/box', 'media', true);
+    setFolderOnDemandDir(file, '/data/box', 'videos\\raw', true);
+    expect(list()).toEqual(['media', 'videos/raw']);
+    setFolderOnDemandDir(file, '/data/box', 'media/', true);
+    expect(list()).toEqual(['media', 'videos/raw']);
+    setFolderOnDemandDir(file, '/data/box', 'media', false);
+    expect(list()).toEqual(['videos/raw']);
+    setFolderOnDemandDir(file, '/data/box', 'videos/raw', false);
+    expect(list()).toBeUndefined();
+    rmDir(join(file, '..'));
+  });
+
+  it('空路径抛错;未知目录抛错', () => {
+    const file = tempConfig();
+    expect(() => setFolderOnDemandDir(file, '/data/box', '', true)).toThrow(/path is required/);
+    expect(() => setFolderOnDemandDir(file, '/nope', 'media', true)).toThrow(/未找到共享目录/);
+    rmDir(join(file, '..'));
+  });
+});
+
+describe('peer 按路径的按需判定(子目录命中前缀才占位)', () => {
+  it('前缀下非空文件记占位;前缀相似名与名单外路径照常拉块', async () => {
+    const dir = mkdtempSync(join(tmpdir(), 'syncx-oddir-peer-'));
+    const root = join(dir, 'share');
+    mkdirSync(root, { recursive: true });
+    const index = openIndexStore(join(dir, 'index.db'));
+    const executor = createLocalExecutor(root, index, join(root, '.syncx-trash'));
+    const localIndex = new Map<string, IndexEntry>();
+    const t = fakeTransport();
+    const peer = createSyncPeer({
+      transport: t.transport,
+      localIndex,
+      executor,
+      readLocalBlock: () => Buffer.alloc(0),
+      deviceId: 'DEV-A',
+      remoteDeviceId: 'DEV-B',
+      getOnDemand: (p) => isUnderDirPrefix(p, ['media']),
+    });
+    const content = Buffer.from('一段非空载荷');
+    const hash = hashBlock(content);
+    await peer.onPeerIndex([
+      entry('media/a.mp4', [['DEV-B', 1]], [hash], content.length),
+      entry('mediax/b.mp4', [['DEV-B', 1]], [hash], content.length),
+      entry('docs/c.bin', [['DEV-B', 1]], [hash], content.length),
+    ]);
+    expect(index.getEntry('media/a.mp4')?.placeholder).toBe(true);
+    expect(existsSync(join(root, 'media', 'a.mp4'))).toBe(false);
+    expect(index.getEntry('mediax/b.mp4')?.placeholder).toBeUndefined();
+    expect(index.getEntry('docs/c.bin')?.placeholder).toBeUndefined();
+    expect(t.requests.map((r) => r.path).sort()).toEqual(['docs/c.bin', 'mediax/b.mp4']);
+    index.close();
+    rmDir(dir);
   });
 });

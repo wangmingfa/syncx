@@ -42,6 +42,8 @@ export interface FolderInfo {
   conflictPolicy?: ConflictPolicy;
   /** 按需同步(稀疏文件):对端非空文件先只记占位不落盘,点「下载」才拉。缺省 = 关闭。 */
   onDemand?: boolean;
+  /** 选择性同步:这些子目录前缀下的对端新文件按占位接收(与 onDemand 是「或」关系)。 */
+  onDemandDirs?: string[];
   /** 该目录是否已设置端到端口令(密钥本体绝不出 daemon,状态只回显此标志)。 */
   e2eKeySet?: boolean;
   /** 被标记为「不可信」的设备 id 列表:对这些设备只发密文视图,永不回源明文。 */
@@ -169,6 +171,8 @@ export interface FolderDirEntry {
   placeholder?: boolean;
   /** true = 该文件已「单文件暂停」(双向冻结):UI 提供「继续同步」而非暂停。 */
   paused?: boolean;
+  /** true = 该目录已「选择性同步」(子目录按需):新到文件只记占位,UI 提供「恢复同步」。 */
+  onDemandDir?: boolean;
 }
 
 /** 回收站的一条删除副本(GET /api/trash):由文件名反解,不落额外元数据。 */

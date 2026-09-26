@@ -767,6 +767,10 @@ export async function run(args: ParsedArgs): Promise<void> {
     setFolderOnDemand: (folderId, on) => {
       manager.setFolderOnDemand(folderId, on);
     },
+    setFolderOnDemandDir: (folderId, path, on) => {
+      // 落盘 + 内存 config 同步 + notifyStatus 都在 manager 内完成(peer 闭包即时生效)
+      manager.setFolderOnDemandDir(folderId, path, on);
+    },
     listPlaceholders: (folderId) => manager.listPlaceholders(folderId),
     materializeFile: (folderId, path) => manager.materializePlaceholder(folderId, path),
     getFolderIgnoreInfo: (folderId) => manager.getFolderIgnoreInfo(folderId),
@@ -855,6 +859,13 @@ export async function run(args: ParsedArgs): Promise<void> {
         const paused = new Set(folder.pausedFiles);
         for (const e of listing.entries) {
           if (!e.dir && paused.has(e.path)) e.paused = true;
+        }
+      }
+      // 选择性同步:命中按需前缀名单的目录行打标(前端据此把按钮显示为「恢复同步此目录」)
+      if (folder.onDemandDirs?.length) {
+        const odDirs = new Set(folder.onDemandDirs);
+        for (const e of listing.entries) {
+          if (e.dir && odDirs.has(e.path)) e.onDemandDir = true;
         }
       }
       // 按需同步的占位文件盘上不存在,listDirectory 天然列不到 —— 按索引补进

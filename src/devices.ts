@@ -392,6 +392,28 @@ export function setFolderOnDemand(configPath: string, folderId: string, onDemand
 }
 
 /**
+ * 选择性同步:把某子目录加入/移出目录的按需前缀名单(onDemandDirs)。路径归一为
+ * '/' 分隔、去尾斜杠并去重;列表清空存成 undefined(缺省承载默认语义,同 onDemand)。
+ * 占位化本身在 peer 侧经 getOnDemand(path) 现读生效,这里只管持久化。
+ */
+export function setFolderOnDemandDir(
+  configPath: string,
+  folderId: string,
+  relPath: string,
+  on: boolean,
+): void {
+  const norm = relPath.replace(/\\/g, '/').replace(/\/+$/, '');
+  if (!norm) throw new Error('path is required');
+  mutateConfig(configPath, (config) => {
+    const existing = config.sharedFolders.find((f) => folderIdFor(f) === folderId);
+    if (!existing) throw new Error(`未找到共享目录:「${folderId}」`);
+    const current = existing.onDemandDirs ?? [];
+    const next = on ? Array.from(new Set([...current, norm])) : current.filter((p) => p !== norm);
+    existing.onDemandDirs = next.length > 0 ? next : undefined;
+  });
+}
+
+/**
  * 单文件暂停:把某路径加入/移出目录的冻结名单(pausedFiles)。路径归一为 '/'
  * 分隔并去重;列表清空存成 undefined(缺省承载默认语义,同 onDemand)。
  * 冻结本身在同步两侧生效(peer.isPausedPath 与 session-manager 的扫描闸门),

@@ -56,7 +56,7 @@ export async function tryFolderRoutes(
   res: ServerResponse,
   deps: ControlServerDeps,
 ): Promise<boolean> {
-  const { addFolder, removeFolder, setFolderDevices, setFolderUseGitignore, setFolderPaused, setFolderFilePaused, setFolderSchedule, setFolderGitSync, setFolderConflictPolicy, setFolderE2E, setFolderOnDemand, prioritizeTransfer, materializeFile, getFolderIgnoreInfo, setFolderIgnoreLines, testFolderIgnore, reAdoptFolderIdentity, getFolderHistory, getGlobalHistory, getWeeklyReport, clearFolderHistory, listFolderConflicts, resolveFolderConflict, conflictFilePair, applyConflictMerge, cleanIdenticalConflicts, diffFolder, compareFolder, readFilePair, applyFileSync, listFolderVersions, restoreFolderVersion, deleteFolderVersion, getFolderVersionContent, rollbackFolder } = deps;
+  const { addFolder, removeFolder, setFolderDevices, setFolderUseGitignore, setFolderPaused, setFolderFilePaused, setFolderSchedule, setFolderGitSync, setFolderConflictPolicy, setFolderE2E, setFolderOnDemand, setFolderOnDemandDir, prioritizeTransfer, materializeFile, getFolderIgnoreInfo, setFolderIgnoreLines, testFolderIgnore, reAdoptFolderIdentity, getFolderHistory, getGlobalHistory, getWeeklyReport, clearFolderHistory, listFolderConflicts, resolveFolderConflict, conflictFilePair, applyConflictMerge, cleanIdenticalConflicts, diffFolder, compareFolder, readFilePair, applyFileSync, listFolderVersions, restoreFolderVersion, deleteFolderVersion, getFolderVersionContent, rollbackFolder } = deps;
   const path = req.url ? pathname(req.url) : '/';
 
   // Form POST /folders : add or (via _method=DELETE) remove a folder
@@ -285,6 +285,37 @@ export async function tryFolderRoutes(
       sendJson(res, 200, { ok: true });
     } catch (e) {
       sendJson(res, 400, { error: e instanceof Error ? e.message : '设置按需同步失败' });
+    }
+    return true;
+  }
+
+  // POST /api/folders/on-demand-dir { folderId, path, onDemand } : 选择性同步 ——
+  // 把某个子目录加入/移出按需前缀名单。命中的子树里对端非空文件只记占位、不落盘,
+  // 在文件管理器里逐个点「下载」再拉回。path 为共享目录内相对路径(不含根),
+  // onDemand=true 加入 / false 移出(幂等)。整目录开关走 /api/folders/on-demand。
+  if (req.method === 'POST' && path === '/api/folders/on-demand-dir' && setFolderOnDemandDir) {
+    try {
+      const raw = await readBody(req);
+      const body = raw === '' ? {} : JSON.parse(raw);
+      const folderId = (body as { folderId?: unknown }).folderId;
+      const p = (body as { path?: unknown }).path;
+      const on = (body as { onDemand?: unknown }).onDemand;
+      if (typeof folderId !== 'string' || folderId === '') {
+        sendJson(res, 400, { error: 'folderId is required' });
+        return true;
+      }
+      if (typeof p !== 'string' || p === '') {
+        sendJson(res, 400, { error: 'path is required' });
+        return true;
+      }
+      if (typeof on !== 'boolean') {
+        sendJson(res, 400, { error: 'onDemand must be a boolean' });
+        return true;
+      }
+      setFolderOnDemandDir(folderId, p, on);
+      sendJson(res, 200, { ok: true });
+    } catch (e) {
+      sendJson(res, 400, { error: e instanceof Error ? e.message : '设置子目录按需失败' });
     }
     return true;
   }

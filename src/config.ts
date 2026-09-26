@@ -141,6 +141,14 @@ export interface SharedFolderConfig {
    */
   onDemand?: boolean;
   /**
+   * 选择性同步(子目录级按需):这些目录前缀('/' 分隔,与索引同形)下的对端**非空
+   * 文件**按 onDemand 同款口径处理 —— 只记占位条目、不落盘,文件管理器点「下载」
+   * 再拉块。目录整体 onDemand=true 时本字段多余(整盘已占位化),二者是「或」关系。
+   * 只影响**之后的接收**:开关不改既有实体文件,也不落地既有占位(与目录级同语义)。
+   * 旧配置缺省 = 空列表。
+   */
+  onDemandDirs?: string[];
+  /**
    * 单文件暂停:这些相对路径('/' 分隔,与索引同形)的文件在本目录**双向冻结**——
    * 本机改动不外推、对端改动不落地(含对端删除),但文件保留在索引与盘上,
    * 恢复后下一轮索引交换自然收敛。与整目录 paused 不同:那是通道级停摆,
@@ -193,6 +201,18 @@ export function isGitSyncMode(v: unknown): v is GitSyncMode {
 /** 目录的 wire 标识:优先 id,缺省用 path。 */
 export function folderIdFor(folder: SharedFolderConfig): string {
   return folder.id ?? folder.path;
+}
+
+/**
+ * 选择性同步判定:相对路径('/' 分隔,与索引同形)是否落在 dirs 里某个目录前缀
+ * 之下(等于该目录本身,或其后代)。列表缺省/为空恒 false。
+ */
+export function isUnderDirPrefix(relPath: string, dirs: string[] | undefined): boolean {
+  if (!dirs || dirs.length === 0) return false;
+  for (const d of dirs) {
+    if (relPath === d || relPath.startsWith(`${d}/`)) return true;
+  }
+  return false;
 }
 
 /**

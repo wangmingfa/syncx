@@ -77,6 +77,11 @@ export interface ControlServerDeps {
   prioritizeTransfer?: (folderId: string, path: string) => void;
   /** 设置某目录的按需同步开关(稀疏文件;开=对端非空文件先只记占位不落盘)。 */
   setFolderOnDemand?: (folderId: string, on: boolean) => void;
+  /**
+   * 选择性同步:把某子目录加入/移出按需前缀名单(onDemandDirs)。命中子树的
+   * 对端非空文件按占位接收(点「下载」再拉);路径归一/落盘/内存生效都在 manager 内。
+   */
+  setFolderOnDemandDir?: (folderId: string, path: string, on: boolean) => void;
   /** 列出某目录当前占位(未落地)的文件(供文件管理器标「未下载」)。 */
   listPlaceholders?: (folderId: string) => Array<{ path: string; size: number }>;
   /** 按需同步:把一个占位文件真正拉回本地落盘(异步,收齐块后落地)。 */

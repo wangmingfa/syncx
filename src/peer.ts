@@ -120,13 +120,14 @@ export interface SyncPeerDeps {
    */
   checkDiskSpace?: (neededBytes: number) => boolean;
   /**
-   * 按需同步(稀疏文件,见 config.SharedFolderConfig.onDemand):取该目录**当前生效**
-   * 开关(与 getConflictPolicy 同构,设置弹窗改完即生效、无需重连)。为 true 时对端
-   * 推来的**非空文件**只记占位条目(块哈希齐备、盘上无实体),不发块请求;用户点
-   * 「下载」经 {@link SyncPeer.materialize} 才真正拉块落地。空文件无盘可省,照常落地;
-   * 冲突路径需要内容,不受影响。
+   * 按需同步(稀疏文件,见 config.SharedFolderConfig.onDemand / onDemandDirs):取该目录
+   * 对**给定路径当前生效**的按需判定(与 getConflictPolicy 同构,设置弹窗改完即生效、无需
+   * 重连)。整目录 onDemand 或路径命中 onDemandDirs 前缀时为 true —— 对端推来的**非空文件**
+   * 只记占位条目(块哈希齐备、盘上无实体),不发块请求;用户点「下载」经
+   * {@link SyncPeer.materialize} 才真正拉块落地。空文件无盘可省,照常落地;
+   * 冲突路径需要内容,不受影响。入参为条目相对路径(旧调用方忽略之即可)。
    */
-  getOnDemand?: () => boolean;
+  getOnDemand?: (path: string) => boolean;
   /**
    * 单文件暂停(见 config.SharedFolderConfig.pausedFiles):该路径在本连接上**双向冻结**
    * —— send/receive/conflict/delete 动作一律跳过,本地索引不前移。恢复后下一轮索引
@@ -546,7 +547,7 @@ export function createSyncPeer(deps: SyncPeerDeps): SyncPeer {
           if (action.kind !== 'receive' && action.kind !== 'conflict') continue;
           const incoming = action.kind === 'receive' ? action.entry : action.remote;
           // 按需同步下 receive 会变成占位(不占盘),不计入预估;冲突仍需内容,照算
-          if (action.kind === 'receive' && incoming.blocks.length > 0 && getOnDemand?.()) continue;
+          if (action.kind === 'receive' && incoming.blocks.length > 0 && getOnDemand?.(action.path)) continue;
           const current = localIndex.get(action.path);
           needed += Math.max(0, incoming.size - (current && !current.deleted ? current.size : 0));
         }
@@ -603,7 +604,7 @@ export function createSyncPeer(deps: SyncPeerDeps): SyncPeer {
               // 不发块请求、不落盘 —— 用户点「下载」时经 materialize() 再拉。
               // 空文件(blocks=0)无盘可省,照常即时落地。占位不进 landed(不中转),
               // 且 encodeIndex 把它挡在 wire 之外(不谎称自己供得出内容)。
-              if (getOnDemand?.() && remoteEntry.blocks.length > 0) {
+              if (getOnDemand?.(remoteEntry.path) && remoteEntry.blocks.length > 0) {
                 const placeholder: IndexEntry = { ...remoteEntry, placeholder: true };
                 const isNew = !localIndex.has(remoteEntry.path);
                 localIndex.set(remoteEntry.path, placeholder);

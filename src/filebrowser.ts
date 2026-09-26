@@ -30,6 +30,11 @@ export interface DirEntry {
    * 但不再同步。UI 标「已暂停」并提供「继续同步」。缺省 = 正常同步。
    */
   paused?: boolean;
+  /**
+   * true = 选择性同步命中的目录(在 onDemandDirs 名单里):其下对端非空文件按占位
+   * 接收、不落盘。UI 据此把目录行按钮显示为「恢复同步此目录」。仅目录行会置此标志。
+   */
+  onDemandDir?: boolean;
 }
 
 export interface DirListing {

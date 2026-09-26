@@ -159,6 +159,30 @@ async function togglePause(entry: FolderDirEntry): Promise<void> {
 }
 
 /**
+ * 选择性同步(子目录级):POST /api/folders/on-demand-dir 切换某目录的「按需前缀」态。
+ * 开=该子树下之后的对端非空文件只记占位、不落盘(小盘设备省空间),进去逐个点「下载」拉回;
+ * 关=恢复正常即时落地。惰性语义:开关都不改动既有实体,也不落地既有占位。仅需登录(不改盘)。
+ */
+async function toggleDirOnDemand(entry: FolderDirEntry): Promise<void> {
+  if (busy.value) return;
+  busy.value = true;
+  const next = !entry.onDemandDir;
+  try {
+    await apiJson('/api/folders/on-demand-dir', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ folderId: folderId.value, path: entry.path, onDemand: next }),
+    });
+    entry.onDemandDir = next;
+    showToast(next ? `已设为按需同步「${entry.name}/」(之后的新文件不占本机盘)` : `已恢复「${entry.name}/」的即时同步`);
+  } catch (e) {
+    showToast(errText(e, '设置子目录按需失败'), 'alert');
+  } finally {
+    busy.value = false;
+  }
+}
+
+/**
  * 删除入口:先落二次确认卡(写明会同步传播给对端),确认后再过提权门 ——
  * 顺序刻意如此:取消确认就不该白弹一次验证。提权通过与后端 DELETE 403 门对应。
  */
@@ -316,7 +340,8 @@ onMounted(async () => {
                   <path d="M14 3.5V8h4" />
                 </svg>
                 <span class="mono">{{ entry.name }}</span>
-                <span v-if="entry.paused" class="fm-badge-paused">已暂停</span>
+                <span v-if="entry.dir && entry.onDemandDir" class="fm-badge-unloaded">按需</span>
+                <span v-else-if="entry.paused" class="fm-badge-paused">已暂停</span>
                 <span v-else-if="entry.placeholder" class="fm-badge-unloaded">未下载</span>
               </button>
               <span class="fm-col-meta fm-meta-txt">{{ entry.dir ? '—' : formatBytes(entry.size) }}</span>
@@ -324,6 +349,7 @@ onMounted(async () => {
               <span class="fm-col-ops">
                 <n-button v-if="entry.placeholder" size="tiny" tertiary :disabled="busy" @click="materialize(entry)">下载</n-button>
                 <n-button v-else-if="!entry.dir" size="tiny" tertiary :disabled="busy" @click="download(entry)">下载</n-button>
+                <n-button v-if="entry.dir" size="tiny" tertiary :disabled="busy" @click="toggleDirOnDemand(entry)">{{ entry.onDemandDir ? '恢复同步' : '按需同步' }}</n-button>
                 <n-button v-if="!entry.dir" size="tiny" tertiary :disabled="busy" @click="togglePause(entry)">{{ entry.paused ? '继续同步' : '暂停同步' }}</n-button>
                 <n-button v-if="!entry.placeholder" size="tiny" tertiary type="error" :disabled="busy" @click="askDelete(entry)">删除</n-button>
               </span>
