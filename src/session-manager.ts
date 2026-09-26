@@ -58,7 +58,7 @@ import { learnPeerUrl, learnPeerIp, getLanAddresses } from './net/addresses.js';
 import { e2eKeyForPeer, wrapTransportBlind } from './e2e.js';
 import { hostname as osHostname } from 'node:os';
 import { RateLimiter } from './ratelimit.js';
-import { isPeerAllowed, addPeer, setFolderPaused, setGlobalPaused, setFolderSchedule as persistFolderSchedule, setFolderGitSync as persistFolderGitSync, setFolderConflictPolicy as persistFolderConflictPolicy, setFolderE2E as persistFolderE2E, setFolderGitLastCommitHash, setGlobalSettings as persistGlobalSettings, type GlobalSettingsPatch, type FolderE2EPatch } from './devices.js';
+import { isPeerAllowed, addPeer, setFolderPaused, setGlobalPaused, setFolderSchedule as persistFolderSchedule, setFolderGitSync as persistFolderGitSync, setFolderConflictPolicy as persistFolderConflictPolicy, setFolderOnDemand as persistFolderOnDemand, setFolderE2E as persistFolderE2E, setFolderGitLastCommitHash, setGlobalSettings as persistGlobalSettings, type GlobalSettingsPatch, type FolderE2EPatch } from './devices.js';
 import { receiveOffer, makeOfferId, pruneRevokedOffers } from './offers.js';
 import type { DeviceIdentity } from './identity.js';
 import type { ProgressCounts, RelayActivity, TransferFile } from './status.js';
@@ -748,6 +748,7 @@ export class SyncSessionManager {
       applyConflictKeepLocal: wrap((local, remote) =>
         executor.applyConflictKeepLocal(local, remote),
       ) as LocalExecutor['applyConflictKeepLocal'],
+      applyPlaceholder: wrap((entry) => executor.applyPlaceholder(entry)) as LocalExecutor['applyPlaceholder'],
     };
   }
 
@@ -1278,6 +1279,9 @@ export class SyncSessionManager {
       receiveOnly: folder.config.receiveOnly ?? false,
       // 冲突自动策略:取函数是刻意的 —— 设置弹窗改完即生效,无需重连目录通道
       getConflictPolicy: () => folder.config.conflictPolicy ?? 'keep-both',
+      // 按需同步:同样取函数(弹窗改完下一轮索引即到占位)。e2e 通道优先 ——
+      // 盲区端本来就不收明文条目,对它的 peer 不存在「接收落地」,无需占位逻辑
+      getOnDemand: () => folder.config.onDemand === true && e2eKey === undefined,
       // 磁盘空间守卫:本轮入向体积预估不足则整轮拦下接收(目录卡挂错误横幅),
       // 空间恢复由扫描心跳复检触发,重放各 peer 积压(见 checkFolderDiskSpace)
       checkDiskSpace: (needed) => this.checkFolderDiskSpace(folder, needed),
@@ -2645,6 +2649,56 @@ export class SyncSessionManager {
     const folder = this.folderStates.find((f) => f.id === folderId);
     if (folder) folder.config.conflictPolicy = policy === 'keep-both' ? undefined : policy;
     this.logger.info(`conflict policy updated: ${folderId} -> ${policy}`);
+    this.notifyStatus();
+  }
+
+  /**
+   * 设置某目录的按需同步开关(稀疏文件;目录设置弹窗)。落盘 + 同步内存 config,
+   * 无需重连即生效:peer 侧经 getOnDemand 闭包读 folder.config 本体,下一轮索引规划
+   * 起对端非空文件即改记占位条目。**关闭时不主动落地既有占位**(尊重用户此前的选择,
+   * 已省的盘继续省着;需要实体就点下载)。
+   */
+  setFolderOnDemand(folderId: string, on: boolean): void {
+    persistFolderOnDemand(this.configPath, folderId, on);
+    const folder = this.folderStates.find((f) => f.id === folderId);
+    if (folder) folder.config.onDemand = on ? true : undefined;
+    this.logger.info(`on-demand sync updated: ${folderId} -> ${on ? 'on' : 'off'}`);
+    this.notifyStatus();
+  }
+
+  /** 列出某目录当前以占位形态存在(未落地)的文件(供文件管理器把「未下载」并入列目录视图)。 */
+  listPlaceholders(folderId: string): Array<{ path: string; size: number }> {
+    const folder = this.folderStates.find((f) => f.id === folderId);
+    if (!folder) throw new Error('共享目录不存在(可能刚被移除)');
+    const out: Array<{ path: string; size: number }> = [];
+    for (const [path, entry] of folder.localIndex) {
+      if (entry.placeholder && !entry.deleted) out.push({ path, size: entry.size });
+    }
+    return out.sort((a, b) => a.path.localeCompare(b.path));
+  }
+
+  /**
+   * 按需同步:把一个占位文件真正拉回本地落盘(文件管理器/对比页点「下载」触发)。
+   * 遍历该目录在线对端 peer,任一 peer 持有该路径的完整块即可 materialize;
+   * 落地后经既有块管线写盘并清占位标志。无在线对端能供这块时抛错(交路由转 400)。
+   */
+  async materializePlaceholder(folderId: string, path: string): Promise<void> {
+    const folder = this.folderStates.find((f) => f.id === folderId);
+    if (!folder) throw new Error('共享目录不存在(可能刚被移除)');
+    if (!path) throw new Error('path is required');
+    const entry = folder.localIndex.get(path);
+    if (!entry) throw new Error('索引里没有这个文件');
+    if (!entry.placeholder) return; // 已是实体:无需拉取(幂等)
+    let started = false;
+    for (const peer of folder.peers.values()) {
+      if (peer.materialize(path)) {
+        started = true;
+        break;
+      }
+    }
+    if (!started) {
+      throw new Error('当前没有在线对端能提供该文件(等对端上线后重试)');
+    }
     this.notifyStatus();
   }
 

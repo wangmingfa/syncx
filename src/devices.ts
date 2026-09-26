@@ -379,6 +379,19 @@ export function setFolderConflictPolicy(configPath: string, folderId: string, po
 }
 
 /**
+ * 设置某目录的按需同步开关(稀疏文件,目录设置弹窗;按 folderId 定位)。
+ * false 存成 undefined 而非字面量:与 conflictPolicy 同款「默认语义由代码缺省承载」,
+ * 配置里不留关闭态的痕迹。
+ */
+export function setFolderOnDemand(configPath: string, folderId: string, onDemand: boolean): void {
+  mutateConfig(configPath, (config) => {
+    const existing = config.sharedFolders.find((f) => folderIdFor(f) === folderId);
+    if (!existing) throw new Error(`未找到共享目录:「${folderId}」`);
+    existing.onDemand = onDemand ? true : undefined;
+  });
+}
+
+/**
  * 设置某目录的端到端加密口令与不可信节点名单(目录设置弹窗;按 folderId 定位)。
  * patch 语义与全局设置同款:键出现才改。
  *  - passphrase:新口令(≥4 字符)→ scrypt 派生新密钥;null/'' → 清除密钥**并连带清空名单**

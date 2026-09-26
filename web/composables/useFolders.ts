@@ -49,7 +49,7 @@ export function useFolders(deps: CoreDeps): {
   ignoreFolder: Ref<FolderInfo | null>;
   /** 非空 = 打开该目录的端到端加密设置弹窗。 */
   e2eFolder: Ref<FolderInfo | null>;
-  saveEditDevices: (payload: { path: string; devices: string[]; gitignore: boolean; schedule: string; gitSync: GitSyncMode; conflictPolicy: ConflictPolicy }) => Promise<void>;
+  saveEditDevices: (payload: { path: string; devices: string[]; gitignore: boolean; schedule: string; gitSync: GitSyncMode; conflictPolicy: ConflictPolicy; onDemand: boolean }) => Promise<void>;
   /** 「优先同步」:把该目录某个在传文件的块请求插到对端发送队列最前(幂等)。 */
   prioritizeFile: (f: FolderInfo, path: string) => Promise<void>;
   toggleFolderPaused: (f: FolderInfo, paused: boolean) => Promise<void>;
@@ -160,7 +160,7 @@ export function useFolders(deps: CoreDeps): {
   }
 
   /** 弹窗「保存」:设备指派、.gitignore 开关、同步时段、git 同步模式与冲突策略一起提交,真正的写操作只有这里。 */
-  async function saveEditDevices(payload: { path: string; devices: string[]; gitignore: boolean; schedule: string; gitSync: GitSyncMode; conflictPolicy: ConflictPolicy }): Promise<void> {
+  async function saveEditDevices(payload: { path: string; devices: string[]; gitignore: boolean; schedule: string; gitSync: GitSyncMode; conflictPolicy: ConflictPolicy; onDemand: boolean }): Promise<void> {
     await commitFolderDevices(payload.path, payload.devices);
     // refreshStatus 后按最新 folders 找回该目录,开关/时段/git 模式/冲突策略有变化才额外发请求
     const f = status.value.folders.find((x) => x.path === payload.path);
@@ -176,7 +176,29 @@ export function useFolders(deps: CoreDeps): {
     if (f && (f.conflictPolicy ?? 'keep-both') !== payload.conflictPolicy) {
       await saveFolderConflictPolicy(f, payload.conflictPolicy);
     }
+    if (f && (f.onDemand ?? false) !== payload.onDemand) {
+      await saveFolderOnDemand(f, payload.onDemand);
+    }
     editDevicesOpen.value = false;
+  }
+
+  /** 提交某目录的按需同步开关;失败回读后端真实状态。 */
+  async function saveFolderOnDemand(f: FolderInfo, on: boolean): Promise<void> {
+    try {
+      await apiJson('/api/folders/on-demand', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ folderId: f.id ?? f.path, onDemand: on }),
+      });
+      showToast(
+        on
+          ? '已开启按需同步:对端新文件先只记索引,点「下载」才落盘'
+          : '已关闭按需同步:此后对端新文件恢复即时落盘(既有占位文件仍需手动下载)',
+      );
+    } catch (e) {
+      showToast(errText(e, '设置按需同步失败'), 'alert');
+    }
+    await refreshStatus();
   }
 
   /** 提交某目录的 git 提交同步模式;失败回读后端真实状态。 */

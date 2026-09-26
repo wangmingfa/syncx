@@ -73,6 +73,12 @@ export interface ControlServerDeps {
   setFolderE2E?: (folderId: string, patch: { passphrase?: string | null; untrusted?: string[] | null }) => void;
   /** 「优先同步」:把该目录某个在传文件的块请求插到对端发送队列最前。 */
   prioritizeTransfer?: (folderId: string, path: string) => void;
+  /** 设置某目录的按需同步开关(稀疏文件;开=对端非空文件先只记占位不落盘)。 */
+  setFolderOnDemand?: (folderId: string, on: boolean) => void;
+  /** 列出某目录当前占位(未落地)的文件(供文件管理器标「未下载」)。 */
+  listPlaceholders?: (folderId: string) => Array<{ path: string; size: number }>;
+  /** 按需同步:把一个占位文件真正拉回本地落盘(异步,收齐块后落地)。 */
+  materializeFile?: (folderId: string, path: string) => Promise<void>;
   /** 忽略规则编辑器:读 .syncxignore 原始行 + 内置默认 + 是否并入 .gitignore。 */
   getFolderIgnoreInfo?: (folderId: string) => { lines: string[]; builtin: string[]; useGitignore: boolean };
   /** 忽略规则编辑器:保存 .syncxignore 并让该目录规则立即生效。 */

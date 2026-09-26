@@ -120,6 +120,14 @@ export interface SyncPeerDeps {
    */
   checkDiskSpace?: (neededBytes: number) => boolean;
   /**
+   * 按需同步(稀疏文件,见 config.SharedFolderConfig.onDemand):取该目录**当前生效**
+   * 开关(与 getConflictPolicy 同构,设置弹窗改完即生效、无需重连)。为 true 时对端
+   * 推来的**非空文件**只记占位条目(块哈希齐备、盘上无实体),不发块请求;用户点
+   * 「下载」经 {@link SyncPeer.materialize} 才真正拉块落地。空文件无盘可省,照常落地;
+   * 冲突路径需要内容,不受影响。
+   */
+  getOnDemand?: () => boolean;
+  /**
    * 端到端加密视图(对不可信peer的盲区口径,见 src/e2e.ts):该目录为此对端设了口令时,
    * 上层交给它的 transport 已是密文变换壳(sendEntries 前条目被换成密文视图)。SyncPeer
    * 再补两道:①对端索引宣告**整轮忽略**(盲区端只有密文副本,它的「回推」会把密文当
@@ -148,6 +156,12 @@ export interface SyncPeer {
    * 不在接收中的路径调用是空操作(还没开传的文件本就按规划顺序进行,无需插队)。
    */
   markPriority(path: string): void;
+  /**
+   * 按需同步:把一个占位条目(见 IndexEntry.placeholder / deps.getOnDemand)真正拉回来
+   * 落盘。复用既有块管线(pending + requestMissingBlocks + completeIfReady),零新协议帧。
+   * 该路径此刻不在占位态(不是占位/不存在/已落地)时是空操作;已在拉取中则幂等。
+   */
+  materialize(path: string): boolean;
 }
 
 interface PendingEntry {
@@ -211,7 +225,7 @@ const RATE_SPAN_FLOOR_MS = 1000;
  * complete, then apply it via the executor.
  */
 export function createSyncPeer(deps: SyncPeerDeps): SyncPeer {
-  const { transport, localIndex, executor, readLocalBlock, deviceId, remoteDeviceId, root, onEvent, onTraffic, readIgnoreLines, receiveOnly, getConflictPolicy, checkDiskSpace, onHardIgnoredDropped, onLanded, onStallDrop, e2eKey } = deps;
+  const { transport, localIndex, executor, readLocalBlock, deviceId, remoteDeviceId, root, onEvent, onTraffic, readIgnoreLines, receiveOnly, getConflictPolicy, getOnDemand, checkDiskSpace, onHardIgnoredDropped, onLanded, onStallDrop, e2eKey } = deps;
   const pending = new Map<string, PendingEntry>();
   // 逐块跟踪超时重试:块响应丢失/丢弃时自动重发,避免文件永远收不齐
   const pendingBlocks = new Map<string, PendingBlockRequest>();
@@ -525,6 +539,8 @@ export function createSyncPeer(deps: SyncPeerDeps): SyncPeer {
         for (const action of actions) {
           if (action.kind !== 'receive' && action.kind !== 'conflict') continue;
           const incoming = action.kind === 'receive' ? action.entry : action.remote;
+          // 按需同步下 receive 会变成占位(不占盘),不计入预估;冲突仍需内容,照算
+          if (action.kind === 'receive' && incoming.blocks.length > 0 && getOnDemand?.()) continue;
           const current = localIndex.get(action.path);
           needed += Math.max(0, incoming.size - (current && !current.deleted ? current.size : 0));
         }
@@ -574,6 +590,24 @@ export function createSyncPeer(deps: SyncPeerDeps): SyncPeer {
           case 'receive': {
             const remoteEntry = remote.get(action.path);
             if (remoteEntry) {
+              // 按需同步:非空文件先只记占位条目(块哈希齐备、盘上无实体),
+              // 不发块请求、不落盘 —— 用户点「下载」时经 materialize() 再拉。
+              // 空文件(blocks=0)无盘可省,照常即时落地。占位不进 landed(不中转),
+              // 且 encodeIndex 把它挡在 wire 之外(不谎称自己供得出内容)。
+              if (getOnDemand?.() && remoteEntry.blocks.length > 0) {
+                const placeholder: IndexEntry = { ...remoteEntry, placeholder: true };
+                const isNew = !localIndex.has(remoteEntry.path);
+                localIndex.set(remoteEntry.path, placeholder);
+                await executor?.applyPlaceholder(placeholder);
+                onEvent?.({
+                  ts: Date.now(),
+                  path: remoteEntry.path,
+                  action: isNew ? 'add' : 'update',
+                  direction: 'remote',
+                  deviceId: remoteDeviceId,
+                });
+                break;
+              }
               pending.set(remoteEntry.path, {
                 kind: 'receive',
                 entry: remoteEntry,
@@ -868,6 +902,23 @@ export function createSyncPeer(deps: SyncPeerDeps): SyncPeer {
       for (let i = 0; i < item.entry.blocks.length; i++) {
         if (item.blocks[i] === undefined) requestBlock(path, i, item.entry.blocks[i]!);
       }
+    },
+    materialize(path: string): boolean {
+      const entry = localIndex.get(path);
+      // 只受理「本机有占位条目」的路径:非占位(已是实体)/ 不存在 / 墓碑都无需拉块
+      if (!entry || entry.deleted || !entry.placeholder) return false;
+      if (pending.has(path)) return true; // 已在拉取中:幂等
+      // 去占位标志后走标准接收管线(pending → 块请求 → completeIfReady 落盘并 saveEntry,
+      // 落地的 entry 不带 placeholder,索引自动从占位转实体)。
+      const target: IndexEntry = { ...entry, placeholder: undefined };
+      pending.set(path, {
+        kind: 'receive',
+        entry: target,
+        blocks: new Array<Buffer | undefined>(target.blocks.length),
+        received: 0,
+      });
+      requestMissingBlocks(path, target);
+      return true;
     },
   };
   return self;

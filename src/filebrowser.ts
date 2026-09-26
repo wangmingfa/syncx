@@ -20,6 +20,11 @@ export interface DirEntry {
   size: number;
   /** 修改时间(毫秒);stat 失败时为 0。 */
   mtime: number;
+  /**
+   * true = 按需同步的占位文件(盘上无实体,行由索引补入):UI 标「未下载」,
+   * 提供「下载」而非直接打开。普通盘面条目缺省(不写该字段)。
+   */
+  placeholder?: boolean;
 }
 
 export interface DirListing {

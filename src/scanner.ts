@@ -149,6 +149,9 @@ export function scanFolder(
   const tombstones: IndexEntry[] = [];
   for (const entry of index.listEntries()) {
     if (entry.deleted || seen.has(entry.path)) continue;
+    // 按需同步的占位条目(见 IndexEntry.placeholder):盘上本就没有实体文件,
+    // 这不是「本地删除」——生成墓碑会把对端的真文件删进回收站(数据丢失级)。
+    if (entry.placeholder) continue;
     // 硬忽略路径(如 .git/**)绝不生成墓碑:墓碑会把「对端也有这份内容」变成
     // 对端的一次真实删除。历史遗留的硬忽略条目由 createFolderState 从库里清掉
     if (isIgnoredPath(rules, entry.path, false)) continue;

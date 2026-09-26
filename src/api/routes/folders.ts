@@ -56,7 +56,7 @@ export async function tryFolderRoutes(
   res: ServerResponse,
   deps: ControlServerDeps,
 ): Promise<boolean> {
-  const { addFolder, removeFolder, setFolderDevices, setFolderUseGitignore, setFolderPaused, setFolderSchedule, setFolderGitSync, setFolderConflictPolicy, setFolderE2E, prioritizeTransfer, getFolderIgnoreInfo, setFolderIgnoreLines, testFolderIgnore, reAdoptFolderIdentity, getFolderHistory, getGlobalHistory, getWeeklyReport, clearFolderHistory, listFolderConflicts, resolveFolderConflict, conflictFilePair, applyConflictMerge, cleanIdenticalConflicts, diffFolder, compareFolder, readFilePair, applyFileSync, listFolderVersions, restoreFolderVersion, deleteFolderVersion, getFolderVersionContent, rollbackFolder } = deps;
+  const { addFolder, removeFolder, setFolderDevices, setFolderUseGitignore, setFolderPaused, setFolderSchedule, setFolderGitSync, setFolderConflictPolicy, setFolderE2E, setFolderOnDemand, prioritizeTransfer, materializeFile, getFolderIgnoreInfo, setFolderIgnoreLines, testFolderIgnore, reAdoptFolderIdentity, getFolderHistory, getGlobalHistory, getWeeklyReport, clearFolderHistory, listFolderConflicts, resolveFolderConflict, conflictFilePair, applyConflictMerge, cleanIdenticalConflicts, diffFolder, compareFolder, readFilePair, applyFileSync, listFolderVersions, restoreFolderVersion, deleteFolderVersion, getFolderVersionContent, rollbackFolder } = deps;
   const path = req.url ? pathname(req.url) : '/';
 
   // Form POST /folders : add or (via _method=DELETE) remove a folder
@@ -260,6 +260,56 @@ export async function tryFolderRoutes(
       sendJson(res, 200, { ok: true });
     } catch (e) {
       sendJson(res, 400, { error: e instanceof Error ? e.message : '设置端到端加密失败' });
+    }
+    return true;
+  }
+
+  // POST /api/folders/on-demand { folderId, onDemand } : 按需同步开关(稀疏文件)。
+  // onDemand 必须是布尔(与 receiveOnly/paused 同款严格校验);开=之后对端非空文件
+  // 只记占位不落盘,已占位的文件在文件管理器里点「下载」拉回。
+  if (req.method === 'POST' && path === '/api/folders/on-demand' && setFolderOnDemand) {
+    try {
+      const raw = await readBody(req);
+      const body = raw === '' ? {} : JSON.parse(raw);
+      const folderId = (body as { folderId?: unknown }).folderId;
+      const on = (body as { onDemand?: unknown }).onDemand;
+      if (typeof folderId !== 'string' || folderId === '') {
+        sendJson(res, 400, { error: 'folderId is required' });
+        return true;
+      }
+      if (typeof on !== 'boolean') {
+        sendJson(res, 400, { error: 'onDemand must be a boolean' });
+        return true;
+      }
+      setFolderOnDemand(folderId, on);
+      sendJson(res, 200, { ok: true });
+    } catch (e) {
+      sendJson(res, 400, { error: e instanceof Error ? e.message : '设置按需同步失败' });
+    }
+    return true;
+  }
+
+  // POST /api/folders/materialize { folderId, path } : 按需同步的「下载」——
+  // 把一个占位文件真正拉回本地。返回 200 只代表**已开始拉取**(块收齐才落地),
+  // 进度看传输统计,完成后该行自动从「未下载」变实体。
+  if (req.method === 'POST' && path === '/api/folders/materialize' && materializeFile) {
+    try {
+      const raw = await readBody(req);
+      const body = raw === '' ? {} : JSON.parse(raw);
+      const folderId = (body as { folderId?: unknown }).folderId;
+      const p = (body as { path?: unknown }).path;
+      if (typeof folderId !== 'string' || folderId === '') {
+        sendJson(res, 400, { error: 'folderId is required' });
+        return true;
+      }
+      if (typeof p !== 'string' || p === '') {
+        sendJson(res, 400, { error: 'path is required' });
+        return true;
+      }
+      await materializeFile(folderId, p);
+      sendJson(res, 200, { ok: true });
+    } catch (e) {
+      sendJson(res, 400, { error: e instanceof Error ? e.message : '下载请求失败' });
     }
     return true;
   }

@@ -40,6 +40,8 @@ export interface FolderInfo {
   gitSync?: GitSyncMode;
   /** 冲突自动处理策略;缺省 = 'keep-both'(保留双方:拉回对端 + 本地留冲突副本)。 */
   conflictPolicy?: ConflictPolicy;
+  /** 按需同步(稀疏文件):对端非空文件先只记占位不落盘,点「下载」才拉。缺省 = 关闭。 */
+  onDemand?: boolean;
   /** 该目录是否已设置端到端口令(密钥本体绝不出 daemon,状态只回显此标志)。 */
   e2eKeySet?: boolean;
   /** 被标记为「不可信」的设备 id 列表:对这些设备只发密文视图,永不回源明文。 */
@@ -163,6 +165,8 @@ export interface FolderDirEntry {
   size: number;
   /** 修改时间(毫秒)。 */
   mtime: number;
+  /** true = 按需同步的占位文件(盘上无实体,「未下载」):只能拉取,不能直接打开。 */
+  placeholder?: boolean;
 }
 
 /** GET /api/folder-files 的响应。 */

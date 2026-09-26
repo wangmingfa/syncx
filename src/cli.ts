@@ -759,6 +759,11 @@ export async function run(args: ParsedArgs): Promise<void> {
       // 向该目录所有在线对端 peer 转发「优先同步」标记(幂等,详见 manager)
       manager.prioritizeTransfer(folderId, path);
     },
+    setFolderOnDemand: (folderId, on) => {
+      manager.setFolderOnDemand(folderId, on);
+    },
+    listPlaceholders: (folderId) => manager.listPlaceholders(folderId),
+    materializeFile: (folderId, path) => manager.materializePlaceholder(folderId, path),
     getFolderIgnoreInfo: (folderId) => manager.getFolderIgnoreInfo(folderId),
     setFolderIgnoreLines: (folderId, lines) => {
       // 落盘 .syncxignore + 规则即时生效都在 manager 内完成
@@ -839,7 +844,24 @@ export async function run(args: ParsedArgs): Promise<void> {
     // 越出共享目录根的相对路径(../、绝对路径、软链外指)一律抛 PathUnsafeError → 400。
     listFolderDirectory: (folderId, relPath, limit) => {
       const folder = findConfigFolder(configPath, folderId);
-      return listDirectory(folder.path, relPath, limit);
+      const listing = listDirectory(folder.path, relPath, limit);
+      // 按需同步的占位文件盘上不存在,listDirectory 天然列不到 —— 按索引补进
+      // 当前层的「未下载」行(dir:false + placeholder:true,大小取索引宣告值)。
+      // 拉取中途盘上已有实体(tmp 落地前一刻)时跳过,不重复出行。
+      try {
+        const dir = relPath ? `${relPath.replace(/\\/g, '/').replace(/\/+$/, '')}/` : '';
+        const onDisk = new Set(listing.entries.map((e) => e.path));
+        for (const ph of manager.listPlaceholders(folderId)) {
+          if (!ph.path.startsWith(dir)) continue;
+          const rest = ph.path.slice(dir.length);
+          if (!rest || rest.includes('/')) continue;
+          if (onDisk.has(ph.path)) continue;
+          listing.entries.push({ path: ph.path, name: rest, dir: false, size: ph.size, mtime: 0, placeholder: true });
+        }
+      } catch {
+        // 目录恰在此刻被移除:占位只是锦上添花,列不到就算了
+      }
+      return listing;
     },
     resolveFolderFile: (folderId, relPath) => {
       const folder = findConfigFolder(configPath, folderId);

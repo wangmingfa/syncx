@@ -14,7 +14,7 @@ const props = defineProps<{
 const emit = defineEmits<{
   close: [];
   /** 「保存」:设备指派、.gitignore 开关、同步时段、git 同步模式与冲突策略一起提交给父级,真正的写操作只有父级那一处。 */
-  save: [payload: { path: string; devices: string[]; gitignore: boolean; schedule: string; gitSync: GitSyncMode; conflictPolicy: ConflictPolicy }];
+  save: [payload: { path: string; devices: string[]; gitignore: boolean; schedule: string; gitSync: GitSyncMode; conflictPolicy: ConflictPolicy; onDemand: boolean }];
 }>();
 
 const path = ref('');
@@ -26,6 +26,7 @@ const scheduleFrom = ref<number | null>(null);
 const scheduleTo = ref<number | null>(null);
 const gitSync = ref<GitSyncMode>('off');
 const conflictPolicy = ref<ConflictPolicy>('keep-both');
+const onDemand = ref(false);
 
 const GIT_SYNC_OPTIONS: { label: string; value: GitSyncMode }[] = [
   { label: '关闭', value: 'off' },
@@ -52,6 +53,7 @@ watch(
     scheduleTo.value = parseScheduleTime(to ?? '');
     gitSync.value = f.gitSync ?? 'off';
     conflictPolicy.value = f.conflictPolicy ?? 'keep-both';
+    onDemand.value = f.onDemand === true;
   },
 );
 
@@ -77,7 +79,7 @@ function onSave(): void {
     scheduleFrom.value !== null && scheduleTo.value !== null
       ? `${formatScheduleTime(scheduleFrom.value)}-${formatScheduleTime(scheduleTo.value)}`
       : '';
-  emit('save', { path: path.value, devices: [...selected.value], gitignore: gitignore.value, schedule, gitSync: gitSync.value, conflictPolicy: conflictPolicy.value });
+  emit('save', { path: path.value, devices: [...selected.value], gitignore: gitignore.value, schedule, gitSync: gitSync.value, conflictPolicy: conflictPolicy.value, onDemand: onDemand.value });
 }
 
 // 地址(host:port)与主机名合并成一行,在设备 ID 之外提供可辨认的信息;两者都可能缺失
@@ -164,6 +166,14 @@ function deviceAddrLine(p: DeviceInfo): string {
       两端同时修改同一文件时的自动裁决:保留双方 = 拉回对端版本、本机旧内容存为冲突副本(进冲突收件箱);
       新者胜 = 修改时间新的一方覆盖(跨机比较依赖各设备时钟,时钟漂移大时判定可能不准);
       本机优先 = 本机内容始终保留,对端自动拉取本机版本。任一时刻只影响「并发修改」,正常单向同步不受影响。
+    </p>
+
+    <div class="edit-section-label">按需同步</div>
+    <n-checkbox v-model:checked="onDemand" :disabled="busy">对端新文件先不下载(占位)</n-checkbox>
+    <p class="confirm-note-extra">
+      小容量设备的省盘开关:开启后,对端推来的非空文件只同步索引(记全块哈希)、
+      <strong>不在本机落盘</strong>,在文件管理器里显示为「未下载」,点「下载」才真正拉取内容。
+      空文件照常即时落地;已占位的文件在关闭开关后仍保持占位,需要实体请手动下载。
     </p>
 
     <template #footer>

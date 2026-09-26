@@ -18,7 +18,10 @@ interface WireEntry {
 }
 
 export function encodeIndex(entries: IndexEntry[]): Buffer {
-  const wire: WireEntry[] = entries.map((e) => ({
+  // 按需同步的占位条目永不出线(唯一收口):盘上没有实体文件,宣告出去等于
+  // 谎称「我供得出这块内容」——对端会来拉块而永远拿不到(见 IndexEntry.placeholder)。
+  // 占位的传播由真正持有内容的设备负责;本机落地(materialize)后自然恢复宣告。
+  const wire: WireEntry[] = entries.filter((e) => !e.placeholder).map((e) => ({
     path: e.path,
     version: [...e.version.entries()],
     size: e.size,

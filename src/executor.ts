@@ -28,6 +28,11 @@ export interface LocalExecutor {
    * 「本地较新」并主动来拉本机内容 —— 收敛由协议自然完成,这里无需额外推送。
    */
   applyConflictKeepLocal(local: IndexEntry, remote: IndexEntry): Promise<IndexEntry>;
+  /**
+   * 按需同步(见 config.SharedFolderConfig.onDemand):把远端条目以**占位**形态
+   * 记进索引(含块哈希)但绝不落盘 —— 文件系统一字不动,只写索引库。
+   */
+  applyPlaceholder(entry: IndexEntry): Promise<void>;
   applySend(path: string, deviceId: string): Promise<IndexEntry>;
 }
 
@@ -339,6 +344,10 @@ export function createLocalExecutor(
       };
       index.saveEntry(keep);
       return keep;
+    },
+    async applyPlaceholder(entry: IndexEntry): Promise<void> {
+      // 按需同步占位:只写索引库,绝不碰文件系统(块哈希已在 entry 里)。
+      index.saveEntry({ ...entry, placeholder: true });
     },
     async applySend(path: string, deviceId: string): Promise<IndexEntry> {
       const target = resolvePath(path);

@@ -46,6 +46,7 @@ function rowToEntry(row: Record<string, unknown>): IndexEntry {
     mtime: row.mtime !== undefined && row.mtime !== null && row.mtime !== 0
       ? (row.mtime as number)
       : undefined,
+    placeholder: row.placeholder === 1 ? true : undefined,
   };
 }
 
@@ -80,12 +81,21 @@ export function openIndexStore(dbPath: string): IndexStore {
         throw error;
       }
     }
+    // 按需同步占位标志(仅本机,不进 wire),旧库安全追加(见 IndexEntry.placeholder)
+    try {
+      db.exec('ALTER TABLE entries ADD COLUMN placeholder INTEGER NOT NULL DEFAULT 0');
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      if (!message.includes('duplicate column name')) {
+        throw error;
+      }
+    }
 
     const saveEntry = db.prepare(
-      'INSERT OR REPLACE INTO entries (path, version, size, deleted, blocks, mtime) VALUES (?, ?, ?, ?, ?, ?)',
+      'INSERT OR REPLACE INTO entries (path, version, size, deleted, blocks, mtime, placeholder) VALUES (?, ?, ?, ?, ?, ?, ?)',
     );
-    const getEntry = db.prepare('SELECT path, version, size, deleted, blocks, mtime FROM entries WHERE path = ?');
-    const listEntries = db.prepare('SELECT path, version, size, deleted, blocks, mtime FROM entries');
+    const getEntry = db.prepare('SELECT path, version, size, deleted, blocks, mtime, placeholder FROM entries WHERE path = ?');
+    const listEntries = db.prepare('SELECT path, version, size, deleted, blocks, mtime, placeholder FROM entries');
     const countLive = db.prepare('SELECT COUNT(*) AS n FROM entries WHERE deleted = 0');
     const countTombstones = db.prepare('SELECT COUNT(*) AS n FROM entries WHERE deleted = 1');
     const removeEntry = db.prepare('DELETE FROM entries WHERE path = ?');
@@ -99,6 +109,7 @@ export function openIndexStore(dbPath: string): IndexStore {
           entry.deleted ? 1 : 0,
           JSON.stringify(entry.blocks),
           entry.mtime ?? 0,
+          entry.placeholder ? 1 : 0,
         );
       },
       saveEntries(entries: IndexEntry[]): void {
@@ -112,6 +123,7 @@ export function openIndexStore(dbPath: string): IndexStore {
               entry.deleted ? 1 : 0,
               JSON.stringify(entry.blocks),
               entry.mtime ?? 0,
+              entry.placeholder ? 1 : 0,
             );
           }
           db.exec('COMMIT');

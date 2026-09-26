@@ -13,6 +13,13 @@ export interface IndexEntry {
    * 可选:跨设备的索引(线上协议)不带此字段,旧数据缺省为 undefined。
    */
   mtime?: number;
+  /**
+   * 按需同步占位条目(仅本机,不进 wire,见 config.SharedFolderConfig.onDemand):
+   * 索引记录了对端内容的完整块哈希,但**磁盘上没有实体文件**,用户显式下载后清除。
+   * 扫描器对这样的条目不生成墓碑(盘上本就没有,不是本地删除),全量宣告时过滤掉
+   * (不谎称自己供得出内容)。
+   */
+  placeholder?: boolean;
 }
 
 export type FileStateRelation = 'equal' | 'local-newer' | 'remote-newer' | 'conflict';

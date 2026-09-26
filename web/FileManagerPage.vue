@@ -112,6 +112,29 @@ async function download(entry: FolderDirEntry): Promise<void> {
 }
 
 /**
+ * 按需同步的占位文件「下载」:POST /api/folders/materialize 让 daemon 经既有块
+ * 管线向在线对端拉取,收齐后自动落地(本接口返回只代表「已开始拉取」)。
+ * 拉完前该行仍是「未下载」,故 3s 后自动刷新一次列表兜底,不跟传输状态较真。
+ */
+async function materialize(entry: FolderDirEntry): Promise<void> {
+  if (busy.value) return;
+  busy.value = true;
+  try {
+    await apiJson('/api/folders/materialize', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ folderId: folderId.value, path: entry.path }),
+    });
+    showToast(`正在下载「${entry.name}」,完成后本行自动消失`);
+    setTimeout(() => void load(), 3000);
+  } catch (e) {
+    showToast(errText(e, '下载请求失败'), 'alert');
+  } finally {
+    busy.value = false;
+  }
+}
+
+/**
  * 删除入口:先落二次确认卡(写明会同步传播给对端),确认后再过提权门 ——
  * 顺序刻意如此:取消确认就不该白弹一次验证。提权通过与后端 DELETE 403 门对应。
  */
@@ -258,23 +281,25 @@ onMounted(async () => {
               <button
                 type="button"
                 class="fm-col-name fm-name"
-                :title="entry.dir ? '打开目录' : entry.name"
-                @click="entry.dir ? enter(entry) : download(entry)"
+                :title="entry.dir ? '打开目录' : entry.placeholder ? '未下载(按需同步占位),点击开始拉取' : entry.name"
+                @click="entry.dir ? enter(entry) : entry.placeholder ? materialize(entry) : download(entry)"
               >
                 <svg v-if="entry.dir" class="fm-icon is-dir" viewBox="0 0 24 24" width="15" height="15" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
                   <path d="M3.5 6.5A1.5 1.5 0 0 1 5 5h4l2 2.5h8A1.5 1.5 0 0 1 20.5 9v8A1.5 1.5 0 0 1 19 18.5H5A1.5 1.5 0 0 1 3.5 17Z" />
                 </svg>
-                <svg v-else class="fm-icon" viewBox="0 0 24 24" width="15" height="15" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+                <svg v-else class="fm-icon" :class="{ 'is-placeholder': entry.placeholder }" viewBox="0 0 24 24" width="15" height="15" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
                   <path d="M6 3.5h8l4 4V20a.5.5 0 0 1-.5.5h-11A.5.5 0 0 1 6 20V4a.5.5 0 0 1 .5-.5Z" />
                   <path d="M14 3.5V8h4" />
                 </svg>
                 <span class="mono">{{ entry.name }}</span>
+                <span v-if="entry.placeholder" class="fm-badge-unloaded">未下载</span>
               </button>
               <span class="fm-col-meta fm-meta-txt">{{ entry.dir ? '—' : formatBytes(entry.size) }}</span>
-              <span class="fm-col-meta fm-meta-txt fm-time">{{ fmtTime(entry.mtime) }}</span>
+              <span class="fm-col-meta fm-meta-txt fm-time">{{ entry.placeholder ? '—' : fmtTime(entry.mtime) }}</span>
               <span class="fm-col-ops">
-                <n-button v-if="!entry.dir" size="tiny" tertiary :disabled="busy" @click="download(entry)">下载</n-button>
-                <n-button size="tiny" tertiary type="error" :disabled="busy" @click="askDelete(entry)">删除</n-button>
+                <n-button v-if="entry.placeholder" size="tiny" tertiary :disabled="busy" @click="materialize(entry)">下载</n-button>
+                <n-button v-else-if="!entry.dir" size="tiny" tertiary :disabled="busy" @click="download(entry)">下载</n-button>
+                <n-button v-if="!entry.placeholder" size="tiny" tertiary type="error" :disabled="busy" @click="askDelete(entry)">删除</n-button>
               </span>
             </div>
           </div>
@@ -478,6 +503,18 @@ onMounted(async () => {
 
 .fm-icon { color: var(--muted); flex: none; }
 .fm-icon.is-dir { color: var(--accent); }
+.fm-icon.is-placeholder { color: var(--muted); opacity: 0.6; }
+
+.fm-badge-unloaded {
+  flex: none;
+  font-size: 10.5px;
+  line-height: 1;
+  padding: 3px 6px;
+  border-radius: 999px;
+  color: var(--muted-strong);
+  background: var(--bg-soft);
+  border: 1px solid var(--border);
+}
 
 .fm-meta-txt {
   font-size: 12px;
