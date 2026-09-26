@@ -34,6 +34,9 @@ const pauseOnMeteredNetwork = ref(false);
 const pauseOnLowBattery = ref(false);
 const batteryPauseThreshold = ref<number | null>(null);
 
+// 分享链接总开关(默认关):开=允许在文件管理器为单文件生成免登录限时下载链接
+const shareEnabled = ref(false);
+
 const DEFAULT_VERSIONS = 10;
 const DEFAULT_HISTORY = 2000;
 const DEFAULT_BATTERY_THRESHOLD = 20;
@@ -53,6 +56,7 @@ watch(
     pauseOnMeteredNetwork.value = s?.pauseOnMeteredNetwork === true;
     pauseOnLowBattery.value = s?.pauseOnLowBattery === true;
     batteryPauseThreshold.value = s?.batteryPauseThreshold ?? null;
+    shareEnabled.value = s?.shareEnabled === true;
   },
 );
 
@@ -67,6 +71,8 @@ async function onSave(): Promise<void> {
     pauseOnMeteredNetwork: pauseOnMeteredNetwork.value ? true : null,
     pauseOnLowBattery: pauseOnLowBattery.value ? true : null,
     batteryPauseThreshold: batteryPauseThreshold.value,
+    // 开关:关 = 传 null 清除(后端不留 false 值,并连带清空在册分享 —— 关即全断)
+    shareEnabled: shareEnabled.value ? true : null,
   };
   // 密钥三态:填了新值就覆盖;点了「清除」传 null;否则整个键不传 = 保持已存值
   const secret = webhookSecret.value.trim();
@@ -189,6 +195,13 @@ async function onTestWebhook(): Promise<void> {
       daemon 每分钟探测一次联网成本与电池状态,命中条件时所有目录的数据面自动挂起(连接与配对照常),
       条件解除自动恢复;与手动暂停互不覆盖。挂起期间目录栏会显示原因徽标。非 Windows 机器不启用探测。
       阈值留空 = 默认 {{ DEFAULT_BATTERY_THRESHOLD }}%。
+    </p>
+
+    <div class="edit-section-label">分享链接</div>
+    <n-checkbox v-model:checked="shareEnabled" class="settings-checkbox" :disabled="busy">允许生成免登录的限时文件下载链接</n-checkbox>
+    <p class="confirm-note-extra">
+      开启后可在文件管理器为单个文件生成分享链接:对方无需账户即可下载,限时(最长 30 天)、只读、不能浏览目录里的其他文件,
+      随时可撤销。默认关闭;关闭开关会让全部在外的链接立即失效。每次匿名下载都会记入 daemon 日志。
     </p>
 
     <template #footer>

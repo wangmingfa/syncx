@@ -180,6 +180,8 @@ export interface GlobalSettingsStatus {
   pauseOnLowBattery?: boolean;
   /** 低电量挂起阈值(%);undefined = 默认 20。 */
   batteryPauseThreshold?: number;
+  /** 分享链接总开关(默认关;开才允许创建/使用免登录下载链接)。 */
+  shareEnabled?: boolean;
 }
 
 /** buildStatus 的扩展口径:新功能统计一律进这里,不再膨胀位置参数。 */

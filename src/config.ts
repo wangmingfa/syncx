@@ -332,6 +332,24 @@ export interface DeviceConfig {
   name?: string;
 }
 
+/**
+ * 一条分享链接的持久化记录(免登录限时下载,见 share.ts)。
+ * 令牌的签名不落盘(HMAC 由控制令牌派生);记录只存**校验与展示**所需:
+ * id 是主键(撤销=删记录)、expiresAt 参与签名比对、downloads 是审计计数。
+ * path 为共享目录内相对路径('/' 分隔);folderId 用 wire 口径(id ?? path)。
+ */
+export interface ShareRecord {
+  id: string;
+  folderId: string;
+  path: string;
+  createdAt: number;
+  expiresAt: number;
+  /** 成功匿名下载的累计次数(缺省 0)。 */
+  downloads?: number;
+  /** 最近一次匿名下载时间(毫秒)。 */
+  lastDownloadAt?: number;
+}
+
 /** 对方 daemon 推送过来的待确认项:配对请求 或 目录共享邀请。 */
 export interface PendingOffer {
   /** 去重 / 确认用的唯一 id(由发起方确定性生成,便于重推幂等)。 */
@@ -362,6 +380,13 @@ export interface Config {
   pendingOffers: PendingOffer[];
   /** 全局暂停同步:所有目录的数据面一起停摆;各目录自己的 paused 独立保留。 */
   paused?: boolean;
+  /**
+   * 分享链接总开关(默认关闭):true 才允许创建/使用 /s/ 免登录下载。
+   * 关闭时既有的全部链接立即失效(404),不残留可达入口 —— 一键止血。
+   */
+  shareEnabled?: boolean;
+  /** 在册的分享链接记录(见 ShareRecord / share.ts);撤销 = 从列表删记录。 */
+  shares?: ShareRecord[];
   /**
    * 全局发送带宽上限(KB/s):目录未单独配置 maxBandwidthKbps 时的兜底默认。
    * 0/缺省 = 不限速。目录级配置优先级更高(未配置才落到这里)。
@@ -480,6 +505,9 @@ export function loadConfig(configPath: string): Config {
     knownDevices: parsed.knownDevices ?? [],
     pendingOffers: parsed.pendingOffers ?? [],
     paused: parsed.paused === true ? true : undefined,
+    // 分享链接:开关只认 true;记录逐条清洗(手改坏掉的 JSON 不能让脏条目进校验路径)
+    shareEnabled: parsed.shareEnabled === true ? true : undefined,
+    shares: sanitizeShares(parsed.shares),
     // 全局设置:手改 config.json 填了非法值(负数/字符串)时丢弃,回退默认,不让坏值外溢
     maxSendKbps: sanitizeCount(parsed.maxSendKbps, 0),
     versionsPerPath: sanitizeCount(parsed.versionsPerPath, 1),
@@ -494,9 +522,48 @@ export function loadConfig(configPath: string): Config {
   };
 }
 
+/**
+ * 清洗分享记录列表:仅保留字段完整、时间可解释的条目(id/folderId/path 为非空字符串,
+ * createdAt/expiresAt 为有限数且 expiresAt > createdAt),计数类字段丢弃非法值。
+ * 超上限(500)从尾部截断 —— 上限只是防御坏数据撑爆配置,正常创建路径另有更严的活跃数约束。
+ */
+function sanitizeShares(v: unknown): ShareRecord[] | undefined {
+  if (!Array.isArray(v)) return undefined;
+  const out: ShareRecord[] = [];
+  for (const item of v) {
+    if (typeof item !== 'object' || item === null) continue;
+    const s = item as Record<string, unknown>;
+    if (
+      typeof s.id !== 'string' || s.id === '' ||
+      typeof s.folderId !== 'string' || s.folderId === '' ||
+      typeof s.path !== 'string' || s.path === '' ||
+      typeof s.createdAt !== 'number' || !Number.isFinite(s.createdAt) ||
+      typeof s.expiresAt !== 'number' || !Number.isFinite(s.expiresAt) ||
+      s.expiresAt <= s.createdAt
+    ) {
+      continue;
+    }
+    const rec: ShareRecord = {
+      id: s.id,
+      folderId: s.folderId,
+      path: s.path,
+      createdAt: s.createdAt,
+      expiresAt: s.expiresAt,
+    };
+    if (typeof s.downloads === 'number' && Number.isFinite(s.downloads) && s.downloads >= 0) {
+      rec.downloads = Math.floor(s.downloads);
+    }
+    if (typeof s.lastDownloadAt === 'number' && Number.isFinite(s.lastDownloadAt)) {
+      rec.lastDownloadAt = s.lastDownloadAt;
+    }
+    out.push(rec);
+    if (out.length >= 500) break;
+  }
+  return out.length > 0 ? out : undefined;
+}
+
 /** 清洗百分比配置(1–99):非有限数/越界返回 undefined(调用方走内置默认)。 */
-function sanitizePercent(v: unknown): number | undefined {
-  if (typeof v !== 'number' || !Number.isFinite(v)) return undefined;
+function sanitizePercent(v: unknown): number | undefined {  if (typeof v !== 'number' || !Number.isFinite(v)) return undefined;
   const n = Math.floor(v);
   return n >= 1 && n <= 99 ? n : undefined;
 }

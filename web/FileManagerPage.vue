@@ -2,6 +2,7 @@
 import { computed, onMounted, ref, watch } from 'vue';
 import { NButton, NSelect } from 'naive-ui';
 import ElevateGateModal from './components/ElevateGateModal.vue';
+import ShareModal from './components/ShareModal.vue';
 import ToastView from './components/ToastView.vue';
 import { useToast } from './composables/useToast';
 import { apiJson, errText } from './utils/api';
@@ -203,6 +204,9 @@ function confirmDelete(): void {
 /** 二次确认待删除项(非空 = 显示确认条)。 */
 const pendingDelete = ref<FolderDirEntry | null>(null);
 
+/** 分享弹窗的目标文件(行「分享」置入;null = 关闭)。开关状态由弹窗自取(/api/shares)。 */
+const shareTarget = ref<FolderDirEntry | null>(null);
+
 async function doDelete(entry: FolderDirEntry): Promise<void> {
   if (busy.value) return;
   busy.value = true;
@@ -351,6 +355,7 @@ onMounted(async () => {
                 <n-button v-else-if="!entry.dir" size="tiny" tertiary :disabled="busy" @click="download(entry)">下载</n-button>
                 <n-button v-if="entry.dir" size="tiny" tertiary :disabled="busy" @click="toggleDirOnDemand(entry)">{{ entry.onDemandDir ? '恢复同步' : '按需同步' }}</n-button>
                 <n-button v-if="!entry.dir" size="tiny" tertiary :disabled="busy" @click="togglePause(entry)">{{ entry.paused ? '继续同步' : '暂停同步' }}</n-button>
+                <n-button v-if="!entry.dir && !entry.placeholder" size="tiny" tertiary :disabled="busy" @click="shareTarget = entry">分享</n-button>
                 <n-button v-if="!entry.placeholder" size="tiny" tertiary type="error" :disabled="busy" @click="askDelete(entry)">删除</n-button>
               </span>
             </div>
@@ -378,6 +383,15 @@ onMounted(async () => {
 
     <!-- 提权验证门(与终端共用):ensureElevated 拦下时在此弹出 -->
     <ElevateGateModal />
+
+    <!-- 分享链接弹窗(行「分享」入口) -->
+    <ShareModal
+      :open="shareTarget !== null"
+      :folder-id="folderId"
+      :path="shareTarget?.path ?? ''"
+      :name="shareTarget?.name ?? ''"
+      @close="shareTarget = null"
+    />
   </div>
 </template>
 
@@ -506,7 +520,7 @@ onMounted(async () => {
 .fm-head,
 .fm-row {
   display: grid;
-  grid-template-columns: minmax(0, 1fr) 84px 140px 210px;
+  grid-template-columns: minmax(0, 1fr) 84px 140px 264px;
   align-items: center;
   gap: 10px;
 }

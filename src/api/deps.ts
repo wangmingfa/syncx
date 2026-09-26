@@ -102,6 +102,8 @@ export interface ControlServerDeps {
     pauseOnMeteredNetwork?: boolean | null;
     pauseOnLowBattery?: boolean | null;
     batteryPauseThreshold?: number | null;
+    /** 分享链接总开关:null/false = 关闭(在外的链接立即失效并清空记录)。 */
+    shareEnabled?: boolean | null;
   }) => void;
   /** 测试 Webhook:真实投递一条测试事件并等回执。 */
   testWebhook?: () => Promise<{ ok: boolean; error?: string }>;
@@ -239,6 +241,36 @@ export interface ControlServerDeps {
    * 不传则对 /api/terminal 的握手一律拒绝。见 src/api/terminal.ts。
    */
   terminal?: { handle(socket: import('ws').WebSocket): void; close(): void };
+
+  // ---- 分享链接(免登录限时下载,默认关闭;实现见 src/api/routes/share.ts + src/share.ts) ----
+  /**
+   * 服务端能力包:开关读取、创建/撤销/校验/计数都在 cli 接线处用 configPath + 控制令牌
+   * 实现(crypto 与持久化在 share.ts),路由只做 HTTP 编排。不传 = 整个域 503/404。
+   */
+  share?: {
+    /** 总开关(config.shareEnabled)。false 时创建被拒、全部在外的匿名链接立即 404。 */
+    enabled(): boolean;
+    /** 在册且未过期的分享(新→旧),供管理面列表。 */
+    list(): Array<{
+      id: string;
+      folderId: string;
+      path: string;
+      createdAt: number;
+      expiresAt: number;
+      downloads?: number;
+      lastDownloadAt?: number;
+    }>;
+    /** 创建一条分享;参数非法/超上限抛错,路由转 400。 */
+    create(folderId: string, path: string, ttlMs: number): { urlToken: string; expiresAt: number };
+    /** 撤销(删记录,立即失效);不存在抛错。 */
+    revoke(id: string): void;
+    /** 校验匿名令牌(签名/过期/在册):通过回定位信息,否则 undefined。 */
+    verify(urlToken: string): { id: string; folderId: string; path: string } | undefined;
+    /** 记一次成功下载(计数 + 审计日志)。 */
+    noteDownload(id: string, ip: string): void;
+    /** 匿名端点的拒绝审计(无效令牌/被限流/文件已不在)。 */
+    reportFailure?(ip: string, reason: string): void;
+  };
 }
 
 /** 域路由处理器的统一签名:处理了请求返回 true,未命中返回 false(交给下一个域)。 */

@@ -509,6 +509,8 @@ export interface GlobalSettingsPatch {
   pauseOnLowBattery?: boolean | null;
   /** 低电量挂起阈值(%);null = 回默认 20。合法范围 1–99。 */
   batteryPauseThreshold?: number | null;
+  /** 分享链接总开关;仅 true 落盘(null/false = 关闭,关闭即在外的全部链接立即失效)。 */
+  shareEnabled?: boolean | null;
 }
 
 /** 校验并收敛一个设置值:null → undefined(清除);负数/非整数拒绝(设置页的输入必须可解释)。 */
@@ -563,6 +565,11 @@ export function setGlobalSettings(configPath: string, patch: GlobalSettingsPatch
         if (n === undefined || n > 99) throw new Error('低电量阈值必须为 1–99 的整数');
         config.batteryPauseThreshold = n;
       }
+    }
+    if ('shareEnabled' in patch) {
+      // 仅 true 落盘;关闭时清掉在册记录(否则 config 里残留可用令牌记录,与「关即失效」矛盾)
+      config.shareEnabled = patch.shareEnabled === true ? true : undefined;
+      if (config.shareEnabled !== true) config.shares = undefined;
     }
   });
 }

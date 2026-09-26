@@ -33,6 +33,7 @@ import { createPowerGuard } from './powerguard.js';
 import { execFile } from 'node:child_process';
 import { createTerminalHub } from './api/terminal.js';
 import { listDirectory, resolveFolderSubpath, deleteFolderEntry } from './filebrowser.js';
+import { createShare, listShares, noteShareDownload, revokeShare, verifyShare } from './share.js';
 import { buildStatus, type DeviceStatus, type SyncProgress, type FolderErrorStatus } from './status.js';
 import { addSharedFolder, removeSharedFolder, isPeerAllowed, addKnownDevice, removeKnownDevice, addPeer, removePeer, setFolderDevices, setFolderGitignore, setGlobalSettings, acceptFolderInvitation } from './devices.js';
 import { markOfferAccepted, markOfferDeclined, restoreDeclinedOffer, listOpenOffers, findPendingOffer } from './offers.js';
@@ -635,6 +636,8 @@ export async function run(args: ParsedArgs): Promise<void> {
             pauseOnMeteredNetwork: config.pauseOnMeteredNetwork === true,
             pauseOnLowBattery: config.pauseOnLowBattery === true,
             batteryPauseThreshold: config.batteryPauseThreshold,
+            // 分享链接开关(默认关;开才允许建免登录下载链接)
+            shareEnabled: config.shareEnabled === true,
           },
           // 电源守卫当前挂起原因(顶栏徽标;未挂起为 null)
           powerGuard: manager.getPowerGuardReason(),
@@ -946,6 +949,36 @@ export async function run(args: ParsedArgs): Promise<void> {
       const target = resolveSharePath(trashDir, file);
       if (!existsSync(target)) throw new Error('回收站里没有这个副本');
       rmSync(target);
+    },
+    // 分享链接(免登录限时下载,默认关闭;算法与持久化见 src/share.ts):
+    // 签名密钥从控制令牌派生 —— 轮换 control.token 即吊销全部在外的链接。
+    share: {
+      enabled: () => loadConfig(configPath).shareEnabled === true,
+      list: () => listShares(configPath),
+      create: (folderId, p, ttlMs) => {
+        if (loadConfig(configPath).shareEnabled !== true) throw new Error('分享链接未启用:请先在全局设置中打开开关');
+        const folder = findConfigFolder(configPath, folderId);
+        const abs = resolveFolderSubpath(folder.path, p); // 越界/非法路径抛错,路由转 400
+        if (!existsSync(abs) || !statSync(abs).isFile()) throw new Error('只能分享盘上存在的文件(按需占位请先点「下载」)');
+        const r = createShare(configPath, token, { folderId, path: p, ttlMs });
+        logger.info(`share link created: ${folderId}/${p} (id=${r.record.id.slice(0, 8)}, ${Math.round(ttlMs / 3_600_000)}h)`);
+        return { urlToken: r.urlToken, expiresAt: r.record.expiresAt };
+      },
+      revoke: (id) => {
+        const gone = revokeShare(configPath, id);
+        logger.info(`share revoked: ${gone.folderId}/${gone.path} (id=${id.slice(0, 8)})`);
+      },
+      verify: (urlToken) => {
+        const v = verifyShare(configPath, token, urlToken);
+        return v.ok ? { id: v.record.id, folderId: v.record.folderId, path: v.record.path } : undefined;
+      },
+      noteDownload: (id, ip) => {
+        noteShareDownload(configPath, id);
+        // 审计:下载即留痕(日志文件与终端可见);记录恰被撤销时只报 id
+        const rec = listShares(configPath).find((s) => s.id === id);
+        logger.info(`share download: ${rec ? `${rec.folderId}/${rec.path}` : id} from ${ip} (#${rec?.downloads ?? '?'})`);
+      },
+      reportFailure: (ip, reason) => logger.warn(`share anonymous rejected: ${reason} from ${ip}`),
     },
     // 文件版本:列出 / 恢复 / 删除。恢复 = 把旧版本拷回共享目录原路径,
     // 恢复前把当前内容也拷一份进版本目录(操作可逆),随后触发一轮扫描让恢复

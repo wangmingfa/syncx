@@ -58,6 +58,7 @@ export function isControlRoute(method: string, path: string): boolean {
   if (path.startsWith('/api/')) return true;
   if (path === '/health' || path === '/healthz') return true; // dev 模式下探活也命中控制服务,而不是被重定向到 vite
   if (path === '/metrics') return true; // Prometheus 抓取端点同理(见 routes/metrics.ts)
+  if (path.startsWith('/s/')) return true; // 分享链接匿名下载:外部访客没有 vite,必须落在 daemon 上(见 routes/share.ts)
   // 表单提交走 control server:登录写 cookie,目录增删写配置。
   return method === 'POST' && (path === '/login' || path === '/folders' || path === '/actions');
 }

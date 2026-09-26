@@ -217,6 +217,8 @@ export interface GlobalSettingsData {
   pauseOnLowBattery?: boolean;
   /** 低电量挂起阈值(%);undefined = 默认 20。 */
   batteryPauseThreshold?: number;
+  /** 分享链接总开关(默认关;开才允许创建免登录限时下载链接)。 */
+  shareEnabled?: boolean;
 }
 
 /** GET /api/report/weekly 的响应(与后端 report.ts WeeklyReport 同形)。 */

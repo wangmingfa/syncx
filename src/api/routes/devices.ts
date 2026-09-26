@@ -89,8 +89,8 @@ export async function tryDeviceRoutes(
           return true;
         }
       }
-      // 电源守卫开关是布尔(null = 关闭);范围校验在 devices.setGlobalSettings
-      for (const key of ['pauseOnMeteredNetwork', 'pauseOnLowBattery'] as const) {
+      // 电源守卫/分享开关是布尔(null = 关闭);范围校验在 devices.setGlobalSettings
+      for (const key of ['pauseOnMeteredNetwork', 'pauseOnLowBattery', 'shareEnabled'] as const) {
         if (!(key in body)) continue;
         const v = body[key];
         if (v !== null && typeof v !== 'boolean') {
@@ -116,6 +116,7 @@ export async function tryDeviceRoutes(
         ...(('pauseOnMeteredNetwork' in body) ? { pauseOnMeteredNetwork: body.pauseOnMeteredNetwork === null ? null : Boolean(body.pauseOnMeteredNetwork) } : {}),
         ...(('pauseOnLowBattery' in body) ? { pauseOnLowBattery: body.pauseOnLowBattery === null ? null : Boolean(body.pauseOnLowBattery) } : {}),
         ...(('batteryPauseThreshold' in body) ? { batteryPauseThreshold: body.batteryPauseThreshold === null ? null : Number(body.batteryPauseThreshold) } : {}),
+        ...(('shareEnabled' in body) ? { shareEnabled: body.shareEnabled === null ? null : body.shareEnabled === true } : {}),
       });
       sendJson(res, 200, { ok: true });
     } catch (e) {

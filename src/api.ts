@@ -13,6 +13,7 @@ import { tryDeviceRoutes } from './api/routes/devices.js';
 import { tryOfferRoutes } from './api/routes/offers.js';
 import { tryFleetRoutes } from './api/routes/fleet.js';
 import { tryFileRoutes } from './api/routes/files.js';
+import { trySharePublicRoutes, tryShareAdminRoutes } from './api/routes/share.js';
 import { TERMINAL_PATH } from './api/terminal.js';
 
 export type { ControlServerDeps } from './api/deps.js';
@@ -23,11 +24,11 @@ export type { ControlServerDeps } from './api/deps.js';
  * SSR page; unknown paths return 404.
  *
  * 路由按域拆分在 `src/api/routes/` 下,本函数只负责编排分发顺序:
- * 1. 免认证探活/静态资源(favicon、/health)
+ * 1. 免认证探活/静态资源(favicon、/health)+ 分享链接匿名下载(/s/<token>,自带限时令牌)
  * 2. dev 模式下非控制端点的 web 请求重定向到 vite
  * 3. 免认证登录与 UI 入口(/api/auth、/api/login、/logout、/、/client.js)
  * 4. 认证门(401)
- * 5. 各业务域(system → account → folders → devices → offers),均未命中则 404
+ * 5. 各业务域(system → metrics → account → folders → devices → offers → fleet → files → shares),均未命中则 404
  *
  * 若传入 `devViteUrl`,非控制端点的请求会先重定向到 vite dev server
  * (见 `isControlRoute`),生产形态下不传该参数。
@@ -44,6 +45,10 @@ export function createControlServer(deps: ControlServerDeps): Server {
       try {
         // 探活与图标:公开资源,必须在认证与 dev 重定向之前处理
         if (await tryPreAuthRoutes(req, res)) return;
+
+        // 分享链接的匿名下载(/s/<token>):自带 HMAC 限时令牌这道门,不进登录域;
+        // 也必须排在 dev 重定向之前 —— 收到链接的外部访客没有 vite,更没有会话。
+        if (await trySharePublicRoutes(req, res, deps)) return;
 
         // dev 模式:非控制端点的 web 页面请求重定向到 vite dev server,
         // 由 vite 原生提供 HMR。fetch 反向代理无法转发 HMR 的 WebSocket,
@@ -78,6 +83,8 @@ export function createControlServer(deps: ControlServerDeps): Server {
         if (await tryOfferRoutes(req, res, deps)) return;
         // fleet 代理:多实例集中管理页经本机 daemon 转发远端 daemon(白名单收紧,见 routes/fleet.ts)
         if (await tryFleetRoutes(req, res)) return;
+        // 分享链接管理面(列出/创建/撤销):创建需提权,列出与撤销仅需登录门
+        if (await tryShareAdminRoutes(req, res, deps, auth.elevateOk(readCookie(req, ELEVATE_COOKIE)), auth.issueElevation)) return;
         // 文件管理器是敏感域:除了登录,还要一次性提权(终端/文件管理器共用)
         if (await tryFileRoutes(req, res, deps, auth.elevateOk(readCookie(req, ELEVATE_COOKIE)), auth.issueElevation)) return;
 
