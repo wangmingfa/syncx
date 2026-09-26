@@ -36,6 +36,7 @@ import {
   BUILTIN_IGNORE_LINES,
   type IgnoreVerdict,
 } from './ignore.js';
+import type { WebhookEvent } from './webhook.js';
 import { createSyncPeer, type PeerTransport, type SyncPeer } from './peer.js';
 import { freeBytesAt, DISK_GUARD_MIN_FREE_BYTES } from './disk.js';
 import { scanFolder } from './scanner.js';
@@ -301,6 +302,11 @@ export interface SessionManagerDeps {
    * 窗口内也只推一帧,因此宁可多打不可漏打。
    */
   onStatusChanged?: () => void;
+  /**
+   * 同步事件 Webhook 出口(完成/冲突/错误三类,见 webhook.ts)。
+   * cli 注入通知器的 notify(火后忘);不注入 = 事件只走界面,不外推。
+   */
+  onWebhookEvent?: (ev: WebhookEvent) => void;
 }
 
 export class SyncSessionManager {
@@ -314,6 +320,15 @@ export class SyncSessionManager {
   private readonly logger: Logger;
   /** 状态变更通知(见 SessionManagerDeps.onStatusChanged);缺省为空操作。 */
   private readonly notifyStatus: () => void;
+  /** Webhook 事件出口(见 SessionManagerDeps.onWebhookEvent);缺省为空操作。 */
+  private readonly emitWebhook: (ev: WebhookEvent) => void;
+  /**
+   * 各目录上一轮进度快照是否「真的有传输在跑」—— 传输完成(completed)事件的边沿
+   * 检测状态:getSyncProgress 每次聚合时翻转,置落沿即发一条(见该函数)。
+   */
+  private readonly folderWasTransferring = new Map<string, boolean>();
+  /** 目录错误 → webhook 的去重:同一目录同一条错误只外推一次(扫描会反复记同一错误)。 */
+  private readonly lastWebhookError = new Map<string, string>();
 
   // --- 目录级同步错误采集(Web UI 目录卡上的错误提示) ---
   // 记录每个目录最近一次同步失败的错误信息(内存态,不落盘);同一目录再次出错覆盖,
@@ -455,6 +470,7 @@ export class SyncSessionManager {
     this.peerPort = deps.peerPort;
     this.logger = deps.logger;
     this.notifyStatus = deps.onStatusChanged ?? ((): void => {});
+    this.emitWebhook = deps.onWebhookEvent ?? ((): void => {});
     // 全局开关与全局设置都是 config.json 的顶层字段,不在 initialFolders 里:构造时读一次
     const bootConfig = loadConfig(deps.configPath);
     this.globalPaused = bootConfig.paused === true;
@@ -630,10 +646,17 @@ export class SyncSessionManager {
   recordFolderError(folderId: string, error: unknown, detail?: string, kind?: string): void {
     const message = error instanceof Error ? error.message : String(error);
     const full = detail ? `${detail}: ${message}` : message;
+    const prev = this.folderErrorsState.get(folderId);
     this.folderErrorsState.set(folderId, { message: full, ts: Date.now(), ...(kind ? { kind } : {}) });
     this.logger.warn(`folder ${folderId} sync error: ${full}`);
     // 目录卡上的错误横幅属「要看就得看到」的信息,不能等兜底 tick
     this.notifyStatus();
+    // webhook 只在「新错误」时外推:同一目录同文案的错误每轮扫描都在重记,
+    // 不去重就是推送风暴(disk-space 一类由守卫自己走状态迁移,同样受此去重保护)
+    if (this.lastWebhookError.get(folderId) !== full) {
+      this.lastWebhookError.set(folderId, full);
+      this.emitWebhook({ kind: 'error', ts: Date.now(), folderId, message: full });
+    }
   }
 
   private clearFolderError(folderId: string, opts?: { exceptKind?: string }): void {
@@ -644,7 +667,11 @@ export class SyncSessionManager {
       if (cur?.kind === opts.exceptKind) return;
     }
     // 内容未变时不打扰推送通道(clearFolderError 每轮扫描都会对每个目录调用)
-    if (this.folderErrorsState.delete(folderId)) this.notifyStatus();
+    if (this.folderErrorsState.delete(folderId)) {
+      // 错误自愈后清去重记录:同一错误将来再次出现时仍应外推一次
+      this.lastWebhookError.delete(folderId);
+      this.notifyStatus();
+    }
   }
 
   /**
@@ -1214,6 +1241,17 @@ export class SyncSessionManager {
       // 远端推送的变更(新增/修改/删除/冲突)落盘为同步记录(此处补全 folderId)
       onEvent: (ev) => {
         recordSyncEvent(this.configPath, { ...ev, folderId: folder.id });
+        // 冲突无人值守也要能出得去:收件箱在界面上,但 NAS 场景没人盯界面
+        if (ev.action === 'conflict') {
+          this.emitWebhook({
+            kind: 'conflict',
+            ts: Date.now(),
+            folderId: folder.id,
+            folder: folder.path,
+            path: ev.path,
+            ...(ev.deviceId ? { deviceId: ev.deviceId } : {}),
+          });
+        }
         // 远端变更落地即改变了索引统计,立即刷新(这是「对端在同步」最直观的反馈)
         this.notifyStatus();
       },
@@ -2358,12 +2396,26 @@ export class SyncSessionManager {
   /** 各目录进行中的同步进度(仅非零项),供 status 下发。 */
   getSyncProgress(): Array<{ folder: string } & ReturnType<SyncPeer['getSyncProgress']>> {
     const result: Array<{ folder: string } & ReturnType<SyncPeer['getSyncProgress']>> = [];
+    // 本轮哪些目录仍有活跃传输(给 completed 事件的边沿检测用)
+    const active = new Set<string>();
     for (const folder of this.folderStates) {
       for (const peer of folder.peers.values()) {
         const progress = peer.getSyncProgress();
         if (progress.pending > 0 || progress.sending > 0 || progress.receiving > 0) {
+          active.add(folder.id);
           result.push({ folder: folder.id, ...progress });
         }
+      }
+    }
+    // 「传输完成」= 上一轮还在传、这一轮全零的落沿。这个函数是状态快照的必经口
+    // (推送兜底 tick 每几秒重算),完成检测寄生在这里就不用另立定时器;
+    // 从未活跃过的目录不发事件(首次观察不是「完成」)。
+    for (const folder of this.folderStates) {
+      const was = this.folderWasTransferring.get(folder.id) === true;
+      const now = active.has(folder.id);
+      this.folderWasTransferring.set(folder.id, now);
+      if (was && !now) {
+        this.emitWebhook({ kind: 'completed', ts: Date.now(), folderId: folder.id, folder: folder.path });
       }
     }
     return result;

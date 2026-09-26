@@ -168,6 +168,10 @@ export interface GlobalSettingsStatus {
   versionsPerPath?: number;
   /** 每目录同步记录保留条数;undefined = 默认 2000。 */
   historyMaxEvents?: number;
+  /** 同步事件 Webhook 地址;undefined = 未启用。 */
+  webhookUrl?: string;
+  /** 是否已配置 Webhook 签名密钥(不回传密钥本体,UI 展示「已设置」用)。 */
+  webhookSecretSet?: boolean;
 }
 
 /** buildStatus 的扩展口径:新功能统计一律进这里,不再膨胀位置参数。 */

@@ -323,6 +323,13 @@ export interface Config {
   versionsPerPath?: number;
   /** 每目录保留的同步记录条数上限(超出轮转,见 history.ts)。缺省 2000。 */
   historyMaxEvents?: number;
+  /**
+   * 同步事件 Webhook 地址(见 webhook.ts):完成 / 冲突 / 错误三类事件 POST 到这里。
+   * 飞书群机器人地址自动按飞书格式加签。缺省/空 = 关闭。
+   */
+  webhookUrl?: string;
+  /** Webhook 签名密钥:通用载荷带 x-syncx-signature HMAC 头;飞书按其算法加 timestamp/sign。 */
+  webhookSecret?: string;
 }
 
 export const DEFAULT_CONFIG: Config = {
@@ -420,7 +427,17 @@ export function loadConfig(configPath: string): Config {
     maxSendKbps: sanitizeCount(parsed.maxSendKbps, 0),
     versionsPerPath: sanitizeCount(parsed.versionsPerPath, 1),
     historyMaxEvents: sanitizeCount(parsed.historyMaxEvents, 1),
+    // Webhook:手改 config.json 填了非字符串/空串时丢弃,与全局设置同一套「坏值回退」口径
+    webhookUrl: normalizeWebhookString(parsed.webhookUrl, 500),
+    webhookSecret: normalizeWebhookString(parsed.webhookSecret, 200),
   };
+}
+
+/** 清洗一个 Webhook 字符串配置:非字符串/空白/超长返回 undefined。 */
+function normalizeWebhookString(v: unknown, maxLen: number): string | undefined {
+  if (typeof v !== 'string') return undefined;
+  const s = v.trim();
+  return s !== '' && s.length <= maxLen ? s : undefined;
 }
 
 /** 清洗一个「非负整数」配置值:非法(负数/非有限数)返回 undefined;0 保留(0 = 不限速语义)。 */

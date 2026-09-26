@@ -79,7 +79,11 @@ export interface ControlServerDeps {
     maxSendKbps?: number | null;
     versionsPerPath?: number | null;
     historyMaxEvents?: number | null;
+    webhookUrl?: string | null;
+    webhookSecret?: string | null;
   }) => void;
+  /** 测试 Webhook:真实投递一条测试事件并等回执。 */
+  testWebhook?: () => Promise<{ ok: boolean; error?: string }>;
   /** 「目录不可信」时重新采集身份指纹(仅更新 folderIdentity,不动索引)。 */
   reAdoptFolderIdentity?: (folderId: string) => void;
   /** 全局暂停/恢复同步(所有目录一起停;各目录自己的 paused 独立保留)。 */

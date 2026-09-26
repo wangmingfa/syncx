@@ -1124,6 +1124,22 @@ html[data-theme='dark'] .chip-menu__item--danger {
   width: 100%;
 }
 
+/* 设置弹窗里相邻两个输入框之间留出小间距(Webhook 地址 + 密钥是成对字段) */
+.settings-input + .settings-input {
+  margin-top: 8px;
+}
+
+/* 密钥说明行内的行内链接按钮:清除已存密钥的显式入口 */
+.settings-link {
+  border: none;
+  background: none;
+  padding: 0;
+  font: inherit;
+  color: #2080f0;
+  cursor: pointer;
+  text-decoration: underline;
+}
+
 /* 已指派设备的只读标签行(卡片上不可直接改,编辑走弹窗) */
 .device-tags {
   display: flex;

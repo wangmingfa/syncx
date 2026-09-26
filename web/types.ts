@@ -174,6 +174,10 @@ export interface GlobalSettingsData {
   versionsPerPath?: number;
   /** 每目录同步记录保留条数;undefined = 默认 2000。 */
   historyMaxEvents?: number;
+  /** 同步事件 Webhook 地址;undefined = 未配置(关闭通知)。 */
+  webhookUrl?: string;
+  /** 是否已设置 Webhook 签名密钥(密钥本身不回传)。 */
+  webhookSecretSet?: boolean;
 }
 
 /** 一个采样窗口的流量增量。 */

@@ -1,13 +1,14 @@
 <script setup lang="ts">
 import { ref, watch } from 'vue';
-import { NButton, NInputNumber } from 'naive-ui';
+import { NButton, NInput, NInputNumber } from 'naive-ui';
 import { useStatusContext } from '../composables/statusContext';
 import { apiPost, errText } from '../utils/api';
 import ModalShell from './ModalShell.vue';
 
 /**
- * 全局设置弹窗:发送带宽上限(全局兜底)、每路径版本份数、历史记录保留上限。
- * 三项都是「留空 = 回默认」的语义(后端 null 清除配置,走内置默认值);
+ * 全局设置弹窗:发送带宽上限(全局兜底)、每路径版本份数、历史记录保留上限、
+ * 同步事件 Webhook(完成/冲突/错误外推通知,飞书机器人地址自动适配格式)。
+ * 前三项都是「留空 = 回默认」的语义(后端 null 清除配置,走内置默认值);
  * 保存走 POST /api/settings,后端落盘并按需热生效(重建限速通道 / 执行器)。
  */
 const props = defineProps<{ open: boolean }>();
@@ -20,6 +21,13 @@ const maxSendKbps = ref<number | null>(null);
 const versionsPerPath = ref<number | null>(null);
 const historyMaxEvents = ref<number | null>(null);
 
+// Webhook:地址 '' = 关闭;密钥留空 = 保持已存值不变(清空需点「清除密钥」)
+const webhookUrl = ref('');
+const webhookSecret = ref('');
+const secretCleared = ref(false);
+const secretAlreadySet = ref(false);
+const testingWebhook = ref(false);
+
 const DEFAULT_VERSIONS = 10;
 const DEFAULT_HISTORY = 2000;
 
@@ -31,22 +39,46 @@ watch(
     maxSendKbps.value = s?.maxSendKbps ?? null;
     versionsPerPath.value = s?.versionsPerPath ?? null;
     historyMaxEvents.value = s?.historyMaxEvents ?? null;
+    webhookUrl.value = s?.webhookUrl ?? '';
+    webhookSecret.value = '';
+    secretCleared.value = false;
+    secretAlreadySet.value = s?.webhookSecretSet === true;
   },
 );
 
 async function onSave(): Promise<void> {
   if (busy.value) return;
+  const body: Record<string, unknown> = {
+    maxSendKbps: maxSendKbps.value,
+    versionsPerPath: versionsPerPath.value,
+    historyMaxEvents: historyMaxEvents.value,
+    webhookUrl: webhookUrl.value.trim() || null,
+  };
+  // 密钥三态:填了新值就覆盖;点了「清除」传 null;否则整个键不传 = 保持已存值
+  const secret = webhookSecret.value.trim();
+  if (secret) body.webhookSecret = secret;
+  else if (secretCleared.value) body.webhookSecret = null;
   try {
-    await apiPost('/api/settings', {
-      maxSendKbps: maxSendKbps.value,
-      versionsPerPath: versionsPerPath.value,
-      historyMaxEvents: historyMaxEvents.value,
-    });
+    await apiPost('/api/settings', body);
     showToast('设置已保存');
     await refreshStatus();
     emit('close');
   } catch (e) {
     showToast(errText(e, '保存失败,请重试'), 'alert');
+  }
+}
+
+async function onTestWebhook(): Promise<void> {
+  if (testingWebhook.value) return;
+  testingWebhook.value = true;
+  try {
+    const res = await apiPost<{ ok?: boolean; error?: string }>('/api/settings/webhook-test', {});
+    if (res.ok) showToast('测试消息已送达');
+    else showToast(res.error ?? '测试失败', 'alert');
+  } catch (e) {
+    showToast(errText(e, '测试失败'), 'alert');
+  } finally {
+    testingWebhook.value = false;
   }
 }
 </script>
@@ -97,6 +129,33 @@ async function onSave(): Promise<void> {
       <template #suffix>条 / 目录</template>
     </n-input-number>
     <p class="confirm-note-extra">每个目录最多保留多少条同步记录,超出后丢弃最旧的。留空 = 默认 {{ DEFAULT_HISTORY }} 条。</p>
+
+    <div class="edit-section-label">同步事件 Webhook</div>
+    <n-input
+      v-model:value="webhookUrl"
+      class="settings-input"
+      placeholder="https://… 留空 = 关闭通知"
+      :disabled="busy"
+      clearable
+    />
+    <n-input
+      v-model:value="webhookSecret"
+      class="settings-input"
+      :placeholder="secretAlreadySet && !secretCleared ? '已设置(留空保持不变)' : '可选:签名密钥'"
+      type="password"
+      show-password-on="click"
+      :disabled="busy"
+    />
+    <p class="confirm-note-extra">
+      同步完成、出现冲突、目录持续出错时向该地址推送一条通知;飞书机器人地址自动按其格式发送,其余地址为 JSON。
+      目录出错只在错误内容变化时推送一次,不会每轮重复打扰。
+      <template v-if="secretAlreadySet && !secretCleared">
+        密钥已保存,不回显;输入新值可覆盖,或
+        <button type="button" class="settings-link" @click="secretCleared = true; webhookSecret = ''">清除已存密钥</button>。
+      </template>
+      <template v-else-if="secretCleared">密钥将被清除。</template>
+    </p>
+    <n-button size="small" :loading="testingWebhook" :disabled="busy" @click="onTestWebhook">发送测试消息</n-button>
 
     <template #footer>
       <n-button class="modal-cancel" :disabled="busy" @click="emit('close')">取消</n-button>

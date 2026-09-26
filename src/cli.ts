@@ -18,6 +18,7 @@ import { startDiscovery } from './net/discovery.js';
 import { getLanAddresses, formatHost } from './net/addresses.js';
 import { createControlServer, type ControlServerDeps } from './api.js';
 import { createStatusHub } from './status-hub.js';
+import { createWebhookNotifier } from './webhook.js';
 import { createTerminalHub } from './api/terminal.js';
 import { listDirectory, resolveFolderSubpath, deleteFolderEntry } from './filebrowser.js';
 import { buildStatus, type DeviceStatus, type SyncProgress, type FolderErrorStatus } from './status.js';
@@ -405,6 +406,9 @@ export async function run(args: ParsedArgs): Promise<void> {
   let peerPort = 0;
 
   // 会话/目录运行期状态管理器:连接、同步通道、扫描、配置热重载、P2P 自更新全部内聚于此
+  // 同步事件 Webhook 通知器:每次投递现读 config(改设置即时生效),串行队列保序,
+  // 失败只 warn —— 通知是旁路,绝不允许拖垮同步。
+  const webhook = createWebhookNotifier({ configPath, logger });
   const manager = new SyncSessionManager(
     {
       identity,
@@ -416,6 +420,9 @@ export async function run(args: ParsedArgs): Promise<void> {
       // 拓扑:cli 先建 hub(hub 只持有取快照的闭包,不依赖 manager)→ 再建 manager
       // (需要 hub 的 notify)→ 最后建控制服务(hub 由它按 upgrade 挂连接)。
       onStatusChanged: () => statusHub.notify(),
+      // 同步事件外推(webhook):设置弹窗配的地址,完成/冲突/错误三类(见 webhook.ts)。
+      // 通知器内部火后忘 + 串行队列,这里调用永不抛、不拖慢同步路径。
+      onWebhookEvent: (ev) => webhook.notify(ev),
     },
     config.sharedFolders,
   );
@@ -590,6 +597,9 @@ export async function run(args: ParsedArgs): Promise<void> {
             maxSendKbps: config.maxSendKbps,
             versionsPerPath: config.versionsPerPath,
             historyMaxEvents: getHistoryMaxEvents(),
+            // Webhook:地址回显;密钥不回传本体,只告诉 UI「已设置」
+            webhookUrl: config.webhookUrl,
+            webhookSecretSet: config.webhookSecret !== undefined,
           },
           // 数据目录:日志弹窗等处的示例命令要跟真实目录走(--config-dir 隔离时不误导)
           configDir,
@@ -718,6 +728,7 @@ export async function run(args: ParsedArgs): Promise<void> {
       // 落盘 + 按需热生效(重建通道/执行器/历史上限)都在 manager 内完成
       manager.setGlobalSettings(patch);
     },
+    testWebhook: () => webhook.test(),
     setGlobalPaused: (paused) => {
       manager.setGlobalPaused(paused);
     },

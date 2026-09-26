@@ -398,6 +398,10 @@ export interface GlobalSettingsPatch {
   versionsPerPath?: number | null;
   /** 每目录历史上限;null = 回默认 2000。 */
   historyMaxEvents?: number | null;
+  /** 同步事件 Webhook 地址;null/空串 = 关闭。必须 http(s)://。 */
+  webhookUrl?: string | null;
+  /** Webhook 签名密钥;null = 清除。 */
+  webhookSecret?: string | null;
 }
 
 /** 校验并收敛一个设置值:null → undefined(清除);负数/非整数拒绝(设置页的输入必须可解释)。 */
@@ -423,6 +427,19 @@ export function setGlobalSettings(configPath: string, patch: GlobalSettingsPatch
     }
     if ('historyMaxEvents' in patch) {
       config.historyMaxEvents = sanitizeSetting(patch.historyMaxEvents, 1, '历史记录保留上限');
+    }
+    if ('webhookUrl' in patch) {
+      const v = typeof patch.webhookUrl === 'string' ? patch.webhookUrl.trim() : '';
+      if (v !== '' && !/^https?:\/\//i.test(v)) {
+        throw new Error(`Webhook 地址须以 http:// 或 https:// 开头:「${patch.webhookUrl}」`);
+      }
+      if (v.length > 500) throw new Error('Webhook 地址过长(最多 500 字符)');
+      config.webhookUrl = v === '' ? undefined : v;
+    }
+    if ('webhookSecret' in patch) {
+      const v = typeof patch.webhookSecret === 'string' ? patch.webhookSecret.trim() : '';
+      if (v.length > 200) throw new Error('Webhook 密钥过长(最多 200 字符)');
+      config.webhookSecret = v === '' ? undefined : v;
     }
   });
 }

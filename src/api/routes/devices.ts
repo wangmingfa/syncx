@@ -8,7 +8,7 @@ export async function tryDeviceRoutes(
   res: ServerResponse,
   deps: ControlServerDeps,
 ): Promise<boolean> {
-  const { addDevice, removeDevice, selfUpdate, shutdown, rescan, reconnect, setFolderPaused, setGlobalPaused, setGlobalSettings, restoreFolderVersion, deleteFolderVersion } = deps;
+  const { addDevice, removeDevice, selfUpdate, shutdown, rescan, reconnect, setFolderPaused, setGlobalPaused, setGlobalSettings, testWebhook, restoreFolderVersion, deleteFolderVersion } = deps;
   const path = req.url ? pathname(req.url) : '/';
 
   // POST /api/devices : 添加一个已知对端设备 ID
@@ -89,14 +89,37 @@ export async function tryDeviceRoutes(
           return true;
         }
       }
+      // webhook 两键是字符串(null = 清除);格式校验在 devices.setGlobalSettings
+      for (const key of ['webhookUrl', 'webhookSecret'] as const) {
+        if (!(key in body)) continue;
+        const v = body[key];
+        if (v !== null && typeof v !== 'string') {
+          sendJson(res, 400, { error: `${key} must be a string or null` });
+          return true;
+        }
+      }
       setGlobalSettings({
         ...(('maxSendKbps' in body) ? { maxSendKbps: body.maxSendKbps === null ? null : Number(body.maxSendKbps) } : {}),
         ...(('versionsPerPath' in body) ? { versionsPerPath: body.versionsPerPath === null ? null : Number(body.versionsPerPath) } : {}),
         ...(('historyMaxEvents' in body) ? { historyMaxEvents: body.historyMaxEvents === null ? null : Number(body.historyMaxEvents) } : {}),
+        ...(('webhookUrl' in body) ? { webhookUrl: body.webhookUrl === null ? null : String(body.webhookUrl) } : {}),
+        ...(('webhookSecret' in body) ? { webhookSecret: body.webhookSecret === null ? null : String(body.webhookSecret) } : {}),
       });
       sendJson(res, 200, { ok: true });
     } catch (e) {
       sendJson(res, 400, { error: e instanceof Error ? e.message : '保存设置失败' });
+    }
+    return true;
+  }
+
+  // POST /api/settings/webhook-test : 向已配置地址真实发一条测试事件,同步等回执。
+  if (req.method === 'POST' && path === '/api/settings/webhook-test' && testWebhook) {
+    try {
+      const r = await testWebhook();
+      if (r.ok) sendJson(res, 200, { ok: true });
+      else sendJson(res, 400, { error: r.error ?? 'Webhook 测试失败' });
+    } catch (e) {
+      sendJson(res, 400, { error: e instanceof Error ? e.message : 'Webhook 测试失败' });
     }
     return true;
   }
