@@ -1,0 +1,52 @@
+version: 1
+
+repowiki:
+  notes:
+    - text: >-
+      web 前端皮肤层:视觉风格 data-skin(slate 板岩 / glass 液态玻璃)与深浅主题
+      data-theme 严格正交,CSS 令牌按 html[data-skin][data-theme] 双属性选择器分层覆盖;
+      撰写相关章节时必须讲清正交模型,勿把皮肤描述成主题的第三种取值。
+    - text: >-
+      皮肤 localStorage 键 'syncx:skin' 有意重复定义在 web/composables/useSkin.ts 与
+      web/index.html 首绘前脚本两处(避免刷新闪皮肤),两处必须同源修改;test/skin.test.ts
+      用契约测试看守这一点。
+    - text: >-
+      web/style.css 玻璃段落有严格块顺序契约(由 test/skin.test.ts 看守):plain dark 令牌 →
+      glass-light 令牌 → glass-dark 令牌 → @supports(backdrop-filter) 降级块必须最后;
+      令牌块必须保持扁平不嵌套,否则测试的 ruleBlock 解析器失效。
+    - text: >-
+      :root 规则须保持全文件第一条且唯一 —— src/theme-tokens.ts 的 extractRootRule 依赖此
+      契约生成 ui-fallback.ts;:root 之后再新增第二条 :root 块会静默破坏该派生。
+    - text: >-
+      naive-ui 的主题变量以内联 custom property 注入,普通 CSS 选择器吃不掉:覆盖优先走
+      App.vue 的 themeOverrides;唯 Tooltip 可读性例外,用 CSS !important 直接压最终属性
+      (玻璃档全局 Popover.color 会在 merge 时盖掉 Tooltip 自带的深色气泡,主题覆盖解决不了)。
+    - text: >-
+      液态玻璃「真折射」= 单一共享 SVG feDisplacement 滤镜 syncx-glass-lens,挂在
+      web/composables/useGlassLens.ts,位移贴图由 web/liquidGlassSdf.ts 的圆角矩形 SDF
+      纯函数生成;url() 拼在 backdrop-filter 链末端,故只弯折背景、文字保持锐利。
+    - text: >-
+      折射滤镜只接浮层(.modal/.toast/.device-chip/.stat-pill-item/.n-popover/
+      .n-dropdown-menu),平铺卡片有意排除:无结构化背景可弯折且逐卡 SVG 滤镜合成开销大;
+      Firefox 与探测失败的主机不挂滤镜,自动退回纯磨砂 —— 描述降级路径时勿称其为 bug。
+    - text: >-
+      折射技法移植自 @wxperia/liquid-glass-vue(MIT,其本身改编自 shuding/liquid-glass);
+      本仓库不引入该依赖、只移植技法。后续玻璃升级应延续「移植而非依赖」策略。
+
+knowledgecard:
+  notes:
+    - text: >-
+      知识条目划分:web 皮肤层(令牌体系 + 液态玻璃折射)独立成条,不与通用 UI 组件合并;
+      边界 = web/style.css 玻璃段落、web/liquidGlassSdf.ts、web/composables/useGlassLens.ts、
+      useSkin.ts 及 test/skin.test.ts、test/liquid-glass.test.ts。
+    - text: >-
+      皮肤层三条契约必须由条目显式记载(均可被测试看守但难以从代码一眼推断):
+      'syncx:skin' 键在 useSkin.ts 与 index.html 两处重复;style.css 令牌块顺序与扁平结构;
+      :root 首条且唯一(theme-tokens.ts → ui-fallback.ts 派生依赖)。
+    - text: >-
+      naive-ui 内联主题变量约束要写进条目:覆盖走 themeOverrides,Tooltip 例外用 CSS
+      !important;不记载这点,后续改动会反复踩「弹窗深色、页面浅色」拼接坑。
+    - text: >-
+      玻璃折射的调参入口:web/composables/useGlassLens.ts 中三个
+      disp(-26 / -28.6 / -31.2) 位移 scale(保持比例改动以维持色散);能力探测失败时
+      html 上不写 data-glass-lens 钩子,style.css 自然退回 v2 纯磨砂观感。
