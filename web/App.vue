@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, ref, onMounted } from 'vue';
+import { computed, ref, watch, onMounted } from 'vue';
 import { NConfigProvider, darkTheme, dateZhCN, zhCN, type GlobalThemeOverrides } from 'naive-ui';
 import StatusPage from './StatusPage.vue';
 import LoginForm from './LoginForm.vue';
@@ -11,6 +11,7 @@ import TrashPage from './TrashPage.vue';
 import { route } from './utils/route';
 import { useTheme } from './composables/useTheme';
 import { useSkin } from './composables/useSkin';
+import { mountGlassLens } from './composables/useGlassLens';
 import type { StatusData } from './types';
 
 // 让 naive-ui 控件沿用品牌色与圆角,与现有卡片/面板视觉统一。
@@ -48,6 +49,12 @@ const themeOverrides = computed<GlobalThemeOverrides>(() => {
 // naive-ui 的深色算法主题跟随解析结果;CSS 变量层由 useTheme 挂在 <html data-theme> 上,
 // 两套必须同源切换 —— 否则出现「naive 弹窗深色、页面卡片还是浅色」的拼接。
 const naiveTheme = computed(() => (resolved.value === 'dark' ? darkTheme : null));
+
+// 玻璃档追加「真折射」:挂一个共享 SVG feDisplacement 滤镜,能力探测通过后
+// style.css 靠 html[data-glass-lens] 钩子把它接到浮层 backdrop-filter 上。
+// 切到 glass 才挂(探测失败/Firefox 不挂,自动退回纯磨砂);挂载幂等,离开玻璃档
+// 不移除滤镜(slate 的 CSS 本就不引用它,留着无害,省得再切回来重复生成贴图)。
+watch(skinMode, (m) => m === 'glass' && mountGlassLens(), { immediate: true });
 
 // 纯 CSR:页面由客户端挂载,状态由 /api/status 拉取,不再依赖 SSR 注入
 const status = ref<StatusData | null>(null);

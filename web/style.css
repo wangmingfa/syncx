@@ -3903,6 +3903,24 @@ html[data-skin='glass'] body .n-dropdown-menu {
   backdrop-filter: var(--glass-blur);
 }
 
+/* ---------- 折射钩子(三版,可缺席) ----------
+   composables/useGlassLens 探测通过才给 <html> 挂 data-glass-lens='on':
+   backdrop-filter 链尾追加共享 SVG feDisplacement 滤镜(先磨砂、后位移),
+   面板边缘把背景真的弯折并拆出红绿蓝三色 —— macOS 26 液态玻璃的招牌。
+   url() 在链尾还有两个好处:整条链只作用于背景(文字依旧锐利,无需库那种
+   warp span);引擎不认 url() 时计算值探测已挡住,不会静默吞掉整条磨砂。
+   名单只收**浮在内容上**的表面(弹窗/吐司/顶栏 chip/统计药丸/naive 浮层):
+   大卡片垫在静态极光底上,位移无从显形,平白让每个 .card 背一次 SVG 滤镜的
+   合成开销,不值。 */
+html[data-skin='glass'][data-glass-lens='on'] .modal,
+html[data-skin='glass'][data-glass-lens='on'] .toast,
+html[data-skin='glass'][data-glass-lens='on'] .device-chip,
+html[data-skin='glass'][data-glass-lens='on'] .stat-pill-item,
+html[data-skin='glass'][data-glass-lens='on'] body .n-popover,
+html[data-skin='glass'][data-glass-lens='on'] body .n-dropdown-menu {
+  backdrop-filter: var(--glass-blur) url(#syncx-glass-lens);
+}
+
 /* Tooltip 单独处理:它内部复用 Popover 主题,而 App.vue 给 Popover 定的半透明底
    在合并序里压过了 tooltip 自带的深气泡色 —— 于是浅色主题下变成「白底 + 我们设的
    浅色字」= 看不见。macOS 的 tooltip 本就是深磨砂,这里一律拉回深色,并把文字钉成
