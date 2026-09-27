@@ -1149,6 +1149,9 @@ export async function run(args: ParsedArgs): Promise<void> {
     logger.info(
       `  请用 ${args.devViteUrl} 打开 Web UI;生产构建(不带 --dev-vite)才由 ${controlPort} 端口直接提供页面`,
     );
+    // dev 专属便利:免开 control.token 文件抄令牌。生产启动不打 —— 终端日志常被
+    // 截图/粘进 issue,明文令牌会跟着外泄
+    logger.info(`  登录令牌(control.token):${token}`);
   }
   if (noFoldersAtBoot) {
     // 无目录时 daemon 保持运行,通过 Web UI 添加目录后由热重载生效,无需重启
