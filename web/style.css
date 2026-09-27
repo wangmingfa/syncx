@@ -301,6 +301,14 @@ tbody tr:last-child td {
   margin-bottom: 18px;
 }
 
+/* 顶栏这两个图标(主题 / 材质)按 20px 标注画,但 naive 的图标槽是个写死 18px 的
+   flex 容器,默认会把比它宽的 svg **收缩**回 18px —— 于是「改成 20px」在 DOM 里
+   静默失效(实测 width 18 / height 20,即宽高被压成不同步)。槽本身 flex 居中且
+   overflow: visible,禁掉收缩后多出的 2px 两侧各溢出 1px,仍在 34px 的按钮内。 */
+.topbar .topbar-icon {
+  flex: none;
+}
+
 .brand {
   display: flex;
   align-items: center;
@@ -3812,20 +3820,30 @@ html[data-skin='glass'] {
   /* 基底:极浅冷灰,极光渐变(下面 body 规则)叠在其上 */
   --bg: #eef1f7;
   --bg-soft: rgb(255 255 255 / 0.45);
-  /* 玻璃的两层厚度:常态 / 悬停抬起 */
-  --card: rgb(255 255 255 / 0.55);
-  --card-hi: rgb(255 255 255 / 0.78);
+  /* 玻璃的两层厚度:常态 / 悬停抬起。tint 收到「刚够读出切面」—— 0.55 的白蒙版
+     等于给每块板刷了层乳胶漆,是塑料感的第二来源 */
+  --card: rgb(255 255 255 / 0.4);
+  --card-hi: rgb(255 255 255 / 0.58);
+  /* 抬起面(弹窗/吐司)另开一档,不能复用 --card:它们垫的是 .modal-overlay 那层
+     暗遮罩,0.4 的白压进灰底 = 一块脏灰板,里面的 --muted 小字对比度直接归零。
+     卡片垫在极光浅底上可以薄,抬起面必须近实。 */
+  --glass-raised: rgb(255 255 255 / 0.86);
+  /* 次级文字跟着抬起面重给:板岩档的 #7e8aa0 是给近白实底调的,压到抬起面混出的
+     灰白上只剩 2.6:1(截图里弹窗那行灰字看不清的第二半原因)。玻璃档钉到 5:1 档。 */
+  --muted: #55637c;
   /* 玻璃的边不是纸边:低透明冷灰描边,存在感靠内描边高光撑 */
   --border: rgb(96 116 148 / 0.24);
   --border-strong: rgb(96 116 148 / 0.42);
   --accent-soft: rgb(234 241 251 / 0.65);
   --shadow: 0 1px 2px rgb(22 32 52 / 0.06), 0 16px 42px -20px rgb(22 32 52 / 0.32);
   --radius: 18px;
-  /* 本皮肤私有参数:磨砂(深 blur + 饱和回补,透出底色的「折射感」) + 玻璃切面
-     的三段边:顶缘镜面高光、整周细亮边、底缘内投影(厚玻璃下沿聚影) */
-  --glass-blur: saturate(1.8) blur(26px) brightness(1.05);
-  --glass-edge: inset 0 1px 0 rgb(255 255 255 / 0.85), inset 0 0 0 1px rgb(255 255 255 / 0.35),
-    inset 0 -22px 36px -28px rgb(84 110 160 / 0.5);
+  /* 本皮肤私有参数:磨砂。**轻** blur 保清晰度,饱和略回补而不是猛拉 —— 真玻璃是
+     透而不是糊,blur 26px + saturate 1.8 会把一切糊成塑料磨砂膜(三版观感败因)。
+     玻璃切面的三段边:顶缘镜面高光(细,收白)、整周 1px 亮线、底缘窄内投影 ——
+     轮廓靠这三段「画」出来,不靠大面积奶白蒙版撑。 */
+  --glass-blur: saturate(1.35) blur(10px);
+  --glass-edge: inset 0 1px 0 rgb(255 255 255 / 0.6), inset 0 0 0 1px rgb(255 255 255 / 0.28),
+    inset 0 -12px 20px -18px rgb(84 110 160 / 0.45);
 }
 
 /* 底光分两层:body 铺一层细噪(去渐变色带纹,玻璃质感的隐形一半来自颗粒),
@@ -3841,10 +3859,10 @@ html[data-skin='glass'] body::before {
   inset: -14vmax;
   z-index: -1;
   background-image:
-    radial-gradient(52% 46% at 12% 4%, rgb(116 168 238 / 0.62), transparent 66%),
-    radial-gradient(46% 42% at 92% 10%, rgb(70 206 196 / 0.5), transparent 62%),
-    radial-gradient(52% 48% at 50% 104%, rgb(172 136 232 / 0.45), transparent 64%),
-    radial-gradient(38% 34% at 74% 62%, rgb(238 176 138 / 0.3), transparent 60%);
+    radial-gradient(52% 46% at 12% 4%, rgb(116 168 238 / 0.5), transparent 66%),
+    radial-gradient(46% 42% at 92% 10%, rgb(70 206 196 / 0.4), transparent 62%),
+    radial-gradient(52% 48% at 50% 104%, rgb(172 136 232 / 0.36), transparent 64%),
+    radial-gradient(38% 34% at 74% 62%, rgb(238 176 138 / 0.24), transparent 60%);
   will-change: transform;
 }
 
@@ -3888,13 +3906,26 @@ html[data-skin='glass'] .stat-pill-item {
 }
 
 html[data-skin='glass'] .modal {
+  background: var(--glass-raised);
   box-shadow: 0 24px 60px -24px rgb(22 32 52 / 0.4), var(--glass-edge);
 }
 
-/* 遮罩跟着换打法:压暗更轻、模糊更深 —— 弹窗浮起时后景整片化开,玻璃感来自对比 */
+/* 吐司同理浮在整页之上,底色走抬起面;弹窗内的「内嵌子面」反过来要收掉
+   自带的那层半透明白 —— .empty 的 rgb(255 255 255 / .5) 是纸面皮肤时代的写死值,
+   压在抬起面上会再叠一层雾,深色档下更会变成一块白板浮在暗弹窗里 */
+html[data-skin='glass'] .toast {
+  background: var(--glass-raised);
+}
+
+html[data-skin='glass'] .empty {
+  background: transparent;
+}
+
+/* 遮罩跟着换打法:压暗更轻、模糊比面板深一档 —— 弹窗浮起时后景化开但仍有形,
+   玻璃感来自「板清/底糊」的对比,底糊成一堵墙反而没有透镜参照 */
 html[data-skin='glass'] .modal-overlay {
   background: rgb(20 28 42 / 0.28);
-  backdrop-filter: blur(16px) saturate(1.4);
+  backdrop-filter: blur(12px) saturate(1.25);
 }
 
 /* naive 浮层(弹层/下拉)底色已由 App.vue themeOverrides 给成半透明,只补磨砂 */
@@ -3943,17 +3974,22 @@ html[data-skin='glass'] body .n-popover.n-tooltip:has(.n-popover-arrow) {
 html[data-skin='glass'][data-theme='dark'] {
   --bg: #0c1016;
   --bg-soft: rgb(255 255 255 / 0.07);
-  --card: rgb(38 47 62 / 0.55);
-  --card-hi: rgb(52 63 82 / 0.72);
+  --card: rgb(38 47 62 / 0.45);
+  --card-hi: rgb(52 63 82 / 0.6);
+  /* 抬起面同理要近实:深遮罩上再叠 0.45 的半透板,弹窗里的浅字会沉进遮罩本身 */
+  --glass-raised: rgb(24 30 41 / 0.82);
+  /* 深玻璃的次级文字比浅档宽松(暗底上本来就吃提亮),但仍比板岩档那版抬一档,
+     免得在 0.82 的深抬起面上沉成「和遮罩一个色」 */
+  --muted: #97a3b6;
   --border: rgb(150 170 200 / 0.18);
   --border-strong: rgb(150 170 200 / 0.36);
   --accent-soft: rgb(66 96 142 / 0.4);
   --shadow: 0 1px 2px rgb(0 0 0 / 0.4), 0 16px 42px -20px rgb(0 0 0 / 0.65);
   --radius: 18px;
-  /* 深底要更用力地提亮才透得出发光底光;镜面边整体压暗,只留「切面可辨」的量 */
-  --glass-blur: saturate(1.7) blur(26px) brightness(1.12);
-  --glass-edge: inset 0 1px 0 rgb(255 255 255 / 0.18), inset 0 0 0 1px rgb(255 255 255 / 0.08),
-    inset 0 -22px 36px -28px rgb(0 0 0 / 0.55);
+  /* 与浅色同款配方:深底也只用轻磨砂,亮度回补靠极光底本身,不靠滤镜猛提 */
+  --glass-blur: saturate(1.3) blur(10px) brightness(1.06);
+  --glass-edge: inset 0 1px 0 rgb(255 255 255 / 0.14), inset 0 0 0 1px rgb(255 255 255 / 0.07),
+    inset 0 -12px 20px -18px rgb(0 0 0 / 0.5);
 }
 
 /* 深色极光:换掉浅色 body::before 的四团冷白光,改成深底上的暗色相辉光。

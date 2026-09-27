@@ -40,8 +40,10 @@ const themeOverrides = computed<GlobalThemeOverrides>(() => {
     // (配 darkTheme 亮字)。一版不分深浅统一白气泡,深色页里 naive 亮字压在白底上直接糊掉。
     // Tooltip 例外:它复用 Popover 的主题,气泡色在 style.css 玻璃段用 !important 定向
     // 成 macOS 式深色磨砂(它的 textColor 没有同名竞争者,在这里给亮白即可读)。
-    Popover: { color: dark ? 'rgba(26, 32, 43, 0.66)' : 'rgba(255, 255, 255, 0.72)' },
-    Dropdown: { color: dark ? 'rgba(26, 32, 43, 0.74)' : 'rgba(255, 255, 255, 0.8)' },
+    // 浮层气泡 = 抬起面,底色要近实(naive 浮层没有皮肤层的 --glass-raised 令牌可吃,
+    // 数值与 style.css 两档抬起面同配方):半透 0.6 压在任意页面上,小字对比度会归零。
+    Popover: { color: dark ? 'rgba(24, 30, 41, 0.86)' : 'rgba(255, 255, 255, 0.88)' },
+    Dropdown: { color: dark ? 'rgba(24, 30, 41, 0.9)' : 'rgba(255, 255, 255, 0.92)' },
     Tooltip: { textColor: 'rgba(244, 247, 252, 0.96)' },
   };
 });

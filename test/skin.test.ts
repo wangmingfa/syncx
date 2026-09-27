@@ -7,10 +7,16 @@ const css = read('../web/style.css');
 const indexHtml = read('../web/index.html');
 const useSkin = read('../web/composables/useSkin.ts');
 
-/** 取某个选择器对应的顶层规则块(不含嵌套),找不到返回 null。 */
-function ruleBlock(selector: string): string | null {
-  const at = css.indexOf(`${selector} {`);
-  if (at === -1) return null;
+/** 取某个选择器对应的顶层规则块(不含嵌套),找不到返回 null。
+ *  occurrence:同名选择器在全文件出现多次时取第几处(基础规则与玻璃覆盖规则会同名)。 */
+function ruleBlock(selector: string, occurrence = 1): string | null {
+  let at = -1;
+  let from = 0;
+  for (let i = 0; i < occurrence; i++) {
+    at = css.indexOf(`${selector} {`, from);
+    if (at === -1) return null;
+    from = at + 1;
+  }
   const end = css.indexOf('}', at);
   return end === -1 ? null : css.slice(at, end);
 }
@@ -25,6 +31,19 @@ const PLAIN_DARK = "html[data-theme='dark'] {";
 
 /** 玻璃深色块现已重定义浅色块的每一个 token(含 --radius/--glass-blur),无需豁免。 */
 const SHARED_TOKENS = new Set<string>([]);
+
+/** #rrggbb → WCAG 相对亮度。 */
+function luminance(hex: string): number {
+  const [r, g, b] = [1, 3, 5].map((i) => parseInt(hex.slice(i, i + 2), 16) / 255)
+    .map((c) => (c <= 0.03928 ? c / 12.92 : ((c + 0.055) / 1.055) ** 2.4));
+  return 0.2126 * r! + 0.7152 * g! + 0.0722 * b!;
+}
+
+/** 前景 hex 压在不透明底 hex 上的 WCAG 对比度。 */
+function contrast(fg: string, bg: string): number {
+  const [x, y] = [luminance(fg), luminance(bg)];
+  return (Math.max(x, y) + 0.05) / (Math.min(x, y) + 0.05);
+}
 
 /**
  * 皮肤(skin)与主题(theme)是正交维度,靠三条纸质约定撑住,全部容易在重构中静默断裂:
@@ -90,6 +109,51 @@ describe('skin:板岩 / 液态玻璃两档皮肤', () => {
     expect(css).toContain("html[data-skin='glass'][data-theme='dark'] body::before");
   });
 
+  it('抬起面另开一档:弹窗/吐司吃 --glass-raised,内嵌子面不叠第二层雾', () => {
+    // 弹窗垫的是暗遮罩,复用卡片那层薄 tint 会混成脏灰板 —— 里面 --muted 小字对比度归零
+    // (实测败因)。抬起面必须近实,且深浅两档都要给(深色漏给 = 暗弹窗浮白板)。
+    for (const block of [ruleBlock(GLASS_LIGHT)!, ruleBlock(GLASS_DARK)!]) {
+      const alpha = block.match(/--glass-raised:\s*rgb\([^/]+\/\s*([\d.]+)\s*\)/)?.[1];
+      expect(Number(alpha)).toBeGreaterThanOrEqual(0.8);
+    }
+    const raised = ruleBlock(`${GLASS_LIGHT} .modal`);
+    expect(raised).toContain('background: var(--glass-raised)');
+    expect(ruleBlock(`${GLASS_LIGHT} .toast`)).toContain('background: var(--glass-raised)');
+    // .empty 的底色是纸面时代写死的半透明白,玻璃档必须收掉(深色档它本是块白板)
+    expect(ruleBlock(`${GLASS_LIGHT} .empty`)).toContain('background: transparent');
+
+    // 抬起面 ≠ 万能:白 0.86 压在暗遮罩上仍会混出灰白底,次级文字要按**混色后**的底
+    // 来验对比度(截图里弹窗灰字就栽在这一步)。全部数值从 CSS 现读,不写死第二份真相。
+    /** 读某个规则块里某条声明的颜色(#rrggbb 或 rgb(r g b / a) 两种写法都认)。 */
+    const colorOf = (src: string | null, token: string): { c: string; a: number } => {
+      const decl = src?.match(new RegExp(`${token}:\\s*(#[0-9a-f]{6}|rgb\\(([^)]+)\\))`, 'i'))?.[1];
+      if (!decl) throw new Error(`CSS 里找不到 ${token} 的颜色值(规则块漏了还是改了写法)`);
+      if (decl.startsWith('#')) return { c: decl, a: 1 };
+      const n = decl.slice(4, -1).split(/[\s/]+/).filter(Boolean).map(Number);
+      const [r = 0, g = 0, b = 0, a = 1] = n;
+      return {
+        c: `#${[r, g, b].map((v) => Math.round(v).toString(16).padStart(2, '0')).join('')}`,
+        a,
+      };
+    };
+    const over = (top: { c: string; a: number }, bottom: string): string =>
+      '#' + [1, 3, 5]
+        .map((s) => Math.round(
+          parseInt(top.c.slice(s, s + 2), 16) * top.a + parseInt(bottom.slice(s, s + 2), 16) * (1 - top.a),
+        ).toString(16).padStart(2, '0'))
+        .join('');
+    const light = ruleBlock(GLASS_LIGHT)!;
+    const dark = ruleBlock(GLASS_DARK)!;
+    const surfaceUnder = (raised: string, overlay: string | null, page: string): string =>
+      over(colorOf(raised, '--glass-raised'), over(colorOf(overlay, 'background'), page));
+    const lightPage = colorOf(light, '--bg').c;
+    // 选择器带 `html[data-skin=...]` 前缀,与基础 .modal-overlay 不同名,取第 1 处即是覆盖规则
+    const lightSurface = surfaceUnder(light, ruleBlock(`${GLASS_LIGHT} .modal-overlay`), lightPage);
+    expect(contrast(colorOf(light, '--muted').c, lightSurface)).toBeGreaterThanOrEqual(4.5);
+    const darkSurface = surfaceUnder(dark, ruleBlock(`${GLASS_DARK} .modal-overlay`), colorOf(dark, '--bg').c);
+    expect(contrast(colorOf(dark, '--muted').c, darkSurface)).toBeGreaterThanOrEqual(4.5);
+  });
+
   it('Tooltip 玻璃态:深色磨砂气泡 + 浅色字,用 !important 压过内联注入的半透明底', () => {
     // tooltip 复用 Popover 主题,App.vue 的半透明 Popover 底会盖掉它自带深气泡 →
     // 浅底配浅字直接糊掉;这里必须 !important 直写深色底 + 浅色字救回可读性。
@@ -102,5 +166,20 @@ describe('skin:板岩 / 液态玻璃两档皮肤', () => {
   it(':root 仍是文件里第一个规则块(theme-tokens 抽取的前提,皮肤块不得插队)', () => {
     expect(css.indexOf(':root {')).toBeLessThan(css.indexOf(GLASS_LIGHT));
     expect(css.match(/:root\s*\{/g)?.length).toBe(1);
+  });
+});
+
+/**
+ * 顶栏那两个 20px 图标(主题 / 材质)。naive 的图标槽是写死 18px 的 flex 容器,
+ * 会把更宽的 svg **静默收缩**回 18px(实测 width:18 / height:20)——「把图标放大」
+ * 这件事在 DOM 里悄悄没发生,只能靠 class + flex:none 这一对同时在场来兜住。
+ */
+describe('顶栏 20px 图标:不被图标槽压回 18px', () => {
+  it('每个 width="20" 的 svg 都挂 topbar-icon,且 style.css 给它 flex: none', () => {
+    const topbar = read('../web/components/StatusTopbar.vue');
+    const big = [...topbar.matchAll(/<svg\b[^>]*>/g)].map((m) => m[0]).filter((t) => /width="20"/.test(t));
+    expect(big.length).toBeGreaterThanOrEqual(2);
+    for (const tag of big) expect(tag).toContain('topbar-icon');
+    expect(ruleBlock('.topbar .topbar-icon')).toContain('flex: none');
   });
 });

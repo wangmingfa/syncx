@@ -22,8 +22,8 @@ const themeOptions: DropdownOption[] = [
 
 /** 皮肤(材质语言)与主题正交:这里选「板岩 / 液态玻璃」,深浅仍由上面那组决定 */
 const skinOptions: DropdownOption[] = [
-  { label: '板岩', key: 'slate' },
-  { label: '液态玻璃', key: 'glass' },
+  { label: '板岩 · 实心不透明', key: 'slate' },
+  { label: '液态玻璃 · 半透磨砂', key: 'glass' },
 ];
 const SKIN_LABELS: Record<SkinMode, string> = { slate: '板岩', glass: '液态玻璃' };
 
@@ -43,6 +43,12 @@ function renderThemeLabel(option: DropdownOption): VNodeChild {
 function onThemeSelect(key: string): void {
   setMode(key as ThemeMode);
 }
+
+/** 跟随系统时把「系统当前带出的是哪档」一起说出来:图标只表明「由系统决定」,不表明结果。 */
+const themeHint = computed<string>(() =>
+  themeMode.value === 'system'
+    ? `主题:跟随系统(当前${themeResolved.value === 'dark' ? '深色' : '浅色'})`
+    : `主题:${themeMode.value === 'dark' ? '深色' : '浅色'}(手动固定)`);
 
 /** 风格菜单复用主题菜单同款 ✓ 槽位画法(见 renderThemeLabel 注释)。 */
 function renderSkinLabel(option: DropdownOption): VNodeChild {
@@ -155,7 +161,17 @@ function runChipRow(row: ChipRow): void {
       {{ trafficText }}
     </n-button>
 
-    <!-- 主题切换:图标随当前生效主题变(日/月),悬停选三档。高频全局偏好,留在外面 -->
+    <!-- 主题切换:底图永远按**生效**主题画日/月(现在看到的是深色就该是月牙),
+         跟随系统时右上角再叠一枚「半明半暗圆」角标 —— 它是自动档的通用记号(GitHub
+         主题选择器同款),且是纯几何图形,不像字母「A」那样受字体度量摆布。
+         两件事分开说:底图 = 当前生效的是哪档,角标 = 这档是系统带的还是我选的。
+         两者**交叠**而不互相避让:角标压在底图上,底图套一层 SVG mask 在角标周围挖出
+         透明环隙(mask 里只画黑白,不掺颜色,所以挖空处透出按钮底色,深浅主题与玻璃
+         皮肤下都自动成立,不必为每种背景再配一个描边色)。
+         角标放右上角而不是惯例的右下角,是被几何逼出来的:月牙的实体占左下、缺口朝
+         右上,角标压在右下会把月牙咬掉一大块(采样实测:那条路径 39% 的轮廓点落进
+         挖空圈里)。挪到右上,月牙轮廓的最近点离挖空圈仍有 3u 余量(即完全不咬),
+         而日字右上那根射线整条落进圈内被干净取代(不留残根),交叠感由太阳承担 -->
     <n-dropdown
       trigger="hover"
       placement="bottom-end"
@@ -164,21 +180,36 @@ function runChipRow(row: ChipRow): void {
       :render-label="renderThemeLabel"
       @select="onThemeSelect"
     >
-      <n-button tertiary circle :title="`主题:${themeMode === 'system' ? '跟随系统' : themeResolved === 'dark' ? '深色' : '浅色'}`">
+      <n-button tertiary circle :title="themeHint">
         <template #icon>
-          <svg v-if="themeResolved === 'dark'" viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
-            <path d="M20 14.5A8 8 0 1 1 9.5 4a6.5 6.5 0 0 0 10.5 10.5Z" />
-          </svg>
-          <svg v-else viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
-            <circle cx="12" cy="12" r="4" />
-            <path d="M12 2v2M12 20v2M2 12h2M20 12h2M4.9 4.9l1.4 1.4M17.7 17.7l1.4 1.4M19.1 4.9l-1.4 1.4M6.3 17.7l-1.4 1.4" />
+          <svg class="topbar-icon" viewBox="0 0 24 24" width="20" height="20" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+            <defs>
+              <mask id="syncx-theme-auto-knockout" maskUnits="userSpaceOnUse" x="0" y="0" width="24" height="24">
+                <rect width="24" height="24" fill="#fff" />
+                <circle cx="17.8" cy="6.2" r="5.6" fill="#000" />
+              </mask>
+            </defs>
+            <g :mask="themeMode === 'system' ? 'url(#syncx-theme-auto-knockout)' : undefined">
+              <path v-if="themeResolved === 'dark'" d="M20 14.5A8 8 0 1 1 9.5 4a6.5 6.5 0 0 0 10.5 10.5Z" />
+              <template v-else>
+                <circle cx="12" cy="12" r="4" />
+                <path d="M12 2v2M12 20v2M2 12h2M20 12h2M4.9 4.9l1.4 1.4M17.7 17.7l1.4 1.4M19.1 4.9l-1.4 1.4M6.3 17.7l-1.4 1.4" />
+              </template>
+            </g>
+            <g v-if="themeMode === 'system'" stroke-width="1.6">
+              <circle cx="17.8" cy="6.2" r="3.6" />
+              <path d="M17.8 2.6a3.6 3.6 0 0 1 0 7.2Z" fill="currentColor" stroke="none" />
+            </g>
           </svg>
         </template>
       </n-button>
     </n-dropdown>
 
     <!-- 风格(材质语言)切换:与主题正交 —— 这里选「板岩 / 液态玻璃」,深浅仍由主题那组管。
-         图标是一枚菱形切面(玻璃的直观联想) -->
+         图标没有通用语义可借(不像日/月之于主题),所以两管齐下:同一块「面板」按材质变形
+         —— 玻璃档是空框带两道斜高光(透),板岩档是实心带一道浅色纹理(厚);
+         高光**故意画出边框外**再收回来:镜面反光本来就是一整道掠过板面,被框裁住反而读成
+         「框里画了条线」。并把当前档名直接写在按钮上,和「流量」按钮同一套模式,不靠猜。 -->
     <n-dropdown
       trigger="hover"
       placement="bottom-end"
@@ -187,13 +218,18 @@ function runChipRow(row: ChipRow): void {
       :render-label="renderSkinLabel"
       @select="onSkinSelect"
     >
-      <n-button tertiary circle :title="`风格:${SKIN_LABELS[skinMode]}`">
+      <n-button tertiary :title="`界面材质:${SKIN_LABELS[skinMode]} —— 悬停切换 板岩(实心) / 液态玻璃(半透磨砂)`">
         <template #icon>
-          <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
-            <path d="M12 3 21 12 12 21 3 12Z" />
-            <path d="M12 3v18M3 12h18" opacity="0.55" />
+          <svg class="topbar-icon" viewBox="0 0 24 24" width="20" height="20" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+            <rect x="3.5" y="4.5" width="17" height="15" rx="4.5" :fill="skinMode === 'glass' ? 'none' : 'currentColor'" :opacity="skinMode === 'glass' ? 1 : 0.22" />
+            <template v-if="skinMode === 'glass'">
+              <path d="M2.5 16 14 3.5" />
+              <path d="M7 20.5 18.5 8" opacity="0.45" />
+            </template>
+            <path v-else d="M6.5 9.5h11M6.5 14.5h7" opacity="0.9" />
           </svg>
         </template>
+        {{ SKIN_LABELS[skinMode] }}
       </n-button>
     </n-dropdown>
 
