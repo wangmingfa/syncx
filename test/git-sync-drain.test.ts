@@ -356,7 +356,11 @@ describe('git commit notify relayed to the folder\'s other devices', () => {
     internals.flushPendingGitNotify(); // 通知槽已空,纯补投
     expect(folder.gitRelay).toBeNull();
     expect(sent).toHaveLength(2);
-    expect(sent[1]?.msg.commitHash).toBe('a'.repeat(40));
+    // 先钉住 kind 再按收窄取哈希:补投出去的那一笔必须原样是 git 提交通知
+    expect(sent[1]?.msg.kind).toBe('git-commit-notify');
+    const resent = sent[1]?.msg;
+    if (resent?.kind !== 'git-commit-notify') throw new Error('resent message is not a git commit notify');
+    expect(resent.commitHash).toBe('a'.repeat(40));
 
     (manager as unknown as { close(): void }).close();
   });

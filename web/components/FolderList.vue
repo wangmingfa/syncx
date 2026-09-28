@@ -33,6 +33,29 @@ function conflictCountOf(f: FolderInfo): number {
 }
 
 /**
+ * Git 提交同步徽标:三种模式各一条文案,`off`/缺省不显示(多数目录没开,常挂一个
+ * 「已关闭」只是噪音)。
+ *
+ * 措辞逐字对齐「编辑目录」里那个下拉框的选项(仅发送 / 仅接收 / 双向),卡片与弹窗说的
+ * 是同一件事,不用来回翻译。行为描述按 daemon 里的实际闸门写:
+ *  - send  只广播本机提交(见 session-manager 的 `mode === 'receive'` 跳过),不自动提交;
+ *  - receive 只自动提交对端通知,既不广播也不中继(`gitSync !== 'full'` 直接 return);
+ *  - full  两者都做,且把收到的通知一跳一跳转给其他对端。
+ */
+function gitBadgeOf(f: FolderInfo): { label: string; tip: string } | null {
+  switch (f.gitSync) {
+    case 'send':
+      return { label: '仅发送', tip: 'Git 提交同步 · 仅发送:本机提交会广播给对端,但本机不自动提交对端的提交通知,也不中继;目录本身是 git 仓库时才生效' };
+    case 'receive':
+      return { label: '仅接收', tip: 'Git 提交同步 · 仅接收:对端的提交通知落地后本机自动提交,但不广播本机提交、也不中继给其他设备;目录本身是 git 仓库时才生效' };
+    case 'full':
+      return { label: '双向', tip: 'Git 提交同步 · 双向:既广播本机提交、也自动提交对端通知,并把通知一跳一跳中继给其他对端;目录本身是 git 仓库时才生效' };
+    default:
+      return null;
+  }
+}
+
+/**
  * 「目录不可信」→ 重新采集身份的二次确认。文案按 kind 分级:
  * remounted(仅设备号变、inode 未变)大概率是重挂,语气给到"可以放心确认";
  * changed(inode 也变了)可能是换盘/重建,把风险说满,让用户先看内容再决定。
@@ -342,9 +365,26 @@ function visibleFiles(f: FolderInfo): TransferFile[] {
            整行横移,切换时卡片内容左右跳)。多个共用一个容器 → 同时命中时并排而不打架;
            容器 pointer-events:none 让空隙鼠标穿透到下方按钮,单个徽标可命中以显示
            title 说明(「接收」没有专属操作按钮,只能靠徽标自身的 tooltip 解释)。
-           「冲突 N」做成按钮:徽标本身就是收件箱入口,点它直接处理。 -->
-      <div v-if="f.receiveOnly || f.paused || outsideSchedule(f) || conflictCountOf(f) > 0" class="card-floats">
+           「冲突 N」做成按钮:徽标本身就是收件箱入口,点它直接处理。
+           「Git 仅发送/仅接收/双向」同理只靠 title 解释 —— 它没有专属按钮,开关在「编辑目录」里。 -->
+      <div v-if="f.receiveOnly || (f.gitSync && f.gitSync !== 'off') || f.paused || outsideSchedule(f) || conflictCountOf(f) > 0" class="card-floats">
         <span v-if="f.receiveOnly" class="float-badge receive-badge" title="接收模式:只拉不推,本机改动不会同步出去">接收</span>
+        <!-- Git 提交同步:模式文案与编辑弹窗的下拉框逐字一致,方向由文字给出;
+             双向额外铺一层淡底,一眼能从「只做一边」的两条里分出来 -->
+        <span
+          v-if="gitBadgeOf(f)"
+          class="float-badge git-badge"
+          :class="{ 'git-badge--full': f.gitSync === 'full' }"
+          :title="gitBadgeOf(f)!.tip"
+        >
+          <svg viewBox="0 0 24 24" width="10" height="10" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+            <line x1="6" y1="3" x2="6" y2="15" />
+            <circle cx="18" cy="6" r="3" />
+            <circle cx="6" cy="18" r="3" />
+            <path d="M18 9a9 9 0 0 1-9 9" />
+          </svg>
+          {{ gitBadgeOf(f)!.label }}
+        </span>
         <span v-if="f.paused" class="float-badge paused-badge" title="已暂停:不扫描、不广播、不接收;连接与配对照常">已暂停</span>
         <span v-if="outsideSchedule(f)" class="float-badge paused-badge" :title="`同步时段外(${f.schedule}),到点自动恢复;连接与配对照常`">时段外</span>
         <button

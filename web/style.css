@@ -828,6 +828,25 @@ html[data-theme='dark'] .chip-menu__item--danger {
   border-color: rgb(234 162 60 / 0.7);
 }
 
+/* Git 提交同步:绿,承接 `--online` 那一族(都是「已启用」的意思)。
+   三个模式靠文案区分(仅发送 / 仅接收 / 双向,与编辑目录弹窗逐字一致),图标只说明「这是 git」。 */
+.git-badge {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  color: var(--online);
+  /* 描边与下面的淡底都从 var(--online) 推:深色块把该 token 换成更亮的 #46b877,
+     徽标跟着一起提亮,不必像 receive/paused 那样另写一条 dark 覆盖。 */
+  border-color: color-mix(in srgb, var(--online) 55%, transparent);
+}
+
+/* 双向 = 又广播又自动提交还中继,比只做单向的两档更重,铺一层淡底把它分出来。
+   写成 `.float-badge.x` 双类是为了把特异度提到 (0,2,0),压过 .float-badge 的卡片白底
+   而不依赖文件顺序 —— 与 .modal.settings-modal 同一写法。半透明底在玻璃皮肤下能透出卡片,不脏。 */
+.float-badge.git-badge--full {
+  background: color-mix(in srgb, var(--online) 12%, transparent);
+}
+
 /* 目录卡图标按钮的 tooltip 触发包裹:禁用态按钮不派发鼠标事件,由外层 span 承接 hover */
 .icon-btn {
   display: inline-flex;
@@ -1418,12 +1437,41 @@ html[data-theme='dark'] .chip-menu__item--danger {
   width: 100%;
   max-width: 520px;
   max-height: 88vh;
-  overflow-y: auto;
+  /* 定高 flex 列 + 自身不滚:滚动交给正文那一段(见下面 .modal-body)。
+     原先是 overflow-y: auto 让整块滚 —— 内容一长,标题滚出视野、按钮也滚出视野,
+     用户既不记得自己在哪个弹窗,也得先把弹窗滚到底才能点「保存」。 */
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
   background: var(--card);
   border: 1px solid var(--border);
   border-radius: 16px;
   padding: 26px 26px 22px;
   box-shadow: 0 24px 60px -24px rgb(22 32 52 / 0.45);
+}
+
+/* 标题与动作区是「不滚动的那两段」:flex: none 既挡住被压缩,也挡住让位。
+   ⚠️ 别给它们 flex-shrink 的余地 —— 正文撑满时标题先被压扁,比滚动条更难解释。 */
+.modal-title,
+.modal-title-row,
+.modal-actions {
+  flex: none;
+}
+
+/* 唯一的滚动区。min-height: 0 是这条链的关键:flex 子项的默认最小高度是内容高度,
+   不写的话正文会顶穿 .modal 的 max-height,滚动条又跑回整块弹窗上。
+   滚动条内缩在 26px 边距里(边距留在 .modal 上是为了标题/动作区/正文共用同一个内容盒),
+   比把正文撑到圆角边上更贴这块卡片的观感。
+   一个顺带的后果:滚动容器自成 BFC,正文首元素的 margin-top 不再与标题的下边距折叠,
+   两者相加。实测只有「首块自带 18px 顶距」的编辑目录 / 分享弹窗受影响,多出 12px 的
+   段前距 —— 那是分节标签本来就该有的距离,不做 first-child 归零(Vue 的 v-if 会留注释
+   节点占位,`:first-child` 在这些弹窗里根本匹配不上,规则会静默失灵)。 */
+.modal-body {
+  flex: 1 1 auto;
+  min-height: 0;
+  overflow-y: auto;
+  /* 滚到尽头不带动背后的页面:弹窗是独立视口,连锁滚动会让人以为在滚底下那页 */
+  overscroll-behavior: contain;
 }
 
 /* 全局设置弹窗加宽(默认 520 → 620)。写成 `.modal.x` 双类是为了把特异度提到 (0,2,0),
@@ -2952,6 +3000,14 @@ html[data-theme='dark'] .conflict-state-diff {
 .fd-modal--tall {
   height: 94%;
   max-height: none;
+}
+
+/* 对比弹窗的正文里不再是「一段流水内容」,而是要靠 flex 撑满剩余高度的对比区
+   (左右两个窗格各自滚动),所以外壳这层在这里换回纵向 flex。`overflow-y: auto` 保留:
+   极端矮视口下窗格的 220px 下限撑不下时,整块正文还能滚,而不是被裁掉。 */
+.fd-modal .modal-body {
+  display: flex;
+  flex-direction: column;
 }
 
 .fd-legend__role {

@@ -3,19 +3,26 @@ import { useId } from 'vue';
 import ModalCloseButton from './ModalCloseButton.vue';
 
 /**
- * 弹窗外壳 —— 9 个弹窗共用的骨架:遮罩 + 过渡 + dialog + 关闭按钮 + 标题行 + 动作区容器。
+ * 弹窗外壳 —— 全部弹窗共用的骨架(20 处引用):遮罩 + 过渡 + dialog + 关闭按钮 + 标题行
+ * + 正文滚动区 + 动作区容器。
  *
  * 为什么值得抽出来:这几层一直是一模一样的,只有中间的内容不同,于是每个弹窗都自己抄一遍
  * `<Transition name="guide">` + `.modal-overlay` + `role="dialog" aria-modal` + 手写
- * `aria-labelledby` 的 id。任何一层要改(比如「忙碌时不许点遮罩关闭」)都得改 9 遍,
+ * `aria-labelledby` 的 id。任何一层要改(比如「忙碌时不许点遮罩关闭」)都得改 20 遍,
  * 而漏掉的那一个不会报错 —— 只会静静地行为不一致。
+ *
+ * 滚动只发生在**正文**:dialog 是定高 flex 列,标题行与动作区 `flex: none` 不参与压缩,
+ * 默认 slot 被包在 `.modal-body` 里独自滚动。长内容从「整块弹窗跟着滚」变成「只有正文滚」,
+ * 于是滚到哪都看得见自己开的是哪个弹窗、确认按钮在哪 —— 这套分工由外壳统一提供,
+ * 弹窗自己不要再套滚动容器(需要内部窗格的对比弹窗是唯一的例外,见 style.css 的
+ * `.fd-modal .modal-body`)。
  *
  * 四个可配置的位置:
  *  - `title`(prop):标题。`aria-labelledby` 指向它,id 由 `useId()` 生成 —— 原先手写的
  *    `guide-title` / `fd-title` 一类固定 id 每加一个弹窗就要新起一个名字,还得担心撞车。
  *  - `description`(prop):标题**右侧**的说明,通常是目录路径或一句副标题。给了才渲染
  *    `.modal-title-row`;不给就还是裸 `h2`(保留它 4px 的下边距),空的标题行会白占高度。
- *  - 默认 slot:正文。
+ *  - 默认 slot:正文,挂在 `.modal-body` 里滚动。
  *  - `footer` slot:底部动作区。**容器由外壳提供**,这样 `.modal-actions` 那套「按钮按内容
  *    宽度排、整组靠右、窄屏换行」的规则不会因为某个弹窗忘了套而失效(footer 为空时连容器
  *    都不渲染,省掉 18px 的 `margin-top`)。
@@ -88,7 +95,9 @@ const titleId = `modal-title-${useId()}`;
         </div>
         <h2 v-else :id="titleId" class="modal-title">{{ title }}</h2>
 
-        <slot />
+        <div class="modal-body">
+          <slot />
+        </div>
 
         <div v-if="$slots.footer" class="modal-actions">
           <slot name="footer" />
