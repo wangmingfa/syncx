@@ -1526,6 +1526,22 @@ html[data-theme='dark'] .chip-menu__item--danger {
   max-width: 840px;
 }
 
+/* 列表吃掉正文除筛选条/「加载更多」之外的全部高度:**列表自己滚,外壳的 .modal-body
+   不再出第二根滚动条**。原先 `.history-list` 的 `max-height: 60vh` 是按视口算的 ——
+   标题行/导语/筛选条/统计行/动作行加起来,弹窗整体就顶穿了外壳的 88vh,两根滚动条
+   同屏(截图实测)。改成 flex 填充后列表高度=正文剩余高度,只滚内部;正文仍是普通
+   滚动容器(窄屏兜底:内容真放不下时它才滚)。 */
+.modal-wide.history-modal .modal-body {
+  display: flex;
+  flex-direction: column;
+}
+
+.modal-wide.history-modal .history-list {
+  flex: 1 1 auto;
+  min-height: 0;
+  overflow-y: auto;
+}
+
 .history-loading {
   color: var(--muted);
   font-size: 13px;
@@ -1624,8 +1640,9 @@ html[data-theme='dark'] .chip-menu__item--danger {
   display: flex;
   flex-direction: column;
   gap: 2px;
-  max-height: 60vh;
-  overflow-y: auto;
+  /* 滚动收在 `.modal-wide.history-modal .history-list` 那条(随正文剩余高度内滚),
+     这里不自带 max-height —— 按视口算的 60vh 会把弹窗整体顶穿外壳的 88vh,
+     两根滚动条同屏。 */
 }
 
 .history-row {
