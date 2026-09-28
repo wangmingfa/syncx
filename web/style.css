@@ -3882,11 +3882,13 @@ html[data-skin='glass'] body::before {
 }
 
 /* 磨砂名单:凡是整块铺 var(--card) 当「板面」的元素。逐行的小表面(文件对照行、
-   代码视图行、输入底、徽标)不进名单 —— backdrop-filter 按元素各自合成,名单越长越费。 */
+   代码视图行、输入底、徽标)不进名单 —— backdrop-filter 按元素各自合成,名单越长越费。
+   toast 只收**普通胶囊**:`.toast--alert` 是品牌渐变**实色**板(见下面 .toast:not(.toast--alert)
+   那条的说明),给它加磨砂既看不见效果(自身底色不透明),又把它的实色底抢掉。 */
 html[data-skin='glass'] .card,
 html[data-skin='glass'] .item-card,
 html[data-skin='glass'] .modal,
-html[data-skin='glass'] .toast,
+html[data-skin='glass'] .toast:not(.toast--alert),
 html[data-skin='glass'] .device-chip,
 html[data-skin='glass'] .stat-pill-item,
 html[data-skin='glass'] .add-form,
@@ -3902,7 +3904,7 @@ html[data-skin='glass'] .pairqr-addr-item {
    它原本写死的深投影比 --shadow 重,不能顺手换掉) */
 html[data-skin='glass'] .card,
 html[data-skin='glass'] .item-card,
-html[data-skin='glass'] .toast,
+html[data-skin='glass'] .toast:not(.toast--alert),
 html[data-skin='glass'] .device-chip,
 html[data-skin='glass'] .stat-pill-item {
   box-shadow: var(--shadow), var(--glass-edge);
@@ -3915,8 +3917,12 @@ html[data-skin='glass'] .modal {
 
 /* 吐司同理浮在整页之上,底色走抬起面;弹窗内的「内嵌子面」反过来要收掉
    自带的那层半透明白 —— .empty 的 rgb(255 255 255 / .5) 是纸面皮肤时代的写死值,
-   压在抬起面上会再叠一层雾,深色档下更会变成一块白板浮在暗弹窗里 */
-html[data-skin='glass'] .toast {
+   压在抬起面上会再叠一层雾,深色档下更会变成一块白板浮在暗弹窗里。
+   ⚠️ 这条**必须**排除 `.toast--alert`:那颗是「品牌渐变实色 + 白字」的高对比通知,
+   玻璃档若把它的 background 一起换掉,`color: #fff` 还留在身上 —— 浅玻璃档就成了
+   「白雾底 + 白字」,文字整条看不见(实测上传升级那颗就是这样哑掉的)。排除后它连
+   自带的深投影一起保住(上面两条名单同样排掉了它)。 */
+html[data-skin='glass'] .toast:not(.toast--alert) {
   background: var(--glass-raised);
 }
 
@@ -3947,7 +3953,7 @@ html[data-skin='glass'] body .n-dropdown-menu {
    大卡片垫在静态极光底上,位移无从显形,平白让每个 .card 背一次 SVG 滤镜的
    合成开销,不值。 */
 html[data-skin='glass'][data-glass-lens='on'] .modal,
-html[data-skin='glass'][data-glass-lens='on'] .toast,
+html[data-skin='glass'][data-glass-lens='on'] .toast:not(.toast--alert),
 html[data-skin='glass'][data-glass-lens='on'] .device-chip,
 html[data-skin='glass'][data-glass-lens='on'] .stat-pill-item,
 html[data-skin='glass'][data-glass-lens='on'] body .n-popover,

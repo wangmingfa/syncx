@@ -118,7 +118,8 @@ describe('skin:板岩 / 液态玻璃两档皮肤', () => {
     }
     const raised = ruleBlock(`${GLASS_LIGHT} .modal`);
     expect(raised).toContain('background: var(--glass-raised)');
-    expect(ruleBlock(`${GLASS_LIGHT} .toast`)).toContain('background: var(--glass-raised)');
+    // 吐司只收**普通胶囊**:alert 那颗是实色渐变板,吃抬起面会把白字丢在白雾上(见下一条用例)
+    expect(ruleBlock(`${GLASS_LIGHT} .toast:not(.toast--alert)`)).toContain('background: var(--glass-raised)');
     // .empty 的底色是纸面时代写死的半透明白,玻璃档必须收掉(深色档它本是块白板)
     expect(ruleBlock(`${GLASS_LIGHT} .empty`)).toContain('background: transparent');
 
@@ -152,6 +153,28 @@ describe('skin:板岩 / 液态玻璃两档皮肤', () => {
     expect(contrast(colorOf(light, '--muted').c, lightSurface)).toBeGreaterThanOrEqual(4.5);
     const darkSurface = surfaceUnder(dark, ruleBlock(`${GLASS_DARK} .modal-overlay`), colorOf(dark, '--bg').c);
     expect(contrast(colorOf(dark, '--muted').c, darkSurface)).toBeGreaterThanOrEqual(4.5);
+  });
+
+  it('高对比 alert 吐司不吃抬起面:白字必须有实色底托着', () => {
+    // `.toast--alert` 是「品牌渐变实色 + 白字」的重要通知(配对/升级)。抬起面
+    // --glass-raised 是 rgb(255 255 255 / .86) 的白雾:玻璃段只要有一条 .toast 规则没排除
+    // 它,那颗就被刷成白雾底 + 白字,整条文字看不见(实测:上传安装包升级的提示就是这么哑的)。
+    // 所以规则是「玻璃段里凡命中 .toast 的选择器,必须一律排除 .toast--alert」。
+    const glass = css.slice(css.indexOf(GLASS_LIGHT)).replace(/\/\*[\s\S]*?\*\//g, '');
+    const toastSelectors: string[] = [];
+    for (const block of glass.matchAll(/([^{}]+)\{[^{}]*\}/g)) {
+      for (const sel of block[1]!.split(',')) {
+        // `\.toast(?![\w-])` 只认真正的 .toast 类,不认 :not() 里那个 .toast--alert
+        if (/\.toast(?![\w-])/.test(sel)) toastSelectors.push(sel.trim());
+      }
+    }
+    // 磨砂名单 / 切面高光名单 / 抬起面底色 / 折射名单 —— 四处都点名了 .toast
+    expect(toastSelectors).toHaveLength(4);
+    for (const sel of toastSelectors) expect(sel).toMatch(/:not\(\.toast--alert\)\s*$/);
+    // alert 自己的两条真相还在:实色渐变底 + 白字
+    const alert = ruleBlock('.toast--alert')!;
+    expect(alert).toContain('linear-gradient');
+    expect(alert).toContain('color: #fff');
   });
 
   it('Tooltip 玻璃态:深色磨砂气泡 + 浅色字,用 !important 压过内联注入的半透明底', () => {
