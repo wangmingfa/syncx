@@ -19,7 +19,7 @@ import { randomBytes } from 'node:crypto';
 import type { Logger } from 'pino';
 import { WebSocket } from 'ws';
 
-import { loadConfig, mutateConfig, folderIdFor, folderIndexKey, folderIndexPath, folderTrashPath, folderVersionsPath, purgeFolderIndex, isWithinSchedule, isUnderDirPrefix, type FolderIdentity, type SharedFolderConfig, type GitSyncMode, type ConflictPolicy } from './config.js';
+import { loadConfig, mutateConfig, folderIdFor, folderIndexKey, folderIndexPath, folderTrashPath, folderVersionsPath, purgeFolderIndex, isWithinSchedule, isUnderDirPrefix, type FolderIdentity, type GitCommitRelayRecord, type SharedFolderConfig, type GitSyncMode, type ConflictPolicy } from './config.js';
 import { acceptedDevs, checkFolderIdentity, readFolderIdentity, withAcceptedDev } from './folder-identity.js';
 import { openIndexStore, type IndexStore } from './indexstore.js';
 import { createLocalExecutor, resolveSharePath, type LocalExecutor } from './executor.js';
@@ -58,7 +58,7 @@ import { learnPeerUrl, learnPeerIp, getLanAddresses } from './net/addresses.js';
 import { e2eKeyForPeer, wrapTransportBlind } from './e2e.js';
 import { hostname as osHostname } from 'node:os';
 import { RateLimiter } from './ratelimit.js';
-import { isPeerAllowed, addPeer, setFolderPaused, setGlobalPaused, setFolderSchedule as persistFolderSchedule, setFolderGitSync as persistFolderGitSync, setFolderConflictPolicy as persistFolderConflictPolicy, setFolderOnDemand as persistFolderOnDemand, setFolderOnDemandDir as persistFolderOnDemandDir, setFolderPausedFile as persistFolderPausedFile, setFolderE2E as persistFolderE2E, setFolderGitLastCommitHash, setGlobalSettings as persistGlobalSettings, type GlobalSettingsPatch, type FolderE2EPatch } from './devices.js';
+import { isPeerAllowed, addPeer, setFolderPaused, setGlobalPaused, setFolderSchedule as persistFolderSchedule, setFolderGitSync as persistFolderGitSync, setFolderConflictPolicy as persistFolderConflictPolicy, setFolderOnDemand as persistFolderOnDemand, setFolderOnDemandDir as persistFolderOnDemandDir, setFolderPausedFile as persistFolderPausedFile, setFolderE2E as persistFolderE2E, setFolderGitLastCommitHash, setFolderGitRelayPending, setGlobalSettings as persistGlobalSettings, type GlobalSettingsPatch, type FolderE2EPatch } from './devices.js';
 import { receiveOffer, makeOfferId, pruneRevokedOffers } from './offers.js';
 import { OfferRetryLedger, type TrackedOffer } from './net/offer-retry.js';
 import type { DeviceIdentity } from './identity.js';
@@ -66,7 +66,42 @@ import type { ProgressCounts, RelayActivity, TransferFile } from './status.js';
 import { isBundledRuntime, packSelfTgz, runSelfUpdate, runtimeVersion, sha256Hex } from './selfupdate.js';
 import { compareVersions } from './upgrade.js';
 import { reconnectDelayMs } from './args.js';
-import { isGitRepo, getLastCommitHash, getCommitInfo, autoCommit, type CommitInfo } from './git-monitor.js';
+import { isGitRepo, getLastCommitHash, getCommitInfo, hasUncommittedChanges, autoCommit, type CommitInfo } from './git-monitor.js';
+
+/** 对端 git 提交通知的消息形状(入队、结算、中继共用一份)。 */
+type GitCommitNotifyMsg = Extract<ControlMessage, { kind: 'git-commit-notify' }>;
+
+/** 尚未投完的 git 提交通知中继:原始通知 + 仍未送达的目标设备。 */
+interface GitCommitRelay {
+  msg: GitCommitNotifyMsg;
+  targets: string[];
+}
+
+/**
+ * 从配置里的待中继记录还原台账(daemon 重启后接着补投)。来源缺失、字段不全或
+ * 名单已空都视为无 —— 宁可不投,也不凭一份残缺记录往外发通知(配置可被手改)。
+ */
+function readGitRelay(folderId: string, f: SharedFolderConfig): GitCommitRelay | null {
+  const r = f.gitRelayPending;
+  if (!r || typeof r.fromDeviceId !== 'string' || !r.fromDeviceId) return null;
+  if (typeof r.commitHash !== 'string' || !r.commitHash) return null;
+  if (typeof r.commitMessage !== 'string') return null;
+  const targets = Array.isArray(r.targets) ? r.targets.filter((d) => typeof d === 'string' && d) : [];
+  if (targets.length === 0) return null;
+  return {
+    targets,
+    msg: {
+      kind: 'git-commit-notify',
+      fromDeviceId: r.fromDeviceId,
+      folderId,
+      commitHash: r.commitHash,
+      commitMessage: r.commitMessage,
+      changedFiles: Array.isArray(r.changedFiles) ? r.changedFiles : [],
+      ...(typeof r.diffStat === 'string' ? { diffStat: r.diffStat } : {}),
+      parentHash: typeof r.parentHash === 'string' ? r.parentHash : '',
+    },
+  };
+}
 
 /** 一个共享目录的运行期状态:索引、执行器与本地索引,随配置热重载增删。 */
 export interface FolderState {
@@ -113,7 +148,7 @@ export interface FolderState {
   lastCommitHash: string | null;
   /**
    * Git 提交同步:已处理过的远端提交哈希集合(去重用)。
-   * 对端发来的 commitHash 若已在此集合中,跳过自动提交,避免同一通知被多次执行。
+   * 对端发来的 commitHash 若已在此集合中,跳过(入队时登记,通知重达不排两次)。
    * 集合大小有上限(见 onGitCommitNotify),超出后淘汰最早的一半,防止无限膨胀。
    */
   processedRemoteCommits: Set<string>;
@@ -122,6 +157,24 @@ export interface FolderState {
    * 只用来抑制「每轮扫描都打一遍」的重复日志,不参与判定。
    */
   gitBroadcastPending: boolean;
+  /**
+   * Git 提交同步:对端提交通知的待结算队列。通知由**控制面**送达、可能早于文件
+   * 内容经数据面落盘,收到不立即提交(半成品提交会永久定格),由结算步骤等接收
+   * 台账排空后执行。新通知覆盖旧通知:提交信息取最新一笔,积压内容一次
+   * git add -A 全量扫进(与逐笔通知的净效果一致 —— 本设计不搬运 git 历史)。
+   */
+  pendingGitNotify: { msg: GitCommitNotifyMsg } | null;
+  /** 挂起等待在途接收期间已打过一条 deferred 日志;抑制每轮扫描重复刷屏,仅日志用。 */
+  gitDrainWarned: boolean;
+  /**
+   * Git 提交同步:本机镜像提交完成后向其余对端**中继**原始通知,链式拓扑
+   * (A—B—C,C 只与 B 配对)的末端因此也能把收到的内容落成提交。
+   * 只存尚未送达者(对端离线/握手未完),下一轮扫描补投,全送达即清空。
+   * 单笔槽位:下一笔结算的中继会覆盖它 —— 与 pendingGitNotify 同一套取舍,
+   * 接收方是 `git add -A` 全量扫,漏投的旧一笔会被下一笔一起带走。
+   * 与配置里的 `gitRelayPending` 同值落盘(daemon 重启后这一跳仍能补投,不因重启丢失)。
+   */
+  gitRelay: GitCommitRelay | null;
   /**
    * 磁盘守卫当前是否拦着入向接收(checkFolderDiskSpace 判不足时置位)。
    * 解除由守卫复检/扫描心跳完成:空间恢复 → 清目录错误 → 重放各 peer 的积压索引。
@@ -624,7 +677,7 @@ export class SyncSessionManager {
     // 索引为空 → 首扫是建基线(存量文件不算新增);索引有存量 → 首扫 diff 是
     // daemon 离线期间的真实改动,要写同步记录
     const baselinePending = usable.length === 0;
-    return { id, indexKey, path: f.path, index, executor, localIndex, ignoreLines, transports: [], peers: new Map(), transportDevice: new Map(), receiveLedger: new Map(), config: f, baselinePending, conflictCount: 0, lastCommitHash: f.gitLastCommitHash ?? null, processedRemoteCommits: new Set(), gitBroadcastPending: false, diskBlocked: false };
+    return { id, indexKey, path: f.path, index, executor, localIndex, ignoreLines, transports: [], peers: new Map(), transportDevice: new Map(), receiveLedger: new Map(), config: f, baselinePending, conflictCount: 0, lastCommitHash: f.gitLastCommitHash ?? null, processedRemoteCommits: new Set(), gitBroadcastPending: false, pendingGitNotify: null, gitDrainWarned: false, gitRelay: readGitRelay(id, f), diskBlocked: false };
   }
 
   /**
@@ -981,6 +1034,10 @@ export class SyncSessionManager {
    * 在每轮扫描末尾调用,复用 5 秒定时间隔,不额外起定时器。
    */
   private async checkGitCommits(): Promise<void> {
+    // 先结算挂起的对端提交通知(见 pendingGitNotify),再检测本地新提交:
+    // 结算里的自动提交会把基线同步推到新 HEAD,下面的比对因此不会把
+    // 镜像提交误判成本地新提交而回弹给对端(死循环防护不变)。
+    this.flushPendingGitNotify();
     for (const folder of this.folderStates) {
       if (this.folderPausedNow(folder)) continue;
       const mode = folder.config.gitSync;
@@ -1026,6 +1083,158 @@ export class SyncSessionManager {
     }
   }
 
+  /**
+   * 结算挂起的对端提交通知(每轮扫描末尾,先于新提交检测)。
+   *
+   * 通知从**控制面**来,文件内容却走数据面、要等块拉齐 —— 立刻 `git add -A`
+   * 会把半套文件定格成一笔提交,且基线已推进,永远不会再有第二笔通知来纠正。
+   * 所以等接收台账排空再提交:排空判据用 receiveLedger 而非 peer 的 pending 表,
+   * 前者在连接拆除时主动释放、有保鲜期自愈,后者在「对端消失但未断连」时可能
+   * 永久滞留,拿它当判据会把结算无限期挂起。在途与否看**认领的新鲜度**:接收侧
+   * 每收一块就刷新认领时刻,健康传输(哪怕慢链路上要跑十分钟)永不被打断;
+   * 只有 60 秒收不到任何块的死认领才放行,照旧提交并告警 —— 保留活性优先于
+   * 等待一个可能永不到来的终局。
+   *
+   * 工作树干净(内容早已落地并随上一笔结算提交过,或对端提交无净变更)时跳过
+   * 提交,但仍把基线推到当前 HEAD:不提交就没有新哈希,基线不推进下一轮又会被
+   * 「新提交检测」当成有一笔要广播的提交,白耗一次重试。
+   *
+   * 真正落成一笔镜像提交后要把这条通知**中继**给本机其余对端(见 relayGitCommitNotify),
+   * 链式拓扑 A—B—C 的末端因此也能提交;开头先补投上一轮未送达的中继。
+   */
+  private flushPendingGitNotify(): void {
+    const CLAIM_IDLE_MAX_MS = 60_000;
+    this.retryGitCommitRelays();
+    for (const folder of this.folderStates) {
+      const pending = folder.pendingGitNotify;
+      if (!pending) continue;
+      const mode = folder.config.gitSync;
+      if (!mode || mode === 'off' || mode === 'send') {
+        folder.pendingGitNotify = null;
+        continue;
+      }
+      if (this.folderPausedNow(folder)) continue;
+      // 只认「还活着」的在途接收:本管线自己的陈旧认领(块重试耗尽的滞留)不算,
+      // 它已由保鲜期判死,继续等只会把结算挂死(见 peer.ts 的认领保鲜期)
+      const now = Date.now();
+      const inFlight = [...folder.receiveLedger.values()].filter(
+        (c) => now - c.ts < CLAIM_IDLE_MAX_MS,
+      ).length;
+      if (inFlight > 0) {
+        if (!folder.gitDrainWarned) {
+          folder.gitDrainWarned = true;
+          this.logger.info(
+            `git auto-commit deferred: ${folder.id} (waiting for ${inFlight} in-flight receive(s), idle cap ${CLAIM_IDLE_MAX_MS / 1000}s)`,
+          );
+        }
+        continue;
+      }
+      folder.pendingGitNotify = null;
+      folder.gitDrainWarned = false;
+      const stalled = folder.receiveLedger.size;
+      if (stalled > 0) {
+        this.logger.warn(
+          `git auto-commit flushing with ${stalled} stale claim(s) in the ledger: ${folder.id} (partial content may be committed)`,
+        );
+      }
+      const { msg } = pending;
+      if (!hasUncommittedChanges(folder.path)) {
+        this.logger.info(
+          `git auto-commit skipped (nothing to commit): ${folder.id} (from ${msg.fromDeviceId}) "${msg.commitMessage.split('\n')[0]}"`,
+        );
+        this.setGitBaseline(folder, getLastCommitHash(folder.path));
+        continue;
+      }
+      const filesDesc = msg.changedFiles.length
+        ? `${msg.changedFiles.length} 个文件: ${msg.changedFiles.slice(0, 10).join(', ')}${msg.changedFiles.length > 10 ? ' …' : ''}`
+        : '无文件变更';
+      this.logger.info(
+        `auto-committing: ${folder.id} (from ${msg.fromDeviceId}) "${msg.commitMessage.split('\n')[0]}" — ${filesDesc}`,
+      );
+      const result = autoCommit(folder.path, msg.commitMessage);
+      if (result.success) {
+        this.logger.info(`auto-commit success: ${folder.id} -> ${result.hash?.slice(0, 8)}`);
+        // 更新基线并落盘:防止扫描循环把这个自动提交误判为「新提交」再广播回去(死循环防护)
+        this.setGitBaseline(folder, result.hash ?? getLastCommitHash(folder.path));
+        // 同时把本机产生的新哈希也加入去重集合
+        if (folder.lastCommitHash) {
+          folder.processedRemoteCommits.add(folder.lastCommitHash);
+        }
+        this.relayGitCommitNotify(folder, msg);
+      } else {
+        this.logger.warn(`auto-commit failed: ${folder.id}: ${result.error}`);
+        this.recordFolderError(folder.id, new Error(`Git auto-commit failed: ${result.error}`), 'Git 自动提交失败');
+      }
+    }
+  }
+
+  /**
+   * 把一笔远端提交通知**原样**中继给本机该目录的其余对端(不含通知来源)。
+   *
+   * 只在镜像提交真的成功之后调用,这正是链路不会成环的原因:一笔提交每经一台
+   * 真正落了提交的设备才多走一跳;回到提交者自己(或任何内容已齐的设备)时,
+   * 工作树必然干净 → 走 skip 分支不再提交,也就不会再转发。此外接收方按
+   * commitHash 在入队前就去重,所以 mesh 拓扑下直连的两条路径只会各落一笔提交、
+   * 第二份通知在门口即被丢弃。
+   *
+   * 不改写消息任何字段:fromDeviceId 仍是最初那台提交设备,commitHash 仍是它的哈希,
+   * 中继设备自己的镜像哈希从头到尾不出门。
+   */
+  private relayGitCommitNotify(folder: FolderState, msg: GitCommitNotifyMsg): void {
+    // 'receive' 只进不出:这种模式的设备不向对端发任何 git 提交消息,中继也不破例
+    if (folder.config.gitSync !== 'full') return;
+    const targets = (folder.config.devices ?? []).filter((d) => d !== msg.fromDeviceId);
+    const left = this.deliverGitRelay(msg, targets);
+    const reached = targets.filter((d) => !left.includes(d));
+    // 单笔槽位:没投出去的换成这一笔的未送达者,投完(或压根没人可投)则清空
+    this.setGitRelay(folder, left.length ? { msg, targets: left } : null);
+    if (reached.length) {
+      this.logger.info(`git commit relayed: ${folder.id} ${msg.commitHash.slice(0, 8)} -> ${reached.join(', ')}`);
+    }
+    if (left.length) {
+      this.logger.info(
+        `git commit relay deferred: ${folder.id} ${msg.commitHash.slice(0, 8)} (offline: ${left.join(', ')}, retry next scan)`,
+      );
+    }
+  }
+
+  /** 逐个投递中继目标,返回仍未送达者(无会话或 socket 写失败都算未送达)。 */
+  private deliverGitRelay(msg: GitCommitNotifyMsg, targets: string[]): string[] {
+    return targets.filter((deviceId) => !this.sendControlTo(deviceId, msg));
+  }
+
+  /**
+   * 补投上一轮没送出去的中继(对端当时离线或握手尚未完成),含 daemon 重启前
+   * 留在配置里的那笔 —— 台账落盘就是为了让这一跳不因重启永久丢失。
+   */
+  private retryGitCommitRelays(): void {
+    for (const folder of this.folderStates) {
+      const relay = folder.gitRelay;
+      if (!relay) continue;
+      const shared = folder.config.devices ?? [];
+      const live = relay.targets.filter((d) => d !== relay.msg.fromDeviceId && shared.includes(d));
+      if (folder.config.gitSync !== 'full' || live.length === 0) {
+        // 模式被改成 receive/off,或这些目标已不再共享该目录:台账作废,绝不越权外发
+        this.setGitRelay(folder, null);
+        this.logger.info(
+          `git commit relay dropped: ${folder.id} ${relay.msg.commitHash.slice(0, 8)} (${
+            folder.config.gitSync !== 'full' ? 'gitSync no longer full' : 'no shared target left'
+          })`,
+        );
+        continue;
+      }
+      if (this.folderPausedNow(folder)) continue;
+      const left = this.deliverGitRelay(relay.msg, live);
+      if (left.length === live.length) continue; // 一台都没够到:静等下一轮,不刷屏
+      this.setGitRelay(folder, left.length ? { msg: relay.msg, targets: left } : null);
+      this.logger.info(
+        `git commit relay resent: ${folder.id} ${relay.msg.commitHash.slice(0, 8)} (${
+          left.length ? `still pending: ${left.join(', ')}` : live.join(', ')
+        })`,
+      );
+    }
+  }
+
   /** 更新基线哈希并落盘(内存与磁盘始终同值,热重载读回的必然是最新基线)。 */
   private setGitBaseline(folder: FolderState, hash: string | null): void {
     if (folder.lastCommitHash === hash) return;
@@ -1040,6 +1249,28 @@ export class SyncSessionManager {
     } else {
       setFolderGitLastCommitHash(this.configPath, folder.id, hash);
     }
+  }
+
+  /**
+   * 更新中继台账并落盘(内存与配置同值):daemon 重启后 readGitRelay 读回这份记录,
+   * 这一跳就不会因为「B 在投给 C 之前重启」而永久丢失。
+   */
+  private setGitRelay(folder: FolderState, next: GitCommitRelay | null): void {
+    folder.gitRelay = next;
+    if (!next) {
+      setFolderGitRelayPending(this.configPath, folder.id, undefined);
+      return;
+    }
+    const { msg } = next;
+    setFolderGitRelayPending(this.configPath, folder.id, {
+      fromDeviceId: msg.fromDeviceId,
+      commitHash: msg.commitHash,
+      commitMessage: msg.commitMessage,
+      changedFiles: msg.changedFiles,
+      ...(msg.diffStat !== undefined ? { diffStat: msg.diffStat } : {}),
+      parentHash: msg.parentHash,
+      targets: next.targets,
+    });
   }
 
   /**
@@ -1073,9 +1304,15 @@ export class SyncSessionManager {
     return reached;
   }
 
-  /** 处理对端发来的 git 提交通知:在本地目录执行自动提交 */
+  /**
+   * 处理对端发来的 git 提交通知:**只入队,不立即提交**。
+   * 通知来自控制面,而本次提交的内容还要经数据面把块拉齐才落盘 —— 立刻
+   * git add -A 定格的是半套文件,且基线一推进就永远不会再有通知来纠正。
+   * 实际提交由 flushPendingGitNotify 在扫描末尾等接收台账排空后执行,
+   * 提交成功后这条通知还会被中继给本机该目录的其余对端(见 relayGitCommitNotify)。
+   */
   private onGitCommitNotify(msg: Extract<ControlMessage, { kind: 'git-commit-notify' }>): void {
-    const { fromDeviceId, folderId, commitHash, commitMessage } = msg;
+    const { fromDeviceId, folderId, commitHash } = msg;
 
     const folder = this.folderStates.find((f) => f.id === folderId);
     if (!folder) return;
@@ -1084,7 +1321,8 @@ export class SyncSessionManager {
     const mode = folder.config.gitSync;
     if (!mode || mode === 'off' || mode === 'send') return;
 
-    // 去重:已处理过的提交跳过
+    // 去重:已处理过的提交跳过。在入队时登记 —— 结算前同一通知重达(重连补发)
+    // 不应排队两次
     if (folder.processedRemoteCommits.has(commitHash)) return;
     folder.processedRemoteCommits.add(commitHash);
 
@@ -1099,26 +1337,10 @@ export class SyncSessionManager {
       return;
     }
 
-    const filesDesc = msg.changedFiles.length
-      ? `${msg.changedFiles.length} 个文件: ${msg.changedFiles.slice(0, 10).join(', ')}${msg.changedFiles.length > 10 ? ' …' : ''}`
-      : '无文件变更';
+    folder.pendingGitNotify = { msg };
     this.logger.info(
-      `auto-committing: ${folderId} (from ${fromDeviceId}) "${commitMessage.split('\n')[0]}" — ${filesDesc}`,
+      `git-commit-notify queued: ${folderId} (from ${fromDeviceId}) "${msg.commitMessage.split('\n')[0]}"`,
     );
-
-    const result = autoCommit(folder.path, commitMessage);
-    if (result.success) {
-      this.logger.info(`auto-commit success: ${folderId} -> ${result.hash?.slice(0, 8)}`);
-      // 更新基线并落盘:防止扫描循环把这个自动提交误判为「新提交」再广播回去(死循环防护)
-      this.setGitBaseline(folder, result.hash ?? getLastCommitHash(folder.path));
-      // 同时把本机产生的新哈希也加入去重集合
-      if (folder.lastCommitHash) {
-        folder.processedRemoteCommits.add(folder.lastCommitHash);
-      }
-    } else {
-      this.logger.warn(`auto-commit failed: ${folderId}: ${result.error}`);
-      this.recordFolderError(folderId, new Error(`Git auto-commit failed: ${result.error}`), 'Git 自动提交失败');
-    }
   }
 
   /* ==================== 连接与会话 ==================== */
@@ -2167,6 +2389,9 @@ export class SyncSessionManager {
     content?: string;
   }): Promise<void> {
     const { folderId, deviceId, path, direction, content } = opts;
+    // 手动覆盖是**同步跑完整个文件**的(取对端 → 落盘),所以起止都在这个函数里,
+    // 耗时真实可测 —— 与扫描出来的 local 事件不同,那些记录时字节还没开始动。
+    const t0 = Date.now();
     const folder = this.folderStates.find((f) => f.id === folderId);
     if (!folder) throw new Error('共享目录不存在(可能刚被移除)');
     if (!(folder.config.devices ?? []).includes(deviceId)) {
@@ -2197,6 +2422,7 @@ export class SyncSessionManager {
       this.writeLocalFile(folder, path, target, version);
       recordSyncEvent(this.configPath, {
         ts: Date.now(), path, action: 'update', direction: 'remote', deviceId, folderId,
+        durationMs: Date.now() - t0,
       });
     } else {
       const target = content !== undefined ? Buffer.from(content, 'utf8') : localBytes;
@@ -2213,6 +2439,7 @@ export class SyncSessionManager {
       }
       recordSyncEvent(this.configPath, {
         ts: Date.now(), path, action: 'update', direction: 'local', deviceId, folderId,
+        durationMs: Date.now() - t0,
       });
     }
     this.notifyStatus();
@@ -2716,7 +2943,12 @@ export class SyncSessionManager {
   setFolderGitSync(folderId: string, mode: GitSyncMode): void {
     persistFolderGitSync(this.configPath, folderId, mode);
     const folder = this.folderStates.find((f) => f.id === folderId);
-    if (folder) folder.config.gitSync = mode === 'off' ? undefined : mode;
+    if (folder) {
+      folder.config.gitSync = mode === 'off' ? undefined : mode;
+      // 落盘函数已清空磁盘上的待中继台账;内存这份必须跟着清,否则下一轮补投会把
+      // 用户刚取消的那一笔重新写回配置 —— 「改模式按重新启用处理」的承诺就此失效。
+      folder.gitRelay = null;
+    }
     this.logger.info(`git sync mode updated: ${folderId} -> ${mode}`);
     this.notifyStatus();
   }
@@ -3120,6 +3352,9 @@ export class SyncSessionManager {
           const prevReceiveOnly = existing.config.receiveOnly ?? false;
           const nextReceiveOnly = f.receiveOnly ?? false;
           existing.config = f;
+          // 中继台账以磁盘为准:内存里那份只由 setGitRelay 写入、两处必然同值,此刻有出入
+          // 只可能是手改配置或改模式清空所致,故只跟随、不回写。
+          existing.gitRelay = readGitRelay(id, f);
           if (prevReceiveOnly !== nextReceiveOnly) {
             for (const session of this.activeSessions) {
               if (session.peers.has(id)) this.detachFolderFromSession(session, existing);

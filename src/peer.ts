@@ -46,6 +46,8 @@ export interface SyncEventInput {
   action: 'add' | 'update' | 'delete' | 'conflict';
   direction: 'local' | 'remote';
   deviceId?: string;
+  /** 本次传输耗时(毫秒)。语义与缺省规则见 history.ts 的 SyncEvent.durationMs。 */
+  durationMs?: number;
 }
 
 /**
@@ -226,6 +228,11 @@ interface PendingEntry {
    * 执行器与校验完全不用感知两种布局(见 completeIfReady)。
    */
   cdc: boolean;
+  /**
+   * 待接收的**规划时刻**(openPending 那一刻)。收齐落地时用它算 durationMs 写进同步记录。
+   * 语义是「本机决定要收这个版本」→「文件落地完成」,含排队与逐块传输,不含对端生成内容。
+   */
+  startedAt: number;
 }
 
 /** 单个块请求的超时与重试状态。 */
@@ -512,6 +519,7 @@ export function createSyncPeer(deps: SyncPeerDeps): SyncPeer {
       blocks: new Array<Buffer | undefined>(cdc ? remoteEntry.cdh!.length : remoteEntry.blocks.length),
       received: 0,
       cdc,
+      startedAt: Date.now(),
     });
   }
 
@@ -625,7 +633,14 @@ export function createSyncPeer(deps: SyncPeerDeps): SyncPeer {
         if (landed) {
           localIndex.set(path, landed);
         }
-        onEvent?.({ ts: Date.now(), path, action: 'conflict', direction: 'remote', deviceId: remoteDeviceId });
+        onEvent?.({
+          ts: Date.now(),
+          path,
+          action: 'conflict',
+          direction: 'remote',
+          deviceId: remoteDeviceId,
+          durationMs: Date.now() - item.startedAt,
+        });
       } else {
         const isNew = !localIndex.has(path);
         // 冷启动保护:本机磁盘已有同名文件、但本机索引尚未记录(对端“热”且先于本机
@@ -650,6 +665,7 @@ export function createSyncPeer(deps: SyncPeerDeps): SyncPeer {
           action: preserved ? 'conflict' : isNew ? 'add' : 'update',
           direction: 'remote',
           deviceId: remoteDeviceId,
+          durationMs: Date.now() - item.startedAt,
         });
       }
     } finally {
@@ -1074,6 +1090,12 @@ export function createSyncPeer(deps: SyncPeerDeps): SyncPeer {
       item.received += 1;
       // 块真的收下了(重复响应在上面已被挡掉):记一笔接收字节,供瞬时速率统计
       recordBytes(0, response.data.length);
+      // 块在到达 = 这条认领还活着:保鲜期随进度滚动。上层拿「认领新鲜度」当
+      // 接收在途的判据(git 提交通知的延迟结算),不能让慢链路上传了几十分钟
+      // 的健康认领因规划时刻过期而误判为停摆。
+      if (receiveLedger?.get(response.path)?.claimId === claimId) {
+        receiveLedger.get(response.path)!.ts = Date.now();
+      }
 
       // 块已收到,清除对应的超时重试
       const bKey = blockKey(response.path, response.blockIndex, item.cdc);

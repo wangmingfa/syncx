@@ -45,9 +45,16 @@ function fakeFetch(
   };
 }
 
-/** 等微任务/真实 Promise 链全部落地(notify 是火后忘,得让串行队列跑完)。 */
-async function drain(): Promise<void> {
-  for (let i = 0; i < 10; i += 1) await new Promise((r) => setTimeout(r, 5));
+/**
+ * 等微任务/真实 Promise 链全部落地(notify 是火后忘,得让串行队列跑完)。
+ * 缺省等 50ms;传 `until` 时轮询到事件真的落地为止(上限 2s)——投递路径上
+ * 带人为延时的用例不能靠固定时长赌胜负,否则慢端点的 60ms 就赢过等待。
+ */
+async function drain(until?: () => boolean): Promise<void> {
+  const deadline = Date.now() + (until ? 2_000 : 50);
+  do {
+    await new Promise((r) => setTimeout(r, 5));
+  } while (until !== undefined && !until() && Date.now() < deadline);
 }
 
 function bodyOf(s: Sent): Record<string, unknown> {
@@ -166,7 +173,7 @@ describe('webhook delivery', () => {
     n.notify({ kind: 'completed', ts: 1 });
     n.notify({ kind: 'completed', ts: 2 });
     n.notify({ kind: 'conflict', ts: 3 });
-    await drain();
+    await drain(() => f.sent.length === 3);
     expect(f.sent).toHaveLength(3);
     expect(logs).toContain('webhook completed failed: Webhook 返回 500');
     expect(logs).toContain('webhook completed failed: ECONNREFUSED');
@@ -189,7 +196,7 @@ describe('webhook delivery', () => {
     // notify 是同步火后忘:两个事件几乎同时入队,慢端点下仍须按入队顺序投递
     n.notify({ kind: 'completed', ts: 1 });
     n.notify({ kind: 'conflict', ts: 2 });
-    await drain();
+    await drain(() => order.length === 2);
     expect(order).toEqual(['completed', 'conflict']);
     rmDir(dirname(file));
   });
@@ -199,10 +206,10 @@ describe('webhook delivery', () => {
     const f = fakeFetch();
     const n = createWebhookNotifier({ configPath: file, fetchImpl: f.fetchImpl });
     n.notify({ kind: 'completed', ts: 1 });
-    await drain();
+    await drain(() => f.sent.length === 1);
     setGlobalSettings(file, { webhookUrl: 'https://new.example.com/h' });
     n.notify({ kind: 'completed', ts: 2 });
-    await drain();
+    await drain(() => f.sent.length === 2);
     expect(f.sent.map((s) => s.url)).toEqual(['https://old.example.com/h', 'https://new.example.com/h']);
     rmDir(dirname(file));
   });

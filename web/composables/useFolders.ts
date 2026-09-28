@@ -94,8 +94,27 @@ export function useFolders(deps: CoreDeps): {
   /** 接收模式(只拉不推):勾选后该目录只从对端拉取变更,绝不把本地变更反灌对端。 */
   const newFolderReceiveOnly = ref(false);
 
+  /**
+   * 添加表单的「空」只定义一次:成功提交与取消都走它。
+   * 两处各写一遍清空清单,迟早会有一处漏掉某个字段(加了新输入框却忘了旧代码里的清单)。
+   */
+  function resetAddFolderForm(): void {
+    newPath.value = '';
+    newFolderId.value = '';
+    newFolderDevices.value = [];
+    newFolderReceiveOnly.value = false;
+  }
+
+  /**
+   * 开 / 关添加表单。**关闭时连输入一起丢弃**:填了一半的路径留在下次打开的表单里,
+   * 看起来像「上次没提交成功」,而实际多半是自己放弃了 —— 那种残留会逼人先去核对一遍。
+   *
+   * 关闭只有「取消」这一条路:表单展开时右上角的「＋ 添加」是 `is-invisible` +
+   * `tabindex=-1`,点不到,所以这条规则不会被误触发。
+   */
   function toggleAddFolder(): void {
     addFolderOpen.value = !addFolderOpen.value;
+    if (!addFolderOpen.value) resetAddFolderForm();
   }
 
   async function addFolder(): Promise<void> {
@@ -118,10 +137,7 @@ export function useFolders(deps: CoreDeps): {
         }),
       });
       showToast(data.created ? '已添加共享目录(原路径不存在,已自动创建)' : '已添加共享目录');
-      newPath.value = '';
-      newFolderId.value = '';
-      newFolderDevices.value = [];
-      newFolderReceiveOnly.value = false;
+      resetAddFolderForm();
       addFolderOpen.value = false;
       await refreshStatus();
     } catch (e) {
@@ -217,7 +233,7 @@ export function useFolders(deps: CoreDeps): {
           : mode === 'send'
             ? '已设为仅发送:本机提交会通知对端,但不自动提交对端通知'
             : mode === 'receive'
-              ? '已设为仅接收:自动提交对端通知,不广播本机提交'
+              ? '已设为仅接收:自动提交对端通知,不广播本机提交、也不中继给其他设备'
               : '已开启双向 Git 提交同步',
       );
     } catch (e) {

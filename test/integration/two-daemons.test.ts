@@ -13,7 +13,7 @@ import {
 } from 'node:fs';
 import { rmDir } from '../helpers.js';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { dirname, join } from 'node:path';
 import { spawn, type ChildProcess } from 'node:child_process';
 import { loadOrCreateIdentity } from '../../src/identity.js';
 import { openIndexStore } from '../../src/indexstore.js';
@@ -220,6 +220,74 @@ describe('two real daemons sync over peers config', () => {
       expect(readFileSync(join(a.share, 'b.txt'))).toEqual(Buffer.from('content from B'));
 
       // 先停掉 daemon 再清理临时目录,避免进程写文件导致 ENOTEMPTY
+      await stopChildren();
+      rmDir(a.dir);
+      rmDir(b.dir);
+    },
+    90000,
+  );
+
+  /**
+   * 同步耗时的端到端验证:真实两个 daemon、真实一次传输。
+   *
+   * 只验「有没有」不验「是多少」—— 数值取决于机器与调度,断言数值只会让用例变成
+   * 随机失败源。这条真正钉住的是那个**区分**:
+   *  - 本机扫描出的改动:记录那一刻字节还没开始动,不该有 durationMs;
+   *  - 从对端接收落地:有真实的起止,必须有 durationMs。
+   * 把两者混为一谈(让没有耗时的记录也显示「小于1秒」)是这个功能最容易撒的谎,
+   * 而这个区分在有真实传输的场景里才验得出来 —— 纯单测只能验格式化函数。
+   */
+  it(
+    'records a duration only for received files, never for locally detected changes',
+    async () => {
+      const a = await setupDaemon('a', []);
+      const b = await setupDaemon('b', []);
+
+      startDaemon(a, [`ws://127.0.0.1:${b.peerPort}`], [b.deviceId]);
+      await waitForDaemonReady(a);
+      startDaemon(b, [`ws://127.0.0.1:${a.peerPort}`], [a.deviceId]);
+
+      // 第一个文件会撞上 A 的**首轮基线扫描**(空索引的第一轮只建基线、不写同步记录),
+      // 所以 A 侧的本地事件要靠第二个文件拿 —— 这点踩过一次:指望第一个文件产生
+      // local 事件,结果是 history 目录根本不出现。
+      writeFileSync(join(a.share, 'timed.txt'), 'duration me');
+      await waitFor(() => existsSync(join(b.share, 'timed.txt')), 20000);
+      writeFileSync(join(a.share, 'local2.txt'), 'after baseline');
+      await waitFor(() => existsSync(join(b.share, 'local2.txt')), 20000);
+
+      /**
+       * 直接读 daemon 写在盘上的 JSONL,而不是调 listSyncHistory()。
+       *
+       * 原因不是省事,是**必须绕过缓存**:history.ts 有一张模块级 Map 按文件路径缓存
+       * 已加载的事件,测试进程第一次调用时文件还不存在 → 空结果被缓存 → 之后每次轮询
+       * 读到的都是那份空缓存,waitFor 必然超时(第一版就是这么挂的,加 sleep 只是碰巧
+       * 让首次读落在写入之后,仍然是个随机失败的用例)。记录由另一个进程写盘,
+       * 这里读盘才是诚实的断言对象。
+       */
+      const readHistory = (configPath: string): Array<Record<string, unknown>> => {
+        const file = join(dirname(configPath), 'history', 'main.jsonl'); // 镜像 historyFileFor()
+        if (!existsSync(file)) return [];
+        return readFileSync(file, 'utf8')
+          .split('\n')
+          .filter(Boolean)
+          .map((l) => JSON.parse(l) as Record<string, unknown>);
+      };
+
+      // 记录是 200ms 防抖批量落盘的,轮询等它出现在盘上
+      await waitFor(() => readHistory(a.configPath).some((e) => e.path === 'local2.txt'), 10000);
+      await waitFor(() => readHistory(b.configPath).some((e) => e.path === 'timed.txt'), 10000);
+
+      // A 侧:基线之后自己盘上新增的文件 → 本机改动,记录时刻字节还没开始传,不该有耗时
+      const onA = readHistory(a.configPath).find((e) => e.path === 'local2.txt');
+      expect(onA?.direction).toBe('local');
+      expect(onA?.durationMs).toBeUndefined();
+
+      // B 侧:从对端接收落地 → 有真实起止,必须带耗时
+      const onB = readHistory(b.configPath).find((e) => e.path === 'timed.txt');
+      expect(onB?.direction).toBe('remote');
+      expect(typeof onB?.durationMs).toBe('number');
+      expect((onB?.durationMs as number)).toBeGreaterThanOrEqual(0);
+
       await stopChildren();
       rmDir(a.dir);
       rmDir(b.dir);

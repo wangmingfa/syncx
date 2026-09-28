@@ -104,7 +104,7 @@ async function onTestWebhook(): Promise<void> {
 </script>
 
 <template>
-  <ModalShell :open="open" title="全局设置" description="对所有共享目录生效;目录级设置优先于这里的默认值" @close="emit('close')">
+  <ModalShell :open="open" title="全局设置" description="对所有共享目录生效;目录级设置优先于这里的默认值" class="settings-modal" @close="emit('close')">
     <div class="edit-section-label">发送带宽上限</div>
     <n-input-number
       v-model:value="maxSendKbps"

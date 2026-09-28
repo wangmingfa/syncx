@@ -1426,6 +1426,12 @@ html[data-theme='dark'] .chip-menu__item--danger {
   box-shadow: 0 24px 60px -24px rgb(22 32 52 / 0.45);
 }
 
+/* 全局设置弹窗加宽(默认 520 → 620)。写成 `.modal.x` 双类是为了把特异度提到 (0,2,0),
+   压过 `.modal` 而**不依赖文件顺序** —— 与上面 .history-modal 那两条同一写法。 */
+.modal.settings-modal {
+  max-width: 620px;
+}
+
 /* 右上角关闭按钮。圆(悬停底色)沿用 naive-ui medium 的 34px 不变,里面的叉号是内联 SVG 画的。
    为什么不用文字字符:一个字的墨迹位置由字体度量(baseline 与数学轴)决定,CSS 的 align-items /
    line-height 只能摆布行盒、摆布不了墨迹。实测同一个「×」,28px 时 macOS 默认字体的墨迹中心比
@@ -1433,7 +1439,8 @@ html[data-theme='dark'] .chip-menu__item--danger {
    高 1.00px(14px 时这些偏差只有 ~0.5px,所以字号小的时候看不出来) —— 靠 transform / line-height
    去凑,等于把外观绑死在某款字体上,换个平台就翻车。SVG 的几何与字体无关,34px 盒里 14px 图形
    左右各留 10px 整数边距。标记本身在 `web/components/ModalCloseButton.vue`(9 个弹窗共用),
-   样式按本项目约定留在全局这里 —— 与 `.modal` 的定位上下文放在一处。 */
+   样式留在这里是因为它与 `.modal` 的定位上下文互相咬合(绝对定位的角、与标题行的对齐),
+   拆进组件就看不出层叠关系 —— 这是它留在全局的理由,不是"项目约定"(那条已废)。 */
 .modal-close {
   position: absolute;
   top: 14px;
@@ -1576,6 +1583,19 @@ html[data-theme='dark'] .chip-menu__item--danger {
   max-width: 640px;
 }
 
+/* 同步记录弹窗加宽(原 640 → 单目录 740 / 全部目录 840)。
+   写成 `.modal-wide.x` 双类是为了把特异度提到 (0,2,0),压过 .modal-wide 而**不依赖
+   文件顺序** —— 对照上面 .conflict-modal 那条单类写法,它靠"后来者胜",文件一重排
+   就会静默失效,这种坑不值得复刻。
+   全部目录比单目录再宽 100px:它多一列「目录」路径,时间/动作/方向那几列是共用的。 */
+.modal-wide.history-modal {
+  max-width: 740px;
+}
+
+.modal-wide.history-modal.is-global {
+  max-width: 840px;
+}
+
 .history-loading {
   color: var(--muted);
   font-size: 13px;
@@ -1707,9 +1727,20 @@ html[data-theme='dark'] .chip-menu__item--danger {
 }
 
 .history-time {
+  /* 纵向两格:时间在上、耗时在下。只有一格时高度与改前的纯文本一致,
+     所以不带耗时的记录(本机扫描改动、以及本次改动之前写入的旧记录)行高不变。 */
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 1px;
   color: var(--muted);
   font-variant-numeric: tabular-nums;
   white-space: nowrap;
+}
+
+.history-dur {
+  font-size: 11px;
+  opacity: 0.85;
 }
 
 .history-action {
@@ -3695,10 +3726,28 @@ html[data-theme='dark'] .diff-item__warn { color: #e0b45f; }
 }
 
 .discovered-head {
+  display: flex;
+  align-items: center;
+  gap: 6px;
   font-size: 12px;
   font-weight: 600;
   color: var(--muted);
   letter-spacing: 0.02em;
+}
+
+/* 列表自己滚,不把设备列和整页顶高 —— .col 没有 overflow,这里一长整页就跟着长。
+   250px 的算法按实测尺寸来:带 IP 副行的条目 54px(两行内容 + 上下 7px 内边距)+ 6px 间距
+   → 完整露出 4 条(4×54 + 3×6 = 234),第 5 条露出 16px 边,用「切一半」本身暗示还能滚,
+   比再加箭头或「更多」按钮省。总数在标题旁的 .badge 上,滚不滚都看得见。
+   (不带 IP 的条目约 44px,同高度下会多露半条 —— 这里要的是有上限,不是精确条数。) */
+.discovered-list {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  max-height: 250px;
+  overflow-y: auto;
+  /* 滚动条不该压住「添加」按钮的右缘 */
+  padding-right: 2px;
 }
 
 .discovered-item {
@@ -3713,6 +3762,33 @@ html[data-theme='dark'] .diff-item__warn { color: #e0b45f; }
 
 .discovered-item .avatar {
   flex: none;
+}
+
+/* 条目内部两行:第一行「设备ID + mDNS 主机名」,第二行发现到的 IP。
+   整组 .discovered-* 仍留在全局:它们是一个视觉单元,把新加的这几条单独搬进组件
+   会让同一组规则分处两地(与 .modal-* 同一判据 —— 只有自包含的组件才整体下沉)。 */
+.discovered-body {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 0;
+  flex: 1 1 auto;
+}
+
+.discovered-line {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+}
+
+.discovered-sub {
+  font-size: 11px;
+  color: var(--muted);
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .discovered-id {

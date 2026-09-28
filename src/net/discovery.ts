@@ -1,5 +1,6 @@
 import multicastDNS, { type ResponsePacket } from 'multicast-dns';
 import { hostname } from 'node:os';
+import type { RemoteInfo } from 'node:dgram';
 import type { DeviceIdentity } from '../identity.js';
 import { deriveDeviceIdFromPublicKey } from '../handshake.js';
 
@@ -7,8 +8,22 @@ const SERVICE = '_syncx._tcp.local';
 
 export interface DiscoveredPeer {
   deviceId: string;
+  /** SRV target —— 对端 `hostname()` 的裸值(不带 .local 后缀),不保证可解析。 */
   host: string;
   port: number;
+  /**
+   * 收到这个 mDNS 包的**源 IP**(组播 socket 的 rinfo.address),即对端实际发包用的地址。
+   *
+   * 刻意不从 SRV target 去解析、也不要求对端在广播里附 A 记录:
+   *  - 附 A 记录要改 advertise(),而且只对同样升级过的对端有效;
+   *  - 解析 `xxx.local` 依赖本机 mDNS 解析器(Windows 10+ 有,Termux / 无 avahi 的
+   *    Linux 没有),失败时还会卡几秒;
+   *  - 而 rinfo 是白捡的,并且语义更准:它就是「这台机器此刻 reachable 的地址」,
+   *    A 记录反而可能列出好几个(含不在本网段的)。
+   *
+   * 可选是因为注入的假 mdns(测试)可以不传第二个参数。
+   */
+  address?: string;
 }
 
 export interface Discovery {
@@ -88,7 +103,7 @@ export function startDiscovery(
     }, 30000);
   });
 
-  mdns.on('response', (response: ResponsePacket) => {
+  mdns.on('response', (response: ResponsePacket, rinfo?: RemoteInfo) => {
     const txt = response.answers.find((a) => a.type === 'TXT' && a.name === SERVICE);
     const srv = response.answers.find((a) => a.type === 'SRV' && a.name === SERVICE);
     if (!txt || !srv || srv.type !== 'SRV' || txt.type !== 'TXT') return;
@@ -102,7 +117,7 @@ export function startDiscovery(
     const target = srv.data.target ?? '';
     const host = target.replace(/\.$/, '');
     if (deviceId !== identity.deviceId) {
-      onPeerFound({ deviceId, host, port: srv.data.port });
+      onPeerFound({ deviceId, host, port: srv.data.port, address: rinfo?.address });
     }
   });
 

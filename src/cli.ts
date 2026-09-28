@@ -652,7 +652,7 @@ export async function run(args: ParsedArgs): Promise<void> {
             const cfg = loadConfig(configPath);
             return [...discoveredPeers.values()]
               .filter((d) => !isPeerAllowed(d.deviceId, cfg.sharedFolders, cfg.knownDevices))
-              .map((d) => ({ deviceId: d.deviceId, host: d.host, port: d.port, lastSeen: d.ts }));
+              .map((d) => ({ deviceId: d.deviceId, host: d.host, port: d.port, address: d.address, lastSeen: d.ts }));
           })(),
         },
       );
@@ -1184,7 +1184,7 @@ export async function run(args: ParsedArgs): Promise<void> {
   // 顺带收集「未配对」的邻居进「附近发现的设备」:已配对的不收(那是设备卡的事),
   // 首次发现立即推送一次状态,前端顶栏/设备栏就能冒出「发现新设备」。
   const DISCOVERY_TTL_MS = 3 * 60_000;
-  const discoveredPeers = new Map<string, { deviceId: string; host: string; port: number; ts: number }>();
+  const discoveredPeers = new Map<string, { deviceId: string; host: string; port: number; address?: string; ts: number }>();
   const discovery = startDiscovery(identity, server.port, (peer) => {
     if (manager.isPeerConnected(peer.deviceId)) return;
     // 未授权的对端(已移除,或从未添加)不主动连接。否则移除设备后 mDNS 会把它重新连回来,
@@ -1193,7 +1193,8 @@ export async function run(args: ParsedArgs): Promise<void> {
     const cfg = loadConfig(configPath);
     if (!isPeerAllowed(peer.deviceId, cfg.sharedFolders, cfg.knownDevices)) {
       const prev = discoveredPeers.get(peer.deviceId);
-      discoveredPeers.set(peer.deviceId, { ...peer, ts: Date.now() });
+      // address 缺省时保留上一次学到的那个:别让某一次没带 rinfo 的包把已知 IP 洗掉
+      discoveredPeers.set(peer.deviceId, { ...peer, address: peer.address ?? prev?.address, ts: Date.now() });
       if (!prev) statusHub.notify();
       return;
     }

@@ -5,6 +5,9 @@ import { parsePairCode } from '../utils/qrcode';
 import type { CoreDeps } from './statusContext';
 import type { DeviceInfo, DiscoveredDevice } from '../types';
 
+/** 对端数据面的默认端口(与 daemon 的 --port 默认值一致);表单初始值、留空回退、清空回位共用这一个。 */
+const DEFAULT_PEER_PORT = '22000';
+
 /** 设备相关:扫描/重连/配对/移除(防误删确认)/从对端升级/附近发现一键添加。 */
 export function useDevices(deps: CoreDeps): {
   rescan: () => void;
@@ -35,10 +38,27 @@ export function useDevices(deps: CoreDeps): {
   const addDeviceOpen = ref(false);
   const newDeviceId = ref('');
   const newDeviceHost = ref('');
-  const newDevicePort = ref('22000');
+  const newDevicePort = ref(DEFAULT_PEER_PORT);
 
+  /**
+   * 添加表单的「空」只定义一次:成功提交与取消都走它。
+   * 端口**回到默认值而不是清空** —— 22000 是绝大多数情况的正确答案,
+   * 清空只会逼人在下次添加时重打一遍,那不是「清空草稿」而是「制造额外工作」。
+   */
+  function resetAddDeviceForm(): void {
+    newDeviceId.value = '';
+    newDeviceHost.value = '';
+    newDevicePort.value = DEFAULT_PEER_PORT;
+  }
+
+  /**
+   * 开 / 关配对表单,关闭时连输入一起丢弃(理由同 useFolders 的 toggleAddFolder)。
+   * 关闭只有「取消」这一条路:表单展开时右上角的「＋ 添加」是 `is-invisible` +
+   * `tabindex=-1`,点不到。
+   */
   function toggleAddDevice(): void {
     addDeviceOpen.value = !addDeviceOpen.value;
+    if (!addDeviceOpen.value) resetAddDeviceForm();
   }
 
   async function addDevice(): Promise<void> {
@@ -60,7 +80,7 @@ export function useDevices(deps: CoreDeps): {
     const host = newDeviceHost.value.trim();
     let address: string | undefined;
     if (host) {
-      const port = newDevicePort.value.trim() || '22000';
+      const port = newDevicePort.value.trim() || DEFAULT_PEER_PORT;
       address = `ws://${host}:${port}`;
     }
     busy.value = true;
@@ -71,9 +91,7 @@ export function useDevices(deps: CoreDeps): {
         body: JSON.stringify({ deviceId: id, address }),
       });
       showToast(address ? '已添加设备并发起直连' : '已添加设备');
-      newDeviceId.value = '';
-      newDeviceHost.value = '';
-      newDevicePort.value = '22000';
+      resetAddDeviceForm();
       addDeviceOpen.value = false;
       await refreshStatus();
     } catch (e) {

@@ -4,6 +4,7 @@ import { NButton, NInput } from 'naive-ui';
 import type { SyncEventItem, SyncHistoryData } from '../types';
 import { apiJson, errText } from '../utils/api';
 import { copyText } from '../utils/clipboard';
+import { formatDuration } from '../utils/duration';
 import { useStatusContext } from '../composables/statusContext';
 import ModalShell from './ModalShell.vue';
 
@@ -207,10 +208,10 @@ async function copyHistory(): Promise<void> {
         directionLabel(ev.direction) +
         (ev.direction !== 'local' && ev.deviceId ? `：${ev.deviceId}` : '');
       const folderCol = props.global ? `${ev.folderPath ?? ev.folderId}\t` : '';
-      return `${folderCol}${fmtTime(ev.ts)}\t${actionLabel(ev.action)}\t${dir}\t${ev.path}`;
+      return `${folderCol}${fmtTime(ev.ts)}\t${formatDuration(ev.durationMs)}\t${actionLabel(ev.action)}\t${dir}\t${ev.path}`;
     });
   const header = props.global ? '目录\t' : '';
-  const text = `本机 ${deviceId.value} · 记录里的「本地」即本机，「对端」标注了来源设备 id\n\n${header}时间\t动作\t方向\t路径\n${rows.join('\n')}`;
+  const text = `本机 ${deviceId.value} · 记录里的「本地」即本机，「对端」标注了来源设备 id\n\n${header}时间\t耗时\t动作\t方向\t路径\n${rows.join('\n')}`;
   const ok = await copyText(text);
   if (ok) {
     props.notify('已复制全部同步记录到剪贴板', 'info');
@@ -227,10 +228,11 @@ function csvEscape(v: string): string {
 
 function historyCsv(rows: SyncEventItem[]): string {
   const header = props.global
-    ? ['目录', '时间', '动作', '方向', '设备ID', '路径']
-    : ['时间', '动作', '方向', '设备ID', '路径'];
+    ? ['目录', '时间', '耗时', '动作', '方向', '设备ID', '路径']
+    : ['时间', '耗时', '动作', '方向', '设备ID', '路径'];
   const lines = rows.map((ev) => {
-    const base = [fmtTime(ev.ts), actionLabel(ev.action), directionLabel(ev.direction), ev.deviceId || deviceId.value, ev.path];
+    // 耗时列与界面同一判据:没有可测起止的记录留空(不是 0、也不是"小于1秒")
+    const base = [fmtTime(ev.ts), formatDuration(ev.durationMs), actionLabel(ev.action), directionLabel(ev.direction), ev.deviceId || deviceId.value, ev.path];
     const cells = props.global ? [ev.folderPath ?? ev.folderId, ...base] : base;
     return cells.map(csvEscape).join(',');
   });
@@ -298,6 +300,8 @@ function askClearHistory(): void {
     :description="global ? '' : lastPath"
     description-mono
     wide
+    class="history-modal"
+    :class="{ 'is-global': global }"
     @close="emit('close')"
   >
     <!-- 方向列的「本地 / 对端」与本机 id 成对出现:只标「对端：<id>」而不给本机 id,
@@ -364,7 +368,17 @@ function askClearHistory(): void {
         :class="{ 'row-conflict': ev.action === 'conflict' }"
       >
         <span v-if="global" class="history-folder mono break" :title="ev.folderPath ?? ev.folderId">{{ ev.folderPath ?? ev.folderId }}</span>
-        <span class="history-time">{{ fmtTime(ev.ts) }}</span>
+        <!-- 耗时挂在时间下面而不是单开一列:行已经是 4~5 列、路径列最吃宽度,
+             再加一列会把路径挤成频繁截断;而且"什么时候"和"用了多久"本就该挨着读。
+             `durationMs != null` 而不是真值判断 —— 0 与"没有这个字段"是两回事。 -->
+        <span class="history-time">
+          <span>{{ fmtTime(ev.ts) }}</span>
+          <span
+            v-if="ev.durationMs != null"
+            class="history-dur"
+            :title="`本次同步耗时(开始传输 → 落盘完成)`"
+          >{{ formatDuration(ev.durationMs) }}</span>
+        </span>
         <span class="history-action" :class="'act-' + ev.action">{{ actionLabel(ev.action) }}</span>
         <span class="history-dir" :class="ev.direction === 'local' ? 'dir-local' : 'dir-remote'">{{ directionLabel(ev.direction) }}{{ ev.direction !== 'local' && ev.deviceId ? `：${ev.deviceId}` : '' }}</span>
         <span class="history-path mono break">{{ ev.path }}</span>

@@ -102,6 +102,8 @@ export interface DiscoveredDeviceStatus {
   host: string;
   /** 对端数据面(ws)端口。 */
   port: number;
+  /** 收到该设备 mDNS 包的源 IP —— 它此刻实际 reachable 的地址。旧后端 / 假注入缺省。 */
+  address?: string;
   /** 最近一次被发现的时刻(毫秒);超过 TTL 的条目不再下发。 */
   lastSeen: number;
 }

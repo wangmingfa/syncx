@@ -154,6 +154,18 @@ function startDaemon(setup: DaemonSetup, peerUrl: string, peerDeviceId: string):
   return spawnDaemon(setup);
 }
 
+/** 同 startDaemon,但给该目录的出向通道加发送限速(复现「通知先到、大块后到」的时序)。 */
+function startRateLimitedDaemon(setup: DaemonSetup, peerUrl: string, peerDeviceId: string, maxKbps: number): ChildProcess {
+  writeFileSync(
+    setup.configPath,
+    JSON.stringify({
+      sharedFolders: [{ id: 'main', path: setup.share, devices: [peerDeviceId], gitSync: 'full', maxBandwidthKbps: maxKbps }],
+      peers: [peerUrl],
+    }),
+  );
+  return spawnDaemon(setup);
+}
+
 /** 重启 daemon:**不碰配置** —— 沿用磁盘上已落盘的 gitLastCommitHash 基线。 */
 function restartDaemon(setup: DaemonSetup): ChildProcess {
   return spawnDaemon(setup);
@@ -203,6 +215,11 @@ function broadcastLines(setup: DaemonSetup): number {
 /** 收到对端通知后执行自动提交的条数。 */
 function autoCommitLines(setup: DaemonSetup): number {
   return (daemonText(setup).match(/auto-committing: /g) ?? []).length;
+}
+
+/** 通知已到达、但因接收台账未排空而被挂起的日志条数(竞态修复生效的标记)。 */
+function deferLines(setup: DaemonSetup): number {
+  return (daemonText(setup).match(/git auto-commit deferred:/g) ?? []).length;
 }
 
 /** 磁盘上该目录已落盘的 git 基线哈希(重启后补广播的依据)。 */
@@ -257,6 +274,10 @@ describe('git commit sync between two real daemons', () => {
         console.log('[test] auto-commit not observed\n', daemonText(a), '\n--- B ---\n', daemonText(b));
         throw error;
       }
+      // 日志计数读的是 daemon stdout 经管道落盘的文本,而 headSubject 读 git 状态(由 daemon
+      // 同步写)—— 前者可见性晚于后者。满负载下刷盘能慢到秒级,于是「HEAD 已是这笔提交、
+      // 日志里还没有 auto-committing 那行」,直接断言会读到 0。先等它出现,再断恰好一次。
+      await waitFor(() => broadcastLines(a) >= 1 && autoCommitLines(b) >= 1, 20000);
       expect(broadcastLines(a)).toBe(1);
       expect(autoCommitLines(b)).toBe(1);
       // 「不管本机有哪些改动,一次性全部提交」:B 的 HEAD 里应带上 a.txt,工作树干净
@@ -319,11 +340,61 @@ describe('git commit sync between two real daemons', () => {
         throw error;
       }
       expect(persistedBaseline(a)).toBe(lateCommit);
-      // 补广播只发生一次,且 B 的自动提交没有再弹回 A
+      // 补广播只发生一次,且 B 的自动提交没有再弹回 A。
+      // 同样要先等日志落盘(理由见上面那处 waitFor 的注释)—— 这个等待在满负载下是必需的,
+      // 不是保险:实测 headSubject 已经命中时 autoCommitLines(b) 仍可能是 0。
+      await waitFor(() => broadcastLines(a) >= 1 && autoCommitLines(b) >= 1, 20000);
       expect(broadcastLines(a)).toBe(1);
       expect(autoCommitLines(b)).toBe(1);
       expect(autoCommitLines(a)).toBe(0);
       expect(trackedFiles(b.share)).toContain('late.txt');
+
+      await stopChildren();
+      rmDir(a.dir);
+      rmDir(b.dir);
+    },
+    120000,
+  );
+
+  it.skipIf(!HAS_GIT)(
+    'defers the auto-commit while the notified content is still transferring',
+    async () => {
+      const a = await setupGitDaemon('a');
+      const b = await setupGitDaemon('b');
+      initRepo(a.share);
+      initRepo(b.share);
+
+      // 6MB 在 512KB/s 下约需 12 秒,而扫描每 5 秒一轮:通知(控制面,即时)到达时
+      // 内容(数据面,被限速)必然还在拉,中间至少落下两轮「挂起等待」的扫描。
+      // 健康传输中认领逐块保鲜,结算要一直挂着,而不是被 60s 兜底时限打断。
+      const size = 6 * 1024 * 1024;
+      startRateLimitedDaemon(a, `ws://127.0.0.1:${b.peerPort}`, b.deviceId, 512);
+      await waitForDaemonReady(a);
+      startDaemon(b, `ws://127.0.0.1:${a.peerPort}`, a.deviceId);
+      await waitForBaselines(a, b);
+
+      writeFileSync(join(a.share, 'big.bin'), Buffer.alloc(size, 7));
+      const message = 'fix: 大文件不应被半套提交';
+      commitAll(a.share, message);
+
+      // 竞态确实发生:通知到了 B,而 B 还在拉块 → 挂起等待
+      await waitFor(() => deferLines(b) >= 1, 45000);
+      expect(autoCommitLines(b)).toBe(0);
+
+      // 传输进行中仍未提交:块在到达 = 认领新鲜 = 不打断健康接收
+      await new Promise((r) => setTimeout(r, 4_000));
+      expect(autoCommitLines(b)).toBe(0);
+      expect(headSubject(b.share)).not.toBe(message);
+
+      // 台账排空后才结算:B 的镜像提交带**完整**内容,工作树干净
+      await waitFor(() => headSubject(b.share) === message, 60000);
+      // 同上:日志落盘晚于 git 状态,先等那行出现再断恰好一次
+      await waitFor(() => autoCommitLines(b) >= 1, 20000);
+      expect(autoCommitLines(b)).toBe(1);
+      expect(trackedFiles(b.share)).toContain('big.bin');
+      expect(git(b.share, ['cat-file', '-s', `HEAD:big.bin`])).toBe(String(size));
+      expect(git(b.share, ['status', '--porcelain'])).toBe('');
+      expect(persistedBaseline(a)).toBe(git(a.share, ['rev-parse', 'HEAD']));
 
       await stopChildren();
       rmDir(a.dir);

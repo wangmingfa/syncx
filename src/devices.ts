@@ -2,7 +2,7 @@ import { existsSync, mkdirSync, statSync } from 'node:fs';
 import { resolve, isAbsolute, sep, dirname, join } from 'node:path';
 import { homedir } from 'node:os';
 import { randomBytes } from 'node:crypto';
-import { loadConfig, saveConfig, mutateConfig, normalizePeerUrl, DEFAULT_CONFIG, folderIdFor, folderIndexKey, generateFolderInstanceId, purgeFolderIndex, isValidSchedule, isGitSyncMode, isConflictPolicy, type Config, type FolderIdentity, type SharedFolderConfig, type DeviceConfig, type GitSyncMode, type ConflictPolicy } from './config.js';
+import { loadConfig, saveConfig, mutateConfig, normalizePeerUrl, DEFAULT_CONFIG, folderIdFor, folderIndexKey, generateFolderInstanceId, purgeFolderIndex, isValidSchedule, isGitSyncMode, isConflictPolicy, type Config, type FolderIdentity, type GitCommitRelayRecord, type SharedFolderConfig, type DeviceConfig, type GitSyncMode, type ConflictPolicy } from './config.js';
 import { readFolderIdentity } from './folder-identity.js';
 import { deriveE2EKey } from './e2e.js';
 
@@ -346,9 +346,9 @@ export function setFolderSchedule(configPath: string, folderId: string, schedule
  * 'off' 存成 undefined 而非字面量:与「旧配置从未设置过该字段」保持同一种形态,
  * 避免关一次开关后 config.json 里永久留一条 'off'。
  *
- * 同时清空 gitLastCommitHash:改模式一律按「重新启用」处理,下一轮扫描从当前 HEAD
- * 重新起基线。否则 full→off→full 之间用户自己 commit 的那几次会在重新开启瞬间被
- * 成批补广播出去。
+ * 同时清空 gitLastCommitHash 与待中继台账:改模式一律按「重新启用」处理,下一轮扫描从当前
+ * HEAD 重新起基线。否则 full→off→full 之间用户自己 commit 的那几次会在重新开启瞬间被
+ * 成批补广播出去;而旧的中继会在模式已不是 full 之后继续外发。
  */
 export function setFolderGitSync(configPath: string, folderId: string, mode: GitSyncMode): void {
   if (!isGitSyncMode(mode)) {
@@ -359,6 +359,7 @@ export function setFolderGitSync(configPath: string, folderId: string, mode: Git
     if (!existing) throw new Error(`未找到共享目录:「${folderId}」`);
     existing.gitSync = mode === 'off' ? undefined : mode;
     existing.gitLastCommitHash = undefined;
+    existing.gitRelayPending = undefined;
   });
 }
 
@@ -488,6 +489,24 @@ export function setFolderGitLastCommitHash(configPath: string, folderId: string,
     if (!existing) return false; // 目录已被移除:无需为它补写状态
     if (existing.gitLastCommitHash === hash) return false; // 未变则不落盘,避免无谓重写
     existing.gitLastCommitHash = hash;
+  });
+}
+
+/**
+ * 记录/清除某目录待中继的远端提交通知(仅本机状态,不代表用户意图)。
+ * 与 gitLastCommitHash 分开成两个函数:基线每轮扫描都写,中继台账只在挂起和投完时各写一次。
+ * undefined = 清除(全部送达 / 不再共享给任何目标 / gitSync 改档 / 目录已被移除)。
+ */
+export function setFolderGitRelayPending(
+  configPath: string,
+  folderId: string,
+  record: GitCommitRelayRecord | undefined,
+): void {
+  mutateConfig(configPath, (config) => {
+    const existing = config.sharedFolders.find((f) => folderIdFor(f) === folderId);
+    if (!existing) return false; // 目录已被移除:不用为它写状态
+    if (record === undefined && existing.gitRelayPending === undefined) return false; // 已投完:库里本就没有,不用重写
+    existing.gitRelayPending = record;
   });
 }
 

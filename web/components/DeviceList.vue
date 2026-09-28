@@ -65,19 +65,38 @@ const qrOpen = ref(false);
           </template>
           本机二维码
         </n-button>
-        <n-button quaternary :disabled="busy" @click="toggleAddDevice">取消</n-button>
+        <!-- 与目录表单同一处修正:取消只在**用户自己点开**时渲染。显隐条件是
+             `addDeviceOpen || 设备列表为空`,而取消走 toggle —— 空列表时点它会把 false 翻成
+             true,画面被后半句撑着不动,残留的 true 还会让第一个设备加完后表单关不掉。 -->
+        <n-button v-if="addDeviceOpen" quaternary :disabled="busy" @click="toggleAddDevice">取消</n-button>
         <n-button type="primary" attr-type="submit" :disabled="busy">添加</n-button>
       </div>
     </form>
 
     <!-- 附近发现的设备:mDNS 扫到、但还没配对的邻居,一键添加(带学到的直连地址) -->
     <div v-if="status.discovered?.length" class="discovered">
-      <div class="discovered-head">附近发现的设备</div>
-      <div v-for="d in status.discovered" :key="d.deviceId" class="discovered-item">
-        <span class="avatar online" aria-hidden="true">{{ monogram(d.deviceId) }}</span>
-        <span class="discovered-id mono" :title="`${d.deviceId} · ${d.host}:${d.port}`">{{ d.deviceId }}</span>
-        <span class="discovered-addr mono">{{ d.host }}</span>
-        <n-button size="tiny" type="primary" tertiary :disabled="busy" @click="addDiscovered(d)">添加</n-button>
+      <div class="discovered-head">
+        <span>附近发现的设备</span>
+        <span class="badge">{{ status.discovered.length }}</span>
+      </div>
+      <div class="discovered-list">
+        <div v-for="d in status.discovered" :key="d.deviceId" class="discovered-item">
+          <span class="avatar online" aria-hidden="true">{{ monogram(d.deviceId) }}</span>
+          <span class="discovered-body">
+            <span class="discovered-line">
+              <span class="discovered-id mono" :title="`${d.deviceId} · ${d.host}:${d.port}`">{{ d.deviceId }}</span>
+              <span class="discovered-addr mono">{{ d.host }}</span>
+            </span>
+            <!-- IP 单独一行:mDNS 学到的 host 是对端裸 hostname(不保证解析得了),
+                 而 IP 是它此刻实际发包用的地址,核对与手动填地址都靠这个 -->
+            <span
+              v-if="d.address"
+              class="discovered-sub mono"
+              :title="`发现到该设备发包使用的地址(数据面端口 ${d.port})`"
+            >{{ d.address }}</span>
+          </span>
+          <n-button size="tiny" type="primary" tertiary :disabled="busy" @click="addDiscovered(d)">添加</n-button>
+        </div>
       </div>
     </div>
 

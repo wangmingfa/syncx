@@ -144,6 +144,8 @@ export interface DiscoveredDevice {
   host: string;
   /** 对端数据面(ws)端口。 */
   port: number;
+  /** 收到该设备 mDNS 包的源 IP(它此刻实际 reachable 的地址);旧后端缺省。 */
+  address?: string;
   /** 最近一次被发现的时刻(毫秒)。 */
   lastSeen: number;
 }
@@ -283,6 +285,12 @@ export interface SyncEventItem {
   deviceId?: string;
   /** 所属目录的共享路径(仅全局时间线 /api/history 补;单目录查询无此字段)。 */
   folderPath?: string;
+  /**
+   * 本次同步耗时(毫秒)。**缺省 = 这条记录没有"传输起止"可测**(本机扫描出的改动、
+   * 或本次改动之前写入的旧记录),不是"耗时为 0"。两者必须分开渲染,否则旧记录会
+   * 整片显示成"小于1秒"。
+   */
+  durationMs?: number;
 }
 
 /**

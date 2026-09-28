@@ -70,13 +70,32 @@ describe('mDNS discovery', () => {
     startDiscovery(SELF, 22000, (p) => found.push(p), () => fake as unknown as MdnsInstance);
     fake.emit('ready');
 
-    fake.emit('response', peerResponse('PEER234567', 'host', 22000));
-    expect(found).toEqual([{ deviceId: 'PEER234567', host: 'host', port: 22000 }]);
+    fake.emit('response', peerResponse('PEER234567', 'host', 22000), {
+      address: '10.0.0.5',
+      family: 'IPv4',
+      port: 5353,
+      size: 128,
+    });
+    // address 取自组播包的源地址(rinfo),不是解析 SRV target 得来的
+    expect(found).toEqual([{ deviceId: 'PEER234567', host: 'host', port: 22000, address: '10.0.0.5' }]);
 
     // 自身的广播不应被当成对端
     const before = found.length;
     fake.emit('response', peerResponse('SELF234567', 'self', 22000));
     expect(found).toHaveLength(before);
+  });
+
+  it('没有 rinfo 时仍能发现对端,只是不带 address', () => {
+    const fake = new FakeMdns();
+    const found: DiscoveredPeer[] = [];
+    startDiscovery(SELF, 22000, (p) => found.push(p), () => fake as unknown as MdnsInstance);
+    fake.emit('ready');
+
+    // 注入的假实现可以只传包不传 rinfo —— 发现本身不该因此失效
+    fake.emit('response', peerResponse('PEER234567', 'host', 22000));
+    expect(found).toHaveLength(1);
+    expect(found[0]?.deviceId).toBe('PEER234567');
+    expect(found[0]?.address).toBeUndefined();
   });
 
   it('parses TXT data shaped as Buffer[] (real dns-packet decode output)', () => {

@@ -5,7 +5,8 @@
  *  - 检测共享目录是否为 git 仓库
  *  - 读取 HEAD 提交哈希(用于检测新提交)
  *  - 收集提交信息(消息、变更文件列表、diff stat)
- *  - 执行自动提交(git add -A && git commit)
+ *  - 执行自动提交(git add -A && git commit);调用方应先用
+ *    hasUncommittedChanges 判定有无待提交内容,无变更不必提交
  *
  * 所有 git 命令通过 execFileSync 同步执行(本地仓库操作通常 <100ms),
  * 避免异步引入的竞态条件。失败时抛错,由调用方处理。
@@ -149,7 +150,8 @@ export interface AutoCommitResult {
 
 /**
  * 执行自动提交:git add -A && git commit -m <message>。
- * 使用 --allow-empty 确保即使没有变更也能记录提交(保持提交链完整)。
+ * 使用 --allow-empty 兜底:判定有无变更与 add 之间工作树可能被他程序改回,
+ * 保证提交命令本身不因竞态失败。
  */
 export function autoCommit(folderPath: string, message: string): AutoCommitResult {
   try {

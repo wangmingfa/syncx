@@ -94,7 +94,10 @@ export function listDirectory(root: string, relPath: string, limit = DIR_LIST_LI
     const abs = resolvePath(absDir, name);
     try {
       const st = statSync(abs); // 用 stat 而非 lstat:软链指向目录时按目标类型展示
-      return { name, abs, dir: st.isDirectory(), size: st.size, mtime: st.mtimeMs };
+      const dir = st.isDirectory();
+      // 目录的 st_size 是文件系统内部元数据(APFS 96 / ext4 4096),不是内容体量,
+      // 拿去展示会误导且跨平台不可比较:一律报 0,UI 对目录本来也不显示大小。
+      return { name, abs, dir, size: dir ? 0 : st.size, mtime: st.mtimeMs };
     } catch {
       return { name, abs, dir: false, size: 0, mtime: 0 };
     }

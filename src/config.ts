@@ -105,11 +105,18 @@ export interface SharedFolderConfig {
   schedule?: string;
   /**
    * Git 提交同步模式:当共享目录是 git 仓库时,检测本地提交并通知其他设备自动提交。
+   * 接收侧在**本次提交的内容本地落齐后**才执行提交(控制面通知可能早于数据面块
+   * 传输完成,立刻提交会把半套文件定格成一笔提交),工作树干净则跳过。
+   *
+   * 通知会一跳一跳往前传:完成镜像提交的设备会把**原始通知**(仍署最初提交者的设备
+   * id 与哈希)中继给本机该目录的其余对端,所以链式拓扑(A—B—C,C 只与 B 配对)的
+   * 末端同样会落一笔提交。中继只在真正产生提交时发生,且接收方按原哈希入队前去重,
+   * 因此环路有界;镜像提交本身永远不会被当成「本机新提交」广播出去。
    *
    * - 'off'(默认):不启用 git 同步
-   * - 'send':检测并广播本地提交,但不自动提交对端通知
-   * - 'receive':收到通知时自动提交,但不广播本地提交
-   * - 'full':双向 —— 既广播本地提交,也自动提交对端通知
+   * - 'send':检测并广播本地提交,但不自动提交对端通知(因此也无从中继)
+   * - 'receive':收到通知时自动提交,但不广播本地提交、也不中继对端通知(只进不出)
+   * - 'full':双向 —— 广播本地提交、自动提交对端通知,并向其余对端中继
    *
    * 缺省 'off'(显式 opt-in),避免对非 git 目录产生不必要的 git 命令调用。
    * 旧配置缺省(尚未设置)按 'off' 处理。
@@ -167,6 +174,15 @@ export interface SharedFolderConfig {
    */
   gitLastCommitHash?: string;
   /**
+   * 尚未中继给其余对端的远端提交通知(**仅本机使用,不进 wire、不跨设备对齐**)。
+   *
+   * 与 gitSync 配套:本机替对端完成镜像提交后,会把**原始通知**(仍署最初提交者的设备
+   * id 与哈希)转给本机该目录的其余对端,链式拓扑(A—B—C)末端因此也能落一笔提交。
+   * 目标此刻可能离线,所以台账落盘:daemon 重启后接着补投,这一跳不会永久丢失。
+   * 全部送达 / 目录已不再共享给任何目标 / gitSync 被改动时清除。
+   */
+  gitRelayPending?: GitCommitRelayRecord;
+  /**
    * 端到端加密密钥记录(passphrase 经 scrypt 派生;salt/key 皆 base64,**口令本体永不落盘**)。
    * 设置后,列在 e2eUntrusted 里的对端只收密文视图:路径与内容逐块加密,盲区节点「只存块、
    * 看不懂内容」,且永不回源(可信端忽略其索引宣告)。语义与已知边界见 src/e2e.ts 头注释。
@@ -180,6 +196,22 @@ export interface SharedFolderConfig {
 
 /** Git 提交同步的四种模式;定义见 SharedFolderConfig.gitSync 的注释。 */
 export type GitSyncMode = 'off' | 'send' | 'receive' | 'full';
+
+/**
+ * 一条待中继的远端提交通知:除 targets 外,各字段就是 git-commit-notify 的原样内容
+ * (见 src/net/wire.ts)—— 中继不改写来源与哈希,接收方才能按原哈希去重。
+ */
+export interface GitCommitRelayRecord {
+  /** 最初提交那台设备的 id(原样转发给下游,同时是「不回投给来源」的依据)。 */
+  fromDeviceId: string;
+  commitHash: string;
+  commitMessage: string;
+  changedFiles: string[];
+  diffStat?: string;
+  parentHash: string;
+  /** 仍未送达的设备 id。 */
+  targets: string[];
+}
 
 /** 冲突自动处理策略;定义与语义见 SharedFolderConfig.conflictPolicy 的注释。 */
 export type ConflictPolicy = 'keep-both' | 'newest-wins' | 'local-wins';

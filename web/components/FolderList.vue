@@ -319,7 +319,12 @@ function visibleFiles(f: FolderInfo): TransferFile[] {
         接收模式(只拉不推):只从对端拉取变更,不把本地改动同步出去
       </n-checkbox>
       <div class="add-form-actions">
-        <n-button quaternary :disabled="busy" @click="toggleAddFolder">取消</n-button>
+        <!-- 「取消」只在**用户自己点开**的形态下渲染。表单显隐是 `addFolderOpen || 列表为空`
+             (空列表强制展开,首屏不用先点一次「添加」),而取消走的是 toggle —— 空列表时点它
+             会把 false 翻成 true,画面被后半句撑着毫无变化(点取消=点展开),残留的 true 还会
+             让第一个目录加完后表单赖着不走、并把右上角「＋ 添加」藏进 is-invisible。
+             按钮只在这个分支出现时,toggle 才等价于「关闭」。 -->
+        <n-button v-if="addFolderOpen" quaternary :disabled="busy" @click="toggleAddFolder">取消</n-button>
         <n-button type="primary" attr-type="submit" :disabled="busy">添加</n-button>
       </div>
     </form>

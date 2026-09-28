@@ -31,8 +31,8 @@ const onDemand = ref(false);
 const GIT_SYNC_OPTIONS: { label: string; value: GitSyncMode }[] = [
   { label: '关闭', value: 'off' },
   { label: '仅发送(广播本机提交,不自动提交)', value: 'send' },
-  { label: '仅接收(自动提交对端通知,不广播)', value: 'receive' },
-  { label: '双向(广播本机提交,并自动提交对端通知)', value: 'full' },
+  { label: '仅接收(自动提交对端通知,不广播也不中继)', value: 'receive' },
+  { label: '双向(广播本机提交,并自动提交、中继对端通知)', value: 'full' },
 ];
 
 const CONFLICT_POLICY_OPTIONS: { label: string; value: ConflictPolicy }[] = [
@@ -150,8 +150,9 @@ function deviceAddrLine(p: DeviceInfo): string {
       :disabled="busy"
     />
     <p class="confirm-note-extra">
-      目录为 git 仓库时生效:一端 commit 后通知其他设备,对端把本地全部改动一次性
-      commit(<code>git add -A</code>)并沿用相同提交信息,无需每台设备手动提交。
+      目录为 git 仓库时生效:一端 commit 后通知其他设备,对端等同步过来的文件全部落地后,把本地全部改动一次性
+      commit(<code>git add -A</code>)并沿用相同提交信息,无需每台设备手动提交;本机无待提交内容时跳过。
+      提交会一跳一跳中继:自动提交成功的设备会把同一条通知转给它的其他对端,所以只与中间设备配对的机器也能收到提交。
       首次启用只记录当前 HEAD 作为基线,不会重放历史提交。
     </p>
 
