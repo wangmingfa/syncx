@@ -46,6 +46,7 @@ async function copyReport(): Promise<void> {
     :description="folderPath"
     description-mono
     wide
+    class="report-modal"
     @close="emit('close')"
   >
     <p class="modal-lead">与对比页同一份数据生成的纯文本报告，适合贴进对话或 issue。</p>

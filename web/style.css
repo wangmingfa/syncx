@@ -1606,13 +1606,14 @@ html[data-theme='dark'] .chip-menu__item--danger {
   color: #c47c14;
 }
 
-/* 日志弹窗 / 对比报告弹窗:等宽纯文本块,浅色底仿终端观感(同一块规则共用) */
+/* 日志弹窗 / 对比报告弹窗:等宽纯文本块,浅色底仿终端观感(同一块规则共用)。
+   滚动收在 `.modal.logs-modal .logs-view` / `.modal.report-modal .report-view` 那两条
+   (随正文剩余高度内滚),这里不自带 max-height —— 按视口算的 56vh 在矮窗口下
+   (视口 < ~570px,实测)会和标题/导语/footer 一起顶穿外壳的 88vh,两根滚动条同屏。 */
 .logs-view,
 .report-view {
   margin: 0;
   padding: 12px 14px;
-  max-height: 56vh;
-  overflow: auto;
   background: var(--bg);
   border: 1px solid var(--border);
   border-radius: 10px;
@@ -1621,6 +1622,21 @@ html[data-theme='dark'] .chip-menu__item--danger {
   white-space: pre-wrap;
   word-break: break-all;
   color: var(--text);
+}
+
+/* 文本块吃掉正文除导语之外的全部高度:**文本自己滚,外壳的 .modal-body 不再出
+   第二根滚动条**(与同步记录弹窗的 `.modal-wide.history-modal .history-list` 同款)。 */
+.modal.logs-modal .modal-body,
+.modal.report-modal .modal-body {
+  display: flex;
+  flex-direction: column;
+}
+
+.modal.logs-modal .logs-view,
+.modal.report-modal .report-view {
+  flex: 1 1 auto;
+  min-height: 0;
+  overflow: auto;
 }
 
 /* 未设置 --log-file 时的提示块 */

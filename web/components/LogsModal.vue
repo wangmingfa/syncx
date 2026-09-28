@@ -88,6 +88,7 @@ async function copyLogs(): Promise<void> {
     :description="file"
     description-mono
     wide
+    class="logs-modal"
     @close="emit('close')"
   >
     <p v-if="truncated > 0" class="modal-lead">已省略最早 {{ truncated }} 行</p>
