@@ -201,6 +201,8 @@ function onMoreClick(): void {
      而不是写死 14px:改按钮尺寸时只动 --rail-btn 一处,两边仍然一致。
      (胶囊现在比按钮高,不能用 999px 夹取,那会得到自己的半高而不是按钮的 R。) */
   border-radius: calc((var(--rail-btn) + var(--rail-pad) * 2) / 2);
+  /* 这层是浮在内容上的「抬起面」:玻璃皮肤会把这里的半透明 --card-hi 换成实色
+     (见 style.css 玻璃段的 .rail__scrim 两条)—— 胶囊底下那行字不能透出来。 */
   background: var(--card-hi);
   border: 1px solid var(--border);
   box-shadow: var(--shadow);

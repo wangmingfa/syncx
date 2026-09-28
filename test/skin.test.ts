@@ -177,6 +177,18 @@ describe('skin:板岩 / 液态玻璃两档皮肤', () => {
     expect(alert).toContain('color: #fff');
   });
 
+  it('动作条胶囊在玻璃档是实色底:浮在卡片内容上,半透明会把底下文字透出来', () => {
+    // .rail__scrim 浮在目录卡内容上(展开的动作条背板),玻璃档的 --card-hi 只有
+    // 0.58/0.6 的白,当背板底时底下那行字透出来和按钮打架。实色值取 @supports
+    // 回退档的 --card-hi 同款,深浅两档都必须在 —— 深色漏给 = 暗页浮一块白板。
+    const light = ruleBlock(`${GLASS_LIGHT} .rail__scrim`);
+    expect(light).toContain('background: #ffffff');
+    expect(light!.match(/background:[^;]+/)?.[0]).not.toContain('/');
+    const dark = ruleBlock(`${GLASS_DARK} .rail__scrim`);
+    expect(dark).toContain('background: #232b38');
+    expect(dark!.match(/background:[^;]+/)?.[0]).not.toContain('/');
+  });
+
   it('Tooltip 玻璃态:深色磨砂气泡 + 浅色字,用 !important 压过内联注入的半透明底', () => {
     // tooltip 复用 Popover 主题,App.vue 的半透明 Popover 底会盖掉它自带深气泡 →
     // 浅底配浅字直接糊掉;这里必须 !important 直写深色底 + 浅色字救回可读性。

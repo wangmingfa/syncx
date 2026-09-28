@@ -627,7 +627,8 @@ html[data-theme='dark'] .chip-menu__item--danger {
   color: var(--text);
 }
 
-/* 标题+徽标绑成一组:窄屏 wrap 时两者同进退,徽标不会单独掉进按钮行 */
+/* 标题+徽标+「更多」绑成一组:窄屏 wrap 时三者同进退,「更多」永远贴在徽标右侧,
+   不会单独掉进按钮行(FolderList 的 ActionRail 就在 lead 里) */
 .col-head__lead {
   display: inline-flex;
   align-items: center;
@@ -3961,6 +3962,18 @@ html[data-skin='glass'] .toast:not(.toast--alert) {
 
 html[data-skin='glass'] .empty {
   background: transparent;
+}
+
+/* 展开动作条的胶囊要给**实色**:它浮在目录卡内容上,玻璃档的 --card-hi 只有
+   0.58/0.6 的白,背后那行卡片文字会透出来和动作按钮挤在同一块底上(截图实测)。
+   实色值取 @supports 回退档的 --card-hi 同款(纸面近实值),两档都要给 ——
+   深色漏给 = 暗页浮一块白板。 */
+html[data-skin='glass'] .rail__scrim {
+  background: #ffffff;
+}
+
+html[data-skin='glass'][data-theme='dark'] .rail__scrim {
+  background: #232b38;
 }
 
 /* 遮罩跟着换打法:压暗更轻、模糊比面板深一档 —— 弹窗浮起时后景化开但仍有形,

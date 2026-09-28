@@ -300,21 +300,24 @@ function visibleFiles(f: FolderInfo): TransferFile[] {
       :title="status.powerGuard ? `${status.powerGuard}:电源守卫已自动挂起所有目录同步,条件解除自动恢复;连接与配对照常` : '全局已暂停:所有目录不扫描、不广播、不接收;连接与配对照常'"
     >{{ status.powerGuard ? '自动挂起' : '已暂停' }}</span>
     <div class="col-head">
-      <!-- 标题+徽标绑成一组(.col-head__lead):窄屏 wrap 时两者同进退,
-           徽标不会单独掉进按钮行;手机上 lead 整行独占,按钮组落到第二行(见 style.css) -->
+      <!-- 标题+徽标+栏头动作绑成一组(.col-head__lead):「更多」紧贴徽标右侧,
+           窄屏 wrap 时三者同进退,不会像放在 lead 外面那样在换行后掉到「＋ 添加」左边、
+           看起来像输入行的装饰(实测截图);手机上 lead 整行独占,按钮落到第二行(见 style.css)。
+           展开面板是绝对定位浮层(direction=right 往右摊),盖住的是后面的「＋ 添加」区域,
+           不占布局位置,所以搬进 lead 不改变栏头宽度。 -->
       <div class="col-head__lead">
         <span>共享目录</span>
         <span class="badge">{{ status.folders.length }}</span>
+        <!-- 栏头动作收进 ActionRail(与目录卡同款):收起只留一个「更多」图标,
+             hover 栏头摊开;省空间,小屏不再挤一行文字按钮 -->
+        <ActionRail
+          :actions="headActions"
+          :expanded="headHover || headPinned"
+          direction="right"
+          label="目录栏操作"
+          @update:expanded="headPinned = $event"
+        />
       </div>
-      <!-- 栏头动作收进 ActionRail(与目录卡同款):收起只留一个「更多」图标,
-           hover 栏头摊开;省空间,小屏不再挤一行文字按钮 -->
-      <ActionRail
-        :actions="headActions"
-        :expanded="headHover || headPinned"
-        direction="right"
-        label="目录栏操作"
-        @update:expanded="headPinned = $event"
-      />
       <n-button v-if="status.folders.length > 0" class="add-toggle" :class="{ 'is-invisible': addFolderOpen }" :disabled="busy" :tabindex="addFolderOpen ? -1 : 0" @click="toggleAddFolder">＋ 添加</n-button>
     </div>
 
