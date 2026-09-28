@@ -22,7 +22,12 @@ import { rmDir } from './helpers.js';
  *
  * 真正落了提交之后,这条通知会原样中继给本机该目录的其余对端(排除来源),
  * 链式拓扑 A—B—C 的末端才不至于一直接不到提交;skip 分支与 receive 模式都不转发。
- * 待中继的台账同时落盘到 gitRelayPending:中间设备在投出去之前重启,这一跳照样补得回。
+ *
+ * 两份台账(中继 `gitRelayPending`、本机出站广播 `gitBroadcastPending`)都按**投递回执**
+ * 销账:接收方处理到通知即回 git-commit-ack(回给这一跳,不是最初提交者),发送端收到
+ * 回执才算这一笔完成。写成功却没回执的设备重发到上限自动放弃(旧版本对端不认识该 kind),
+ * 离线的设备不计数、账一直记着 —— 它回来时补投,这正是「内容同步了、提交却少一笔」的解药。
+ * 台账同时落盘:中间设备在投出去之前重启,这一跳照样补得回。
  */
 
 function gitAvailable(): boolean {
@@ -64,14 +69,16 @@ type NotifyMsg = Extract<ControlMessage, { kind: 'git-commit-notify' }>;
 /** 测试视角的内部接口:TS 的 private 只在编译期生效,测试按结构类型触达。 */
 interface Internals {
   onGitCommitNotify(msg: NotifyMsg): void;
+  onControl(msg: ControlMessage, hopDeviceId: string): void;
   flushPendingGitNotify(): void;
+  checkGitCommits(): Promise<void>;
   sendControlTo(deviceId: string, msg: ControlMessage): boolean;
 }
 
 const cleanupDirs: string[] = [];
 
 function boot(
-  mode: 'full' | 'receive',
+  mode: 'off' | 'send' | 'receive' | 'full',
   devices = ['PEER000001'],
 ): { dir: string; share: string; manager: SyncSessionManager; folder: NonNullable<SyncSessionManager['folderStates'][number]>; base: string } {
   const dir = mkdtempSync(join(tmpdir(), 'syncx-gitsync-drain-'));
@@ -110,12 +117,20 @@ function notify(hash: string, message = 'feat: 远端提交'): NotifyMsg {
   };
 }
 
-/** 从磁盘配置里读某目录的待中继台账(验证「内存与配置同值」这条不变量)。 */
-function relayOnDisk(dir: string): Record<string, unknown> | undefined {
+/** 从磁盘配置里读某目录的待投递台账(验证「内存与配置同值」这条不变量)。 */
+function pendingOnDisk(dir: string, field: 'gitRelayPending' | 'gitBroadcastPending'): Record<string, unknown> | undefined {
   const config = JSON.parse(readFileSync(join(dir, 'config.json'), 'utf8')) as {
-    sharedFolders?: Array<{ id?: string; gitRelayPending?: Record<string, unknown> }>;
+    sharedFolders?: Array<{ id?: string } & Partial<Record<typeof field, Record<string, unknown>>>>;
   };
-  return config.sharedFolders?.find((f) => f.id === 'main')?.gitRelayPending;
+  return config.sharedFolders?.find((f) => f.id === 'main')?.[field];
+}
+
+const relayOnDisk = (dir: string) => pendingOnDisk(dir, 'gitRelayPending');
+const broadcastOnDisk = (dir: string) => pendingOnDisk(dir, 'gitBroadcastPending');
+
+/** 接收方处理到通知后回给发送方的投递回执(它署自己的 id,发送方按它匹配台账目标)。 */
+function ackOf(hash: string, device: string): ControlMessage {
+  return { kind: 'git-commit-ack', fromDeviceId: device, folderId: 'main', commitHash: hash };
 }
 
 /** 改写磁盘上该目录的配置字段(模拟手改配置 / 热重载读回的新状态)。 */
@@ -282,7 +297,7 @@ describe('git commit notify relayed to the folder\'s other devices', () => {
   });
 
   it.skipIf(!HAS_GIT)('relays the original notify once the mirror commit lands, never back to the source', () => {
-    const { share, manager, folder } = boot('full', ['PEER000001', 'PEER000002']);
+    const { dir, share, manager, folder } = boot('full', ['PEER000001', 'PEER000002']);
     const internals = manager as unknown as Internals;
     const remoteHash = 'e'.repeat(40);
     const sent = spyControls(manager);
@@ -301,7 +316,13 @@ describe('git commit notify relayed to the folder\'s other devices', () => {
       commitHash: remoteHash,
       commitMessage: 'feat: 远端提交',
     });
+    // 写成功不等于送达:回执没到之前这一跳仍挂在台账上(内存与磁盘同值)
+    expect(folder.gitRelay?.targets).toEqual(['PEER000002']);
+    expect(relayOnDisk(dir)).toMatchObject({ commitHash: remoteHash, targets: ['PEER000002'] });
+    // 对端回执到达 → 销账(内存与磁盘一起清)
+    internals.onControl(ackOf(remoteHash, 'PEER000002'), 'PEER000002');
     expect(folder.gitRelay).toBeNull();
+    expect(relayOnDisk(dir)).toBeUndefined();
 
     (manager as unknown as { close(): void }).close();
   });
@@ -340,7 +361,7 @@ describe('git commit notify relayed to the folder\'s other devices', () => {
   });
 
   it.skipIf(!HAS_GIT)('holds the relay while the target is out of reach and resends next flush', () => {
-    const { share, manager, folder } = boot('full', ['PEER000001', 'PEER000002']);
+    const { dir, share, manager, folder } = boot('full', ['PEER000001', 'PEER000002']);
     const internals = manager as unknown as Internals;
     let online = false;
     const sent = spyControls(manager, () => online);
@@ -354,13 +375,23 @@ describe('git commit notify relayed to the folder\'s other devices', () => {
 
     online = true;
     internals.flushPendingGitNotify(); // 通知槽已空,纯补投
-    expect(folder.gitRelay).toBeNull();
     expect(sent).toHaveLength(2);
     // 先钉住 kind 再按收窄取哈希:补投出去的那一笔必须原样是 git 提交通知
     expect(sent[1]?.msg.kind).toBe('git-commit-notify');
     const resent = sent[1]?.msg;
     if (resent?.kind !== 'git-commit-notify') throw new Error('resent message is not a git commit notify');
     expect(resent.commitHash).toBe('a'.repeat(40));
+    // 补投只是「再送一次」,销账要等回执
+    expect(folder.gitRelay?.targets).toEqual(['PEER000002']);
+    // 再补投一轮:台账未清,会原样重发(接收侧按哈希去重,重复通知无害)
+    internals.flushPendingGitNotify();
+    expect(sent).toHaveLength(3);
+    // 回执到达 → 两处一起清空,不再多发一个字
+    internals.onControl(ackOf('a'.repeat(40), 'PEER000002'), 'PEER000002');
+    expect(folder.gitRelay).toBeNull();
+    expect(relayOnDisk(dir)).toBeUndefined();
+    internals.flushPendingGitNotify();
+    expect(sent).toHaveLength(3);
 
     (manager as unknown as { close(): void }).close();
   });
@@ -397,7 +428,9 @@ describe('git commit relay ledger persisted to config', () => {
     (restarted.manager as unknown as Internals).flushPendingGitNotify();
     expect(sent.map((s) => s.deviceId)).toEqual(['PEER000002']);
     expect(sent[0]?.msg).toMatchObject({ kind: 'git-commit-notify', commitHash: 'b'.repeat(40) });
-    // 投完即两处一起清空:配置里不留陈旧的待中继记录
+    // 补投成功后仍等回执;回执到达才两处一起清空:配置里不留陈旧的待中继记录
+    expect(restarted.folder.gitRelay?.targets).toEqual(['PEER000002']);
+    (restarted.manager as unknown as Internals).onControl(ackOf('b'.repeat(40), 'PEER000002'), 'PEER000002');
     expect(restarted.folder.gitRelay).toBeNull();
     expect(relayOnDisk(dir)).toBeUndefined();
 
@@ -467,6 +500,257 @@ describe('git commit relay ledger persisted to config', () => {
     expect(sent).toEqual([]);
     expect(folder.gitRelay).toBeNull();
     expect(relayOnDisk(dir)).toBeUndefined();
+
+    (manager as unknown as { close(): void }).close();
+  });
+});
+
+describe('git commit broadcast reaches every device of the folder', () => {
+  /**
+   * 真实事故:本机 mo 目录配了两台设备,15:58:13 探活失败拆掉了其中一台的连接,
+   * 15:58:14 本机提交广播只送达另一台 —— `broadcastGitCommit` 只看「至少送达一个」,
+   * 于是基线照样推进,掉线那台永远收不到这一笔通知(文件照常同步,工作树留一堆未提交
+   * 改动)。这条测试钉住这个缺口:没送达的设备必须被记住并在下一轮补投。
+   */
+  it.skipIf(!HAS_GIT)('resends the commit notification to a device that was out of reach', async () => {
+    const { share, manager } = boot('full', ['PEER000001', 'PEER000002']);
+    const internals = manager as unknown as Internals;
+    let online = new Set(['PEER000001', 'PEER000002']);
+    const accepted: string[] = [];
+    const sent = spyControls(manager, (deviceId) => {
+      const ok = online.has(deviceId);
+      if (ok) accepted.push(deviceId);
+      return ok;
+    });
+
+    // 首轮只建基线,不广播
+    await internals.checkGitCommits();
+    expect(sent).toEqual([]);
+
+    // 本机提交一笔,此刻 PEER000001 够不着
+    writeFileSync(join(share, 'a.txt'), 'local change');
+    git(share, ['add', '-A']);
+    git(share, ['commit', '-qm', 'feat: 本机提交']);
+    const head = git(share, ['rev-parse', 'HEAD']);
+    online = new Set(['PEER000002']);
+    await internals.checkGitCommits();
+    expect(accepted).toEqual(['PEER000002']);
+
+    // 它重连之后:这一笔要补投给它(接收侧按原始哈希去重,重复通知无害)
+    online = new Set(['PEER000001', 'PEER000002']);
+    accepted.length = 0;
+    sent.length = 0;
+    await internals.checkGitCommits();
+    expect(accepted).toContain('PEER000001');
+    const resent = sent.find((s) => s.deviceId === 'PEER000001')?.msg;
+    if (resent?.kind !== 'git-commit-notify') throw new Error('PEER000001 没有收到 git 提交通知');
+    expect(resent.commitHash).toBe(head);
+
+    (manager as unknown as { close(): void }).close();
+  });
+
+  /**
+   * 发送端的「完成」判据是**回执**,不是本地写成功:两台都写成功时台账仍挂着两台,
+   * 各自回执各自销账,回执齐了才清空(内存与磁盘一起)。
+   */
+  it.skipIf(!HAS_GIT)('keeps one entry per device until every device has acked', async () => {
+    const { dir, share, manager, folder } = boot('full', ['PEER000001', 'PEER000002']);
+    const internals = manager as unknown as Internals;
+    const sent = spyControls(manager, () => true);
+
+    await internals.checkGitCommits(); // 首轮建基线
+    writeFileSync(join(share, 'a.txt'), 'local change');
+    git(share, ['add', '-A']);
+    git(share, ['commit', '-qm', 'feat: 本机提交']);
+    const head = git(share, ['rev-parse', 'HEAD']);
+    await internals.checkGitCommits();
+
+    expect(sent.map((s) => s.deviceId).sort()).toEqual(['PEER000001', 'PEER000002']);
+    expect(folder.gitBroadcast?.targets.sort()).toEqual(['PEER000001', 'PEER000002']);
+    expect(broadcastOnDisk(dir)).toMatchObject({ commitHash: head, targets: ['PEER000001', 'PEER000002'] });
+
+    internals.onControl(ackOf(head, 'PEER000001'), 'PEER000001');
+    expect(folder.gitBroadcast?.targets).toEqual(['PEER000002']);
+    expect(broadcastOnDisk(dir)).toMatchObject({ targets: ['PEER000002'] });
+
+    // 回执齐 → 台账两处一起清空,后续扫描不再多发一个字
+    internals.onControl(ackOf(head, 'PEER000002'), 'PEER000002');
+    expect(folder.gitBroadcast).toBeNull();
+    expect(broadcastOnDisk(dir)).toBeUndefined();
+    sent.length = 0;
+    await internals.checkGitCommits();
+    expect(sent).toEqual([]);
+
+    (manager as unknown as { close(): void }).close();
+  });
+
+  it.skipIf(!HAS_GIT)('ignores an ack for a hash the ledger no longer holds', async () => {
+    const { dir, share, manager, folder } = boot('full', ['PEER000001']);
+    const internals = manager as unknown as Internals;
+    spyControls(manager, () => true);
+
+    await internals.checkGitCommits();
+    writeFileSync(join(share, 'a.txt'), 'first');
+    git(share, ['add', '-A']);
+    git(share, ['commit', '-qm', 'feat: 第一笔']);
+    await internals.checkGitCommits();
+    expect(folder.gitBroadcast?.targets).toEqual(['PEER000001']);
+    const pendingHash = folder.gitBroadcast?.msg.commitHash;
+
+    // 陈旧回执(前一笔的)不清账:它证明不了这一笔送达
+    internals.onControl(ackOf('9'.repeat(40), 'PEER000001'), 'PEER000001');
+    expect(folder.gitBroadcast?.msg.commitHash).toBe(pendingHash);
+
+    (manager as unknown as { close(): void }).close();
+  });
+
+  /**
+   * 补投有上限:本地一直写成功却始终等不到回执 = 对端是不回 git-commit-ack 的旧版本,
+   * 重发到上限自动放弃(每目标各记各的账,一台耗尽不连累另一台),绝不无限重发刷屏。
+   */
+  it.skipIf(!HAS_GIT)('abandons a peer that never acks after the resend cap, but keeps the other one', async () => {
+    const { dir, share, manager, folder } = boot('full', ['PEER000001', 'PEER000002']);
+    const internals = manager as unknown as Internals;
+    // PEER000001 是旧版本:写得进去却永不定回执;PEER000002 正常回执
+    const accepted: string[] = [];
+    const sent = spyControls(manager, (deviceId) => {
+      accepted.push(deviceId);
+      return true;
+    });
+
+    await internals.checkGitCommits();
+    writeFileSync(join(share, 'a.txt'), 'local change');
+    git(share, ['add', '-A']);
+    git(share, ['commit', '-qm', 'feat: 本机提交']);
+    const head = git(share, ['rev-parse', 'HEAD']);
+    await internals.checkGitCommits(); // 首发:两台各 1 次
+
+    for (let i = 0; i < 10; i++) {
+      internals.onControl(ackOf(head, 'PEER000002'), 'PEER000002');
+      await internals.checkGitCommits();
+    }
+
+    // 首 1 次 + 补投 4 次 = 5 次写成功后放弃(GIT_NOTIFY_MAX_RESENDS)
+    expect(sent.filter((s) => s.deviceId === 'PEER000001')).toHaveLength(5);
+    expect(folder.gitBroadcast).toBeNull();
+    expect(broadcastOnDisk(dir)).toBeUndefined();
+
+    (manager as unknown as { close(): void }).close();
+  });
+
+  it.skipIf(!HAS_GIT)('resumes an unacked broadcast after the daemon restarts', async () => {
+    const { dir, share, manager, folder } = boot('full', ['PEER000001', 'PEER000002']);
+    const internals = manager as unknown as Internals;
+    spyControls(manager, () => false); // 两台都够不着
+
+    await internals.checkGitCommits();
+    writeFileSync(join(share, 'a.txt'), 'local change');
+    git(share, ['add', '-A']);
+    git(share, ['commit', '-qm', 'feat: 停机期间的提交']);
+    const head = git(share, ['rev-parse', 'HEAD']);
+    await internals.checkGitCommits();
+
+    // 全部离线也要记账:旧实现里这一笔会因为「一个对端都没送达」而冻住基线等重试,
+    // 而基线一旦因别的缘故推进就永久漏掉。现在基线照常推进,账落在台账里。
+    expect(folder.gitBroadcast?.targets.sort()).toEqual(['PEER000001', 'PEER000002']);
+    expect(folder.lastCommitHash).toBe(head);
+    expect(broadcastOnDisk(dir)).toMatchObject({ commitHash: head });
+
+    const restarted = reboot(dir);
+    expect(restarted.folder.gitBroadcast?.targets.sort()).toEqual(['PEER000001', 'PEER000002']);
+    const sent = spyControls(restarted.manager, () => true);
+    (restarted.manager as unknown as Internals).flushPendingGitNotify();
+    expect(sent.map((s) => s.deviceId).sort()).toEqual(['PEER000001', 'PEER000002']);
+    expect(sent[0]?.msg).toMatchObject({ kind: 'git-commit-notify', commitHash: head });
+    // 重启后补投出去的这一笔照样要等回执才销账
+    expect(restarted.folder.gitBroadcast?.targets.sort()).toEqual(['PEER000001', 'PEER000002']);
+    (restarted.manager as unknown as Internals).onControl(ackOf(head, 'PEER000001'), 'PEER000001');
+    (restarted.manager as unknown as Internals).onControl(ackOf(head, 'PEER000002'), 'PEER000002');
+    expect(restarted.folder.gitBroadcast).toBeNull();
+    expect(broadcastOnDisk(dir)).toBeUndefined();
+
+    (restarted.manager as unknown as { close(): void }).close();
+  });
+
+  it.skipIf(!HAS_GIT)('drops the pending broadcast when the folder stops sending or loses its targets', async () => {
+    const { dir, share, manager, folder } = boot('full', ['PEER000001', 'PEER000002']);
+    const internals = manager as unknown as Internals;
+    spyControls(manager, () => false);
+
+    await internals.checkGitCommits();
+    writeFileSync(join(share, 'a.txt'), 'local change');
+    git(share, ['add', '-A']);
+    git(share, ['commit', '-qm', 'feat: 本机提交']);
+    await internals.checkGitCommits();
+    expect(folder.gitBroadcast?.targets.sort()).toEqual(['PEER000001', 'PEER000002']);
+
+    // 改成 receive:用户已明确不再往外发,积压的那一笔必须作废(内存与磁盘)
+    manager.setFolderGitSync('main', 'receive');
+    expect(folder.gitBroadcast).toBeNull();
+    expect(broadcastOnDisk(dir)).toBeUndefined();
+    const sent = spyControls(manager, () => true);
+    internals.flushPendingGitNotify();
+    expect(sent).toEqual([]);
+
+    (manager as unknown as { close(): void }).close();
+  });
+
+  it.skipIf(!HAS_GIT)('drops a target that has been unshared from the folder', async () => {
+    const { dir, share, manager, folder } = boot('full', ['PEER000001', 'PEER000002']);
+    const internals = manager as unknown as Internals;
+    spyControls(manager, () => false);
+
+    await internals.checkGitCommits();
+    writeFileSync(join(share, 'a.txt'), 'local change');
+    git(share, ['add', '-A']);
+    git(share, ['commit', '-qm', 'feat: 本机提交']);
+    await internals.checkGitCommits();
+
+    // 目录不再共享给任何人:无权外发,台账作废并清盘
+    patchDiskFolder(dir, { devices: [] });
+    manager.reloadConfig();
+    const sent = spyControls(manager, () => true);
+    internals.flushPendingGitNotify();
+    expect(sent).toEqual([]);
+    expect(folder.gitBroadcast).toBeNull();
+    expect(broadcastOnDisk(dir)).toBeUndefined();
+
+    (manager as unknown as { close(): void }).close();
+  });
+});
+
+describe('incoming git commit notify is receipted to the hop it arrived on', () => {
+  /**
+   * 中继出去的通知里 fromDeviceId 仍是最初那台提交设备(两跳之外,本机对它未必有会话),
+   * 所以回执必须按**这一跳**寻址 —— 否则中间设备永远等不到回执,会一遍遍重发。
+   */
+  it.skipIf(!HAS_GIT)('answers a relayed notify back to the relaying device', () => {
+    const { share, manager } = boot('receive', ['PEER000001', 'PEER000002']);
+    const internals = manager as unknown as Internals;
+    const sent = spyControls(manager, () => true);
+    writeFileSync(join(share, 'a.txt'), 'from peer');
+
+    // 通知由 PEER000002 转发过来,署名仍是最初提交者 PEER000001
+    internals.onControl(notify('7'.repeat(40)), 'PEER000002');
+
+    const receipt = sent.find((s) => s.msg.kind === 'git-commit-ack');
+    expect(receipt?.deviceId).toBe('PEER000002');
+    expect(receipt?.msg).toMatchObject({ kind: 'git-commit-ack', folderId: 'main', commitHash: '7'.repeat(40) });
+    // 通知照常入队(回执只是投递层的事,不影响接收流程)
+    expect(manager.folderStates[0]?.pendingGitNotify).not.toBeNull();
+
+    (manager as unknown as { close(): void }).close();
+  });
+
+  it.skipIf(!HAS_GIT)('receipts even a notify it will not act on (no such folder / send-only mode)', () => {
+    const { manager } = boot('send', ['PEER000001']);
+    const internals = manager as unknown as Internals;
+    const sent = spyControls(manager, () => true);
+
+    // 本目录是 send 模式:不提交,但回执照回 —— 发送方据此停止重发
+    internals.onControl(notify('8'.repeat(40)), 'PEER000001');
+    expect(sent.filter((s) => s.msg.kind === 'git-commit-ack')).toHaveLength(1);
+    expect(manager.folderStates[0]?.pendingGitNotify).toBeNull();
 
     (manager as unknown as { close(): void }).close();
   });

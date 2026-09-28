@@ -179,9 +179,18 @@ export interface SharedFolderConfig {
    * 与 gitSync 配套:本机替对端完成镜像提交后,会把**原始通知**(仍署最初提交者的设备
    * id 与哈希)转给本机该目录的其余对端,链式拓扑(A—B—C)末端因此也能落一笔提交。
    * 目标此刻可能离线,所以台账落盘:daemon 重启后接着补投,这一跳不会永久丢失。
-   * 全部送达 / 目录已不再共享给任何目标 / gitSync 被改动时清除。
+   * 全部拿到回执 / 目录已不再共享给任何目标 / gitSync 被改动时清除。
    */
-  gitRelayPending?: GitCommitRelayRecord;
+  gitRelayPending?: GitCommitPendingRecord;
+  /**
+   * 本机某笔提交**尚未拿到投递回执**的出站通知(见 wire 的 git-commit-ack;同样**仅本机使用**)。
+   *
+   * 出站广播过去按「至少送达一个对端」判定成败,于是目录配了两台设备时,一台在线就能把
+   * 基线推走,另一台(此刻离线)永久收不到这笔通知 —— 内容照样同步,提交却永远少一笔。
+   * 现在逐目标记账:每个目标各记一笔,回执到达才摘除,落盘是为了 daemon 重启后继续补投。
+   * 全部回执 / 目标已不再共享该目录 / gitSync 改档(不再发送)时清除。
+   */
+  gitBroadcastPending?: GitCommitPendingRecord;
   /**
    * 端到端加密密钥记录(passphrase 经 scrypt 派生;salt/key 皆 base64,**口令本体永不落盘**)。
    * 设置后,列在 e2eUntrusted 里的对端只收密文视图:路径与内容逐块加密,盲区节点「只存块、
@@ -198,10 +207,11 @@ export interface SharedFolderConfig {
 export type GitSyncMode = 'off' | 'send' | 'receive' | 'full';
 
 /**
- * 一条待中继的远端提交通知:除 targets 外,各字段就是 git-commit-notify 的原样内容
+ * Git 提交通知的待投递台账(两条槽共用同一形状:中继 `gitRelayPending` 与出站广播
+ * `gitBroadcastPending`)。除 targets 外,各字段就是 git-commit-notify 的原样内容
  * (见 src/net/wire.ts)—— 中继不改写来源与哈希,接收方才能按原哈希去重。
  */
-export interface GitCommitRelayRecord {
+export interface GitCommitPendingRecord {
   /** 最初提交那台设备的 id(原样转发给下游,同时是「不回投给来源」的依据)。 */
   fromDeviceId: string;
   commitHash: string;

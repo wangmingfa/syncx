@@ -10,6 +10,13 @@
  *
  * 所有 git 命令通过 execFileSync 同步执行(本地仓库操作通常 <100ms),
  * 避免异步引入的竞态条件。失败时抛错,由调用方处理。
+ *
+ * 每一处 execFileSync 都必须带 `windowsHide: true`,这不是装饰:
+ * daemon 被自更新流程 detached 拉起后**自己没有控制台**,而 git.exe 是控制台子系统
+ * 程序 —— 不给这个标志,Windows 会为每次调用现开一个控制台窗口。于是每轮扫描的两笔
+ * git 调用(读 HEAD + 查工作区状态)就是**两下黑框闪烁**,默认 5s 一轮,现象是
+ * 「每隔几秒弹两次、两次之间隔几百毫秒」。从终端手工启动的 daemon 有控制台可继承,
+ * 所以不闪 —— 这正是「升级之后才开始闪」的原因。新增调用点时别忘了它。
  */
 import { existsSync } from 'node:fs';
 import { join } from 'node:path';
@@ -42,6 +49,7 @@ export function getLastCommitHash(folderPath: string): string | null {
       cwd: folderPath,
       encoding: 'utf8',
       stdio: ['ignore', 'pipe', 'ignore'],
+      windowsHide: true,
       timeout: 5000,
     });
     return hash.trim() || null;
@@ -65,6 +73,7 @@ export function getCommitInfo(folderPath: string, fromHash: string, toHash: stri
         cwd: folderPath,
         encoding: 'utf8',
         stdio: ['ignore', 'pipe', 'ignore'],
+        windowsHide: true,
         timeout: 5000,
         maxBuffer: 1024 * 1024,
       },
@@ -92,6 +101,7 @@ export function getCommitInfo(folderPath: string, fromHash: string, toHash: stri
         cwd: folderPath,
         encoding: 'utf8',
         stdio: ['ignore', 'pipe', 'ignore'],
+        windowsHide: true,
         timeout: 5000,
         maxBuffer: 1024 * 1024,
       },
@@ -108,6 +118,7 @@ export function getCommitInfo(folderPath: string, fromHash: string, toHash: stri
           cwd: folderPath,
           encoding: 'utf8',
           stdio: ['ignore', 'pipe', 'ignore'],
+          windowsHide: true,
           timeout: 5000,
           maxBuffer: 64 * 1024,
         },
@@ -132,6 +143,7 @@ export function hasUncommittedChanges(folderPath: string): boolean {
       cwd: folderPath,
       encoding: 'utf8',
       stdio: ['ignore', 'pipe', 'ignore'],
+      windowsHide: true,
       timeout: 5000,
     });
     return status.trim().length > 0;
@@ -159,6 +171,7 @@ export function autoCommit(folderPath: string, message: string): AutoCommitResul
     execFileSync('git', ['add', '-A'], {
       cwd: folderPath,
       stdio: ['ignore', 'ignore', 'pipe'],
+      windowsHide: true,
       timeout: 10000,
     });
 
@@ -166,6 +179,7 @@ export function autoCommit(folderPath: string, message: string): AutoCommitResul
     execFileSync('git', ['commit', '-m', message, '--allow-empty'], {
       cwd: folderPath,
       stdio: ['ignore', 'ignore', 'pipe'],
+      windowsHide: true,
       timeout: 10000,
     });
 

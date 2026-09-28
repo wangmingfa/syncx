@@ -343,7 +343,7 @@ function updaterSource(): string {
     "    ensureExec(join(job.targetDir, 'dist', 'syncx.js')); // 换入成功强制可执行位,避免对端产物缺 +x 致 Permission denied",
     "    // 拉起新 daemon(env 带结果文件路径,新进程启动后上报升级结果)",
     "    const child = spawn(job.execPath, job.restartArgs, {",
-    "      detached: true, stdio: 'ignore',",
+    "      detached: true, stdio: 'ignore', windowsHide: true,",
     "      env: { ...process.env, SYNCX_UPDATE_DONE: job.doneFile },",
     "    });",
     "    child.unref();",
@@ -359,7 +359,7 @@ function updaterSource(): string {
     "        rmSync(job.targetDir, { recursive: true, force: true });",
     "        await swap(backup, job.targetDir);",
     "        ensureExec(join(job.targetDir, 'dist', 'syncx.js')); // 还原旧包后保证可执行位(老包原本可能 0644)",
-    "        const old = spawn(job.execPath, job.restartArgs, { detached: true, stdio: 'ignore', env: { ...process.env, SYNCX_UPDATE_DONE: job.doneFile } });",
+    "        const old = spawn(job.execPath, job.restartArgs, { detached: true, stdio: 'ignore', windowsHide: true, env: { ...process.env, SYNCX_UPDATE_DONE: job.doneFile } });",
     "        old.unref();",
     "        done({ ok: false, rolledBack: true, error: message });",
     "        process.exit(1);",
@@ -443,7 +443,9 @@ export async function runSelfUpdate(
   writeFileSync(jobFile, JSON.stringify(job));
   writeFileSync(updaterFile, updaterSource());
 
-  const child = spawn(job.execPath, [updaterFile, jobFile], { detached: true, stdio: 'ignore' });
+  // windowsHide 与下面 updater 里那两处 spawn 同理:detached 出来的进程若不带这个标志,
+  // Windows 会给它新建控制台窗口 —— 升级过程本身就会闪一个黑框出来。
+  const child = spawn(job.execPath, [updaterFile, jobFile], { detached: true, stdio: 'ignore', windowsHide: true });
   child.unref();
   return { version, doneFile };
 }

@@ -105,7 +105,16 @@ export type ControlMessage =
    * 与 commitHash 都不改写,中继设备的镜像哈希永不出门),链式拓扑的末端因此也能提交。
    * 旧版本对端不识别该 kind,直接忽略,不影响既有功能。
    */
-  | { kind: 'git-commit-notify'; fromDeviceId: string; folderId: string; commitHash: string; commitMessage: string; changedFiles: string[]; diffStat?: string; parentHash: string; version?: string; hostname?: string; platform?: string };
+  | { kind: 'git-commit-notify'; fromDeviceId: string; folderId: string; commitHash: string; commitMessage: string; changedFiles: string[]; diffStat?: string; parentHash: string; version?: string; hostname?: string; platform?: string }
+  /**
+   * Git 提交通知的**投递回执**(控制面「至少一次」的最后一道锁):接收方只要**处理了**
+   * 这条通知就立刻回此帧,与它随后有没有落成一笔镜像提交无关 —— 提不提交取决于模式、
+   * 该哈希是否早已处理、工作树是否干净,这些都发生在回执之后,拿它们驱动重发会把
+   * 台账挂死。发送方(逐目标台账)据此销账:写成功却迟迟不回执的设备重发到上限自动放弃
+   * (旧版本对端不回此帧);离线的设备不消耗次数、账一直记着,等它回来补投。
+   * commitHash 是通知里那笔**原始提交**的哈希(中继不改写),发送方按它匹配台账。
+   */
+  | { kind: 'git-commit-ack'; fromDeviceId: string; folderId: string; commitHash: string; version?: string; hostname?: string; platform?: string };
 
 export function encodeWireMessage(message: WireMessage): string {
   return JSON.stringify(message);
