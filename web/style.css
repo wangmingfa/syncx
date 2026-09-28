@@ -1420,127 +1420,16 @@ html[data-theme='dark'] .chip-menu__item--danger {
 
 /* ---------- 使用指南弹窗 ---------- */
 
-.modal-overlay {
-  position: fixed;
-  inset: 0;
-  background: rgb(22 32 52 / 0.4);
-  backdrop-filter: blur(2px);
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  padding: 20px;
-  z-index: var(--z-overlay);
-}
-
-.modal {
-  position: relative;
-  width: 100%;
-  max-width: 520px;
-  max-height: 88vh;
-  /* 定高 flex 列 + 自身不滚:滚动交给正文那一段(见下面 .modal-body)。
-     原先是 overflow-y: auto 让整块滚 —— 内容一长,标题滚出视野、按钮也滚出视野,
-     用户既不记得自己在哪个弹窗,也得先把弹窗滚到底才能点「保存」。 */
-  display: flex;
-  flex-direction: column;
-  overflow: hidden;
-  background: var(--card);
-  border: 1px solid var(--border);
-  border-radius: 16px;
-  padding: 26px 26px 22px;
-  box-shadow: 0 24px 60px -24px rgb(22 32 52 / 0.45);
-}
-
-/* 标题与动作区是「不滚动的那两段」:flex: none 既挡住被压缩,也挡住让位。
-   ⚠️ 别给它们 flex-shrink 的余地 —— 正文撑满时标题先被压扁,比滚动条更难解释。 */
-.modal-title,
-.modal-title-row,
-.modal-actions {
-  flex: none;
-}
-
-/* 唯一的滚动区。min-height: 0 是这条链的关键:flex 子项的默认最小高度是内容高度,
-   不写的话正文会顶穿 .modal 的 max-height,滚动条又跑回整块弹窗上。
-   滚动条内缩在 26px 边距里(边距留在 .modal 上是为了标题/动作区/正文共用同一个内容盒),
-   比把正文撑到圆角边上更贴这块卡片的观感。
-   一个顺带的后果:滚动容器自成 BFC,正文首元素的 margin-top 不再与标题的下边距折叠,
-   两者相加。实测只有「首块自带 18px 顶距」的编辑目录 / 分享弹窗受影响,多出 12px 的
-   段前距 —— 那是分节标签本来就该有的距离,不做 first-child 归零(Vue 的 v-if 会留注释
-   节点占位,`:first-child` 在这些弹窗里根本匹配不上,规则会静默失灵)。 */
-.modal-body {
-  flex: 1 1 auto;
-  min-height: 0;
-  overflow-y: auto;
-  /* 滚到尽头不带动背后的页面:弹窗是独立视口,连锁滚动会让人以为在滚底下那页 */
-  overscroll-behavior: contain;
-}
+/* 外壳骨架(`.modal-overlay` / `.modal` / `.modal-title*` / `.modal-body` / `.modal-lead` /
+   `.modal-wide` / `.modal-actions*`)已随模板搬进 `web/components/ModalShell.vue` 的 `<style>`,
+   关闭按钮那两条(`.modal-close` / `.modal-close-x`)跟着它的标记进了
+   `web/components/ModalCloseButton.vue`。这里**只留调用方自己的覆盖**:它们靠 `.modal.x`
+   双类(0,2,0)压过外壳的单类(0,1,0),与文件顺序无关。 */
 
 /* 全局设置弹窗加宽(默认 520 → 620)。写成 `.modal.x` 双类是为了把特异度提到 (0,2,0),
-   压过 `.modal` 而**不依赖文件顺序** —— 与上面 .history-modal 那两条同一写法。 */
+   压过外壳的 `.modal` 而**不依赖文件顺序** —— 与下面 .history-modal 那两条同一写法。 */
 .modal.settings-modal {
   max-width: 620px;
-}
-
-/* 右上角关闭按钮。圆(悬停底色)沿用 naive-ui medium 的 34px 不变,里面的叉号是内联 SVG 画的。
-   为什么不用文字字符:一个字的墨迹位置由字体度量(baseline 与数学轴)决定,CSS 的 align-items /
-   line-height 只能摆布行盒、摆布不了墨迹。实测同一个「×」,28px 时 macOS 默认字体的墨迹中心比
-   圆心低 2.00px、Helvetica 低 2.75px、Verdana 低 2.12px,而 Arial 反而高 0.88px、Courier New
-   高 1.00px(14px 时这些偏差只有 ~0.5px,所以字号小的时候看不出来) —— 靠 transform / line-height
-   去凑,等于把外观绑死在某款字体上,换个平台就翻车。SVG 的几何与字体无关,34px 盒里 14px 图形
-   左右各留 10px 整数边距。标记本身在 `web/components/ModalCloseButton.vue`(9 个弹窗共用),
-   样式留在这里是因为它与 `.modal` 的定位上下文互相咬合(绝对定位的角、与标题行的对齐),
-   拆进组件就看不出层叠关系 —— 这是它留在全局的理由,不是"项目约定"(那条已废)。 */
-.modal-close {
-  position: absolute;
-  top: 14px;
-  right: 14px;
-}
-
-/* 叉号的尺寸只在这里定一处;stroke 走 currentColor,自动跟随按钮文字色(hover / disabled 态一致)。
-   viewBox 是 14x14、path 从 (1,1) 划到 (13,13),加上 round 端帽正好填满 viewBox,
-   即墨迹 14x14、笔画 2 —— 与改造前文字版实测的 1.8~2.1px 同一量级。 */
-.modal-close-x {
-  width: 14px;
-  height: 14px;
-  stroke: currentColor;
-  stroke-width: 2;
-  stroke-linecap: round;
-  fill: none;
-}
-
-.modal-title {
-  font-size: 19px;
-  font-weight: 600;
-  letter-spacing: -0.01em;
-  margin-bottom: 4px;
-}
-
-/* 设置弹窗:标题与目录路径同一行,长路径省略号截断,悬停 title 看全 */
-.modal-title-row {
-  display: flex;
-  align-items: baseline;
-  gap: 10px;
-  min-width: 0;
-  margin-bottom: 12px;
-}
-
-.modal-title-row .modal-title {
-  margin-bottom: 0;
-  flex-shrink: 0;
-}
-
-.modal-title-path {
-  color: var(--muted);
-  font-size: 12px;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-  min-width: 0;
-}
-
-.modal-lead {
-  color: var(--muted);
-  font-size: 13px;
-  margin-bottom: 16px;
 }
 
 /* 使用指南正文。这几个类名早就写在模板里,却一直没有对应样式:<ol class="guide-steps">
@@ -1625,16 +1514,9 @@ html[data-theme='dark'] .chip-menu__item--danger {
   gap: 4px;
 }
 
-/* 需要更宽的弹窗:同步记录(容纳列表)、使用指南(520px 下四步正文被挤成窄长条 ——
-   640 是拐点,再宽各行不再变短、反而行长超过舒适阅读宽度)。 */
-.modal-wide {
-  max-width: 640px;
-}
-
-/* 同步记录弹窗加宽(原 640 → 单目录 740 / 全部目录 840)。
-   写成 `.modal-wide.x` 双类是为了把特异度提到 (0,2,0),压过 .modal-wide 而**不依赖
-   文件顺序** —— 对照上面 .conflict-modal 那条单类写法,它靠"后来者胜",文件一重排
-   就会静默失效,这种坑不值得复刻。
+/* 同步记录弹窗加宽(默认 640 → 单目录 740 / 全部目录 840)。外壳的 `.modal-wide`
+   已在 `ModalShell.vue` 里,这里写成 `.modal-wide.x` 双类把特异度提到 (0,2,0),
+   压过它而**不依赖文件顺序** —— 对照上面 `.conflict-modal` 那条,同一写法。
    全部目录比单目录再宽 100px:它多一列「目录」路径,时间/动作/方向那几列是共用的。 */
 .modal-wide.history-modal {
   max-width: 740px;
@@ -1920,8 +1802,10 @@ li.history-row.row-conflict {
 
 /* 收件箱比通用 wide 弹窗(640)再加宽 200px:一行要同时放下时间、冲突徽标、
    原文件路径 + 来源设备说明、两个动作按钮,640 下路径全被截成省略号。
-   与 .modal-wide 同为单类选择器,靠文件顺序后来者胜。 */
-.conflict-modal {
+   写成 `.modal-wide.x` 双类把特异度提到 (0,2,0):外壳的 `.modal-wide` 现在住在
+   `ModalShell.vue` 里、注入比本文件**更晚**,单类写法会当场输掉(改前它只是靠在本文件里
+   排在 `.modal-wide` 后面取胜,那种运气不该复制到这里)。 */
+.modal-wide.conflict-modal {
   max-width: 840px;
 }
 
@@ -2033,28 +1917,9 @@ html[data-theme='dark'] .conflict-state-diff {
   color: var(--text);
 }
 
-/* 弹窗底部动作区:按钮**按内容宽度**排,整组靠右。
-   早先这里是 `.modal-actions > * { flex: 1 }`(等宽铺满),窄弹窗(520)下看不出来,
-   一到大弹窗就崩:对比弹窗(96% 宽)里三个按钮各 ~370px、拓扑弹窗单个「关闭」~590px、
-   使用指南的「我知道了」整条 588px —— 读起来像几根横杠,分不清哪颗按钮重要。
-   等宽铺满还有个副作用:按钮宽度跟着**弹窗宽度**走,同一颗「关闭」在不同弹窗里宽度不同。 */
-.modal-actions {
-  display: flex;
-  align-items: center;
-  gap: 10px;
-  margin-top: 18px;
-  justify-content: flex-end;
-  /* 窄屏(360)三个按钮放不下时整体换行,而不是让按钮溢出弹窗 */
-  flex-wrap: wrap;
-}
-
-/* 显式写 `flex: 0 1 auto`(即默认值)是为了钉住这个决定:⚠️ 别改回 `flex: 1`,
-   那正是「大弹窗里按钮很宽」的成因。宽度交给 naive-ui 的左右 padding + 文字决定。
-   二次确认行里的说明文字也按同一条规则排(见 `.fd-confirm__msg`,它**不能**设
-   `flex-grow`),这样「警示 + 两颗按钮」是一个整体、整组靠右 —— 焦点不被拉开。 */
-.modal-actions > * {
-  flex: 0 1 auto;
-}
+/* 弹窗底部动作区(`.modal-actions` 与 `.modal-actions > *`)已随外壳搬进
+   `web/components/ModalShell.vue`:那两条决定「按钮按内容宽度排、整组靠右、窄屏换行」,
+   是骨架的一部分,不是某个弹窗的私事。 */
 
 /* ---------- 设备同步拓扑弹窗 ---------- */
 .topo-svg {
@@ -2984,9 +2849,11 @@ html[data-theme='dark'] .conflict-state-diff {
 
 /* ---------- 文件内容对比弹窗 ---------- */
 
-.fd-modal {
+.modal.fd-modal {
   /* 百分比宽度:随窗口伸缩,不再被固定上限卡住 —— 并排差异要尽量铺开才好读。
-     .modal-overlay 两侧各有 20px 内边距,该百分比是相对那个内容盒算的。 */
+     .modal-overlay 两侧各有 20px 内边距,该百分比是相对那个内容盒算的。
+     报双类(`.modal.x`)是因为外壳的 `.modal` 现在住在 ModalShell.vue、注入比本文件更晚,
+     它那两条 `width: 100%` / `max-width: 520px` 会把百分比盖掉 —— 单类靠顺序取胜的写法失效了。 */
   width: 96%;
   max-width: none;
   display: flex;
@@ -2996,8 +2863,8 @@ html[data-theme='dark'] .conflict-state-diff {
 /* 能逐行对比时,高度也按百分比撑开(同为相对 overlay 内容盒),
    并解除 .modal 的 88vh 上限:长文件一屏能多看十几行。
    只有「有内容可比」时才挂这个类 —— 二进制/一侧缺失的降级态内容很少,
-   强撑满屏只会留一片空白。 */
-.fd-modal--tall {
+   强撑满屏只会留一片空白。`max-height: none` 同样要压过外壳,故报双类。 */
+.modal.fd-modal--tall {
   height: 94%;
   max-height: none;
 }
@@ -3629,12 +3496,15 @@ body .n-dropdown-menu .n-dropdown-option .n-dropdown-option-body::before {
   font-size: 15px;
 }
 
+/* 组件已改走 ModalShell,滚动区由外壳的 `.modal-body` 独揽,这里**不再自带**
+   `max-height: 56vh / overflow-y: auto` —— 两层滚动套起来会出现「滚动条里再一根滚动条」,
+   而且外层永远滚不到、只显得弹窗有个滚不动的死角。代价:上滑时快照时间与设备身份那几行
+   会一起推出视野(旧的内层滚动器把它们钉在上方)。选这个方向还因为它是外壳的既有约定 ——
+   外壳只有默认槽进 `.modal-body`,同步记录弹窗那句说明(`.modal-lead`)本来就是跟着内容滚的。 */
 .diff-groups {
   display: flex;
   flex-direction: column;
   gap: 8px;
-  max-height: 56vh;
-  overflow-y: auto;
 }
 
 .diff-group__head {
@@ -3822,7 +3692,8 @@ html[data-theme='dark'] .diff-item__warn { color: #e0b45f; }
 
 /* 条目内部两行:第一行「设备ID + mDNS 主机名」,第二行发现到的 IP。
    整组 .discovered-* 仍留在全局:它们是一个视觉单元,把新加的这几条单独搬进组件
-   会让同一组规则分处两地(与 .modal-* 同一判据 —— 只有自包含的组件才整体下沉)。 */
+   会让同一组规则分处两地。判据是「整组自包含才下沉」—— `.modal-*` 那一组就是这么办的:
+   骨架样式与骨架模板一起搬进 `web/components/ModalShell.vue`,调用方的覆盖留在本文件。 */
 .discovered-body {
   display: flex;
   flex-direction: column;

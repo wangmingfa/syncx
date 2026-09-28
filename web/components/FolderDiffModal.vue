@@ -1,6 +1,7 @@
 <script setup lang="ts">
 import { computed, ref, watch } from 'vue';
 import { NButton } from 'naive-ui';
+import ModalShell from './ModalShell.vue';
 import { useStatusContext } from '../composables/statusContext';
 import { stripWs } from '../utils/format';
 import type { FolderDiffItem, FolderDiffKind } from '../types';
@@ -138,137 +139,134 @@ function transferring(p?: { pending: number; sending: number; receiving: number 
 </script>
 
 <template>
-  <Transition name="guide">
-    <div v-if="diffOpen" class="modal-overlay" @click.self="closeDiff()">
-      <div class="modal modal-wide" role="dialog" aria-modal="true" aria-labelledby="diff-title">
-        <n-button quaternary circle class="modal-close" aria-label="关闭" @click="closeDiff()">×</n-button>
-        <div class="modal-title-row">
-          <h2 id="diff-title" class="modal-title">对比</h2>
-          <span class="modal-title-path mono" :title="diffFolder?.path">{{ diffFolder?.path }}</span>
+  <ModalShell
+    :open="diffOpen"
+    title="对比"
+    :description="diffFolder?.path"
+    description-mono
+    wide
+    @close="closeDiff()"
+  >
+    <!-- 对端选择 + 重跑:目录只指派了一个设备时只剩「重新对比」 -->
+    <div v-if="diffDevices.length > 0" class="diff-bar">
+      <span class="diff-bar__label">对端</span>
+      <n-button
+        v-for="d in diffDevices"
+        :key="d"
+        size="small"
+        class="mono"
+        :type="d === diffDevice ? 'primary' : 'default'"
+        :tertiary="d !== diffDevice"
+        :disabled="diffLoading"
+        @click="switchDiffDevice(d)"
+      >{{ d }}</n-button>
+      <n-button size="small" tertiary :disabled="diffLoading" class="diff-bar__rerun" @click="runDiff">重新对比</n-button>
+    </div>
+
+    <div v-if="diffDevices.length === 0" class="empty">
+      该目录还没有指派设备 · 先在目录卡的「设置」里指派后再对比
+    </div>
+
+    <div v-else-if="diffLoading" class="diff-loading">
+      正在取对端的索引快照…
+      <p class="diff-hint">对端离线、或版本过旧不支持该功能时会失败并给出原因。</p>
+    </div>
+
+    <div v-else-if="diffError" class="diff-error" role="alert">
+      <div class="diff-error__msg break">{{ diffError }}</div>
+      <n-button size="small" tertiary :disabled="diffLoading" @click="runDiff">重试</n-button>
+    </div>
+
+    <template v-else-if="diffData">
+      <div class="diff-meta">
+        对端快照取自 {{ fmtTime(diffData.remoteAt) }}（{{ agoText(diffData.remoteAt) }}）·
+        本机索引 {{ diffData.diff.localTotal }} 条 · 对端 {{ diffData.diff.remoteTotal }} 条 ·
+        双方一致 {{ diffData.diff.counts['in-sync'] }} 条
+      </div>
+
+      <!-- 设备身份:本机 / 对端各一行(主机名 + IP)。多设备时「在跟哪台机器比」比设备
+           id 好认,也便于确认这份报告出自哪台机器(同一台机器开多个界面时尤其明显)。 -->
+      <div class="diff-legend mono">
+        <div class="diff-legend__row">
+          <span class="diff-legend__role">本机</span>
+          <span class="diff-legend__id">{{ status.deviceId }}</span>
+          <span v-if="localWhere" class="diff-legend__where">{{ localWhere }}</span>
         </div>
-
-        <!-- 对端选择 + 重跑:目录只指派了一个设备时只剩「重新对比」 -->
-        <div v-if="diffDevices.length > 0" class="diff-bar">
-          <span class="diff-bar__label">对端</span>
-          <n-button
-            v-for="d in diffDevices"
-            :key="d"
-            size="small"
-            class="mono"
-            :type="d === diffDevice ? 'primary' : 'default'"
-            :tertiary="d !== diffDevice"
-            :disabled="diffLoading"
-            @click="switchDiffDevice(d)"
-          >{{ d }}</n-button>
-          <n-button size="small" tertiary :disabled="diffLoading" class="diff-bar__rerun" @click="runDiff">重新对比</n-button>
-        </div>
-
-        <div v-if="diffDevices.length === 0" class="empty">
-          该目录还没有指派设备 · 先在目录卡的「设置」里指派后再对比
-        </div>
-
-        <div v-else-if="diffLoading" class="diff-loading">
-          正在取对端的索引快照…
-          <p class="diff-hint">对端离线、或版本过旧不支持该功能时会失败并给出原因。</p>
-        </div>
-
-        <div v-else-if="diffError" class="diff-error" role="alert">
-          <div class="diff-error__msg break">{{ diffError }}</div>
-          <n-button size="small" tertiary :disabled="diffLoading" @click="runDiff">重试</n-button>
-        </div>
-
-        <template v-else-if="diffData">
-          <div class="diff-meta">
-            对端快照取自 {{ fmtTime(diffData.remoteAt) }}（{{ agoText(diffData.remoteAt) }}）·
-            本机索引 {{ diffData.diff.localTotal }} 条 · 对端 {{ diffData.diff.remoteTotal }} 条 ·
-            双方一致 {{ diffData.diff.counts['in-sync'] }} 条
-          </div>
-
-          <!-- 设备身份:本机 / 对端各一行(主机名 + IP)。多设备时「在跟哪台机器比」比设备
-               id 好认,也便于确认这份报告出自哪台机器(同一台机器开多个界面时尤其明显)。 -->
-          <div class="diff-legend mono">
-            <div class="diff-legend__row">
-              <span class="diff-legend__role">本机</span>
-              <span class="diff-legend__id">{{ status.deviceId }}</span>
-              <span v-if="localWhere" class="diff-legend__where">{{ localWhere }}</span>
-            </div>
-            <div class="diff-legend__row">
-              <span class="diff-legend__role">对端</span>
-              <span class="diff-legend__id">{{ diffData.deviceId }}</span>
-              <span v-if="remoteWhere" class="diff-legend__where">{{ remoteWhere }}</span>
-            </div>
-          </div>
-
-          <!-- 报告可信度提示:传输中 / 对端规则缺失都会让结论打折,先讲清楚 -->
-          <p v-if="transferring(diffData.localProgress)" class="diff-note">
-            本机此刻在传输（{{ progressTextOf(diffData.localProgress) }}），本报告可能含传输中的中间态。
-          </p>
-          <p v-if="transferring(diffData.remoteProgress)" class="diff-note">
-            对端此刻在传输（{{ progressTextOf(diffData.remoteProgress) }}），本报告可能含传输中的中间态。
-          </p>
-          <p v-if="!diffData.diff.remoteRulesKnown" class="diff-note">
-            对端未提供忽略规则（版本较旧），「规则使然」的差异无法区分，已按普通差异计入。
-          </p>
-
-          <div v-if="totalDiff === 0" class="diff-clean">
-            <span class="diff-clean__mark" aria-hidden="true">✔</span>
-            没有差异：两端同一目录 id 的内容一致。
-          </div>
-
-          <div v-else class="diff-groups">
-            <section v-for="g in GROUPS" :key="g.kind" class="diff-group">
-              <button
-                v-if="itemsOf(g.kind).length > 0"
-                type="button"
-                class="diff-group__head"
-                :aria-expanded="expanded[g.kind] === true"
-                @click="toggle(g.kind)"
-              >
-                <span class="diff-group__caret" :class="{ 'is-open': expanded[g.kind] }" aria-hidden="true">▸</span>
-                <span class="diff-group__label">{{ g.label }}</span>
-                <span class="diff-group__count" :class="{ 'is-noise': g.noise }">{{ itemsOf(g.kind).length }}</span>
-                <span class="diff-group__hint">{{ g.hint }}</span>
-              </button>
-
-              <ul v-if="itemsOf(g.kind).length > 0 && expanded[g.kind]" class="diff-items">
-                <li v-for="item in visibleOf(g.kind)" :key="item.path" class="diff-item">
-                  <div class="diff-item__path mono break">{{ item.path }}</div>
-
-                  <div v-if="item.rule" class="diff-item__rule">
-                    命中规则 <code class="mono">{{ item.rule }}</code>
-                    <span v-if="item.hard" class="diff-chip diff-chip--hard">硬忽略,不可解除</span>
-                  </div>
-
-                  <template v-else>
-                    <div class="diff-item__side">
-                      <span class="diff-item__side-label">本机</span>
-                      <span class="mono">{{ sideText(item.local, diffData.deviceId) }}</span>
-                    </div>
-                    <div class="diff-item__side">
-                      <span class="diff-item__side-label">对端</span>
-                      <span class="mono">{{ sideText(item.remote, diffData.deviceId) }}</span>
-                    </div>
-                  </template>
-
-                  <div v-if="item.disk === 'missing'" class="diff-item__warn">本机盘上已无此文件 —— 索引陈旧,不是两端不同步</div>
-                  <div v-else-if="item.disk === 'size-differs'" class="diff-item__warn">本机盘上大小与索引不符 —— 索引陈旧</div>
-                </li>
-                <li v-if="itemsOf(g.kind).length > PAGE && !showAll[g.kind]" class="diff-more">
-                  <n-button size="tiny" tertiary @click="showAll = { ...showAll, [g.kind]: true }">
-                    展开全部 {{ itemsOf(g.kind).length }} 条
-                  </n-button>
-                </li>
-              </ul>
-            </section>
-          </div>
-        </template>
-
-        <!-- 操作行常驻:加载中/出错时也要有关闭入口(不能只靠右上角的 ×) -->
-        <div class="modal-actions">
-          <n-button :disabled="!diffData || totalDiff === 0" @click="copyDiff">复制结果</n-button>
-          <n-button type="primary" @click="closeDiff()">关闭</n-button>
+        <div class="diff-legend__row">
+          <span class="diff-legend__role">对端</span>
+          <span class="diff-legend__id">{{ diffData.deviceId }}</span>
+          <span v-if="remoteWhere" class="diff-legend__where">{{ remoteWhere }}</span>
         </div>
       </div>
-    </div>
-  </Transition>
+
+      <!-- 报告可信度提示:传输中 / 对端规则缺失都会让结论打折,先讲清楚 -->
+      <p v-if="transferring(diffData.localProgress)" class="diff-note">
+        本机此刻在传输（{{ progressTextOf(diffData.localProgress) }}），本报告可能含传输中的中间态。
+      </p>
+      <p v-if="transferring(diffData.remoteProgress)" class="diff-note">
+        对端此刻在传输（{{ progressTextOf(diffData.remoteProgress) }}），本报告可能含传输中的中间态。
+      </p>
+      <p v-if="!diffData.diff.remoteRulesKnown" class="diff-note">
+        对端未提供忽略规则（版本较旧），「规则使然」的差异无法区分，已按普通差异计入。
+      </p>
+
+      <div v-if="totalDiff === 0" class="diff-clean">
+        <span class="diff-clean__mark" aria-hidden="true">✔</span>
+        没有差异：两端同一目录 id 的内容一致。
+      </div>
+
+      <div v-else class="diff-groups">
+        <section v-for="g in GROUPS" :key="g.kind" class="diff-group">
+          <button
+            v-if="itemsOf(g.kind).length > 0"
+            type="button"
+            class="diff-group__head"
+            :aria-expanded="expanded[g.kind] === true"
+            @click="toggle(g.kind)"
+          >
+            <span class="diff-group__caret" :class="{ 'is-open': expanded[g.kind] }" aria-hidden="true">▸</span>
+            <span class="diff-group__label">{{ g.label }}</span>
+            <span class="diff-group__count" :class="{ 'is-noise': g.noise }">{{ itemsOf(g.kind).length }}</span>
+            <span class="diff-group__hint">{{ g.hint }}</span>
+          </button>
+
+          <ul v-if="itemsOf(g.kind).length > 0 && expanded[g.kind]" class="diff-items">
+            <li v-for="item in visibleOf(g.kind)" :key="item.path" class="diff-item">
+              <div class="diff-item__path mono break">{{ item.path }}</div>
+
+              <div v-if="item.rule" class="diff-item__rule">
+                命中规则 <code class="mono">{{ item.rule }}</code>
+                <span v-if="item.hard" class="diff-chip diff-chip--hard">硬忽略,不可解除</span>
+              </div>
+
+              <template v-else>
+                <div class="diff-item__side">
+                  <span class="diff-item__side-label">本机</span>
+                  <span class="mono">{{ sideText(item.local, diffData.deviceId) }}</span>
+                </div>
+                <div class="diff-item__side">
+                  <span class="diff-item__side-label">对端</span>
+                  <span class="mono">{{ sideText(item.remote, diffData.deviceId) }}</span>
+                </div>
+              </template>
+
+              <div v-if="item.disk === 'missing'" class="diff-item__warn">本机盘上已无此文件 —— 索引陈旧,不是两端不同步</div>
+              <div v-else-if="item.disk === 'size-differs'" class="diff-item__warn">本机盘上大小与索引不符 —— 索引陈旧</div>
+            </li>
+            <li v-if="itemsOf(g.kind).length > PAGE && !showAll[g.kind]" class="diff-more">
+              <n-button size="tiny" tertiary @click="showAll = { ...showAll, [g.kind]: true }">
+                展开全部 {{ itemsOf(g.kind).length }} 条
+              </n-button>
+            </li>
+          </ul>
+        </section>
+      </div>
+    </template>
+
+    <template #footer>
+      <!-- 操作行常驻:加载中/出错时也要有关闭入口(不能只靠右上角的 ×) -->
+      <n-button :disabled="!diffData || totalDiff === 0" @click="copyDiff">复制结果</n-button>
+      <n-button type="primary" @click="closeDiff()">关闭</n-button>
+    </template>
+  </ModalShell>
 </template>
