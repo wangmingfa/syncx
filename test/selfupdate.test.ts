@@ -1,9 +1,9 @@
 import { describe, expect, it } from 'vitest';
 import { createHash, randomBytes } from 'node:crypto';
-import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync, mkdirSync } from 'node:fs';
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from 'node:fs';
 import { spawn, spawnSync } from 'node:child_process';
 import { tmpdir } from 'node:os';
-import { delimiter, dirname, join } from 'node:path';
+import { basename, delimiter, dirname, join } from 'node:path';
 import {
   consumeUpdateDoneFile,
   extractAndValidate,
@@ -122,9 +122,28 @@ describe('packSelfTgz', () => {
 
 describe('isSafePtyRange', () => {
   it('accepts the ranges npm actually uses', () => {
-    for (const range of ['^1.1.0', '~1.1.0', '1.1.0', '>=1.0.0 <2.0.0', '^1.0.0 || ^2.0.0', '*']) {
+    for (const range of ['^1.1.0', '~1.1.0', '1.1.0', '>=1.0.0 <2.0.0', '^1.0.0 || ^2.0.0', '*', '^1.2.0-beta.15']) {
       expect(isSafePtyRange(range), range).toBe(true);
     }
+  });
+
+  /**
+   * 仓库自己声明的那条范围是 updater 现装 node-pty 的唯一输入,它坏有两种安静方式:
+   * - 过不了白名单 → npm 根本不被调用,终端落受限模式(有日志,但得翻到升级结果才看得见);
+   * - 过得去但**那个版本没有本机平台的预编译件** → Linux 上 npm 会转 node-gyp,而 npm 11 默认
+   *   拦住 install 脚本,连编译都不发生,落地即无 `.node`(实测于 aarch64:`1.1.0` 走这条路必挂)。
+   * 下面那条下限只是**下限**:它挡得住「顺手降回 1.1.x」,挡不住「升到某个又不带 linux 预编译的版本」,
+   * 后者只能在目标机上量 —— 改这条范围时请按 README 的升级链路实机验一次。
+   */
+  it("keeps this repo's own declaration installable", () => {
+    const pkg = JSON.parse(readFileSync(new URL('../package.json', import.meta.url), 'utf8')) as {
+      dependencies?: Record<string, string>;
+    };
+    const range = pkg.dependencies?.['node-pty'];
+    expect(typeof range).toBe('string');
+    expect(isSafePtyRange(range), String(range)).toBe(true);
+    // 带 prebuilds/linux-x64 + linux-arm64 的那一档起(1.2.0-beta.15 实测落地四平台预编译)
+    expect(range, String(range)).toMatch(/^(?:[\^~]?)1\.(?:[2-9]|[1-9]\d)\./);
   });
 
   /**
@@ -259,17 +278,26 @@ describe('runSelfUpdate', () => {
     expect(check.status, check.stderr).toBe(0);
 
     expect(code).toContain("spawnSync('npm', args, opts)"); // POSIX:argv
-    expect(code).toContain(String.raw`'\"' + spec + '\"'`); // Windows:spec 裹在双引号里
+    // Windows:npm.cmd 须经 shell,但整条命令是常量 —— 外部数据(对端包里的版本范围)
+    // 一个字都不进命令行,它只作为 npm 读 own 的 package.json 里的依赖声明存在。
+    expect(code).toContain("spawnSync('npm.cmd install --omit=dev --no-audit --no-fund', { ...opts, shell: true })");
+    expect(code).toContain("dependencies: { 'node-pty': range }");
     expect(code).not.toContain('shell: isWin'); // 老 bug 的形状:单串命令 + 只有 Windows 开 shell
+    expect(code).not.toContain('+ spec +'); // 更老的形状:把范围拼回命令串
     rmSync(work, { recursive: true, force: true });
   }, 60_000);
 
   /**
    * node-pty 安装步骤(封闭验证:PATH 上放一个假 npm,不碰网络)。
    *
-   * 假 npm 会在**它被调用时的 cwd** 落一个 node_modules/node-pty 标记 ——
-   * 这恰好同时钉住两件事:updater 确实调了 npm;且 cwd 是 targetDir
-   * (装到别处的话,`import('node-pty')` 从 dist/syncx.js 向上解析是找不到的)。
+   * 假 npm 把「被调用时的 cwd 与命令行」写到一个测试已知位置的标记文件里,于是这里能
+   * 同时钉住三件事:
+   * - updater 确实调了 npm,且产物被拷进了 targetDir/dist 的解析路径上;
+   * - npm 的 cwd 是 workDir 下一个一次性的 pty-install,**不是** targetDir —— 在安装目录里
+   *   跑 npm install 会按它的 package.json 把**整棵依赖树**补齐(实测 273MB,而 vue/naive-ui/
+   *   @xterm 早就内联进单文件 bundle 了,纯属死重);
+   * - 命令行里没有版本范围:对端包声明的字符串只作为 npm 自己读的 package.json 依赖存在,
+   *   Windows 那侧经 shell 拼接的命令里不再携带任何外部数据。
    */
   it('updater installs node-pty into the target when the package declares it', async () => {
     const work = mkdtempSync(join(tmpdir(), 'syncx-test-pty-'));
@@ -287,21 +315,23 @@ describe('runSelfUpdate', () => {
 
     const fakeBin = join(work, 'fakebin');
     mkdirSync(fakeBin, { recursive: true });
+    const marker = join(fakeBin, 'npm-invoked.txt');
     writeFileSync(
       join(fakeBin, 'npm'),
-      '#!/bin/sh\nmkdir -p node_modules/node-pty\n' +
+      '#!/bin/sh\n' +
+        `printf 'cwd=%s\\nargs=%s\\n' "$(pwd)" "$*" > ${marker}\n` +
+        'mkdir -p node_modules/node-pty\n' +
         'printf \'{"name":"node-pty","version":"9.9.9-fake"}\' > node_modules/node-pty/package.json\nexit 0\n',
       { mode: 0o755 },
     );
-    writeFileSync(
-      join(fakeBin, 'npm.cmd'),
-      [
-        '@echo off',
-        'if not exist node_modules\\node-pty mkdir node_modules\\node-pty',
-        'echo {"name":"node-pty","version":"9.9.9-fake"} > node_modules\\node-pty\\package.json',
-        'exit /b 0',
-      ].join('\r\n'),
-    );
+    writeFileSync(join(fakeBin, 'npm.cmd'), [
+      '@echo off',
+      `echo cwd=%CD% > ${marker}`,
+      `echo args=%* >> ${marker}`,
+      'if not exist node_modules\\node-pty mkdir node_modules\\node-pty',
+      'echo {"name":"node-pty","version":"9.9.9-fake"} > node_modules\\node-pty\\package.json',
+      'exit /b 0',
+    ].join('\r\n'));
     const prevPath = process.env.PATH ?? '';
     process.env.PATH = `${fakeBin}${delimiter}${prevPath}`;
 
@@ -326,12 +356,130 @@ describe('runSelfUpdate', () => {
       };
       expect(result.ok).toBe(true);
       expect(result.pty).toEqual({ attempted: true, ok: true, error: '' });
-      // 假 npm 在 targetDir 里执行过:原生模块落在解析路径上
+      // 装好的原生模块被拷到 targetDir 旁:dist/syncx.js 的 import('node-pty') 沿父目录上溯命中
       expect(existsSync(join(targetDir, 'node_modules', 'node-pty', 'package.json'))).toBe(true);
+
+      const invoked = readFileSync(marker, 'utf8');
+      const cwd = /^cwd=(.*)$/m.exec(invoked)?.[1]?.trim();
+      const args = /^args=(.*)$/m.exec(invoked)?.[1]?.trim();
+      expect(cwd).toBeTruthy();
+      // npm 跑在一次性的安装目录里,不是安装目录本身
+      expect(basename(cwd as string)).toBe('pty-install');
+      expect(cwd).not.toBe(targetDir);
+      // 范围没有上命令行
+      expect(args ?? '').not.toContain('1.1.0');
+      // 现场清掉了(updater 的 finally)
+      expect(existsSync(join(dirname(doneFile), 'pty-install'))).toBe(false);
     } finally {
       process.env.PATH = prevPath;
       rmSync(work, { recursive: true, force: true });
     }
+  }, 60_000);
+
+  /**
+   * spawn-helper 的执行位(受限模式第二轮的真正根因)。
+   *
+   * node-pty 在 unix 上要 exec 一个 spawn-helper,而它自己的脚本链没人管这个位:
+   * install 脚本(scripts/prebuild.js)只看 prebuilds 目录存不存在就 exit 0,post-install
+   * 只清 build/Release。npm 提取出来是 0644 —— 实测同一份 1.1.0 在仓库里 0755、在升级
+   * 安装目录里 0644,后果是 pty.spawn 抛 posix_spawnp failed。这里让假 npm 装出 0644 的
+   * helper,断言 updater 换包后把它补成可执行。.node 不需要执行位,故只补这一个文件。
+   */
+  it('re-puts the exec bit on node-pty spawn-helper after installing', async () => {
+    const work = mkdtempSync(join(tmpdir(), 'syncx-test-helper-'));
+    const install = join(work, 'install');
+    mkdirSync(install, { recursive: true });
+    makeFakePackage(install, 'syncx', '0.1.0');
+    const targetDir = join(install, 'syncx');
+    const stagingSrc = makeFakePackage(work, 'newpkg', '0.2.0');
+    const pkgPath = join(stagingSrc, 'package.json');
+    const pkg = JSON.parse(readFileSync(pkgPath, 'utf8')) as { dependencies?: Record<string, string> };
+    pkg.dependencies = { 'node-pty': '^1.1.0' };
+    writeFileSync(pkgPath, JSON.stringify(pkg));
+    const tgz = tgzDir(stagingSrc);
+
+    const helperRel = join('node_modules', 'node-pty', 'prebuilds', `${process.platform}-${process.arch}`, 'spawn-helper');
+    const fakeBin = join(work, 'fakebin');
+    mkdirSync(fakeBin, { recursive: true });
+    // 假 npm 在它的 cwd(=一次性安装目录)里装出一个 0644 的 helper,路径与 ensurePtyHelper 一致
+    writeFileSync(
+      join(fakeBin, 'npm'),
+      '#!/bin/sh\n' +
+        `mkdir -p $(dirname ${helperRel})\n` +
+        `printf '#!/bin/sh\\n' > ${helperRel}\n` +
+        `chmod 644 ${helperRel}\nexit 0\n`,
+      { mode: 0o755 },
+    );
+    // Windows 的执行位没有对应语义,假 npm.cmd 只把 node_modules 造出来让拷贝有东西可做
+    writeFileSync(join(fakeBin, 'npm.cmd'), ['@echo off', 'exit /b 0'].join('\r\n'));
+    const prevPath = process.env.PATH ?? '';
+    process.env.PATH = `${fakeBin}${delimiter}${prevPath}`;
+
+    const dead = spawn(process.execPath, ['-e', 'process.exit(0)']);
+    const deadPid = dead.pid as number;
+    await new Promise<void>((resolve) => dead.on('exit', resolve));
+
+    try {
+      const { doneFile } = await runSelfUpdate(tgz, '0.2.0', {
+        targetDir,
+        minBytes: 16,
+        oldPid: deadPid,
+        waitMs: 10_000,
+        verifyMs: 400,
+        restartArgs: ['-e', 'setTimeout(() => {}, 1200)'],
+      });
+      await waitForFile(doneFile);
+      const result = JSON.parse(readFileSync(doneFile, 'utf8')) as { pty?: { ok?: boolean; error?: string } };
+      expect(result.pty?.ok).toBe(true);
+
+      if (process.platform !== 'win32') {
+        const helper = join(targetDir, helperRel);
+        expect(existsSync(helper)).toBe(true);
+        expect(statSync(helper).mode & 0o111).not.toBe(0);
+      }
+    } finally {
+      process.env.PATH = prevPath;
+      rmSync(work, { recursive: true, force: true });
+    }
+  }, 60_000);
+
+  /**
+   * 新 daemon 的 stdout/stderr 必须落到 --log-file,而不是 /dev/null。
+   *
+   * 第一版拉新进程用 stdio:'ignore',于是启动期任何 console.error(含 main.ts 的
+   * uncaughtException / unhandledRejection 兜底)都进黑洞:那次「posix_spawnp failed」把
+   * 终端卡在连接中、日志里一个字都没有,排查只能靠猜。这里让假 daemon 往 stderr 写一行,
+   * 断言它真的出现在日志文件里。argv 形状与生产一致(脚本路径在前),否则 node 会把
+   * --log-file 当成自己的选项直接报错 —— 那等于测的是另一条路径。
+   */
+  it('routes the restarted daemon stderr into --log-file', async () => {
+    const work = mkdtempSync(join(tmpdir(), 'syncx-test-log-'));
+    const install = join(work, 'install');
+    mkdirSync(install, { recursive: true });
+    makeFakePackage(install, 'syncx', '0.1.0');
+    const stagingSrc = makeFakePackage(work, 'newpkg', '0.2.0');
+    const tgz = tgzDir(stagingSrc);
+    const logFile = join(work, 'syncx.log');
+    const daemonScript = join(work, 'fake-daemon.mjs');
+    writeFileSync(daemonScript, "console.error('[fatal] simulated boot failure');\nsetTimeout(() => {}, 1500);\n");
+
+    const dead = spawn(process.execPath, ['-e', 'process.exit(0)']);
+    const deadPid = dead.pid as number;
+    await new Promise<void>((resolve) => dead.on('exit', resolve));
+
+    const { doneFile } = await runSelfUpdate(tgz, '0.2.0', {
+      targetDir: join(install, 'syncx'),
+      minBytes: 16,
+      oldPid: deadPid,
+      waitMs: 10_000,
+      verifyMs: 400,
+      restartArgs: [daemonScript, '--log-file', logFile],
+    });
+
+    await waitForFile(doneFile);
+    await waitForFile(logFile);
+    expect(readFileSync(logFile, 'utf8')).toContain('simulated boot failure');
+    rmSync(work, { recursive: true, force: true });
   }, 60_000);
 
   it('pty install failure must not roll back the upgrade (终端只是降级,升级不算失败)', async () => {
@@ -391,11 +539,13 @@ describe('runSelfUpdate', () => {
   }, 60_000);
 
   /**
-   * 对端来的包里塞一条「能拼进命令行」的 node-pty 范围:升级照做,npm 照旧不执行。
+   * 对端来的包里塞一条不该交给 npm 的 node-pty 范围:升级照做,npm 照旧不执行。
    *
    * 判据是 done 文件里的原因文案 + 两个「不该出现的文件」:假 npm 留下的调用标记,
-   * 以及被注入命令真跑起来才会落地的 pwned.txt。少断一半都行,但整条路径只在
+   * 以及被注入内容真跑起来才会落地的 pwned.txt。少断一半都行,但整条路径只在
    * 「npm 从未被拉起」时同时成立 —— 这正是白名单要保住的东西。
+   * 标记必须写在测试知道的绝对路径上:假 npm 的 cwd 现在是那个用完即删的一次性目录,
+   * 相对路径下的标记「没被调用」和「调用完又被删」长得一模一样,断言就废了。
    */
   it('refuses to hand a peer-authored node-pty range to npm, and still upgrades', async () => {
     const work = mkdtempSync(join(tmpdir(), 'syncx-test-ptyevil-'));
@@ -410,10 +560,14 @@ describe('runSelfUpdate', () => {
     writeFileSync(pkgPath, JSON.stringify(pkg));
     const tgz = tgzDir(stagingSrc);
 
+    const ranMarker = join(work, 'npm-ran.txt');
     const fakeBin = join(work, 'fakebin');
     mkdirSync(fakeBin, { recursive: true });
-    writeFileSync(join(fakeBin, 'npm'), '#!/bin/sh\ntouch npm-ran.txt\nexit 0\n', { mode: 0o755 });
-    writeFileSync(join(fakeBin, 'npm.cmd'), ['@echo off', 'type nul > npm-ran.txt', 'exit /b 0'].join('\r\n'));
+    writeFileSync(join(fakeBin, 'npm'), `#!/bin/sh\ntouch ${ranMarker}\ntouch pwned.txt\nexit 0\n`, { mode: 0o755 });
+    writeFileSync(
+      join(fakeBin, 'npm.cmd'),
+      ['@echo off', `type nul > ${ranMarker}`, 'type nul > pwned.txt', 'exit /b 0'].join('\r\n'),
+    );
     const prevPath = process.env.PATH ?? '';
     process.env.PATH = `${fakeBin}${delimiter}${prevPath}`;
 
@@ -440,7 +594,7 @@ describe('runSelfUpdate', () => {
       expect(result.pty?.attempted).toBe(false);
       expect(result.pty?.ok).toBe(false);
       expect(result.pty?.error).toContain('已跳过安装');
-      expect(existsSync(join(targetDir, 'npm-ran.txt'))).toBe(false);
+      expect(existsSync(ranMarker)).toBe(false);
       expect(existsSync(join(targetDir, 'pwned.txt'))).toBe(false);
     } finally {
       process.env.PATH = prevPath;

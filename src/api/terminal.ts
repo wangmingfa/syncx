@@ -15,6 +15,9 @@ import { ELEVATE_TTL_MS } from './helpers.js';
  * 无 PTY 管道模式(逐行 REPL)。单文件分发包(scp 到别处直接跑)旁边没有
  * node_modules,拿不到原生模块 —— 回退保证终端功能在任何分发形态下都可用,
  * 只是交互能力降级;npm 安装/源码运行则永远是完整 PTY。
+ * 加载成功也不代表能用:原生层缺件(实测 npm 提取会丢 spawn-helper 的执行位)要到
+ * pty.spawn 这一步才炸,所以 spawn 同样兜住并回退 —— 两条路都只 send ready{pty:false},
+ * 绝不让连接停在「连接中」。
  *
  * 协议(JSON 文本帧):
  *   客户端 → 服务端:{ t: 'in', data }         原始键入(xterm 输出流,含控制字符)
@@ -151,16 +154,30 @@ export function createTerminalHub(): TerminalHub {
   }
 
   // ---- PTY 模式:完整终端 ----
-  function spawnPty(pty: PtyModule): PtyProcess {
+  /**
+   * 按连接 spawn 一个 PTY shell;返回 null 表示这一条用不了完整终端,调用方落回管道模式。
+   *
+   * 「node-pty 能被 import」不等于「能 spawn」:原生层缺件要到这一步才炸 —— 实测 npm 提取
+   * 会丢掉 spawn-helper 的执行位,`posix_spawnp failed.` 正是 pty.spawn 抛出来的。这里必须
+   * 接住:异常一旦顺着 handle() 的浮动 promise 逃逸,前端连 {t:'ready'} 都收不到,界面永远
+   * 停在「连接中」,而升级重启时 stderr 又被 updater 丢进 /dev/null —— 一个字线索都没有。
+   */
+  function spawnPty(pty: PtyModule): PtyProcess | null {
     const { file, args } = pickShell();
-    const proc = pty.spawn(file, args, {
-      name: 'xterm-256color', // xterm.js 按这个名字启用 256 色 + 应用键盘模式
-      cols: 80,
-      rows: 24,
-      cwd: homedir(),
-      env: { ...process.env, TERM: 'xterm-256color' },
-      windowsHide: true,
-    });
+    let proc: PtyProcess;
+    try {
+      proc = pty.spawn(file, args, {
+        name: 'xterm-256color', // xterm.js 按这个名字启用 256 色 + 应用键盘模式
+        cols: 80,
+        rows: 24,
+        cwd: homedir(),
+        env: { ...process.env, TERM: 'xterm-256color' },
+        windowsHide: true,
+      });
+    } catch (e) {
+      console.warn(`[terminal] node-pty 加载成功但 spawn 失败,本连接回退管道模式: ${String((e as Error)?.message ?? e)}`);
+      return null;
+    }
     alive.add(proc);
     proc.onExit(() => alive.delete(proc));
     return proc;
@@ -217,12 +234,14 @@ export function createTerminalHub(): TerminalHub {
       if (ws.readyState === ws.OPEN) ws.send(JSON.stringify(msg));
     };
 
-    if (pty) {
+    // 两种「PTY 不可用」在此合并:模块压根没装上(pty=null),以及装上了却 spawn 不出来
+    // (ptyProc=null)。后者一定要落到下面的管道模式 —— 那里会 send ready{pty:false}。
+    const ptyProc = pty ? spawnPty(pty) : null;
+    if (ptyProc) {
       // ---- PTY:输出是 VT 流原样转发,输入逐字节透传,支持 resize ----
-      const proc = spawnPty(pty);
       send({ t: 'ready', shell: basename(file), pty: true });
-      proc.onData((data) => send({ t: 'out', data }));
-      proc.onExit(({ exitCode }) => send({ t: 'exit', code: exitCode }));
+      ptyProc.onData((data) => send({ t: 'out', data }));
+      ptyProc.onExit(({ exitCode }) => send({ t: 'exit', code: exitCode }));
 
       ws.on('message', (raw) => {
         let msg: { t?: string; data?: string; cols?: number; rows?: number };
@@ -232,18 +251,18 @@ export function createTerminalHub(): TerminalHub {
           return;
         }
         if (msg.t === 'in' && typeof msg.data === 'string' && msg.data.length > 0) {
-          proc.write(msg.data);
+          ptyProc.write(msg.data);
           return;
         }
         if (msg.t === 'resize') {
           // 视口尺寸夹在合理区间,防恶意/异常值把 conhost 撑爆
           const cols = Math.max(2, Math.min(999, Math.floor(Number(msg.cols) || 80)));
           const rows = Math.max(2, Math.min(999, Math.floor(Number(msg.rows) || 24)));
-          proc.resize(cols, rows);
+          ptyProc.resize(cols, rows);
         }
         // PTY 下 Ctrl+C 由 xterm 作为 \x03 直送前台进程组,sigint 消息无需处理
       });
-      ws.on('close', () => killAlive(proc));
+      ws.on('close', () => killAlive(ptyProc));
       return;
     }
 
@@ -277,7 +296,19 @@ export function createTerminalHub(): TerminalHub {
   }
 
   return {
-    handle: (ws) => void handle(ws),
+    // api.ts 在 WS upgrade 鉴权通过后 fire-and-forget 调用。handle 是 async:任何没被上面
+    // 各分支接住的异常都会变成一个没人听的 rejection,连接既不报错也不关闭 —— 前端就停在
+    // 「连接中」。这里兜最后一层:记下原因、关掉连接(close 事件负责收割子进程)。
+    handle: (ws) => {
+      void handle(ws).catch((e: unknown) => {
+        console.error(`[terminal] 会话异常终止: ${String((e as Error)?.message ?? e)}`);
+        try {
+          ws.close();
+        } catch {
+          /* 已经断了 */
+        }
+      });
+    },
     close(): void {
       for (const child of [...alive]) killAlive(child);
       if (reaper) {

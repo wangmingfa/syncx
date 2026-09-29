@@ -335,30 +335,79 @@ function printVersion(nodeExe: string, file: string, timeoutMs: number): Promise
 function updaterSource(): string {
   return [
     "// syncx self-updater(自动生成,勿手改)。用法: node updater.mjs <job.json>",
-    "import { chmodSync, cpSync, existsSync, readFileSync, renameSync, rmSync, writeFileSync } from 'node:fs';",
+    "import { chmodSync, cpSync, existsSync, mkdirSync, openSync, readFileSync, renameSync, rmSync, writeFileSync } from 'node:fs';",
     "import { spawn, spawnSync } from 'node:child_process';",
     "import { dirname, join } from 'node:path';",
     "const job = JSON.parse(readFileSync(process.argv[2], 'utf8'));",
     "const sleep = (ms) => new Promise((r) => setTimeout(r, ms));",
     "const alive = (pid) => { try { process.kill(pid, 0); return true; } catch { return false; } };",
     "const ensureExec = (p) => { try { chmodSync(p, 0o755); } catch {} };",
-    // node-pty 现装:尽力而为,任何失败都只让终端降级,绝不影响换包结果。
-    // POSIX 必须走 argv —— 把整条命令当 file 传而 shell=false 时,Node 会拿整个字符串去做
+    // node-pty 现装:尽力而为,任何失败(含异常)都只让终端降级,绝不影响换包结果。
+    // 装进 workDir 里的一个最小包再拷进安装目录,而不是直接在安装目录里 npm install:
+    // 后者会按安装目录的 package.json 把**整棵依赖树**补齐(实测 273MB,而 vue/naive-ui/
+    // @xterm/highlight.js 早就内联进单文件 bundle 了,纯属死重)。顺带把版本范围从命令行
+    // 挪进 JSON —— Windows 那侧经 shell 拼接的命令里不再携带任何外部数据。
+    // POSIX 必须走 argv:把整条命令当 file 传而 shell=false 时,Node 会拿整个字符串去做
     // execvp,必然 ENOENT(这个坑在本仓的第一版实现里踩过,Mac/Linux 上一次都没装上)。
-    // Windows 的 npm.cmd 须经 shell;spec 用双引号裹住,cmd 不再解析其中的 & | < > ^ 等字面。
-    "const installPty = (spec, dir) => {",
-    "  const args = ['install', spec, '--no-save', '--omit=dev', '--no-audit', '--no-fund'];",
-    `  const opts = { cwd: dir, timeout: ${PTY_INSTALL_TIMEOUT_MS}, windowsHide: true, stdio: ['ignore', 'ignore', 'pipe'] };`,
-    "  const isWin = process.platform === 'win32';",
-    "  const r = isWin",
-    "    ? spawnSync(['npm.cmd', 'install', '\\\"' + spec + '\\\"', '--no-save', '--omit=dev', '--no-audit', '--no-fund'].join(' '), { ...opts, shell: true })",
-    "    : spawnSync('npm', args, opts);",
-    "  const tail = (r.stderr ? r.stderr.toString('utf8') : '').trim().slice(-400);",
-    "  if (r.error) return { attempted: true, ok: false, error: String(r.error.message || r.error) + (tail ? ' | ' + tail : '') };",
-    "  // 先看 signal 再看 status:超时/被杀时 status 是 null,写成 '退出码 null' 就等于没留痕",
-    "  if (r.signal) return { attempted: true, ok: false, error: 'npm 被信号终止 ' + r.signal + (tail ? ': ' + tail : '') };",
-    "  if (r.status !== 0) return { attempted: true, ok: false, error: 'npm 退出码 ' + r.status + (tail ? ': ' + tail : '') };",
-    "  return { attempted: true, ok: true, error: '' };",
+    // Windows 的 npm.cmd 须经 shell;命令是常量,拼单串只为避开 Node 24 的 DEP0190。
+    "const installPty = (range, targetDir, workDir) => {",
+    "  const staging = join(workDir, 'pty-install');",
+    "  try {",
+    "    rmSync(staging, { recursive: true, force: true });",
+    "    mkdirSync(staging, { recursive: true });",
+    "    writeFileSync(",
+    "      join(staging, 'package.json'),",
+    "      JSON.stringify({ name: 'syncx-pty-install', version: '0.0.0', private: true, dependencies: { 'node-pty': range } }),",
+    "    );",
+    "    const args = ['install', '--omit=dev', '--no-audit', '--no-fund'];",
+    `    const opts = { cwd: staging, timeout: ${PTY_INSTALL_TIMEOUT_MS}, windowsHide: true, stdio: ['ignore', 'ignore', 'pipe'] };`,
+    "    const r = process.platform === 'win32'",
+    "      ? spawnSync('npm.cmd install --omit=dev --no-audit --no-fund', { ...opts, shell: true })",
+    "      : spawnSync('npm', args, opts);",
+    "    const tail = (r.stderr ? r.stderr.toString('utf8') : '').trim().slice(-400);",
+    "    if (r.error) return { attempted: true, ok: false, error: String(r.error.message || r.error) + (tail ? ' | ' + tail : '') };",
+    "    // 先看 signal 再看 status:超时/被杀时 status 是 null,写成 '退出码 null' 就等于没留痕",
+    "    if (r.signal) return { attempted: true, ok: false, error: 'npm 被信号终止 ' + r.signal + (tail ? ': ' + tail : '') };",
+    "    if (r.status !== 0) return { attempted: true, ok: false, error: 'npm 退出码 ' + r.status + (tail ? ': ' + tail : '') };",
+    "    const built = join(staging, 'node_modules');",
+    "    if (!existsSync(built)) return { attempted: true, ok: false, error: 'npm 退出码 0 但没有装出 node_modules' };",
+    "    // 拷进安装目录旁:dist/syncx.js 的 import('node-pty') 沿父目录上溯正好命中",
+    "    cpSync(built, join(targetDir, 'node_modules'), { recursive: true });",
+    "    return { attempted: true, ok: true, error: '' };",
+    "  } catch (e) {",
+    "    return { attempted: true, ok: false, error: String((e && e.message) || e) };",
+    "  } finally {",
+    "    try { rmSync(staging, { recursive: true, force: true }); } catch {}",
+    "  }",
+    "};",
+    // 补回 npm 提取时丢掉的可执行位。node-pty 在 unix 上要 exec 一个 spawn-helper,而它自己的
+    // 脚本链没人管这件事:install 脚本(scripts/prebuild.js)只判断 prebuilds 目录存不存在就
+    // exit 0(所以连 build/ 都不生成),post-install 只清 build/Release。丢了的后果是 pty.spawn
+    // 抛 posix_spawnp failed —— 实测同一份件在仓库 node_modules 里量到 0755、在升级安装目录里量到 0644,
+    // 所以只要装上了就补一次位,两种落法都兜住。.node 文件不需要执行位(仓库那份也是 0644
+    // 且能正常 dlopen),故只补 helper 这一个。
+    "const ensurePtyHelper = (dir) => {",
+    "  const hits = [",
+    "    join(dir, 'node_modules', 'node-pty', 'prebuilds', process.platform + '-' + process.arch, 'spawn-helper'),",
+    "    join(dir, 'node_modules', 'node-pty', 'build', 'Release', 'spawn-helper'),",
+    "  ];",
+    "  for (const p of hits) {",
+    "    try { if (existsSync(p)) chmodSync(p, 0o755); } catch {}",
+    "  }",
+    "};",
+    // 新 daemon 的 stdout/stderr 必须有个去处。第一版用 stdio:'ignore',于是启动期任何
+    // console.error(含 main.ts 的 unhandledRejection 兜底)都进了 /dev/null —— 那次终端
+    // 「posix_spawnp failed」把前端卡在连接中而日志里一个字都没有,就是这么来的。
+    // 注意:daemon 自己的 logger 会轮转这个文件(rename 走),已继承的 fd 会继续写进旧
+    // inode —— 只影响 stderr 兜底输出落在哪一份,不影响日志主体。
+    "const daemonStdio = () => {",
+    "  if (!job.logFile) return 'ignore';",
+    "  try {",
+    "    const fd = openSync(job.logFile, 'a');",
+    "    return ['ignore', fd, fd];",
+    "  } catch {",
+    "    return 'ignore'; // 日志文件开不出来(权限/路径没了):维持原状,不因它拖垮重启",
+    "  }",
     "};",
     "const swap = async (from, to) => {",
     "  for (let i = 0; i < 25; i++) {",
@@ -375,7 +424,7 @@ function updaterSource(): string {
     "  let swapped = false;",
     "  // ptyInstall 的声明必须在 try 外:catch 里的回滚 done 要引用它,块内声明会让",
     "  // 回滚路径自己抛 ReferenceError、被内层 catch 吞掉,回滚标记就丢了(实测踩过)。",
-    "  let ptyInstall = { attempted: false, ok: false, error: job.ptySpec ? '未执行' : (job.ptyNote || '包未声明 node-pty 依赖') };",
+    "  let ptyInstall = { attempted: false, ok: false, error: job.ptyRange ? '未执行' : (job.ptyNote || '包未声明 node-pty 依赖') };",
     "  try {",
     "    const deadline = Date.now() + job.waitMs;",
     "    while (alive(job.pid) && Date.now() < deadline) await sleep(300);",
@@ -395,13 +444,14 @@ function updaterSource(): string {
     "    ensureExec(join(job.targetDir, 'dist', 'syncx.js')); // 换入成功强制可执行位,避免对端产物缺 +x 致 Permission denied",
     "    // node-pty(原生模块)不随包分发:现装一份,浏览器终端才能用完整 PTY(受限模式的根因)。",
     "    // 尽力而为:失败 / 超时**不回滚升级** —— 包已换入成功,这只影响终端是否受限。",
-    "    // 装进 <targetDir>/node_modules:dist/syncx.js 的 import('node-pty') 沿父目录上溯正好命中。",
-    "    if (job.ptySpec) {",
-    "      ptyInstall = installPty(job.ptySpec, job.targetDir);",
+    "    if (job.ptyRange) {",
+    "      ptyInstall = installPty(job.ptyRange, job.targetDir, job.workDir);",
+    "      // npm 提取会丢 spawn-helper 的执行位,装完就地补回来(见 ensurePtyHelper 注释)",
+    "      if (ptyInstall.ok) ensurePtyHelper(job.targetDir);",
     "    }",
-    "    // 拉起新 daemon(env 带结果文件路径,新进程启动后上报升级结果)",
+    "    // 拉起新 daemon(env 带结果文件路径,新进程启动后上报升级结果;stdio 见 daemonStdio)",
     "    const child = spawn(job.execPath, job.restartArgs, {",
-    "      detached: true, stdio: 'ignore', windowsHide: true,",
+    "      detached: true, stdio: daemonStdio(), windowsHide: true,",
     "      env: { ...process.env, SYNCX_UPDATE_DONE: job.doneFile },",
     "    });",
     "    child.unref();",
@@ -417,7 +467,7 @@ function updaterSource(): string {
     "        rmSync(job.targetDir, { recursive: true, force: true });",
     "        await swap(backup, job.targetDir);",
     "        ensureExec(join(job.targetDir, 'dist', 'syncx.js')); // 还原旧包后保证可执行位(老包原本可能 0644)",
-    "        const old = spawn(job.execPath, job.restartArgs, { detached: true, stdio: 'ignore', windowsHide: true, env: { ...process.env, SYNCX_UPDATE_DONE: job.doneFile } });",
+    "        const old = spawn(job.execPath, job.restartArgs, { detached: true, stdio: daemonStdio(), windowsHide: true, env: { ...process.env, SYNCX_UPDATE_DONE: job.doneFile } });",
     "        old.unref();",
     "        done({ ok: false, rolledBack: true, error: message, pty: ptyInstall });",
     "        process.exit(1);",
@@ -473,7 +523,7 @@ export async function runSelfUpdate(
   const { root: staging, workDir, version } = await extractAndValidate(tgz, expectedVersion, opts);
   const targetDir = opts.targetDir ?? selfPackageDir();
   if (!targetDir) throw new Error('无法定位当前安装目录,已放弃升级');
-  // node-pty(原生模块)不随 tgz 分发:升级后的安装目录里现装一份,浏览器终端才能用
+  // node-pty(原生模块)不随 tgz 分发:升级后现装一份进安装目录旁,浏览器终端才能用
   // 完整 PTY,否则落「受限模式」(无 prompt / 无回显 / 输出阶梯错位)。规格取**新包
   // package.json 的依赖声明** —— 与 bundle 编译时的来源同一条 semver 线。
   // 装不上(无 npm / 无网络 / Linux 无编译器)只影响终端,不影响升级本身,结果如实
@@ -481,14 +531,16 @@ export async function runSelfUpdate(
   const newPkg = JSON.parse(readFileSync(join(staging, 'package.json'), 'utf8')) as {
     dependencies?: Record<string, string>;
   };
-  const ptyRange = newPkg.dependencies?.['node-pty'];
-  // 范围是「新包声明的字符串」,P2P 路径上来自对端打出的包,而 Windows 侧还要经 shell 拼接。
-  // 故执行前先过白名单(isSafePtyRange):不合法就不装,终端落受限模式,原因写进 done 文件。
-  const ptySpec = typeof ptyRange === 'string' && isSafePtyRange(ptyRange) ? `node-pty@${ptyRange.trim()}` : undefined;
+  const declaredRange = newPkg.dependencies?.['node-pty'];
+  // 范围来自新包的 package.json,P2P 路径上就是对端打出的包,一句都不可以信。
+  // 现在它不再上命令行,而是写进 updater 临时生成的 package.json 当依赖声明 —— 但风险
+  // 没消失:`git+ssh://…` / `file:../…` 这类协议式规格照样会让 npm 去装陌生来源,而 npm
+  // 装包会跑它的 install 脚本。白名单原样保留,判据宁可窄:误杀只是少一个 PTY。
+  const ptyRange = isSafePtyRange(declaredRange) ? declaredRange.trim() : undefined;
   const ptyNote =
-    ptySpec || typeof ptyRange !== 'string'
+    ptyRange || typeof declaredRange !== 'string'
       ? undefined
-      : `包声明的 node-pty 版本范围不适合作为命令行参数执行(${JSON.stringify(ptyRange).slice(0, 120)}),已跳过安装`;
+      : `包声明的 node-pty 版本范围不适合作为 npm 依赖声明执行(${JSON.stringify(declaredRange).slice(0, 120)}),已跳过安装`;
   // 护栏:目标是源码仓库时,整包替换会把 src/ 等源码一起删掉,直接拒绝。
   // 触发场景:直接 `node dist/syncx.js start` 从仓库里跑 —— 此时安装目录就是仓库根。
   if (!opts.allowUnsafeTargetDir && looksLikeSourceCheckout(targetDir)) {
@@ -502,18 +554,26 @@ export async function runSelfUpdate(
   const doneFile = join(workDir, 'update-done.json');
   const updaterFile = join(workDir, 'updater.mjs');
   const jobFile = join(workDir, 'job.json');
+  const restartArgs = [...(opts.restartArgs ?? process.argv.slice(1))];
+  // 新 daemon 的 stdout/stderr 要有去处:updater 拉起它时把 --log-file 那个路径接成 stderr,
+  // 启动期的 console.error(含 main.ts 的 uncaughtException/unhandledRejection 兜底)才不至于
+  // 全进 /dev/null —— 终端「posix_spawnp failed」卡在连接中而日志一个字都没有,就是这么丢的。
+  // args.ts 只认空格形式(`--log-file <path>`),按位置取下一个参数即可。
+  const logIdx = restartArgs.indexOf('--log-file');
+  const logFile = logIdx >= 0 ? restartArgs[logIdx + 1] : undefined;
   const job = {
     pid: opts.oldPid ?? process.pid,
     targetDir,
     stagingDir: staging,
     execPath: opts.nodeExe ?? process.execPath,
-    restartArgs: [...(opts.restartArgs ?? process.argv.slice(1))],
+    restartArgs,
     doneFile,
     waitMs: opts.waitMs ?? OLD_EXIT_WAIT_MS,
     verifyMs: opts.verifyMs ?? NEW_ALIVE_VERIFY_MS,
     version,
-    ptySpec,
+    ptyRange,
     ptyNote,
+    logFile,
     workDir,
   };
   writeFileSync(jobFile, JSON.stringify(job));
@@ -540,7 +600,7 @@ export function consumeUpdateDoneFile(
       version?: string;
       rolledBack?: boolean;
       error?: string;
-      /** updater 顺手安装 node-pty 的结果(见 runSelfUpdate 的 ptySpec)。 */
+      /** updater 顺手安装 node-pty 的结果(见 runSelfUpdate 的 ptyRange)。 */
       pty?: { attempted?: boolean; ok?: boolean; error?: string };
     };
     if (result.ok) logger.info(`self-update 完成:已升级到 ${result.version ?? '(未知版本)'} 并重启`);
