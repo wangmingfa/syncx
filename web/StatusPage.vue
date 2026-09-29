@@ -36,6 +36,7 @@ import AuthPasswordModal from './components/AuthPasswordModal.vue';
 import LogsModal from './components/LogsModal.vue';
 import TopologyModal from './components/TopologyModal.vue';
 import UploadUpdateModal from './components/UploadUpdateModal.vue';
+import UpgradeRequiredModal from './components/UpgradeRequiredModal.vue';
 import DropOverlay from './components/DropOverlay.vue';
 import ToastView from './components/ToastView.vue';
 import SettingsModal from './components/SettingsModal.vue';
@@ -89,6 +90,8 @@ watchEffect(() => {
 // 需要本页模板双向绑定的模态状态:必须提到顶层,否则 <script setup> 模板不会自动拆包 Ref
 const { historyFolder, historyGlobal, versionsFolder, ignoreFolder, e2eFolder, conflictsFolder, editDevicesOpen, editFolder, saveEditDevices } = folders;
 const { upgrading, askSelfUpdate, uploadOpen, openUpload, selectUploadFile } = selfUpdate;
+// 版本一致锁的升级动作(弹窗关不掉,失败要在行内展示,所以拿的是返回 Promise 的原始动作)
+const { upgradeDevice } = devices;
 const { showToast } = useToast();
 
 // 本页 overlay 模态开关(子组件通过 openXxx 触发)
@@ -285,5 +288,13 @@ provide(StatusContextKey, {
 
     <!-- 页面级拖入安装包:遮罩常驻挂在这里,只有拖文件进页面时才显示 -->
     <DropOverlay @package="onPackageDrop" />
+
+    <!-- 版本一致锁:必须挂在模板最后 —— 与其他弹窗同 z-index 时靠 DOM 顺序压住它们,
+         在线对端比本机新时整页只剩「从对方升级」一条活路 -->
+    <UpgradeRequiredModal
+      :devices="status.devices"
+      :local-version="status.version"
+      :on-upgrade="upgradeDevice"
+    />
   </div>
 </template>

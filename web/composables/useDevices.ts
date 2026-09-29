@@ -20,6 +20,7 @@ export function useDevices(deps: CoreDeps): {
   newDevicePort: Ref<string>;
   askRemoveDevice: (deviceId: string) => void;
   askUpgrade: (p: DeviceInfo) => void;
+  upgradeDevice: (deviceId: string) => Promise<void>;
   /** 一键添加「附近发现的设备」:直接带 mDNS 学到的地址配对。 */
   addDiscovered: (d: DiscoveredDevice) => Promise<void>;
 } {
@@ -181,6 +182,7 @@ export function useDevices(deps: CoreDeps): {
     newDevicePort,
     askRemoveDevice,
     askUpgrade,
+    upgradeDevice,
     addDiscovered,
   };
 }

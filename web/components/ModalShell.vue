@@ -63,8 +63,13 @@ withDefaults(
      * 两者必须同一个开关:只禁用 × 而遮罩还能关,等于忙碌时照样能把状态关掉。
      */
     closeDisabled?: boolean;
+    /**
+     * 彻底不可关闭:不渲染右上角 ×,且遮罩点击不再触发 close(与 closeDisabled 同挡遮罩)。
+     * 用于「版本不一致」这类用户没有退出余地的强制弹窗;Esc 本就不由外壳处理,天然关不掉。
+     */
+    hideClose?: boolean;
   }>(),
-  { description: '', descriptionMono: false, wide: false, closeDisabled: false },
+  { description: '', descriptionMono: false, wide: false, closeDisabled: false, hideClose: false },
 );
 
 const emit = defineEmits<{ close: [] }>();
@@ -75,7 +80,7 @@ const titleId = `modal-title-${useId()}`;
 
 <template>
   <Transition name="guide">
-    <div v-if="open" class="modal-overlay" @click.self="!closeDisabled && emit('close')">
+    <div v-if="open" class="modal-overlay" @click.self="!closeDisabled && !hideClose && emit('close')">
       <div
         class="modal"
         :class="{ 'modal-wide': wide }"
@@ -84,7 +89,7 @@ const titleId = `modal-title-${useId()}`;
         :aria-labelledby="titleId"
         v-bind="$attrs"
       >
-        <ModalCloseButton :disabled="closeDisabled" @close="emit('close')" />
+        <ModalCloseButton v-if="!hideClose" :disabled="closeDisabled" @close="emit('close')" />
 
         <!-- 有 description 才起标题行:`.modal-title-row` 是 flex 基线对齐,右侧那格自带
              省略号截断,所以始终挂上原生 title(截不截断取决于视口与内容长度,静态判断不出来,
