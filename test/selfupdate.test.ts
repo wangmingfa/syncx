@@ -3,7 +3,7 @@ import { createHash } from 'node:crypto';
 import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync, mkdirSync } from 'node:fs';
 import { spawn, spawnSync } from 'node:child_process';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { delimiter, join } from 'node:path';
 import {
   extractAndValidate,
   inspectPackage,
@@ -154,6 +154,128 @@ describe('runSelfUpdate', () => {
     expect(existsSync(join(install, '.syncx-update-backup'))).toBe(false);
     rmSync(work, { recursive: true, force: true });
   }, 30_000);
+
+  /**
+   * node-pty 安装步骤(封闭验证:PATH 上放一个假 npm,不碰网络)。
+   *
+   * 假 npm 会在**它被调用时的 cwd** 落一个 node_modules/node-pty 标记 ——
+   * 这恰好同时钉住两件事:updater 确实调了 npm;且 cwd 是 targetDir
+   * (装到别处的话,`import('node-pty')` 从 dist/syncx.js 向上解析是找不到的)。
+   */
+  it('updater installs node-pty into the target when the package declares it', async () => {
+    const work = mkdtempSync(join(tmpdir(), 'syncx-test-pty-'));
+    const install = join(work, 'install');
+    mkdirSync(install, { recursive: true });
+    makeFakePackage(install, 'syncx', '0.1.0');
+    const targetDir = join(install, 'syncx');
+    const stagingSrc = makeFakePackage(work, 'newpkg', '0.2.0');
+    // 新包声明 node-pty 依赖 → 触发 updater 的安装步骤
+    const pkgPath = join(stagingSrc, 'package.json');
+    const pkg = JSON.parse(readFileSync(pkgPath, 'utf8')) as { dependencies?: Record<string, string> };
+    pkg.dependencies = { 'node-pty': '^1.1.0' };
+    writeFileSync(pkgPath, JSON.stringify(pkg));
+    const tgz = tgzDir(stagingSrc);
+
+    const fakeBin = join(work, 'fakebin');
+    mkdirSync(fakeBin, { recursive: true });
+    writeFileSync(
+      join(fakeBin, 'npm'),
+      '#!/bin/sh\nmkdir -p node_modules/node-pty\n' +
+        'printf \'{"name":"node-pty","version":"9.9.9-fake"}\' > node_modules/node-pty/package.json\nexit 0\n',
+      { mode: 0o755 },
+    );
+    writeFileSync(
+      join(fakeBin, 'npm.cmd'),
+      [
+        '@echo off',
+        'if not exist node_modules\\node-pty mkdir node_modules\\node-pty',
+        'echo {"name":"node-pty","version":"9.9.9-fake"} > node_modules\\node-pty\\package.json',
+        'exit /b 0',
+      ].join('\r\n'),
+    );
+    const prevPath = process.env.PATH ?? '';
+    process.env.PATH = `${fakeBin}${delimiter}${prevPath}`;
+
+    const dead = spawn(process.execPath, ['-e', 'process.exit(0)']);
+    const deadPid = dead.pid as number;
+    await new Promise<void>((resolve) => dead.on('exit', resolve));
+
+    try {
+      const { doneFile } = await runSelfUpdate(tgz, '0.2.0', {
+        targetDir,
+        minBytes: 16,
+        oldPid: deadPid,
+        waitMs: 10_000,
+        verifyMs: 400,
+        restartArgs: ['-e', 'setTimeout(() => {}, 1200)'],
+      });
+
+      await waitForFile(doneFile);
+      const result = JSON.parse(readFileSync(doneFile, 'utf8')) as {
+        ok?: boolean;
+        pty?: { attempted?: boolean; ok?: boolean; error?: string };
+      };
+      expect(result.ok).toBe(true);
+      expect(result.pty).toEqual({ attempted: true, ok: true, error: '' });
+      // 假 npm 在 targetDir 里执行过:原生模块落在解析路径上
+      expect(existsSync(join(targetDir, 'node_modules', 'node-pty', 'package.json'))).toBe(true);
+    } finally {
+      process.env.PATH = prevPath;
+      rmSync(work, { recursive: true, force: true });
+    }
+  }, 60_000);
+
+  it('pty install failure must not roll back the upgrade (终端只是降级,升级不算失败)', async () => {
+    const work = mkdtempSync(join(tmpdir(), 'syncx-test-ptyfail-'));
+    const install = join(work, 'install');
+    mkdirSync(install, { recursive: true });
+    makeFakePackage(install, 'syncx', '0.1.0');
+    const targetDir = join(install, 'syncx');
+    const stagingSrc = makeFakePackage(work, 'newpkg', '0.2.0');
+    const pkgPath = join(stagingSrc, 'package.json');
+    const pkg = JSON.parse(readFileSync(pkgPath, 'utf8')) as { dependencies?: Record<string, string> };
+    pkg.dependencies = { 'node-pty': '^1.1.0' };
+    writeFileSync(pkgPath, JSON.stringify(pkg));
+    const tgz = tgzDir(stagingSrc);
+
+    const fakeBin = join(work, 'fakebin');
+    mkdirSync(fakeBin, { recursive: true });
+    // 必败的假 npm
+    writeFileSync(join(fakeBin, 'npm'), '#!/bin/sh\nexit 3\n', { mode: 0o755 });
+    writeFileSync(join(fakeBin, 'npm.cmd'), ['@echo off', 'exit /b 3'].join('\r\n'));
+    const prevPath = process.env.PATH ?? '';
+    process.env.PATH = `${fakeBin}${delimiter}${prevPath}`;
+
+    const dead = spawn(process.execPath, ['-e', 'process.exit(0)']);
+    const deadPid = dead.pid as number;
+    await new Promise<void>((resolve) => dead.on('exit', resolve));
+
+    try {
+      const { doneFile } = await runSelfUpdate(tgz, '0.2.0', {
+        targetDir,
+        minBytes: 16,
+        oldPid: deadPid,
+        waitMs: 10_000,
+        verifyMs: 400,
+        restartArgs: ['-e', 'setTimeout(() => {}, 1200)'],
+      });
+
+      await waitForFile(doneFile);
+      const result = JSON.parse(readFileSync(doneFile, 'utf8')) as {
+        ok?: boolean;
+        rolledBack?: boolean;
+        pty?: { attempted?: boolean; ok?: boolean };
+      };
+      // 升级本体算成功;pty 失败只如实记录
+      expect(result.ok).toBe(true);
+      expect(result.rolledBack).toBeUndefined();
+      expect(result.pty?.attempted).toBe(true);
+      expect(result.pty?.ok).toBe(false);
+    } finally {
+      process.env.PATH = prevPath;
+      rmSync(work, { recursive: true, force: true });
+    }
+  }, 60_000);
 
   it('rolls back to the old package when the new daemon dies immediately', async () => {
     const work = mkdtempSync(join(tmpdir(), 'syncx-test-rb-'));

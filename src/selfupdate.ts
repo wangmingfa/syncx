@@ -305,7 +305,7 @@ function updaterSource(): string {
   return [
     "// syncx self-updater(自动生成,勿手改)。用法: node updater.mjs <job.json>",
     "import { chmodSync, cpSync, existsSync, readFileSync, renameSync, rmSync, writeFileSync } from 'node:fs';",
-    "import { spawn } from 'node:child_process';",
+    "import { spawn, spawnSync } from 'node:child_process';",
     "import { dirname, join } from 'node:path';",
     "const job = JSON.parse(readFileSync(process.argv[2], 'utf8'));",
     "const sleep = (ms) => new Promise((r) => setTimeout(r, ms));",
@@ -324,6 +324,9 @@ function updaterSource(): string {
     "  const backup = join(dirname(job.targetDir), '.syncx-update-backup');",
     "  const local = join(dirname(job.targetDir), '.syncx-update-staging');",
     "  let swapped = false;",
+    "  // ptyInstall 的声明必须在 try 外:catch 里的回滚 done 要引用它,块内声明会让",
+    "  // 回滚路径自己抛 ReferenceError、被内层 catch 吞掉,回滚标记就丢了(实测踩过)。",
+    "  let ptyInstall = { attempted: !!job.ptySpec, ok: false, error: job.ptySpec ? '未执行' : '包未声明 node-pty 依赖' };",
     "  try {",
     "    const deadline = Date.now() + job.waitMs;",
     "    while (alive(job.pid) && Date.now() < deadline) await sleep(300);",
@@ -341,6 +344,23 @@ function updaterSource(): string {
     "      throw e;",
     "    }",
     "    ensureExec(join(job.targetDir, 'dist', 'syncx.js')); // 换入成功强制可执行位,避免对端产物缺 +x 致 Permission denied",
+    "    // node-pty(原生模块)不随包分发:现装一份,浏览器终端才能用完整 PTY(受限模式的根因)。",
+    "    // 尽力而为:失败 / 超时**不回滚升级** —— 包已换入成功,这只影响终端是否受限。",
+    "    if (job.ptySpec) {",
+    "      try {",
+    "        const isWin = process.platform === 'win32';",
+    "        const npmCmd = isWin ? 'npm.cmd' : 'npm';",
+    "        // Windows 的 .cmd 必须经 shell 才能拉起;参数拼成单串以避开 Node 24 的 DEP0190 告警",
+    "        const line = [npmCmd, 'install', job.ptySpec, '--no-save', '--omit=dev', '--no-audit', '--no-fund'].join(' ');",
+    "        const r = spawnSync(line, { cwd: job.targetDir, timeout: 180000, windowsHide: true, stdio: 'ignore', shell: isWin });",
+    "        if (r.error) throw r.error;",
+    "        if (r.status !== 0) throw new Error('npm 退出码 ' + r.status);",
+    "        if (r.signal) throw new Error('npm 被信号终止 ' + r.signal);",
+    "        ptyInstall = { attempted: true, ok: true, error: '' };",
+    "      } catch (e) {",
+    "        ptyInstall = { attempted: true, ok: false, error: String((e && e.message) || e) };",
+    "      }",
+    "    }",
     "    // 拉起新 daemon(env 带结果文件路径,新进程启动后上报升级结果)",
     "    const child = spawn(job.execPath, job.restartArgs, {",
     "      detached: true, stdio: 'ignore', windowsHide: true,",
@@ -350,7 +370,7 @@ function updaterSource(): string {
     "    await sleep(job.verifyMs);",
     "    if (!alive(child.pid)) throw new Error('新进程启动后立即退出');",
     "    rmSync(backup, { recursive: true, force: true });",
-    "    done({ ok: true, pid: child.pid, version: job.version });",
+    "    done({ ok: true, pid: child.pid, version: job.version, pty: ptyInstall });",
     "  } catch (err) {",
     "    const message = String((err && err.message) || err);",
     "    // 回滚:换入已发生但新进程没活下来 → 还原旧包并拉回旧 daemon",
@@ -361,7 +381,7 @@ function updaterSource(): string {
     "        ensureExec(join(job.targetDir, 'dist', 'syncx.js')); // 还原旧包后保证可执行位(老包原本可能 0644)",
     "        const old = spawn(job.execPath, job.restartArgs, { detached: true, stdio: 'ignore', windowsHide: true, env: { ...process.env, SYNCX_UPDATE_DONE: job.doneFile } });",
     "        old.unref();",
-    "        done({ ok: false, rolledBack: true, error: message });",
+    "        done({ ok: false, rolledBack: true, error: message, pty: ptyInstall });",
     "        process.exit(1);",
     "      } catch { /* 回滚也失败:现状保留,结果文件如实记录 */ }",
     "    }",
@@ -415,6 +435,16 @@ export async function runSelfUpdate(
   const { root: staging, workDir, version } = await extractAndValidate(tgz, expectedVersion, opts);
   const targetDir = opts.targetDir ?? selfPackageDir();
   if (!targetDir) throw new Error('无法定位当前安装目录,已放弃升级');
+  // node-pty(原生模块)不随 tgz 分发:升级后的安装目录里现装一份,浏览器终端才能用
+  // 完整 PTY,否则落「受限模式」(无 prompt / 无回显 / 输出阶梯错位)。规格取**新包
+  // package.json 的依赖声明** —— 与 bundle 编译时的来源同一条 semver 线。
+  // 装不上(无 npm / 无网络 / Linux 无编译器)只影响终端,不影响升级本身,结果如实
+  // 写进 done 文件并在新 daemon 启动时记日志 —— 这次排查的最大教训就是降级悄无声息。
+  const newPkg = JSON.parse(readFileSync(join(staging, 'package.json'), 'utf8')) as {
+    dependencies?: Record<string, string>;
+  };
+  const ptyRange = newPkg.dependencies?.['node-pty'];
+  const ptySpec = ptyRange ? `node-pty@${ptyRange}` : undefined;
   // 护栏:目标是源码仓库时,整包替换会把 src/ 等源码一起删掉,直接拒绝。
   // 触发场景:直接 `node dist/syncx.js start` 从仓库里跑 —— 此时安装目录就是仓库根。
   if (!opts.allowUnsafeTargetDir && looksLikeSourceCheckout(targetDir)) {
@@ -438,6 +468,7 @@ export async function runSelfUpdate(
     waitMs: opts.waitMs ?? OLD_EXIT_WAIT_MS,
     verifyMs: opts.verifyMs ?? NEW_ALIVE_VERIFY_MS,
     version,
+    ptySpec,
     workDir,
   };
   writeFileSync(jobFile, JSON.stringify(job));
@@ -464,10 +495,19 @@ export function consumeUpdateDoneFile(
       version?: string;
       rolledBack?: boolean;
       error?: string;
+      /** updater 顺手安装 node-pty 的结果(见 runSelfUpdate 的 ptySpec)。 */
+      pty?: { attempted?: boolean; ok?: boolean; error?: string };
     };
     if (result.ok) logger.info(`self-update 完成:已升级到 ${result.version ?? '(未知版本)'} 并重启`);
     else if (result.rolledBack) logger.warn(`self-update 失败已回滚到旧版本: ${result.error ?? '(未知原因)'}`);
     else logger.warn(`self-update 异常结束: ${result.error ?? '(未知原因)'}`);
+    // 终端是否降级,从这里就能看出根因 —— 不再是打开终端才对着一个光标猜
+    if (result.pty?.attempted) {
+      const msg = result.pty.ok
+        ? '终端 PTY 依赖(node-pty)已就位,浏览器终端为完整模式'
+        : `终端 PTY 依赖(node-pty)安装失败,浏览器终端将处于受限模式: ${result.pty.error ?? '(未知原因)'}`;
+      (result.pty.ok ? logger.info : logger.warn)(msg);
+    }
   } catch {
     // 结果文件读不出来就算了,不影响启动
   } finally {

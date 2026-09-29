@@ -110,7 +110,14 @@ let ptyPromise: Promise<PtyModule | null> | null = null;
 function loadPty(): Promise<PtyModule | null> {
   ptyPromise ??= import('node-pty')
     .then((mod) => (mod as { default?: PtyModule }).default ?? (mod as unknown as PtyModule))
-    .catch(() => null);
+    .catch((e: unknown) => {
+      // 降级必须有痕迹:静默失败会让「受限模式」的根因无从排查 —— 本次排查就发现
+      // 升级包形态根本没有 node_modules,node-pty 必然拿不到,而此前日志里一个字都没有。
+      console.warn(
+        `[terminal] node-pty 加载失败,终端降级为受限管道模式(无提示符 / 无回显 / 输出可能错位): ${e instanceof Error ? e.message : String(e)}`,
+      );
+      return null;
+    });
   return ptyPromise;
 }
 
