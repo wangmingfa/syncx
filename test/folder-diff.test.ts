@@ -8,8 +8,9 @@ import type { IndexEntry } from '../src/index.js';
 import { loadOrCreateIdentity } from '../src/identity.js';
 import { openIndexStore } from '../src/indexstore.js';
 import { createLogger } from '../src/logger.js';
-import { startPeerServer, type PeerServer } from '../src/net/server.js';
+import { type PeerServer } from '../src/net/server.js';
 import { SyncSessionManager } from '../src/session-manager.js';
+import { startLoopbackPeerServer } from './integration/ports.js';
 import { rmDir } from './helpers.js';
 
 /** 异步轮询等待条件成立(hello / 控制消息都是异步 WS 收发的)。 */
@@ -38,13 +39,13 @@ interface Device {
  * 这组要验证的是**控制面的对比通道**(folder-index-request/snapshot 经真实 manager 往返),
  * 所以必须用真 manager —— 挂起表、分片重组、授权闸门都在它内部。
  */
-function bootDevice(opts: {
+async function bootDevice(opts: {
   identity: Identity;
   dir: string;
   share: string;
   /** 该目录指派给哪些设备(写入配置与内存两边,isPeerAllowed 读配置文件)。 */
   shareWith: string[];
-}): Device {
+}): Promise<Device> {
   const configPath = join(opts.dir, 'config.json');
   const sharedFolders = [{ id: 'main', path: opts.share, devices: opts.shareWith }];
   writeFileSync(configPath, JSON.stringify({ sharedFolders, knownDevices: [], peers: [] }));
@@ -59,16 +60,12 @@ function bootDevice(opts: {
     },
     sharedFolders,
   );
-  const server = startPeerServer(
-    opts.identity,
-    {
-      onPeerConnected(socket, remoteDeviceId, key, listenPort) {
-        manager.onInboundPeer(socket, remoteDeviceId, key, listenPort);
-      },
-      onError() {},
+  const server = await startLoopbackPeerServer(opts.identity, {
+    onPeerConnected(socket, remoteDeviceId, key, listenPort) {
+      manager.onInboundPeer(socket, remoteDeviceId, key, listenPort);
     },
-    0,
-  );
+    onError() {},
+  });
   return { dir: opts.dir, share: opts.share, manager, server };
 }
 
@@ -119,8 +116,8 @@ describe('folder diff over real sockets', () => {
         ),
       );
 
-      const a = bootDevice({ identity: aId, dir: aDir, share: shareA, shareWith: [bId.deviceId] });
-      const b = bootDevice({ identity: bId, dir: bDir, share: shareB, shareWith: [aId.deviceId] });
+      const a = await bootDevice({ identity: aId, dir: aDir, share: shareA, shareWith: [bId.deviceId] });
+      const b = await bootDevice({ identity: bId, dir: bDir, share: shareB, shareWith: [aId.deviceId] });
       devices.push(a, b);
 
       a.manager.connectTo(`ws://127.0.0.1:${b.server.port}`);
@@ -185,8 +182,8 @@ describe('folder diff over real sockets', () => {
 
       // A 把目录共享给 B,B **没有**共享给 A:本机侧的检查全过,但服务端必须拒绝 ——
       // 否则这条诊断通道就成了绕过共享关系的索引读取入口。
-      const a = bootDevice({ identity: aId, dir: aDir, share: shareA, shareWith: [bId.deviceId] });
-      const b = bootDevice({ identity: bId, dir: bDir, share: shareB, shareWith: [] });
+      const a = await bootDevice({ identity: aId, dir: aDir, share: shareA, shareWith: [bId.deviceId] });
+      const b = await bootDevice({ identity: bId, dir: bDir, share: shareB, shareWith: [] });
       devices.push(a, b);
 
       a.manager.connectTo(`ws://127.0.0.1:${b.server.port}`);
@@ -211,7 +208,7 @@ describe('folder diff over real sockets', () => {
     const devices: Device[] = [];
     try {
       const aId = loadOrCreateIdentity(aDir);
-      const a = bootDevice({
+      const a = await bootDevice({
         identity: aId,
         dir: aDir,
         share: shareA,
@@ -237,7 +234,7 @@ describe('folder diff over real sockets', () => {
     const devices: Device[] = [];
     try {
       const aId = loadOrCreateIdentity(aDir);
-      const a = bootDevice({ identity: aId, dir: aDir, share: shareA, shareWith: [] });
+      const a = await bootDevice({ identity: aId, dir: aDir, share: shareA, shareWith: [] });
       devices.push(a);
 
       await expect(a.manager.diffFolder('nope', 'DEV-X')).rejects.toThrow('共享目录不存在');

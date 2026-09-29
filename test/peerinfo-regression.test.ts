@@ -3,11 +3,11 @@ import { mkdtempSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { SyncSessionManager } from '../src/session-manager.js';
-import { startPeerServer } from '../src/net/server.js';
 import { connectPeer } from '../src/net/client.js';
 import { sendControlMessage } from '../src/net/wire.js';
 import { loadOrCreateIdentity } from '../src/identity.js';
 import { createLogger } from '../src/logger.js';
+import { startLoopbackPeerServer } from './integration/ports.js';
 import { rmDir } from './helpers.js';
 
 /** 异步轮询等待条件成立(白盒测试里 hello 是异步 WS 收发的)。 */
@@ -50,16 +50,12 @@ describe('peerInfo keyed by deviceId (regression: version survives non-bookmark 
         [],
       );
 
-      const serverA = startPeerServer(
-        aId,
-        {
-          onPeerConnected(socket, remoteDeviceId, key, listenPort) {
-            managerA.onInboundPeer(socket, remoteDeviceId, key, listenPort);
-          },
-          onError() {},
+      const serverA = await startLoopbackPeerServer(aId, {
+        onPeerConnected(socket, remoteDeviceId, key, listenPort) {
+          managerA.onInboundPeer(socket, remoteDeviceId, key, listenPort);
         },
-        0,
-      );
+        onError() {},
+      });
 
       // C 拨 A 两次 → A 端得到两条入站会话:第一条成为「书签会话」,第二条为备份。
       // (与真实双连接拓扑一致:双向同时拨号会在同一对端上产生重复连接,
@@ -128,16 +124,12 @@ describe('peer version learned from non-hello control messages (regression: lost
         [],
       );
 
-      const serverA = startPeerServer(
-        aId,
-        {
-          onPeerConnected(socket, remoteDeviceId, key, listenPort) {
-            managerA.onInboundPeer(socket, remoteDeviceId, key, listenPort);
-          },
-          onError() {},
+      const serverA = await startLoopbackPeerServer(aId, {
+        onPeerConnected(socket, remoteDeviceId, key, listenPort) {
+          managerA.onInboundPeer(socket, remoteDeviceId, key, listenPort);
         },
-        0,
-      );
+        onError() {},
+      });
 
       const conn = await connectPeer(cId, `ws://127.0.0.1:${serverA.port}`);
 

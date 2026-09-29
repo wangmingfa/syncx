@@ -40,6 +40,8 @@ export const MIN_PACKAGE_BYTES = 16 * 1024;
 const OLD_EXIT_WAIT_MS = 120_000;
 /** 换入后观察新进程是否立即退出的时长(毫秒),过期视为启动成功。 */
 const NEW_ALIVE_VERIFY_MS = 2_500;
+/** node-pty 安装时限:npm 可能要下载预编译包或本地编译,给足但不至于永不返回。 */
+const PTY_INSTALL_TIMEOUT_MS = 180_000;
 
 /**
  * 本机是否以打包产物(dist/syncx.js 或 npm 全局安装的单文件)运行。
@@ -123,6 +125,14 @@ async function tarRun(cwd: string, args: readonly string[]): Promise<void> {
 /**
  * 打包本机安装目录为 tgz(P2P 升级的发送侧载荷)。
  * dev 态返回 undefined(没有可打包的安装目录)。
+ *
+ * `--exclude=node_modules` 是必需的,不是优化:updater 换包后会在安装目录里现装 node-pty
+ * (原生模块,单文件 bundle 带不走),于是安装目录旁就有了几十 MB 的 node_modules。
+ * 整包替换是「目录级换入」,接收方不依赖这个目录(bundle 自包含,只缺 node-pty,而它会
+ * 由自己那一侧的 updater 现装),所以把它排除在载荷之外:不排除时包体会顶穿
+ * MIN/MAX_PACKAGE_BYTES 或 30 秒 tar 超时,`packSelfTgz` 静默返回 undefined,
+ * 「发给对端升级」就这样变成「不可用」。
+ *
  * @param overridePkgDir 测试注入:指定要打包的包目录,代替 selfPackageDir()(生产恒为空)。
  */
 export async function packSelfTgz(overridePkgDir?: string): Promise<Buffer | undefined> {
@@ -135,7 +145,7 @@ export async function packSelfTgz(overridePkgDir?: string): Promise<Buffer | und
   if (existsSync(bundle)) ensureExecutable(bundle);
   const work = mkdtempSync(join(tmpdir(), 'syncx-selfpack-'));
   try {
-    await tarRun(work, ['-czf', 'self.tgz', '-C', dirname(dir), basename(dir)]);
+    await tarRun(work, ['-czf', 'self.tgz', '--exclude=node_modules', '-C', dirname(dir), basename(dir)]);
     const st = statSync(join(work, 'self.tgz'));
     if (st.size < MIN_PACKAGE_BYTES || st.size > MAX_PACKAGE_BYTES) return undefined;
     return readFileSync(join(work, 'self.tgz'));
@@ -275,6 +285,27 @@ function looksLikeSourceCheckout(dir: string): boolean {
   return existsSync(join(dir, '.git')) || existsSync(join(dir, 'src', 'main.ts'));
 }
 
+/**
+ * node-pty 的版本范围能不能拿去执行 npm。
+ *
+ * 范围来自**新包的 package.json**,而新包在 P2P 路径上是对端打出来发给我们的 —— 也就是
+ * 一条「对端-controlled、Windows 侧还要经 shell 拼接」的命令行片段。
+ *
+ * 白名单只放 semver 范围用得上的字面:`^ ~ > < = * 空格 - + .` 与字母数字下划线(`||` 靠 `|`)。
+ * 挡掉的两类各有其名:
+ * - shell 元字符(`& ; $ 反引号 引号 括号 花括号 %` 反斜杠 NUL 换行)—— cmd 侧拼的就是命令行;
+ * - `:` 与 `/` —— 装不上 shell,但可以变成 npm 的**协议式规格**
+ *   (`node-pty@https://…` / `git+ssh://…` / `file:../…`),让 npm 去装一个陌生来源的包,
+ *   而 npm 装包会跑它的 install 脚本。合法的范围永远不含这两个字符。
+ * 超长一并拒绝。被挡时不执行 npm:终端降级成受限模式,原因如实写进 done 文件。
+ * 判据宁可窄:误杀只是少一个 PTY,放进命令行就是别人的机器在跑别人写的字符串。
+ */
+const PTY_RANGE_RE = /^[\w.~^><=+|* -]{1,80}$/;
+
+export function isSafePtyRange(range: unknown): range is string {
+  return typeof range === 'string' && PTY_RANGE_RE.test(range.trim());
+}
+
 /** 用 node 执行 `<file> -v`,返回 stdout(空串 = 启动失败/超时)。 */
 function printVersion(nodeExe: string, file: string, timeoutMs: number): Promise<string> {
   return new Promise((resolve) => {
@@ -311,6 +342,24 @@ function updaterSource(): string {
     "const sleep = (ms) => new Promise((r) => setTimeout(r, ms));",
     "const alive = (pid) => { try { process.kill(pid, 0); return true; } catch { return false; } };",
     "const ensureExec = (p) => { try { chmodSync(p, 0o755); } catch {} };",
+    // node-pty 现装:尽力而为,任何失败都只让终端降级,绝不影响换包结果。
+    // POSIX 必须走 argv —— 把整条命令当 file 传而 shell=false 时,Node 会拿整个字符串去做
+    // execvp,必然 ENOENT(这个坑在本仓的第一版实现里踩过,Mac/Linux 上一次都没装上)。
+    // Windows 的 npm.cmd 须经 shell;spec 用双引号裹住,cmd 不再解析其中的 & | < > ^ 等字面。
+    "const installPty = (spec, dir) => {",
+    "  const args = ['install', spec, '--no-save', '--omit=dev', '--no-audit', '--no-fund'];",
+    `  const opts = { cwd: dir, timeout: ${PTY_INSTALL_TIMEOUT_MS}, windowsHide: true, stdio: ['ignore', 'ignore', 'pipe'] };`,
+    "  const isWin = process.platform === 'win32';",
+    "  const r = isWin",
+    "    ? spawnSync(['npm.cmd', 'install', '\\\"' + spec + '\\\"', '--no-save', '--omit=dev', '--no-audit', '--no-fund'].join(' '), { ...opts, shell: true })",
+    "    : spawnSync('npm', args, opts);",
+    "  const tail = (r.stderr ? r.stderr.toString('utf8') : '').trim().slice(-400);",
+    "  if (r.error) return { attempted: true, ok: false, error: String(r.error.message || r.error) + (tail ? ' | ' + tail : '') };",
+    "  // 先看 signal 再看 status:超时/被杀时 status 是 null,写成 '退出码 null' 就等于没留痕",
+    "  if (r.signal) return { attempted: true, ok: false, error: 'npm 被信号终止 ' + r.signal + (tail ? ': ' + tail : '') };",
+    "  if (r.status !== 0) return { attempted: true, ok: false, error: 'npm 退出码 ' + r.status + (tail ? ': ' + tail : '') };",
+    "  return { attempted: true, ok: true, error: '' };",
+    "};",
     "const swap = async (from, to) => {",
     "  for (let i = 0; i < 25; i++) {",
     "    try { renameSync(from, to); return; } catch (e) {",
@@ -326,7 +375,7 @@ function updaterSource(): string {
     "  let swapped = false;",
     "  // ptyInstall 的声明必须在 try 外:catch 里的回滚 done 要引用它,块内声明会让",
     "  // 回滚路径自己抛 ReferenceError、被内层 catch 吞掉,回滚标记就丢了(实测踩过)。",
-    "  let ptyInstall = { attempted: !!job.ptySpec, ok: false, error: job.ptySpec ? '未执行' : '包未声明 node-pty 依赖' };",
+    "  let ptyInstall = { attempted: false, ok: false, error: job.ptySpec ? '未执行' : (job.ptyNote || '包未声明 node-pty 依赖') };",
     "  try {",
     "    const deadline = Date.now() + job.waitMs;",
     "    while (alive(job.pid) && Date.now() < deadline) await sleep(300);",
@@ -346,20 +395,9 @@ function updaterSource(): string {
     "    ensureExec(join(job.targetDir, 'dist', 'syncx.js')); // 换入成功强制可执行位,避免对端产物缺 +x 致 Permission denied",
     "    // node-pty(原生模块)不随包分发:现装一份,浏览器终端才能用完整 PTY(受限模式的根因)。",
     "    // 尽力而为:失败 / 超时**不回滚升级** —— 包已换入成功,这只影响终端是否受限。",
+    "    // 装进 <targetDir>/node_modules:dist/syncx.js 的 import('node-pty') 沿父目录上溯正好命中。",
     "    if (job.ptySpec) {",
-    "      try {",
-    "        const isWin = process.platform === 'win32';",
-    "        const npmCmd = isWin ? 'npm.cmd' : 'npm';",
-    "        // Windows 的 .cmd 必须经 shell 才能拉起;参数拼成单串以避开 Node 24 的 DEP0190 告警",
-    "        const line = [npmCmd, 'install', job.ptySpec, '--no-save', '--omit=dev', '--no-audit', '--no-fund'].join(' ');",
-    "        const r = spawnSync(line, { cwd: job.targetDir, timeout: 180000, windowsHide: true, stdio: 'ignore', shell: isWin });",
-    "        if (r.error) throw r.error;",
-    "        if (r.status !== 0) throw new Error('npm 退出码 ' + r.status);",
-    "        if (r.signal) throw new Error('npm 被信号终止 ' + r.signal);",
-    "        ptyInstall = { attempted: true, ok: true, error: '' };",
-    "      } catch (e) {",
-    "        ptyInstall = { attempted: true, ok: false, error: String((e && e.message) || e) };",
-    "      }",
+    "      ptyInstall = installPty(job.ptySpec, job.targetDir);",
     "    }",
     "    // 拉起新 daemon(env 带结果文件路径,新进程启动后上报升级结果)",
     "    const child = spawn(job.execPath, job.restartArgs, {",
@@ -444,7 +482,13 @@ export async function runSelfUpdate(
     dependencies?: Record<string, string>;
   };
   const ptyRange = newPkg.dependencies?.['node-pty'];
-  const ptySpec = ptyRange ? `node-pty@${ptyRange}` : undefined;
+  // 范围是「新包声明的字符串」,P2P 路径上来自对端打出的包,而 Windows 侧还要经 shell 拼接。
+  // 故执行前先过白名单(isSafePtyRange):不合法就不装,终端落受限模式,原因写进 done 文件。
+  const ptySpec = typeof ptyRange === 'string' && isSafePtyRange(ptyRange) ? `node-pty@${ptyRange.trim()}` : undefined;
+  const ptyNote =
+    ptySpec || typeof ptyRange !== 'string'
+      ? undefined
+      : `包声明的 node-pty 版本范围不适合作为命令行参数执行(${JSON.stringify(ptyRange).slice(0, 120)}),已跳过安装`;
   // 护栏:目标是源码仓库时,整包替换会把 src/ 等源码一起删掉,直接拒绝。
   // 触发场景:直接 `node dist/syncx.js start` 从仓库里跑 —— 此时安装目录就是仓库根。
   if (!opts.allowUnsafeTargetDir && looksLikeSourceCheckout(targetDir)) {
@@ -469,6 +513,7 @@ export async function runSelfUpdate(
     verifyMs: opts.verifyMs ?? NEW_ALIVE_VERIFY_MS,
     version,
     ptySpec,
+    ptyNote,
     workDir,
   };
   writeFileSync(jobFile, JSON.stringify(job));
@@ -501,12 +546,16 @@ export function consumeUpdateDoneFile(
     if (result.ok) logger.info(`self-update 完成:已升级到 ${result.version ?? '(未知版本)'} 并重启`);
     else if (result.rolledBack) logger.warn(`self-update 失败已回滚到旧版本: ${result.error ?? '(未知原因)'}`);
     else logger.warn(`self-update 异常结束: ${result.error ?? '(未知原因)'}`);
-    // 终端是否降级,从这里就能看出根因 —— 不再是打开终端才对着一个光标猜
-    if (result.pty?.attempted) {
-      const msg = result.pty.ok
-        ? '终端 PTY 依赖(node-pty)已就位,浏览器终端为完整模式'
-        : `终端 PTY 依赖(node-pty)安装失败,浏览器终端将处于受限模式: ${result.pty.error ?? '(未知原因)'}`;
-      (result.pty.ok ? logger.info : logger.warn)(msg);
+    // 终端是否降级,从这里就能看出根因 —— 不再是打开终端才对着一个光标猜。
+    // 「未执行」也要留痕:范围被白名单挡下、包没声明 node-pty,同样是终端受限的原因。
+    const pty = result.pty;
+    if (pty?.ok) {
+      logger.info('终端 PTY 依赖(node-pty)已就位,浏览器终端为完整模式');
+    } else if (pty) {
+      logger.warn(
+        `终端 PTY 依赖(node-pty)${pty.attempted ? '安装失败' : '未安装'}:` +
+          ` ${pty.error ?? '(未知原因)'},浏览器终端将处于受限模式`,
+      );
     }
   } catch {
     // 结果文件读不出来就算了,不影响启动

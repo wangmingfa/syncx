@@ -6,9 +6,10 @@ import { describe, expect, it } from 'vitest';
 
 import { loadOrCreateIdentity } from '../src/identity.js';
 import { createLogger } from '../src/logger.js';
-import { startPeerServer } from '../src/net/server.js';
+import { type PeerServer } from '../src/net/server.js';
 import { encryptMessage, type ControlMessage } from '../src/net/wire.js';
 import { SyncSessionManager } from '../src/session-manager.js';
+import { startLoopbackPeerServer } from './integration/ports.js';
 import { rmDir } from './helpers.js';
 
 /** 最小 WebSocket mock:记录 send,允许手动 emit 'message'。 */
@@ -66,7 +67,7 @@ describe('session manager shutdown', () => {
     // (锁文件 ENOENT → 空转 5s → unhandled exception)
     let managerA: SyncSessionManager | undefined;
     let managerB: SyncSessionManager | undefined;
-    let serverB: ReturnType<typeof startPeerServer> | undefined;
+    let serverB: PeerServer | undefined;
     try {
       const aId = loadOrCreateIdentity(aDir);
       const bId = loadOrCreateIdentity(bDir);
@@ -93,17 +94,13 @@ describe('session manager shutdown', () => {
         },
         [],
       );
-      serverB = startPeerServer(
-        bId,
-        {
-          onPeerConnected(socket, remoteDeviceId, key, listenPort) {
-            inbound += 1;
-            managerB!.onInboundPeer(socket, remoteDeviceId, key, listenPort);
-          },
-          onError() {},
+      serverB = await startLoopbackPeerServer(bId, {
+        onPeerConnected(socket, remoteDeviceId, key, listenPort) {
+          inbound += 1;
+          managerB!.onInboundPeer(socket, remoteDeviceId, key, listenPort);
         },
-        0,
-      );
+        onError() {},
+      });
 
       const url = `ws://127.0.0.1:${serverB.port}`;
       managerA.connectTo(url);

@@ -12,9 +12,9 @@ import {
   decodeKxMessage,
 } from '../src/handshake.js';
 import { connectPeer } from '../src/net/client.js';
-import { startPeerServer } from '../src/net/server.js';
 import { mkdtempSync } from 'node:fs';
 import { rmDir } from './helpers.js';
+import { startLoopbackPeerServer } from './integration/ports.js';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { loadOrCreateIdentity } from '../src/identity.js';
@@ -244,16 +244,12 @@ describe('peer server reverse discovery (listenPort)', () => {
     const clientIdentity = loadOrCreateIdentity(clientDir);
 
     let receivedPort: number | undefined;
-    const server = startPeerServer(
-      serverIdentity,
-      {
-        onPeerConnected: (_socket, _deviceId, _key, listenPort) => {
-          receivedPort = listenPort;
-        },
-        onError: () => {},
+    const server = await startLoopbackPeerServer(serverIdentity, {
+      onPeerConnected: (_socket, _deviceId, _key, listenPort) => {
+        receivedPort = listenPort;
       },
-      0,
-    );
+      onError: () => {},
+    });
 
     const peer = await connectPeer(clientIdentity, `ws://127.0.0.1:${server.port}`, 22000);
     // 等待 server 侧握手完成的回调触发
@@ -274,16 +270,12 @@ describe('peer server reverse discovery (listenPort)', () => {
     const clientIdentity = loadOrCreateIdentity(clientDir);
 
     let receivedPort: number | undefined;
-    const server = startPeerServer(
-      serverIdentity,
-      {
-        onPeerConnected: (_socket, _deviceId, _key, listenPort) => {
-          receivedPort = listenPort;
-        },
-        onError: () => {},
+    const server = await startLoopbackPeerServer(serverIdentity, {
+      onPeerConnected: (_socket, _deviceId, _key, listenPort) => {
+        receivedPort = listenPort;
       },
-      0,
-    );
+      onError: () => {},
+    });
 
     // 旧版客户端不广播 listenPort
     const peer = await connectPeer(clientIdentity, `ws://127.0.0.1:${server.port}`);
@@ -305,27 +297,23 @@ describe('connectPeer early-frame buffering (regression: 偶发丢失目录邀�
     const serverIdentity = loadOrCreateIdentity(serverDir);
     const clientIdentity = loadOrCreateIdentity(clientDir);
 
-    const server = startPeerServer(
-      serverIdentity,
-      {
-        onPeerConnected: (socket, deviceId, key) => {
-          // 复刻生产时序:startSyncSession 在 kx 应答的同一 tick 里连发三条控制
-          // 消息(hello / folder-invitation / folder-sync-list),它们常与 kx 应答
-          // 同批到达客户端。修复前这些帧落在无监听的 socket 上被静默丢弃。
-          sendControlMessage(socket, key, { kind: 'hello', fromDeviceId: deviceId, version: 'test' });
-          sendControlMessage(socket, key, {
-            kind: 'folder-invitation',
-            offerId: 'offer-1',
-            fromDeviceId: deviceId,
-            folderId: 'folder-1',
-            folderName: 'demo',
-          });
-          sendControlMessage(socket, key, { kind: 'folder-sync-list', fromDeviceId: deviceId, folderIds: [] });
-        },
-        onError: () => {},
+    const server = await startLoopbackPeerServer(serverIdentity, {
+      onPeerConnected: (socket, deviceId, key) => {
+        // 复刻生产时序:startSyncSession 在 kx 应答的同一 tick 里连发三条控制
+        // 消息(hello / folder-invitation / folder-sync-list),它们常与 kx 应答
+        // 同批到达客户端。修复前这些帧落在无监听的 socket 上被静默丢弃。
+        sendControlMessage(socket, key, { kind: 'hello', fromDeviceId: deviceId, version: 'test' });
+        sendControlMessage(socket, key, {
+          kind: 'folder-invitation',
+          offerId: 'offer-1',
+          fromDeviceId: deviceId,
+          folderId: 'folder-1',
+          folderName: 'demo',
+        });
+        sendControlMessage(socket, key, { kind: 'folder-sync-list', fromDeviceId: deviceId, folderIds: [] });
       },
-      0,
-    );
+      onError: () => {},
+    });
 
     const peer = await connectPeer(clientIdentity, `ws://127.0.0.1:${server.port}`);
     // 模拟生产中 connectPeer resolve 到分发器挂载之间的空窗(微任务 + 日志回调):

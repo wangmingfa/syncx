@@ -1,4 +1,5 @@
 import { WebSocketServer, WebSocket } from 'ws';
+import type { Server as HttpServer } from 'node:http';
 import type { AddressInfo } from 'node:net';
 import type { DeviceIdentity } from '../identity.js';
 import { deriveDeviceIdFromPublicKey } from '../handshake.js';
@@ -42,6 +43,19 @@ export interface PeerServerOptions {
   handshakeTimeoutMs?: number;
   /** 单条消息最大字节数,默认 MAX_MESSAGE_BYTES(64MB)。 */
   maxPayloadBytes?: number;
+  /**
+   * 复用调用方**已经监听**的 http server(测试用 `startLoopbackPeerServer` 传,生产不传)。
+   *
+   * 传了 `server` 就不再自己 bind:升级事件挂到这台 server 上,`address()` 同步可得,
+   * `close()` 连同它一起关掉(所有权交给 PeerServer,否则测试会漏监听)。
+   *
+   * 为什么测试必须这么绕:不传时 ws 把端口绑在 `::`(双栈)。双栈绑定的环回流量**不算被独占**
+   * ——macOS 允许另一个进程随后补绑同端口号的 `127.0.0.1`,而且补上来的那个更具体的 v4 绑定
+   * 会接走环回连接。于是测试客户端 `ws://127.0.0.1:P` 连到的是别人的服务,拿到一句
+   * `Unexpected server response: 404`(内核只会为 `listen(0)` 避让**当时已被占**的 v4 端口,
+   * 不保证这个端口号之后也不被别人占)。绑在 `127.0.0.1` 上就是真独占:同端口再绑直接 EADDRINUSE。
+   */
+  server?: HttpServer;
 }
 
 export function startPeerServer(
@@ -53,7 +67,10 @@ export function startPeerServer(
   const maxConnections = options.maxConnections ?? MAX_PEER_CONNECTIONS;
   const handshakeTimeoutMs = options.handshakeTimeoutMs ?? HANDSHAKE_TIMEOUT_MS;
   const maxPayload = options.maxPayloadBytes ?? MAX_MESSAGE_BYTES;
-  const wss = new WebSocketServer({ port, maxPayload });
+  // 注入 server 时不 bind:所有权在调用方那边,它已经监听好了(见 PeerServerOptions.server)
+  const wss = options.server
+    ? new WebSocketServer({ server: options.server, maxPayload })
+    : new WebSocketServer({ port, maxPayload });
   let activeConnections = 0;
 
   wss.on('connection', (socket) => {
@@ -141,6 +158,9 @@ export function startPeerServer(
         client.close();
       }
       wss.close();
+      // 注入进来的 server 由 ws 之外持有:wss.close() 不会关它,不关就漏一个监听
+      // (测试收尾后 vitest 会因为还有活动 handle 而不退出)。
+      options.server?.close();
     },
   };
 }

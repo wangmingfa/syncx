@@ -4,7 +4,7 @@ import { rmDir } from '../helpers.js';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import type { WebSocket } from 'ws';
-import { startPeerServer } from '../../src/net/server.js';
+import { startLoopbackPeerServer } from './ports.js';
 import { connectPeer } from '../../src/net/client.js';
 import { loadOrCreateIdentity } from '../../src/identity.js';
 import { openIndexStore, type IndexStore } from '../../src/indexstore.js';
@@ -154,19 +154,16 @@ async function connectPair(
   const aSent = { count: 0 };
   const bSent = { count: 0 };
 
-  // 进程内服务用端口 0 让系统分配,避免并行测试文件的随机端口区间互相碰撞
-  const aServer = startPeerServer(
-    aIdentity,
-    {
-      onPeerConnected(socket) {
-        aSocket = socket;
-      },
-      onError() {
-        // ignore
-      },
+  // 端口独占在 127.0.0.1 上(原因见 startLoopbackPeerServer):裸 `startPeerServer(..., 0)`
+  // 绑的是 `::`,并发跑全量时会被别人补绑同端口号的 v4 监听截走环回流量 → 随机 404
+  const aServer = await startLoopbackPeerServer(aIdentity, {
+    onPeerConnected(socket) {
+      aSocket = socket;
     },
-    0,
-  );
+    onError() {
+      // ignore
+    },
+  });
 
   const bConnected = await connectPeer(bIdentity, `ws://127.0.0.1:${aServer.port}`);
   const bSocket = bConnected.socket;

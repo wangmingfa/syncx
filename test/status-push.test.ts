@@ -3,11 +3,11 @@ import { mkdtempSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { SyncSessionManager } from '../src/session-manager.js';
-import { startPeerServer } from '../src/net/server.js';
 import { connectPeer } from '../src/net/client.js';
 import { sendControlMessage } from '../src/net/wire.js';
 import { loadOrCreateIdentity } from '../src/identity.js';
 import { createLogger } from '../src/logger.js';
+import { startLoopbackPeerServer } from './integration/ports.js';
 import { rmDir } from './helpers.js';
 
 /** 异步轮询等待条件成立(白盒测试里 hello 是异步 WS 收发的)。 */
@@ -55,16 +55,12 @@ describe('status change notifications', () => {
         [],
       );
 
-      const serverA = startPeerServer(
-        aId,
-        {
-          onPeerConnected(socket, remoteDeviceId, key, listenPort) {
-            managerA.onInboundPeer(socket, remoteDeviceId, key, listenPort);
-          },
-          onError() {},
+      const serverA = await startLoopbackPeerServer(aId, {
+        onPeerConnected(socket, remoteDeviceId, key, listenPort) {
+          managerA.onInboundPeer(socket, remoteDeviceId, key, listenPort);
         },
-        0,
-      );
+        onError() {},
+      });
 
       // 1) 对端上线 → 设备卡从离线变在线,必须立即通知
       const conn = await connectPeer(cId, `ws://127.0.0.1:${serverA.port}`);

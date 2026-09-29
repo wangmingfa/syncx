@@ -4,7 +4,7 @@ import { rmDir } from '../helpers.js';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import type { WebSocket } from 'ws';
-import { startPeerServer } from '../../src/net/server.js';
+import { startLoopbackPeerServer } from './ports.js';
 import { connectPeer } from '../../src/net/client.js';
 import { loadOrCreateIdentity } from '../../src/identity.js';
 import { openIndexStore, type IndexStore } from '../../src/indexstore.js';
@@ -155,8 +155,9 @@ async function connectChain(
 
   let aSocket: WebSocket | undefined;
   let bFromC: WebSocket | undefined;
-  const aServer = startPeerServer(aIdentity, { onPeerConnected: (s) => (aSocket = s), onError: () => {} }, 0);
-  const bServer = startPeerServer(bIdentity, { onPeerConnected: (s) => (bFromC = s), onError: () => {} }, 0);
+  // 端口独占在 127.0.0.1 上,否则并发跑全量时环回流量会被别人补绑的同端口 v4 监听截走(随机 404)
+  const aServer = await startLoopbackPeerServer(aIdentity, { onPeerConnected: (s) => (aSocket = s), onError: () => {} });
+  const bServer = await startLoopbackPeerServer(bIdentity, { onPeerConnected: (s) => (bFromC = s), onError: () => {} });
 
   // B 拨 A,C 拨 B
   const bToA = (await connectPeer(bIdentity, `ws://127.0.0.1:${aServer.port}`)).socket;
