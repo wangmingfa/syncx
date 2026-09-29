@@ -1,4 +1,4 @@
-import { mkdirSync, renameSync, writeFileSync, rmSync, existsSync, statSync, readFileSync, realpathSync, copyFileSync, readdirSync } from 'node:fs';
+import { closeSync, fsyncSync, mkdirSync, openSync, renameSync, writeFileSync, writeSync, rmSync, existsSync, statSync, readFileSync, realpathSync, copyFileSync, readdirSync } from 'node:fs';
 import { dirname, basename, join, relative, isAbsolute, extname, sep } from 'node:path';
 import type { IndexEntry } from './index.js';
 import type { IndexStore } from './indexstore.js';
@@ -253,7 +253,26 @@ export function createLocalExecutor(
     mkdirSync(dirname(target), { recursive: true });
 
     const tmp = `${target}.syncx-tmp`;
-    writeFileSync(tmp, Buffer.concat(blocks));
+    // 逐块写盘而不是 Buffer.concat 整文件:concat 会让接收峰值内存变成「块的 2 倍」
+    // (blocks 数组 + concat 结果同时驻留),大文件直接把 daemon 顶到 OOM。
+    // 随机写用 5 参形式 —— writeSync(fd, buf, offset, length, position) 的第 3 参是
+    // **buffer 内偏移**、不是文件位置,3 参形式会把每一块都覆盖到文件开头。
+    // 写完必须 fsync 再 rename:流式落盘后"崩在写中间"是常态,rename 前不刷盘,
+    // 崩溃可能留下"已改名但内容未刷"的文件(比丢一个 tmp 严重得多)。
+    const fd = openSync(tmp, 'w');
+    try {
+      let offset = 0;
+      for (const block of blocks) {
+        let written = 0;
+        while (written < block.length) {
+          written += writeSync(fd, block, written, block.length - written, offset + written);
+        }
+        offset += block.length;
+      }
+      fsyncSync(fd);
+    } finally {
+      closeSync(fd);
+    }
     renameSync(tmp, target);
 
     return statSync(target).mtimeMs;

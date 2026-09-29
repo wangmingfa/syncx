@@ -13,7 +13,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { createLocalExecutor, resolveSharePath, preserveLocalAsConflict } from '../src/executor.js';
 import { openIndexStore } from '../src/indexstore.js';
-import { hashBlock } from '../src/blockstore.js';
+import { BLOCK_SIZE, hashBlock } from '../src/blockstore.js';
 
 function entry(
   path: string,
@@ -793,4 +793,63 @@ describe('conflict policy keep-local (applyConflictKeepLocal)', () => {
     index.close();
     rmDir(dir);
   });
+});
+
+/**
+ * 阶段 1a 内存守卫:接收落地**不得**把整个文件再拼进内存。
+ *
+ * 改前 landRemote 用 `writeFileSync(tmp, Buffer.concat(blocks))` —— blocks 数组本就
+ * 攒着全部块,concat 再来一份,峰值是文件大小的 2 倍,大文件直接顶爆 V8 堆
+ * (1.5GB 文件在默认 4GB 堆限下复现过 OOM,daemon 整个崩掉)。
+ *
+ * 量法:provider 的块数组在**测量开始前**分配好,applyReceive 期间只可能新增
+ * concat 那一份 —— 所以「RSS 峰值增长」在改前 ≈ 文件大小、改后 ≈ 0。
+ * 用 0.4× 的上限把两者分开;50ms 采样覆盖整个写循环,不依赖恰好采样到峰值的瞬间。
+ */
+describe('接收落地内存守卫', () => {
+  it('192MB 条目落地时 RSS 峰值增长 < 文件大小的 40%(流式写盘,无整文件 concat)', async () => {
+    const dir = mkdtempSync(join(tmpdir(), 'syncx-exec-mem-'));
+    const root = join(dir, 'share');
+    mkdirSync(root, { recursive: true });
+    const index = openIndexStore(join(dir, 'index.db'));
+    const executor = createLocalExecutor(root, index, join(root, '.syncx-trash'));
+
+    const N = 192; // 192 × 1MB = 192MB
+    const oneBlock = Buffer.alloc(BLOCK_SIZE, 7);
+    const blocks = Array.from({ length: N }, () => hashBlock(oneBlock));
+    const remote = entry('big.bin', [['dev-b', 1]], blocks, N * BLOCK_SIZE);
+    const delivered = Array.from({ length: N }, () => Buffer.from(oneBlock));
+    const provider = { getBlocks: async (): Promise<Buffer[]> => delivered };
+
+    // 内存守卫用「追踪 Buffer.concat」而不是采样 RSS/arrayBuffers:
+    //  - landRemote 整个是同步执行,采样器在它跑完前没有任何机会运行,峰值必被漏掉;
+    //  - RSS 在 Windows 受工作集裁剪影响,192MB 的 concat 实测抓不到。
+    // concat 正是旧实现的分配方式(OOM 的直接来源),追踪它 = 钉住「不得出现
+    // O(文件大小) 的整文件拼接」这条不变式。
+    const concatOrig = Buffer.concat;
+    let biggestConcat = 0;
+    Buffer.concat = ((list: readonly Uint8Array[], totalLength?: number): Buffer => {
+      const total = list.reduce((n, b) => n + b.length, 0);
+      if (total > biggestConcat) biggestConcat = total;
+      return concatOrig(list as Buffer[], totalLength);
+    }) as typeof Buffer.concat;
+
+    try {
+      await executor.applyReceive(remote, provider);
+
+      // 正确性先断言:文件字节与逐块拼接完全一致(每块内容相同,长度即块数×1MB)
+      const landed = readFileSync(join(root, 'big.bin'));
+      expect(landed.length).toBe(N * BLOCK_SIZE);
+      for (let i = 0; i < N; i++) {
+        expect(landed.subarray(i * BLOCK_SIZE, (i + 1) * BLOCK_SIZE).equals(oneBlock)).toBe(true);
+      }
+
+      // 流式落地不该有任何 O(文件大小) 的整文件拼接;给 50% 余量防误伤小拼接
+      expect(biggestConcat).toBeLessThan(N * BLOCK_SIZE * 0.5);
+    } finally {
+      Buffer.concat = concatOrig;
+      index.close();
+      rmDir(dir);
+    }
+  }, 60_000);
 });
