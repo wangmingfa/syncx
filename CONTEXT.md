@@ -51,3 +51,7 @@ _Avoid_: filter, exclude list
 **Invitation**:
 The flow by which one device proposes adding another device to a shared folder; the invited device accepts and chooses the local path.
 _Avoid_: request, share (as verb)
+
+**Version Consistency Lock**:
+The product-level requirement that all paired devices run the same syncx version. A device that is behind its online peers is held at an upgrade prompt with no other exit until it catches up.
+_Avoid_: upgrade banner, warning modal, version gate (which would mean the wire refusing a mismatched peer — that is deliberately *not* what happens)
