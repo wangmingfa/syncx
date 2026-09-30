@@ -1,10 +1,10 @@
-import { readdirSync, readFileSync, statSync, existsSync } from 'node:fs';
+import { readdirSync, statSync, existsSync } from 'node:fs';
 import { join, resolve, sep } from 'node:path';
 import type { IndexEntry } from './index.js';
 import type { IndexStore } from './indexstore.js';
 import type { IgnoreRule } from './ignore.js';
 import { isIgnoredPath, isConflictCopyName } from './ignore.js';
-import { hashBlock, splitIntoBlocks } from './blockstore.js';
+import { blocksMatchOnDisk } from './blockstore.js';
 import { incrementVersion } from './version.js';
 
 /** FAT32 mtime 精度为 2 秒,免哈希快速路径用容忍窗口避免误判。 */
@@ -39,18 +39,18 @@ export interface ScanDiff {
   conflictCount: number;
 }
 
+/**
+ * 内容变了没:逐块读盘比对哈希,首处不符即返回。
+ * 以前是 readFileSync 整读再算块 —— 扫描每轮对**每个**已索引文件都问一次,一个超大
+ * 文件就是一次整读(峰值 = 文件大小,且受 ~2GiB 上限约束),而绝大多数答案在
+ * 第一块就能短出去。
+ */
 function contentChanged(entry: IndexEntry, absPath: string): boolean {
-  let data: Buffer;
   try {
-    data = readFileSync(absPath);
+    return !blocksMatchOnDisk(absPath, entry.blocks);
   } catch {
     return true; // 读不到按变化处理,由调用方 try/catch 兜底
   }
-  const blocks = splitIntoBlocks(data).map(hashBlock);
-  return (
-    blocks.length !== entry.blocks.length ||
-    blocks.some((h, i) => h !== entry.blocks[i])
-  );
 }
 
 /**

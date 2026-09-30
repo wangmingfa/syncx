@@ -9,9 +9,9 @@ export const ELEVATE_COOKIE = 'syncx_su';
 export const ELEVATE_TTL_MS = 10 * 60 * 1000;
 
 /**
- * 状态推送通道的路径。前端 useStatus.ts 里手写了同一个字面量(客户端 bundle 不 import
- * 后端模块),改这里时务必同步改那边 —— 两边不一致的表现是「界面不再实时更新,悄悄退回
- * 轮询」,不会报错,很难发现。
+ * 状态推送通道的路径。前端 `web/composables/useStatusFeed.ts` 里手写了同一个字面量
+ * (客户端 bundle 不 import 后端模块),改这里时务必同步改那边 —— 两边不一致的表现是
+ * 「界面不再实时更新,悄悄退回轮询」,不会报错,很难发现。
  */
 export const EVENTS_PATH = '/api/events';
 

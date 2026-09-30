@@ -1,8 +1,8 @@
-import { closeSync, fsyncSync, mkdirSync, openSync, renameSync, writeFileSync, writeSync, rmSync, existsSync, statSync, readFileSync, realpathSync, copyFileSync, readdirSync } from 'node:fs';
+import { closeSync, fsyncSync, mkdirSync, openSync, renameSync, writeFileSync, writeSync, rmSync, existsSync, statSync, realpathSync, copyFileSync, readdirSync } from 'node:fs';
 import { dirname, basename, join, relative, isAbsolute, extname, sep } from 'node:path';
 import type { IndexEntry } from './index.js';
 import type { IndexStore } from './indexstore.js';
-import { verifyBlock, splitIntoBlocks, hashBlock, chunkHashes } from './blockstore.js';
+import { verifyBlock, hashFileViews } from './blockstore.js';
 import { isHardIgnored } from './ignore.js';
 import { mergeVersions, incrementVersion, createVersionVector } from './version.js';
 
@@ -374,18 +374,17 @@ export function createLocalExecutor(
         throw new Error(`file not found: ${path}`);
       }
 
-      const data = readFileSync(target);
-      const blocks = splitIntoBlocks(data).map(hashBlock);
-      // CDC 视图与定长视图同时算好、一起入索引(纯附加,见 IndexEntry.cdh):
-      // 本机改动的文件从此具备内容分块口径,新对端间小改动只传改动附近的块。
-      const { hashes: cdh, lengths: clens } = chunkHashes(data);
+      // 流式算视图:定长块与 CDC 块一次读盘一起扫出来(CDC 是纯附加视图,见 IndexEntry.cdh)。
+      // 不再 readFileSync 整读 —— 整读把整个文件搬进内存(1.5GB 实测顶爆 V8 堆),
+      // 还有 ~2GiB 硬上限。与内存实现的逐字节等价性由 test/blockstore.test.ts 钉住。
+      const { size, blocks, cdh, clens } = hashFileViews(target);
       const previous = index.getEntry(path);
       const version = incrementVersion(previous?.version ?? createVersionVector(), deviceId);
 
       const updated: IndexEntry = {
         path,
         version,
-        size: data.length,
+        size,
         deleted: false,
         blocks,
         mtime: statSync(target).mtimeMs,

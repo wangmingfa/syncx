@@ -8,6 +8,7 @@ import TerminalPage from './TerminalPage.vue';
 import FileManagerPage from './FileManagerPage.vue';
 import FleetPage from './FleetPage.vue';
 import TrashPage from './TrashPage.vue';
+import UpgradeLockHost from './components/UpgradeLockHost.vue';
 import { route } from './utils/route';
 import { useTheme } from './composables/useTheme';
 import { useSkin } from './composables/useSkin';
@@ -93,5 +94,11 @@ onMounted(async () => {
     <StatusPage v-else-if="status" :status="status" />
     <LoginForm v-else-if="authError" />
     <div v-else class="loading">加载中…</div>
+    <!-- 版本一致锁挂在**页面之外**,所以 /terminal、/files、/fleet 这些不依赖本页 status 的
+         路由也照样被盖住(见 UpgradeLockHost)。
+         ⚠️ v-if="status" 不是可有可无的优化:未登录时 /login 也是这个客户端在渲染,宿主若照挂,
+         它那条 /api/status 会 401 → apiJson 跳 /login → 同一个页面重新加载 → 无限刷新。
+         这里等本页确认会话有效再挂,登录页上锁本来也无意义(拿不到 devices)。 -->
+    <UpgradeLockHost v-if="status" />
   </n-config-provider>
 </template>

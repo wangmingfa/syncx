@@ -2,7 +2,13 @@
 
 ## Status
 
-Accepted. Documents the decision implemented in `9130016` (first shipped in 0.3.2).
+Accepted. Implemented in `9130016` (2026-09-29). The first published artifact carrying it is
+`@wangmingfa/syncx@0.3.3` (2026-09-30) — so the bootstrap consequence below is about the devices
+still sitting on 0.3.2 and older.
+
+2026-09-30: extended from "status page only" to **every route** by mounting it from an App-level
+host (§6). The verdict, the non-dismissibility and the daemon-side `canUpgrade` are unchanged;
+what changed is which pages the lock reaches.
 
 ## Context
 
@@ -45,8 +51,9 @@ per-row upgrade button instead of just blocking the page.
 exits: the × is not rendered, overlay clicks do not emit `close`, and Esc was never handled by
 the shell (`web/components/ModalShell.vue:68`). A dismissible version of this would be read as
 one more banner, and the drift it prevents is invisible — so dismissal is exactly the failure
-mode. Pinned by `test/web-upgrade-lock.test.ts`, which asserts on the source of all three
-routes.
+mode. Pinned by `test/web-upgrade-lock.test.ts`, which asserts on source text: the × is not
+rendered, the overlay click is gated, the host is the last node of `App.vue`'s template, and
+neither the modal nor its host nor `useDevices` contains a `compareVersions` call.
 
 **4. The verdict is computed daemon-side and never re-derived in the browser.**
 `canUpgrade` (`src/cli.ts:595-598`) requires *both* versions to be concrete semver and the
@@ -62,24 +69,55 @@ rather than the front end guessing "the highest".
   which the "target directory looks like a source repo" self-update guard would then refuse.
   The guard is load-bearing, not cosmetic.
 - *Offline peers never lock.* You cannot pull a package from a device that is down, and
-  locking anyway would trap the user outside a page they cannot satisfy. The lock appears the
-  moment that peer reconnects and re-announces.
+  locking anyway would trap the user in an app whose only exit they cannot satisfy — after §6
+  there is no un-locked page to retreat to, so this non-trigger carries more weight than it used
+  to. The lock appears the moment that peer reconnects and re-announces.
 
-**6. Scope: the status page only.** `/terminal`, `/files`, `/fleet`, `/compare`, `/trash` do
-not mount the modal — `web/StatusPage.vue` is its only host (mounted last in the template so
-DOM order puts it above same-z-index overlays). This is a known hole in the invariant, not a
-design: the page a user lands on is the status page, and that is where a mixed fleet gets
-caught.
+**6. Scope: every route, from one App-level host.** `web/components/UpgradeLockHost.vue` is
+mounted in `web/App.vue` as the last node in the template, so DOM order puts it above the
+modals a page mounts itself — they all sit on `--z-overlay` (100), and ties break by tree order.
+Two things are deliberately *above* it and neither is an escape: `--z-toast` (2000), because a
+toast raised from inside the lock must be readable, and `--z-drop` (900), the page-level
+"drop a package here" overlay — which is itself an upgrade path. No page hosts the modal any
+more: `web/StatusPage.vue` used to, and that was an accepted gap rather than a boundary — the
+lock says *this machine's version is wrong*, which is true on `/terminal` exactly as it is on
+`/`. Per-page hosting only moves the failure around: someday one route forgets to mount it, and
+nobody reports "why does `/terminal` still work" as a bug.
+Three things fell out of that placement and are pinned in `test/web-upgrade-lock.test.ts`:
+- The host **subscribes to status itself** (`web/composables/useStatusFeed.ts`) rather than
+  receiving it by props. `/terminal` and `/files` fetch their own data and have no shared
+  `status` instance to hand over; the alternative was duplicating the reconnect/backoff/poll
+  fallback per page. The extra connection costs almost nothing because push is
+  change-driven — an unchanged snapshot sends no frame at all (ADR-0011).
+- It mounts only **after the session is known good** (`v-if="status"` in `App.vue`). `/login` is
+  rendered by this same client, so an always-mounted host would fetch `/api/status` there, get
+  401, and `apiJson` responds to 401 with `location.assign('/login')` — the page reloading
+  itself forever. A lock on a login screen is meaningless anyway: there is no `devices` to lock on.
+- The upgrade POST lives in `web/composables/useUpgrade.ts`, used by both the device card
+  (`askUpgrade`) and the host. The lock is the one surface where the action has no alternative,
+  so its feedback (toast, wait out the restart, refresh) must be identical to the ordinary path
+  — that only holds if there is one implementation.
+
+Measured in a browser against a stubbed daemon (six routes walked in one page load, no reload):
+the overlay is present on every one of them, it is the last `--z-overlay` node in document order
+each time, it has no × and survives both a backdrop click and an Escape keydown, and clicking
+"upgrade from peer" posts `/api/devices/upgrade` exactly once and then *leaves on its own* when
+the host's own `/api/status` refresh comes back with `canUpgrade` false. On the 401 path the
+host never mounts and the boot counter stays put — no self-refresh.
 
 ## Consequences
 
-- **The lock cannot bootstrap itself.** It only exists in the version that shipped it, so a
-  0.3.1 ↔ 0.3.2 pair is protected on one side only and must be resolved by hand. Same shape
-  as the updater's one-generation lag: whatever a release fixes, the *previous* release's code
-  is what performs the fix.
+- **The lock cannot bootstrap itself.** It only exists in the version that ships it, so in a
+  mixed pair the side without it is never prompted and must be brought up by hand. That is not
+  hypothetical: the first artifact carrying it is 0.3.3, and npm's previous `0.3.2` predates the
+  commit entirely. Measured with an ASCII probe — the bundle escapes CJK, so searching it for
+  Chinese text finds nothing — the modal's class prefix `upgrade-lock` occurs 14 times in the
+  0.3.3 tarball and 0 times in 0.3.2's. Same shape as the updater's one-generation lag:
+  whatever a release fixes, the *previous* release's code is what performs the fix.
 - **The invariant is advisory with respect to actual syncing.** Two mismatched devices do
-  still sync if the lower side never opens the status page. Treating a bug report as
-  "upgrade both sides first" remains a manual step.
+  still sync if the lower side never opens the Web UI — the lock is a page, not a check, and a
+  daemon running headless (`syncx start` and nothing else) is outside its reach entirely.
+  Treating a bug report as "upgrade both sides first" remains a manual step.
 - **Prerelease and locally packed builds are judged outdated and get overwritten.**
   `compareVersions('0.3.2-local.1', '0.3.2')` is −1 (a base version outranks its own
   prereleases — `src/upgrade.ts:33`), so a `pack:local --append` build paired with a fleet on

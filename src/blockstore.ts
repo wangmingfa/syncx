@@ -94,11 +94,15 @@ const GEAR_TABLE: Uint32Array = (() => {
 /**
  * 按内容定义的边界切块,语义与 splitIntoBlocks 对齐(返回子数组视图、拼接即原文)。
  *
- * 指纹用 **Buzhash(32 位循环窗口)**而非朴素累加:每个字节的贡献只在随后 32 个
- * 字节内有效(循环移位自然淘汰旧值),所以「中部插入一点内容」的扰动在越过插入点
- * 约 32 字节后完全消失 —— 之后的边界与原始文件逐位吻合(**重同步**)。朴素累加式
- * Gear 的指纹依赖整段前缀,插入会让其后所有边界永久错位,块哈希全换,CDC 的
- * 收益归零,这里刻意避开。边界判定同样不做块级重置,同理依赖其局部性。
+ * 指纹是 32 位循环移位后异或 GEAR 表,形式取自 Buzhash,但**没有「把移出窗口的字节
+ * 异或掉」那一项** —— 循环移位 32 次回到原值,所以扰动不随距离衰减,只是整值旋转。
+ * 于是「改动之后重同步」是概率事件而不是 32 字节后的必然:能不能重新对齐,取决于扰动
+ * rot^k(D) 的低 20 位何时恰好为 0(边界判定只看低 20 位)。实测 4MiB 伪随机文件、改动点
+ * 固定在 1MiB+512、对块哈希求交集:1 字节就地改写或 7 字节中部插入 → 其后所有块作废
+ * (复用 0/4);插入 64B 及以上就回到「只废改动所在那一块」(3/4);4KB 尾部追加也是
+ * 3/4(只有末块变)。门限落在哪与内容有关,不是一条保证。
+ * 相比朴素累加式 Gear(改动之后每个边界永久错位,追加以外一律全废)循环移位仍划算,
+ * 但它买不到「任意小改动都局部」这个口径 —— 对外承诺省流量时按上面实测说。
  *
  * 规则:距上一边界不足 CDC_MIN_CHUNK 不判边界;此后逐字节滚动指纹,低 20 位全 0
  * 即收块(期望平均 ≈ 1MB),达 CDC_MAX_CHUNK 强制收块;EOF 就是边界(末块可短)。
@@ -130,6 +134,145 @@ export function chunkHashes(data: Buffer): { hashes: string[]; lengths: number[]
     hashes: chunks.map(hashBlock),
     lengths: chunks.map((c) => c.length),
   };
+}
+
+// ---------------------------------------------------------------------------
+// 发送侧的流式视图扫描
+//
+// 索引构造原先一律「readFileSync 整读 → 内存里分块/切 CDC」。接收侧在阶段 1a 已经
+// 改成逐块写盘,发送侧却还留着整读:峰值至少是**一整个文件大小**(与接收侧同量级),
+// 而且 readFileSync 有 ~2GiB 硬上限 —— 实测 2.15GiB 文件直接 ERR_FS_FILE_TOO_LARGE,
+// 那样的文件根本进不了索引,也就永远同步不出去。
+//
+// 两个视图都能流式算,且必须与内存实现**逐字节等价**(写进索引的哈希只要错一个,
+// 接收端每块校验都失败、文件永远落不了地,是数据完整性事故而不是性能退化):
+//  - 定长块:窗口尺寸取 BLOCK_SIZE,一个窗口就是一块,哈希彼此独立,无需跨窗口状态;
+//  - CDC:边界由滚动指纹决定,而 fp 是**逐字节的纯折叠**(只由字节序列决定,与读取
+//    方式无关),把它做成跨窗口的持久状态就能复现同一串边界;块哈希用一个持续的
+//    createHash 按片段喂(SHA-256 本身就是流式折叠,分段 update 与整体 update 同值),
+//    边界落在窗口中间也只是换个片段。
+//    ⚠️ 别把这条等价性推广成「改动只影响附近几块」:扰动是否衰减见 chunkContent 的
+//    注释(短改动实测会让其后全部块作废)。流式实现只保证「与内存实现算得一样」。
+// EOF 那一边界不在字节循环里判,而是「读完后若还有未收的块就收尾」—— 与内存实现
+// 里 `i + 1 === data.length` 强制收块等价,这样文件长度恰为窗口整数倍时也不会漏末块。
+// ---------------------------------------------------------------------------
+
+/** 流式扫描的窗口尺寸:与定长块同尺寸,好让定长视图按窗口天然对齐。 */
+const SCAN_WINDOW = BLOCK_SIZE;
+
+export interface FileViews {
+  /** 文件字节数(读到的总长,与 readFileSync 后的 data.length 同口径)。 */
+  size: number;
+  /** 定长块哈希(旧对端只认这个)。 */
+  blocks: string[];
+  /** CDC 块哈希;空文件为 []。 */
+  cdh: string[];
+  /** CDC 块长,与 cdh 一一对应。 */
+  clens: number[];
+}
+
+/**
+ * 一次流式读取同时算出索引要的 size / 定长块视图 / CDC 视图,峰值内存 ≈ 一个窗口
+ * 加两条哈希列表,**与文件大小无关**。语义与
+ * `{ blocks: splitIntoBlocks(d).map(hashBlock), ...chunkHashes(d), size: d.length }`
+ * 完全一致(等价性由 test/blockstore.test.ts 逐字节比对钉住)。
+ *
+ * 打开失败/读失败直接抛(调用方 executor.applySend 本来就要求文件可读,scanner
+ * 那边则按「变化处理」兜底)。
+ *
+ * 文件在扫描中途被人改短/改长:拿到的是**撕裂但自洽**的视图 —— size 就是实际读到的
+ * 字节数,clens 之和等于 size、blocks 条数与之吻合(读不满的末窗按实际字节收,不存在
+ * 「按旧长度补出一个幻影末块」那种形态)。旧的整读实现同样可能撕裂,且改内容会动 mtime
+ * → 下一轮扫描重索引自愈;executor 自己落盘走 tmp+rename,不存在原地变短。
+ */
+export function hashFileViews(absPath: string): FileViews {
+  const fd = openSync(absPath, 'r');
+  try {
+    const blocks: string[] = [];
+    const cdh: string[] = [];
+    const clens: number[] = [];
+    const window = Buffer.allocUnsafe(SCAN_WINDOW);
+    let size = 0; // 本窗口首字节的全局偏移,循环结束后即文件总长
+    let fp = 0; // CDC 滚动指纹:跨窗口连续
+    let chunkStart = 0; // 当前 CDC 块的全局起点
+    let chunkHash = createHash('sha256');
+    for (;;) {
+      // 填满一个窗口:短读继续读,只有 EOF 会带着 filled < SCAN_WINDOW 出来
+      let filled = 0;
+      let eof = false;
+      while (filled < SCAN_WINDOW) {
+        const n = readSync(fd, window, filled, SCAN_WINDOW - filled, size + filled);
+        if (n <= 0) {
+          eof = true;
+          break;
+        }
+        filled += n;
+      }
+      if (filled === 0) break; // 文件刚好读完(长度为窗口整数倍时靠这次退出)
+
+      blocks.push(hashBlock(window.subarray(0, filled)));
+
+      let segStart = 0; // 本窗口内尚未喂进 chunkHash 的片段起点
+      for (let j = 0; j < filled; j++) {
+        fp = ((((fp << 1) | (fp >>> 31)) >>> 0) ^ GEAR_TABLE[window[j]!]!) >>> 0;
+        const len = size + j + 1 - chunkStart;
+        if ((len >= CDC_MIN_CHUNK && (fp & CDC_MASK) === 0) || len >= CDC_MAX_CHUNK) {
+          chunkHash.update(window.subarray(segStart, j + 1));
+          cdh.push(chunkHash.digest('hex'));
+          clens.push(len);
+          chunkStart = size + j + 1;
+          chunkHash = createHash('sha256');
+          segStart = j + 1;
+        }
+      }
+      chunkHash.update(window.subarray(segStart, filled));
+
+      size += filled;
+      if (eof) break;
+    }
+    if (chunkStart < size) {
+      // EOF 就是边界:末块可短(CDC_MIN_CHUNK 之下也照收,与 chunkContent 一致)
+      cdh.push(chunkHash.digest('hex'));
+      clens.push(size - chunkStart);
+    }
+    return { size, blocks, cdh, clens };
+  } finally {
+    closeSync(fd);
+  }
+}
+
+/**
+ * 流式比对盘上内容与索引里的定长块哈希:逐块读、逐块比,**首处不符立刻返回**
+ * (扫描每轮都要对每个已索引文件问一次「内容变了没」,既不该整读、也不该把后面的
+ * 块读完)。语义与 scanner.contentChanged 的「整读后按块比」一致:长度或任一块
+ * 哈希对不上即 false;文件读不到由调用方 try/catch 处理。
+ */
+export function blocksMatchOnDisk(absPath: string, expected: readonly string[]): boolean {
+  const fd = openSync(absPath, 'r');
+  try {
+    const window = Buffer.allocUnsafe(BLOCK_SIZE);
+    let count = 0;
+    for (;;) {
+      let filled = 0;
+      let eof = false;
+      while (filled < BLOCK_SIZE) {
+        const n = readSync(fd, window, filled, BLOCK_SIZE - filled, count * BLOCK_SIZE + filled);
+        if (n <= 0) {
+          eof = true;
+          break;
+        }
+        filled += n;
+      }
+      if (filled === 0) break; // 盘上比索引短:交给下面的长度判断
+      if (count >= expected.length) return false; // 盘上比索引长
+      if (hashBlock(window.subarray(0, filled)) !== expected[count]) return false;
+      count++;
+      if (eof) break;
+    }
+    return count === expected.length;
+  } finally {
+    closeSync(fd);
+  }
 }
 
 /**

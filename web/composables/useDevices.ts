@@ -1,5 +1,6 @@
 import { ref, type Ref } from 'vue';
 import { useToast } from './useToast';
+import { useUpgrade } from './useUpgrade';
 import { apiJson, errText } from '../utils/api';
 import { parsePairCode } from '../utils/qrcode';
 import type { CoreDeps } from './statusContext';
@@ -20,7 +21,6 @@ export function useDevices(deps: CoreDeps): {
   newDevicePort: Ref<string>;
   askRemoveDevice: (deviceId: string) => void;
   askUpgrade: (p: DeviceInfo) => void;
-  upgradeDevice: (deviceId: string) => Promise<void>;
   /** 一键添加「附近发现的设备」:直接带 mDNS 学到的地址配对。 */
   addDiscovered: (d: DiscoveredDevice) => Promise<void>;
 } {
@@ -147,6 +147,9 @@ export function useDevices(deps: CoreDeps): {
   }
 
   // ---- 从对端升级(设备卡版本低于对方时显示;dev↔build 混跑不出现) ----
+  // 动作本体在 useUpgrade:版本一致锁(UpgradeLockHost)那条路走的是同一段流程。
+  const { upgradeFromDevice } = useUpgrade(refreshStatus);
+
   /** 点设备卡「升级到 x.y.z」:二次确认后从对方拉取产物并自动重启。 */
   function askUpgrade(p: DeviceInfo): void {
     askConfirm({
@@ -154,21 +157,8 @@ export function useDevices(deps: CoreDeps): {
       message: `将从对方拉取 syncx ${p.version} 替换本机产物,并自动重启服务。重启期间 Web UI 会短暂断开,稍后自动恢复。`,
       detail: p.deviceId,
       confirmText: '升级并重启',
-      action: () => upgradeDevice(p.deviceId),
+      action: () => upgradeFromDevice(p.deviceId),
     });
-  }
-
-  async function upgradeDevice(deviceId: string): Promise<void> {
-    const data = await apiJson<{ ok?: boolean; version?: string; error?: string }>('/api/devices/upgrade', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ deviceId }),
-    });
-    if (!data.ok) throw new Error(data.error ?? '升级失败');
-    showToast(`已更新到 ${data.version},daemon 重启中…`, 'alert');
-    // daemon 即将重启:稍等片刻再刷新,让状态先落回「离线/重启中」
-    await new Promise((resolve) => setTimeout(resolve, 1200));
-    await refreshStatus();
   }
 
   return {
@@ -182,7 +172,6 @@ export function useDevices(deps: CoreDeps): {
     newDevicePort,
     askRemoveDevice,
     askUpgrade,
-    upgradeDevice,
     addDiscovered,
   };
 }

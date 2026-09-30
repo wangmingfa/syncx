@@ -118,8 +118,10 @@ const run = async () => {
   const spawnDaemon = (dir, port, controlPort, rssLog) => spawn(
     process.execPath,
     [
-      // 发送路径 applySend 是 readFileSync 整文件读:大文件在默认 4GB 堆限下会
-      // V8 OOM(1.5GB 实测崩溃)。基准要量的是峰值,不是崩溃,所以抬到 8GB。
+      // 堆限抬到 8GB:两侧现在都逐块过盘(发送 hashFileViews / 接收 1a 逐块写),
+      // 峰值本该 ≈ 在途块,但本基准还要能跑「改前」的那一版做对比 —— 整读时代
+      // 1.5GB 文件在默认 4GB 堆限下是直接 V8 OOM,量不到峰值。留着 8GB 的意义是让
+      // **回归**(重新引入整读)表现为「看得见的 RSS 峰」而不是「daemon 悄悄崩掉」。
       '--max-old-space-size=8192',
       '--require', samplerCjs,
       join(REPO, 'dist', 'syncx.js'),
@@ -148,8 +150,9 @@ const run = async () => {
 
   // 大文件先写进**同卷暂存目录**再 rename 进共享目录:A 的扫描每 250ms 一轮,
   // 边写边扫会把「部分写入的版本」逐轮广播出去,接收端反复重收、峰值可判性全无。
-  // (尺寸注意:发送路径 applySend 是 readFileSync 整文件读,>2GiB 会抛
-  // ERR_FS_FILE_TOO_LARGE —— 文件大小别越过这条产品上限。)
+  // (尺寸注意:发送侧已改逐块读盘,不再有 readFileSync 的 ~2GiB 硬上限;但接收侧
+  // 阶段 1a 仍把在途块攒在 PendingEntry.blocks 里,再往上调尺寸要先看判读档位是否
+  // 还落在「≈1× 文件大小」这一档。)
   const stageBin = join(workDir, 'stage', 'big.bin');
   mkdirSync(join(stageBin, '..'), { recursive: true });
   const bigBin = 'big.bin';

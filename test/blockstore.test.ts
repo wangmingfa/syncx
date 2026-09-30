@@ -13,6 +13,8 @@ import {
   chunkContent,
   chunkHashes,
   readChunkAt,
+  hashFileViews,
+  blocksMatchOnDisk,
 } from '../src/blockstore.js';
 
 /** 确定性伪随机数据(mulberry32):同 size 永远生成同样字节,插入测试可复现。 */
@@ -213,5 +215,139 @@ describe('blockstore', () => {
         rmSync(dir, { recursive: true, force: true });
       }
     });
+  });
+});
+
+/**
+ * 发送侧流式扫描必须与内存实现**逐字节等价**。
+ *
+ * 这不是性能测试:算出的哈希直接写进索引,错一个字节就意味着接收端逐块校验全红、
+ * 文件永远落不了地 —— 是数据完整性事故,不是慢一点。所以尺寸要专门挑:空文件、
+ * 窗口边界前后(让 CDC 边界既可能落在窗口中间、也可能恰好压在窗口尾)、
+ * CDC_MIN_CHUNK 前后、EOF 末块,以及被 CDC_MAX_CHUNK 强制收块的那条分支。
+ */
+describe('流式视图扫描 hashFileViews', () => {
+  /** 内存参照实现(executor/scanner 改造前用的就是这一套)。 */
+  function inMemory(data: Buffer): { size: number; blocks: string[]; cdh: string[]; clens: number[] } {
+    const { hashes, lengths } = chunkHashes(data);
+    return { size: data.length, blocks: splitIntoBlocks(data).map(hashBlock), cdh: hashes, clens: lengths };
+  }
+
+  function withTempFile(content: Buffer, fn: (file: string) => void): void {
+    const dir = mkdtempSync(join(tmpdir(), 'syncx-views-'));
+    try {
+      const file = join(dir, 'f.bin');
+      writeFileSync(file, content);
+      fn(file);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  }
+
+  /** 三种内容形态各有侧重:随机(边界不规则)、常量(边界恒在 MIN)、递增字节(与窗口错位)。 */
+  function flavors(size: number): Buffer[] {
+    return [
+      pseudoRandom(size, 0x12345678),
+      Buffer.alloc(size, 0x41),
+      Buffer.from(Array.from({ length: size }, (_, i) => i & 0xff)),
+    ];
+  }
+
+  const SIZES = [
+    0, 1, 2, 999,
+    BLOCK_SIZE - 1, BLOCK_SIZE, BLOCK_SIZE + 1, 2 * BLOCK_SIZE,
+    CDC_MIN_CHUNK - 1, CDC_MIN_CHUNK, CDC_MIN_CHUNK + 1,
+    3 * BLOCK_SIZE + 7,
+  ];
+
+  it.each(SIZES)('与内存实现逐字节一致(size=%i)', (size) => {
+    for (const data of flavors(size)) {
+      withTempFile(data, (file) => {
+        expect(hashFileViews(file)).toEqual(inMemory(data));
+      });
+    }
+  });
+
+  it('被 CDC_MAX_CHUNK 强制收块的路径同样吻合', () => {
+    // 10174529 = 这条伪随机流里第一块「撑到 4MB 仍没命中掩码、被强制收块」的结束位置
+    // 再加 5 字节:强制边界落在窗口中间(不是 1MB 整数倍),后面还跟着一个 EOF 末块。
+    const data = pseudoRandom(10_174_529, 0x12345678);
+    withTempFile(data, (file) => {
+      const views = hashFileViews(file);
+      expect(views.clens).toContain(CDC_MAX_CHUNK); // 确认这条用例真的走到了强制分支
+      expect(views).toEqual(inMemory(data));
+    });
+  });
+
+  it('中部插入(长度变了、跨窗口边界)同样逐字节吻合', () => {
+    const base = pseudoRandom(4 * BLOCK_SIZE, 0xabcdef);
+    const at = BLOCK_SIZE + 512; // 插在第 1 个窗口边界附近
+    const moved = Buffer.concat([
+      base.subarray(0, at),
+      Buffer.from([1, 2, 3, 4, 5, 6, 7]),
+      base.subarray(at),
+    ]);
+    withTempFile(base, (fileA) => {
+      expect(hashFileViews(fileA)).toEqual(inMemory(base));
+    });
+    withTempFile(moved, (fileB) => {
+      // 注意:这里只断言「流式 == 内存」。CDC 改动后能复用多少块是 chunkContent
+      // 自己的性质(当前实现:除纯追加外全块作废),与流式扫描无关,不在本条闸门里。
+      expect(hashFileViews(fileB)).toEqual(inMemory(moved));
+    });
+  });
+});
+
+describe('流式内容比对 blocksMatchOnDisk', () => {
+  function withTempFile(content: Buffer, fn: (file: string) => void): void {
+    const dir = mkdtempSync(join(tmpdir(), 'syncx-match-'));
+    try {
+      const file = join(dir, 'f.bin');
+      writeFileSync(file, content);
+      fn(file);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  }
+
+  const blockHashes = (data: Buffer): string[] => splitIntoBlocks(data).map(hashBlock);
+
+  it('内容一致为真;中间改一个字节为假', () => {
+    const data = pseudoRandom(2 * BLOCK_SIZE + 4096, 0x42);
+    withTempFile(data, (file) => {
+      expect(blocksMatchOnDisk(file, blockHashes(data))).toBe(true);
+      const touched = Buffer.from(data);
+      touched[BLOCK_SIZE + 10] = (touched[BLOCK_SIZE + 10]! + 1) & 0xff; // 长度不变,只有块哈希能发现
+      expect(touched.length).toBe(data.length);
+      expect(blocksMatchOnDisk(file, blockHashes(touched))).toBe(false);
+    });
+  });
+
+  it('盘上变长(多出整块)或变短都为假', () => {
+    const data = pseudoRandom(2 * BLOCK_SIZE, 0x43);
+    const shorter = data.subarray(0, BLOCK_SIZE + 10);
+    const longer = Buffer.concat([data, Buffer.alloc(BLOCK_SIZE, 0x5a)]);
+    withTempFile(shorter, (file) => {
+      expect(blocksMatchOnDisk(file, blockHashes(data))).toBe(false); // 盘上比索引短
+    });
+    withTempFile(longer, (file) => {
+      expect(blocksMatchOnDisk(file, blockHashes(data))).toBe(false); // 盘上比索引长
+    });
+  });
+
+  it('空文件与空块列表吻合;非空列表对空文件为假', () => {
+    withTempFile(Buffer.alloc(0), (file) => {
+      expect(blocksMatchOnDisk(file, [])).toBe(true);
+      expect(blocksMatchOnDisk(file, [hashBlock(Buffer.alloc(BLOCK_SIZE, 1))])).toBe(false);
+    });
+  });
+
+  it('文件读不到时抛错(scanner 侧按「已变化」兜底)', () => {
+    const dir = mkdtempSync(join(tmpdir(), 'syncx-match-'));
+    try {
+      expect(() => blocksMatchOnDisk(join(dir, 'missing.bin'), ['x'])).toThrow();
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
   });
 });

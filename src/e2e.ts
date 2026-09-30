@@ -19,9 +19,9 @@
  *  - 还原:凭口令 + 盲区端磁盘可完整还原(recoverFile),不必依赖任何一端的索引。
  */
 import { createCipheriv, createDecipheriv, createHmac, randomBytes, scryptSync } from 'node:crypto';
-import { readFileSync } from 'node:fs';
+import { closeSync, openSync, readSync } from 'node:fs';
 import { join } from 'node:path';
-import { BLOCK_SIZE, hashBlock, splitIntoBlocks } from './blockstore.js';
+import { BLOCK_SIZE, hashBlock } from './blockstore.js';
 import type { IndexEntry } from './index.js';
 // 仅类型引用(peer.ts 运行时反向依赖本模块,`import type` 编译期擦除,不构成环)
 import type { IndexMode, PeerTransport } from './peer.js';
@@ -117,6 +117,39 @@ export function decryptBlock(key: Buffer, encPath: string, blockIndex: number, c
 }
 
 /**
+ * 盲区宣告需要的密文视图:**逐块读盘 → 逐块加密 → 取密文哈希**,峰值内存 = 一块。
+ * 与「整读 + splitIntoBlocks + 逐块加密」逐字节等价(加密只认 (密文路径, 块号) 绑定的
+ * nonce,与怎么读无关)。密文 size = 明文长度 + 每块一个 tag。
+ */
+function blindViews(
+  absPath: string,
+  key: Buffer,
+  enc: string,
+): { size: number; blocks: string[] } {
+  const fd = openSync(absPath, 'r');
+  try {
+    const blocks: string[] = [];
+    const window = Buffer.allocUnsafe(BLOCK_SIZE);
+    let size = 0;
+    for (;;) {
+      let filled = 0;
+      while (filled < BLOCK_SIZE) {
+        const n = readSync(fd, window, filled, BLOCK_SIZE - filled, size + filled);
+        if (n <= 0) break; // EOF:末块按实际字节数加密
+        filled += n;
+      }
+      if (filled === 0) break;
+      blocks.push(hashBlock(encryptBlock(key, enc, blocks.length, window.subarray(0, filled))));
+      size += filled;
+      if (filled < BLOCK_SIZE) break;
+    }
+    return { size: size + blocks.length * TAG_LEN, blocks };
+  } finally {
+    closeSync(fd);
+  }
+}
+
+/**
  * 本地索引条目 → 盲区对端可见的密文条目。blocks 换成**密文块的真实 SHA-256**
  * (逐块读文件现场加密),盲区端落盘后自扫描哈希自然吻合,不会反复重拉。
  * 本地文件此刻读不到(在途删除/tmp 改名)的条目**整条跳过** —— 与既有的
@@ -131,15 +164,19 @@ export function toBlindEntries(entries: IndexEntry[], key: Buffer, root: string)
       out.push({ path: enc, version: e.version, size: 0, deleted: true, blocks: [] });
       continue;
     }
-    let data: Buffer;
+    let views: { size: number; blocks: string[] };
     try {
-      data = readFileSync(join(root, e.path));
+      views = blindViews(join(root, e.path), key, enc);
     } catch {
       continue; // 文件读不到:这条不宣告,下一轮再收敛
     }
-    const blocks = splitIntoBlocks(data).map((b, i) => hashBlock(encryptBlock(key, enc, i, b)));
-    const size = data.length + blocks.length * TAG_LEN;
-    out.push({ path: enc, version: e.version, size, deleted: false, blocks });
+    out.push({
+      path: enc,
+      version: e.version,
+      size: views.size,
+      deleted: false,
+      blocks: views.blocks,
+    });
   }
   return out;
 }

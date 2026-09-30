@@ -9,6 +9,9 @@ import type { DeviceInfo } from '../types';
  * 弹窗盖住,唯一的出路是把本机升到对方的版本(升级走 daemon 自替换重启,回来后
  * status 刷新,canUpgrade 归 false,弹窗自行消失)。
  *
+ * 这里只是**视图**:数据由 `UpgradeLockHost` 在 App 层供给,所以每一条路由(状态页 /
+ * 对比页 / 终端页 / 文件页 / 回收站 / 多实例)都盖得到,不靠各页自己挂。
+ *
  * 判定直接吃 daemon 在 status.devices 里算好的 `canUpgrade`(本机与对端都是具体
  * semver 且本机更低;dev↔build 混跑、dev 运行态一律不触发),web 端不出现第二份
  * 版本比较逻辑 —— 也因此每行一颗按钮、升哪台由人选,而不是前端再比一次取最高。
@@ -23,7 +26,7 @@ const props = defineProps<{
   devices: DeviceInfo[];
   /** 本机运行版本(展示用;dev 态时这层锁根本不会出现)。 */
   localVersion?: string;
-  /** 执行升级(即 useDevices.upgradeDevice:POST /api/devices/upgrade 并等待重启)。 */
+  /** 执行升级(即 useUpgrade.upgradeFromDevice:POST /api/devices/upgrade 并等待重启)。 */
   onUpgrade: (deviceId: string) => Promise<void>;
 }>();
 
