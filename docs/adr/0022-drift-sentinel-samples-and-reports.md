@@ -74,7 +74,8 @@ design wrong in a way only a real two-daemon run shows (`bench/drift-smoke-bench
 one finding printed once per live connection — nine identical audit lines for three corrupted files —
 and `round` restarted at 1 on every reconnect, which pins `pickSlot(path, round)` to the same slot
 forever, i.e. the rotation that keeps an offset bug from hiding (above) silently stops happening.
-Callers that pass no state (old callers, unit tests) keep the per-connection behaviour.
+Callers that pass no state (old callers, unit tests) keep the per-connection behaviour. What this costs
+in per-peer coverage is recorded under Consequences.
 
 **Report only. This is the load-bearing decision.** A detection produces a log line and nothing
 else:
@@ -123,6 +124,15 @@ a sample it did not check.
 - **Blind (e2e) peers are not audited**: `onPeerIndex` returns before any of this when `e2eKey` is
   set (`src/peer.ts:1047`), which is correct — a blind peer declares ciphertext-view hashes, and
   comparing those against the plaintext disk would report every path as drift.
+- **Folder-level gating means one peer per interval, not every peer.** `{ lastAt, round }` is shared by
+  *all* SyncPeers in the folder, so the first device to exchange an index after the interval fires the
+  round and the rest are skipped until the next one. Check B is unaffected — it reads the local disk,
+  which is the same disk whichever peer triggered — but check A compares against *that peer's*
+  declarations, so in a folder of three or more devices the quiet ones are audited less often than
+  `(N/8) × interval` suggests. Keying the state per `remoteDeviceId` would restore per-peer coverage and
+  still dedupe (the duplicate reports came from one device's two connections); it is the follow-up if
+  that ever matters, and it is not taken now because the folder-level object is what the bench verified
+  end to end, and no detection sample yet turns on *which* peer triggered.
 - **Coverage is a rotation, not a guarantee**: at 8 paths per round, a file is audited about once
   per `(N/8) × interval`. Three cases stay invisible by design: a path never sampled in the window,
   a fork where both devices' disks agree with their own declarations *and* the declarations are

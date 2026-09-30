@@ -702,7 +702,7 @@ export function createSyncPeer(deps: SyncPeerDeps): SyncPeer {
   // (整道关掉)必须能表达。两个都在**建管线时**读,不做模块常量,否则值冻在 import 时。
   const sampleN = envInt('SYNCX_DRIFT_SAMPLE_N', DRIFT_SAMPLE_N_DEFAULT);
   const intervalMs = envInt('SYNCX_DRIFT_INTERVAL_MS', DRIFT_INTERVAL_MS_DEFAULT);
-  // 节流状态按目录共享(见 deps.driftState):同一条连接上的两份 SyncPeer 审的是同一块盘,
+  // 节流状态按目录共享(见 deps.driftState):同一设备的两条连接各挂一份 SyncPeer,审的是同一块盘,
   // 各记各的会把一次分叉按连接报两遍,而轮次归零等于抽样槽位永远不轮换。
   // 未传时退化成每连接一份(旧调用方与单测的路径)。
   const drift = driftState ?? { lastAt: 0, round: 0 };
@@ -711,7 +711,9 @@ export function createSyncPeer(deps: SyncPeerDeps): SyncPeer {
    * 闲时抽样审计(drift 哨兵)。三道门:①上层没接线或旋钮关到 0;②这条连接此刻有传输在跑
    * (`pending` 非空 = 本机正在收,盘上同一批路径正被逐块写;`serving` 非空 = 本机正在供块,
    * 再加 8 次定位读只是跟传输抢盘);③距**本目录**上次审计未到间隔(状态见 deps.driftState,
-   * 所以这条闸门管的是整个目录,不是某一条连接)。
+   * 所以这条闸门管的是整个目录,不是某一条连接 —— 代价是间隔到点后第一个交换索引的对端跑掉这一轮,
+   * 其余对端整个窗口内被跳过;A 检查比的是那个对端的宣告,所以三台以上设备时安静的那几台覆盖率
+   * 低于按轮数算出的上界,取舍见 ADR-0022 的 Consequences)。
    *
    * 挂在 `onPeerIndex` 末尾而不是扫描器里,是因为**候选集只在这一刻拿得起来**:本机不持久化
    * 每个对端的索引(每轮临时建一个 Map 就丢掉),离开这轮消息就没有「对端宣告」可比了。
