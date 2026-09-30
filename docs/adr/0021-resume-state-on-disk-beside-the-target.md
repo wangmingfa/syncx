@@ -133,12 +133,19 @@ had a manifest.
   - the 192MB landing case in `test/executor.test.ts` drives a large entry through
     `beginReceive` / `append` × N / `finalizeReceive` with **one reused 1MB buffer** and a patched
     `Buffer.concat` recording the largest concatenation, asserting it stays under 50% of the file size.
-- **Cross-process resume is proven at the executor seam, not against a running daemon.** Each case in
-  `test/resume.test.ts` builds a *brand-new* `createLocalExecutor` over the same directory — the disk
+- **Cross-process resume is proven at the executor seam, and now also against real daemons.** Each case
+  in `test/resume.test.ts` builds a *brand-new* `createLocalExecutor` over the same directory — the disk
   is the only thing carried across, which is exactly what a restart is. `test/peer.test.ts` covers the
   pipeline half: after `releaseClaims()` the pair is still on disk with the two committed slots, the
   reconnected peer requests **only** the missing one, and a peer-declared deletion during flight takes
-  the whole pair with it. A real two-daemon kill-mid-transfer test has *not* been run.
+  the whole pair with it. On 2026-09-30 `bench/resume-kill-bench.mjs` ran the missing scenario for real:
+  two daemons over loopback, a 400MB file, `SIGKILL` to the receiver mid-transfer, then a fresh process
+  over the same config directory. Both slot layouts were driven (fixed: 400 slots, 80 committed at the
+  kill; CDC: 1600 slots, 336 committed) and in both the tmp length never dipped after the restart — the
+  receiver resumed and the landed sha256 matched the sender's, with the pair cleaned up. The metric has
+  a negative control, because "the number did not move" is otherwise just an observation: delete the
+  manifest and the same run collapses the tmp to 2MB (the `openSync(..., 'w')` truncation, i.e. a
+  restart from zero) while the content still lands correctly — the guard goes red, correctness holds.
 - **The disk guard credits the pair, and only what the manifest has committed.** Before this, the
   pre-plan estimate in `src/peer.ts` (`needed = incoming.size − current.size`) ignored the tmp
   entirely — which was harmless while the tmp lived for milliseconds, and became a real defect once
@@ -191,7 +198,20 @@ had a manifest.
 - **Empty files never create a tmp.** Zero slots means a trivially full bitmap; `finalize` opens the
   file only to rename an empty one.
 - **No wire change.** The manifest is purely local, so nothing new is announced and mixed-version
-  fleets (ADR-0018) are unaffected in either direction.
+  fleets (ADR-0018) are unaffected in either direction. Checked rather than assumed, because the
+  tempting opposite story ("an un-upgraded peer sucks the upgraded machine's `.syncx-tmp` into its index
+  and relays it") is false: the older scanner skipped the suffix when *declaring*
+  (`if (!dirent.isFile() || rel.endsWith(TMP_SUFFIX)) continue`, `src/scanner.ts` as of `dd11ca1^`), so a
+  scratch file was never announced by either version, and the newer side additionally drops such paths
+  inbound (`src/peer.ts:1005`) and outbound (`:1236`) — that gate is for rogue or hand-crafted peers, not
+  for old syncx. The pair is a strictly local fact on each machine.
+- **Where mixed versions really do differ is git, and the risk is on the older side.** A ≤ 0.3.3 device
+  killed inside `landRemote`'s synchronous write window leaves an orphan `.syncx-tmp` with no reaper (the
+  TTL sweep is new here) and no pathspec exclusion, so its next `git add -A` — triggered by some other
+  file landing — commits hundreds of MB of half-written content into the user's history and mirrors it
+  down the commit chain. That is precisely the failure point 8 plus `SCRATCH_SUFFIXES` close, so upgrading
+  is what removes it; in the meantime pre-existing leftovers are excluded from commits and get reaped by
+  `pruneScratchFile`, which covers manifest-less orphan tmp by design.
 - **The user-visible trade is the naming rule** (point 8): files ending in `.syncx-tmp` /
   `.syncx-partial` do not sync, in either direction. If that ever has to be revisited, the replacement
   must keep "a negating ignore rule cannot reopen this" — otherwise this ADR's reason for existing is
