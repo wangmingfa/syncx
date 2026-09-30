@@ -52,6 +52,7 @@ import { buildFolderDiff, checkDiffAgainstDisk, toSnapshotEntry, type FolderDiff
 import { broadcastFolderUpdates } from './broadcast.js';
 import { relayToSiblings } from './relay.js';
 import { compareContentLimit, imageMimeOf, TEXT_COMPARE_MAX_BYTES } from './file-kind.js';
+import type { DriftReport } from './drift.js';
 import { connectPeer } from './net/client.js';
 import { makePeerTransport, attachPeerMessages, sendControlMessage, type ControlMessage } from './net/wire.js';
 import { learnPeerUrl, learnPeerIp, getLanAddresses } from './net/addresses.js';
@@ -790,6 +791,31 @@ export class SyncSessionManager {
   }
 
   /**
+   * drift 哨兵一轮审计的去向:**只落日志**。
+   *
+   * 计数行无条件打(哪怕 sampled=0):没有它,「这一片舰队内容一致」与「哨兵根本没跑起来」
+   * 在日志里是同一副样子。检出明细另起行、按检出类别给 WARN/DEBUG —— 盘读不出是常态
+   * (刚改完、正被移走),把它做成 WARN 只会训练用户无视这个前缀。
+   *
+   * 不走 folderErrors:那条通道一个目录只有一个槽位、且下一轮干净扫描就清横幅,而扫描周期
+   * 是秒级 —— 半小时一次的哨兵检出会在目录卡上闪一下就没,既不可靠也不如日志可回溯。
+   */
+  private reportDrift(folderId: string, report: DriftReport): void {
+    const { summary } = report;
+    this.logger.info(
+      `audit folder=${folderId} peer=${report.peer || '?'} round=${report.round}` +
+      ` candidates=${summary.candidates} sampled=${summary.sampled}` +
+      ` declared=${summary.declared} disk=${summary.disk} unreadable=${summary.unreadable}`,
+    );
+    for (const f of report.findings) {
+      const line = `drift folder=${folderId} peer=${report.peer || '?'} ${f.kind} ${f.path}` +
+        `${f.slot >= 0 ? ` slot=${f.slot}` : ''}: ${f.detail}`;
+      if (f.kind === 'unreadable') this.logger.debug(line);
+      else this.logger.warn(line);
+    }
+  }
+
+  /**
    * 磁盘守卫判定:本轮接收需要 needed 字节,所在盘可用空间须同时覆盖它并保留
    * 水位线(DISK_GUARD_MIN_FREE_BYTES),否则拦下整轮入向(见 peer.checkDiskSpace)。
    *
@@ -864,6 +890,9 @@ export class SyncSessionManager {
       // 磁盘守卫的预估读取:partialBytes 自己保证不抛错(失败即退回「不扣在途」的旧口径),
       // 所以不套 wrap —— 一次预估读不出来不该记进目录错误、更不该影响本轮。
       partialBytes: (entry, opts) => executor.partialBytes(entry, opts),
+      // 抽样验盘(drift 哨兵):同样不套 wrap —— 它按契约不抛错,读不出来只记 unreadable。
+      // 一次抽样失败若被写进目录错误横幅,哨兵就把「想知道的」变成了「一直在响的」。
+      verifySampledSlots: (samples) => executor.verifySampledSlots(samples),
       finalizeReceive: wrap((entry, handle) => executor.finalizeReceive(entry, handle)) as LocalExecutor['finalizeReceive'],
       applyDelete: wrap((path, tombstone) => executor.applyDelete(path, tombstone)) as LocalExecutor['applyDelete'],
       applyConflict: wrap((path, local, remote, handle, deviceId) =>
@@ -1693,6 +1722,8 @@ export class SyncSessionManager {
       e2eKey,
       // 接收认领台账:本目录全部 SyncPeer 共用一份,挡住双向连接重复落地(见 FolderState)
       receiveLedger: folder.receiveLedger,
+      // drift 哨兵(抽样审计):每轮抽几条路径验「索引 vs 对端宣告 vs 盘上字节」,只落日志。
+      onDriftAudit: (report) => this.reportDrift(folder.id, report),
       // 中转(ADR-0014):收到并落地远程条目后,转发给同目录其它 transport(排除来源端本身)。
       // 仅增量接收触发(peer.ts 内 gate),full 交换已收敛整网,不中转。
       onLanded: (entries) => {

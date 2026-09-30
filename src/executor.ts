@@ -2,10 +2,12 @@ import { closeSync, fsyncSync, mkdirSync, openSync, readSync, renameSync, writeS
 import { dirname, basename, join, relative, isAbsolute, extname, sep } from 'node:path';
 import type { IndexEntry } from './index.js';
 import type { IndexStore } from './indexstore.js';
-import { verifyBlock, hashFileViews, blocksMatchOnDisk, BLOCK_SIZE } from './blockstore.js';
+import { verifyBlock, hashBlock, hashFileViews, blocksMatchOnDisk, BLOCK_SIZE } from './blockstore.js';
 import { isHardIgnored } from './ignore.js';
+import { isUnchanged } from './scanner.js';
 import { mergeVersions, incrementVersion, createVersionVector } from './version.js';
 import { entryFingerprint, partialPaths, readManifest, removePartial, writeManifest, SlotBitmap, type PartialManifest } from './partial-store.js';
+import type { SlotSample, SlotVerdict } from './drift.js';
 
 /**
  * 一个在途接收的落盘句柄:块到达即按最终偏移写进 `<target>.syncx-tmp`,
@@ -60,6 +62,24 @@ export interface LocalExecutor {
    * 都只返回 0,即退回「不扣在途」的旧口径。
    */
   partialBytes(entry: IndexEntry, opts: { cdc: boolean }): number;
+  /**
+   * 抽样验盘(drift 哨兵的 B 检查):对给定抽样的**那一个槽位**做定位读 + sha256,
+   * 与索引宣告的块哈希比。返回每个抽样的结论;顺序与入参一致。
+   *
+   * 问的是「本机有没有在宣告一份盘上并不存在的内容」—— 这份谎会被本机外推给整个舰队,
+   * 而索引一旦与盘不符,接收侧的哈希闸门反倒会把对端送来的**正确**内容当坏块丢掉。
+   *
+   * 只读被抽到的那一段(偏移由 slotLayout 现算,与落地用的同一套算术,所以「验的位置」
+   * 与「写的位置」不可能各说各话),整轮成本 = 抽样数 × 一块,与文件大小无关。
+   *
+   * 盘上字节与宣告不符有两类原因,只有第二类是事故:①本机刚改过这份文件而索引还没跟上
+   * (判据 = scanner 的免哈希快速路径,同一条口径)→ `unreadable`;②索引在撒谎 → `drift`。
+   *
+   * **绝不抛错**:一条抽样读不出来只记 `unreadable`,不允许掀翻审计或同步轮次
+   * (`partialBytes` 同一条规矩)。文件消失 / 无权限 / 越界路径都归这一类 ——
+   * 它们说明「这条没法验」,不是「内容不对」。
+   */
+  verifySampledSlots(samples: readonly SlotSample[]): SlotVerdict[];
   applyDelete(path: string, tombstone: IndexEntry): Promise<void>;
   /**
    * 双方都改过同一份文件:本地内容保留成 `.sync-conflict-` 副本,远端内容落地。
@@ -553,6 +573,67 @@ export function createLocalExecutor(
     }
   }
 
+  function verifySampledSlots(samples: readonly SlotSample[]): SlotVerdict[] {
+    const out: SlotVerdict[] = [];
+    for (const { entry, cdc, slot } of samples) {
+      try {
+        const hashes = cdc ? entry.cdh : entry.blocks;
+        if (hashes === undefined || slot < 0 || slot >= hashes.length) {
+          out.push({ kind: 'unreadable', path: entry.path, slot, error: 'no such slot' });
+          continue;
+        }
+        // CDC 口径要 clens 与 cdh 一一对应才定得出偏移(同 peer.ts 的 cdcUsable 口径)
+        if (cdc && (!entry.clens || entry.clens.length !== hashes.length)) {
+          out.push({ kind: 'unreadable', path: entry.path, slot, error: 'incomplete cdc view' });
+          continue;
+        }
+        const target = resolvePath(entry.path); // 不安全路径在这里抛,由下面的 catch 归 unreadable
+        const st = statSync(target, { throwIfNoEntry: false });
+        if (st === undefined || !st.isFile()) {
+          out.push({ kind: 'unreadable', path: entry.path, slot, error: 'file absent' });
+          continue;
+        }
+        // 本机正在改这份文件:索引还没跟上,盘上字节与旧宣告不符是**预期**,不是漂移。
+        // 判据与扫描器的免哈希快速路径同源(见 scanner.isUnchanged)—— 它自己都不信这种
+        // 条目的块哈希,哨兵再拿它当基准去验盘就是拿一张已知过期的收据对账。
+        if (!isUnchanged(entry, st)) {
+          out.push({ kind: 'unreadable', path: entry.path, slot, error: 'index stale (edited locally since scan)' });
+          continue;
+        }
+        // 偏移与长度用 slotLayout:与 beginReceive 落地时同一套算术,验的位置=写的位置
+        const { offsets, lengths } = slotLayout(entry, cdc);
+        const len = lengths[slot]!;
+        const buf = Buffer.allocUnsafe(len);
+        const fd = openSync(target, 'r');
+        let got = 0;
+        try {
+          // 必须循环读到 EOF:定位读的短读是 POSIX 允许的正常返回(尤其大 offset 与大长度),
+          // 只读一次会拿半截字节去哈希 —— 那是一条**每次都对不上**的假 drift。
+          while (got < len) {
+            const n = readSync(fd, buf, got, len - got, offsets[slot]! + got);
+            if (n <= 0) break;
+            got += n;
+          }
+        } finally {
+          closeSync(fd);
+        }
+        // 读不满也照哈希:短内容的哈希必然不等于宣告值,落进 drift,不必再分一类 ——
+        // 「盘上比索引说的少」正是索引在撒谎的一种。走到这里的只剩两种情况:定位读的
+        // 短读(POSIX 允许,上面的循环已读完为止),以及 stat 与 read 之间文件被截短。
+        const actual = hashBlock(buf.subarray(0, got));
+        const declared = hashes[slot]!;
+        out.push(
+          actual === declared
+            ? { kind: 'ok', path: entry.path, slot }
+            : { kind: 'drift', path: entry.path, slot, declared, actual },
+        );
+      } catch (e) {
+        out.push({ kind: 'unreadable', path: entry.path, slot, error: e instanceof Error ? e.message : String(e) });
+      }
+    }
+    return out;
+  }
+
   return {
     async finalizeReceive(entry: IndexEntry, handle: ReceiveHandle): Promise<void> {
       const mtime = await handle.finalize();
@@ -561,6 +642,7 @@ export function createLocalExecutor(
     },
     beginReceive,
     partialBytes,
+    verifySampledSlots,
     async applyDelete(path: string, tombstone: IndexEntry): Promise<void> {
       const target = resolvePath(path);
       if (existsSync(target) && statSync(target).isFile()) {

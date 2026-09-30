@@ -11,8 +11,15 @@ import { incrementVersion } from './version.js';
 /** FAT32 mtime 精度为 2 秒,免哈希快速路径用容忍窗口避免误判。 */
 const MTIME_TOLERANCE_MS = 2000;
 
-/** 免哈希快速路径:大小与修改时间都在容忍窗口内则视为未改动,跳过整文件重算。 */
-function isUnchanged(entry: IndexEntry, stat: { size: number; mtimeMs: number }): boolean {
+/**
+ * 免哈希快速路径:大小与修改时间都在容忍窗口内则视为未改动,跳过整文件重算。
+ *
+ * 导出它不只是为了复用那 2 秒的容忍窗口,而是为了**共用同一条口径**:「这条目的块哈希
+ * 还代表不代表盘上的字节」。drift 哨兵(见 drift.ts 的检查 B)只审 isUnchanged 成立的
+ * 条目 —— 正在被本机编辑的文件,盘上内容与旧宣告不符是预期,不是漂移。两边各写一遍
+ * 迟早会漂:一边认 2 秒容忍、另一边不认,哨兵就开始报假案。
+ */
+export function isUnchanged(entry: IndexEntry, stat: { size: number; mtimeMs: number }): boolean {
   if (stat.size !== entry.size) return false;
   if (entry.mtime === undefined) return false;
   return Math.abs(stat.mtimeMs - entry.mtime) <= MTIME_TOLERANCE_MS;

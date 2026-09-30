@@ -40,6 +40,10 @@ _Avoid_: backup, duplicate
 A recorded deletion with its own version; prevents a deleted file from resurrecting on another device that edited it while offline.
 _Avoid_: delete marker, ghost
 
+**Drift**:
+The state two paired devices are in when their versions say a file is equal but the bytes on their disks differ — the one inconsistency version comparison structurally cannot see (ADR-0022). A drift audit surfaces it by sampling and *reports only*: a finding is a fact to act on, never an automatic rewrite of either side.
+_Avoid_: corruption (drift names a relation between two devices, not a damaged file), desync (too vague — it also covers plain lag, which is not drift), checksum verification (that is the receiver's per-block gate at landing time, which is how drift gets ruled out rather than detected), self-heal / repair / resync (the deliberately rejected dispositions: when both versions are equal there is no evidence for a winner)
+
 **Block**:
 A fixed-size chunk of a file identified by a content hash; only changed blocks are transferred during incremental sync.
 _Avoid_: chunk (that word names the content-defined unit below), part, segment

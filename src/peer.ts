@@ -9,6 +9,7 @@ import { parseIgnoreRules, isIgnoredPath, isHardIgnored, type IgnoreRule } from 
 import { mergeVersions } from './version.js';
 import type { ConflictPolicy } from './config.js';
 import type { ProgressCounts, TransferFile } from './status.js';
+import { equalPairs, runAudit, type DriftReport } from './drift.js';
 
 /**
  * 索引消息的两种语义:
@@ -192,6 +193,16 @@ export interface SyncPeerDeps {
    * 就跳过。缺省(旧调用方/单测)不设闸门,行为与从前一致。
    */
   receiveLedger?: Map<string, ReceiveClaim>;
+  /**
+   * drift 哨兵(抽样审计)的出口:本轮抽到的若干条路径审完,把汇总计数与检出明细交上去。
+   *
+   * 上层拿它只有一件事可做 —— 落日志。SyncPeer 侧对检出的东西**不做任何处置**:要修就得在
+   * 「本机这份」与「对端那份」之间挑一个赢家,而内容已经分叉的场景里恰恰没有任何证据说明
+   * 哪份是对的。为什么宁可报而不修,见 docs/adr/0022。
+   *
+   * 缺省(旧调用方/单测)不跑审计 —— 与 `SYNCX_DRIFT_SAMPLE_N=0` 同效。
+   */
+  onDriftAudit?: (report: DriftReport) => void;
 }
 
 export interface SyncPeer {
@@ -317,6 +328,33 @@ const SEND_WINDOW_BYTES = Number(process.env.SYNCX_SEND_WINDOW_BYTES) || 64 * 10
 const DEFERRED_MAX = 4096;
 
 /**
+ * drift 哨兵每轮抽样的路径条数默认值(见 drift.ts)。取 8:成本上界 = 8 次「读一块 + 一次
+ * sha256」,与目录里有多少文件无关。一块的字节数按被验的那套视图定:定长块 ≤ BLOCK_SIZE,
+ * 内容定义块 ≤ CDC_MAX_CHUNK —— 所以两侧都有 CDC 视图时,一轮的最坏情况是 32MB 而不是 8MB
+ * (平均块长 ≈1MB,8MB 是典型值不是上限)。环境变量 SYNCX_DRIFT_SAMPLE_N 设 0 整道关闭。
+ */
+const DRIFT_SAMPLE_N_DEFAULT = 8;
+/**
+ * 两次审计的最小间隔默认值:半小时。哨兵要抓的是「静默分叉」,它以周为单位积累,
+ * 半小时一轮已经把覆盖转完一圈绰绰有余(每轮 8 条、槽位随轮次轮换),再把间隔收紧
+ * 就只是在给一个几乎不响的东西分配盘读预算。环境变量 SYNCX_DRIFT_INTERVAL_MS 覆盖。
+ *
+ * 两个旋钮都在**建管线时**读(见 createSyncPeer),不做成模块常量:那会把值冻在
+ * import 那一刻,而「把抽样数压到 2、间隔压到 0」正是集成用例走到这条路径的办法。
+ * 用 envInt 而不是本文件常见的 `Number(env) || 默认`:对抽样数来说 **0 是要能生效的
+ * 取值**(关掉哨兵),而 `|| 8` 会把用户明确写下的 0 悄悄变回 8。
+ */
+const DRIFT_INTERVAL_MS_DEFAULT = 30 * 60 * 1000;
+
+/** 读整型环境旋钮:未设/空串/非有限/负数都退回默认值。 */
+function envInt(name: string, fallback: number): number {
+  const raw = process.env[name];
+  if (raw === undefined || raw === '') return fallback;
+  const v = Number(raw);
+  return Number.isFinite(v) && v >= 0 ? Math.floor(v) : fallback;
+}
+
+/**
  * 速率采样窗口:瞬时速率 = 最近这段时间内实测字节的平均值。
  * 与兜底状态推送周期(5s)同阶,保证每次快照都能看到窗口内的新鲜数据。
  */
@@ -340,7 +378,7 @@ let NEXT_CLAIM_ID = 1;
  * complete, then apply it via the executor.
  */
 export function createSyncPeer(deps: SyncPeerDeps): SyncPeer {
-  const { transport, localIndex, executor, readLocalBlock, readLocalChunk, deviceId, remoteDeviceId, root, onEvent, onTraffic, readIgnoreLines, receiveOnly, getConflictPolicy, getOnDemand, isPausedPath, checkDiskSpace, onHardIgnoredDropped, onLanded, onStallDrop, e2eKey, receiveLedger } = deps;
+  const { transport, localIndex, executor, readLocalBlock, readLocalChunk, deviceId, remoteDeviceId, root, onEvent, onTraffic, readIgnoreLines, receiveOnly, getConflictPolicy, getOnDemand, isPausedPath, checkDiskSpace, onHardIgnoredDropped, onLanded, onStallDrop, e2eKey, receiveLedger, onDriftAudit } = deps;
   const pending = new Map<string, PendingEntry>();
   // 逐块跟踪超时重试:块响应丢失/丢弃时自动重发,避免文件永远收不齐
   const pendingBlocks = new Map<string, PendingBlockRequest>();
@@ -641,6 +679,46 @@ export function createSyncPeer(deps: SyncPeerDeps): SyncPeer {
     if (!cdcUsable(remoteEntry) || readLocalChunk === undefined) return false;
     const local = localIndex.get(remoteEntry.path);
     return !!local && !local.deleted && !local.placeholder && cdcUsable(local);
+  }
+
+  // drift 哨兵的节流状态:上次真跑了审计的时刻 + 轮次序号(抽样按轮次滚动取点)。
+  // 放在每条 SyncPeer 各自一份:抽样集合是「这个对端的宣告 ∩ 本机索引」,按连接独立才说得通。
+  const sampleN = envInt('SYNCX_DRIFT_SAMPLE_N', DRIFT_SAMPLE_N_DEFAULT);
+  const intervalMs = envInt('SYNCX_DRIFT_INTERVAL_MS', DRIFT_INTERVAL_MS_DEFAULT);
+  let driftLastAt = 0;
+  let driftRound = 0;
+
+  /**
+   * 闲时抽样审计(drift 哨兵)。三道门:①上层没接线或旋钮关到 0;②这条连接此刻有传输在跑
+   * (`pending` 非空 = 本机正在收,盘上同一批路径正被逐块写;`serving` 非空 = 本机正在供块,
+   * 再加 8 次定位读只是跟传输抢盘);③距上次审计未到间隔。
+   *
+   * 挂在 `onPeerIndex` 末尾而不是扫描器里,是因为**候选集只在这一刻拿得起来**:本机不持久化
+   * 每个对端的索引(每轮临时建一个 Map 就丢掉),离开这轮消息就没有「对端宣告」可比了。
+   * 代价是审计跟着「有人来交换索引」走而不是跟着时钟走 —— 长期空闲意味着没有改动在流动,
+   * 也就没有分叉在积累,这个方向上不亏。
+   *
+   * 端到端加密的对端走不到这里(`onPeerIndex` 开头就返回),这是对的:盲区端宣告的是密文视图
+   * 的块哈希,拿它比本机明文盘等于把每条路径都报成漂移。
+   */
+  function runDriftAudit(remote: Map<string, IndexEntry>): void {
+    if (onDriftAudit === undefined || sampleN === 0) return;
+    if (pending.size > 0 || serving.size > 0) return;
+    const now = Date.now();
+    if (now - driftLastAt < intervalMs) return;
+    driftLastAt = now;
+
+    const candidates = equalPairs(remote.values(), localIndex);
+    // 没有候选也照发报告:日志里的 sampled 计数就是「这一轮真跑了」的证据。
+    // 少了它,「一切干净」与「哨兵从没跑起来」在日志里长得一模一样。
+    const report = runAudit(candidates, {
+      round: ++driftRound,
+      n: sampleN,
+      cdcOf: (pair) => planCdc(pair.remote),
+      // 没有执行器就只跑 A:少了 verify 是「这道检查没做」,报成「做了且干净」是假安心。
+      verify: executor ? (samples) => executor.verifySampledSlots(samples) : undefined,
+    });
+    onDriftAudit({ ...report, peer: remoteDeviceId ?? '', round: driftRound });
   }
 
   /**
@@ -1238,6 +1316,10 @@ export function createSyncPeer(deps: SyncPeerDeps): SyncPeer {
         // 规划出来的回推永远是「针对某几条路径的应答」,即 delta
         transport.sendEntries(outbound, 'delta');
       }
+
+      // 抽样审计放在最后:它要读盘(成本上限 = 抽样数 × 一块),不能压在本轮的回推之后。
+      // 此刻本轮的动作已全部应用完,`pending` 反映的是「还有文件没收齐」——正在收就不审。
+      runDriftAudit(remote);
     },
 
     onBlockRequest(request: BlockRequest): void {
