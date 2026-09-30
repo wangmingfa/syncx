@@ -48,7 +48,7 @@ either: a fixed slot only ever reads the head of the file, which is exactly the 
 offset-arithmetic bug — ADR-0021 records the "3-arg `writeSync` writes every block to the file
 start" mistake, and under a fixed slot 0 that bug looks perfectly healthy.
 
-**Cost ceiling: one slot read per sampled path** (default 8 per round per connection), independent
+**Cost ceiling: one slot read per sampled path** (default 8 per round **per folder**), independent
 of folder size — 8 reads and 8 sha256. A slot is `BLOCK_SIZE` (1 MiB) on the fixed view but up to
 `CDC_MAX_CHUNK` (4 MiB) on the content-defined view, which is what an audit between two
 CDC-carrying sides uses, so a round reads ~8 MB typically and 32 MB in the worst case.
@@ -58,13 +58,23 @@ built rather than as module constants so a test can drive them.
 They are not in `config.json` on purpose: a config key implies UI, migration and a user decision,
 and this is a diagnostic that should never need touching.
 
-**It runs at the tail of `onPeerIndex`, gated on an idle connection and the interval** — `pending`
+**It runs at the tail of `onPeerIndex`, gated on an idle connection and a folder-wide interval** — `pending`
 non-empty means the receive path is writing those very files; `serving` non-empty means the disk is
 busy for the transfer. Not hooked into the scanner, because the candidate set only exists *in this
 message*: no per-peer index is persisted (`onPeerIndex` builds a request-local Map and drops it), so
 outside a round there is nothing to compare declarations against. The cost is that the audit follows
 index traffic rather than the clock; that direction is safe, since a device exchanging no index
 changes is not accumulating divergence.
+
+**The throttle state belongs to the folder, not to the connection** (`SyncPeerDeps.driftState`, one
+object per `FolderState`, same reasoning as the receive-claim ledger in ADR-0021). A device pair runs
+up to two connections, each with its own `SyncPeer`, and every one of them audits *the same local
+index against the same disk*. Keeping `{ lastAt, round }` per connection made both halves of the
+design wrong in a way only a real two-daemon run shows (`bench/drift-smoke-bench.mjs`, 2026-09-30):
+one finding printed once per live connection — nine identical audit lines for three corrupted files —
+and `round` restarted at 1 on every reconnect, which pins `pickSlot(path, round)` to the same slot
+forever, i.e. the rotation that keeps an offset bug from hiding (above) silently stops happening.
+Callers that pass no state (old callers, unit tests) keep the per-connection behaviour.
 
 **Report only. This is the load-bearing decision.** A detection produces a log line and nothing
 else:

@@ -17,7 +17,7 @@ import { rmDir } from './helpers.js';
 import { openIndexStore, type IndexStore } from '../src/indexstore.js';
 import { createLocalExecutor, type LocalExecutor } from '../src/executor.js';
 import { hashBlock, splitIntoBlocks, BLOCK_SIZE } from '../src/blockstore.js';
-import { createSyncPeer, type PeerTransport } from '../src/peer.js';
+import { createSyncPeer, type DriftState, type PeerTransport } from '../src/peer.js';
 import type { BlockRequest } from '../src/messages.js';
 import type { IndexEntry } from '../src/index.js';
 import {
@@ -519,7 +519,7 @@ describe('哨兵接线:peer 侧的门控与上报', () => {
    * 旋钮必须在 createSyncPeer **之前**设:peer 在建管线时读它们(见 peer.ts),
    * 这样每个用例能自己决定抽样数与间隔,而不必依赖进程启动时的环境。
    */
-  function harness(env: { n: string; intervalMs: string }) {
+  function harness(env: { n: string; intervalMs: string; state?: DriftState }) {
     const dir = mkdtempSync(join(tmpdir(), 'syncx-drift-peer-'));
     const root = join(dir, 'share');
     mkdirSync(root, { recursive: true });
@@ -534,16 +534,22 @@ describe('哨兵接线:peer 侧的门控与上报', () => {
     process.env.SYNCX_DRIFT_SAMPLE_N = env.n;
     process.env.SYNCX_DRIFT_INTERVAL_MS = env.intervalMs;
     const { transport, requests } = fakeTransport();
-    const peer = createSyncPeer({
-      transport,
-      localIndex,
-      executor,
-      readLocalBlock: () => Buffer.alloc(0),
-      deviceId: 'DEV-A',
-      remoteDeviceId: 'DEV-B',
-      root,
-      onDriftAudit: (report) => reports.push(report),
-    });
+    /** 再建一条 SyncPeer:同一份本机索引、同一个执行器、同一个上报出口 —— 生产里这就是
+     *  同一目录上的第二条连接(设备对之间至多两条,每方向一条)。 */
+    function makePeer(remoteDeviceId = 'DEV-B') {
+      return createSyncPeer({
+        transport,
+        localIndex,
+        executor,
+        readLocalBlock: () => Buffer.alloc(0),
+        deviceId: 'DEV-A',
+        remoteDeviceId,
+        root,
+        onDriftAudit: (report) => reports.push(report),
+        driftState: env.state,
+      });
+    }
+    const peer = makePeer();
     return {
       dir,
       root,
@@ -551,6 +557,7 @@ describe('哨兵接线:peer 侧的门控与上报', () => {
       requests,
       reports,
       peer,
+      makePeer,
       /** 在盘上写一份文件并登记进本机索引(mtime 取落盘真值,否则哨兵会判 unreadable)。 */
       seed(rel: string, data: Buffer): IndexEntry {
         const e = seed2(root, rel, data);
@@ -617,6 +624,39 @@ describe('哨兵接线:peer 侧的门控与上报', () => {
     await h.peer.onPeerIndex([declare(e)], { full: true });
     await h.peer.onPeerIndex([declare(e)], { full: true });
     expect(h.reports.length).toBe(1);
+    h.dispose();
+  });
+
+  it('两条连接共享一份 driftState → 间隔内第二条整轮跳过(一次检出只报一遍)', async () => {
+    const state: DriftState = { lastAt: 0, round: 0 };
+    const h = harness({ n: '8', intervalMs: '600000', state });
+    const e = h.seed('h1.txt', Buffer.from('content h1'));
+    await h.peer.onPeerIndex([declare(e)], { full: true });
+    await h.makePeer('DEV-B-dup').onPeerIndex([declare(e)], { full: true });
+    // 各记各的话这里是 2 条,而且两条 round 都是 1 —— 2026-09-30 双真 daemon 冒烟实测到的形态
+    expect(h.reports.length).toBe(1);
+    expect(h.reports[0]!.round).toBe(1);
+    h.dispose();
+  });
+
+  it('共享 driftState:间隔过了才来的下一轮由另一条连接跑,轮号继续前移(槽位真轮换的前提)', async () => {
+    const state: DriftState = { lastAt: 0, round: 0 };
+    const h = harness({ n: '8', intervalMs: '600000', state });
+    const e = h.seed('h2.txt', Buffer.from('content h2'));
+    await h.peer.onPeerIndex([declare(e)], { full: true });
+    state.lastAt = 0; // 等价于「间隔已过」:这份状态由上层持有,本来就是个普通对象
+    await h.makePeer('DEV-B-dup').onPeerIndex([declare(e)], { full: true });
+    // 每连接各记各的话是 [1, 1]:轮号一归零,(path, round) 哈希出的槽位就永远是同一个
+    expect(h.reports.map((r) => r.round)).toEqual([1, 2]);
+    h.dispose();
+  });
+
+  it('不传 driftState → 退化成每连接一份(旧调用方与单测行为不变)', async () => {
+    const h = harness({ n: '8', intervalMs: '600000' });
+    const e = h.seed('h3.txt', Buffer.from('content h3'));
+    await h.peer.onPeerIndex([declare(e)], { full: true });
+    await h.makePeer('DEV-B-dup').onPeerIndex([declare(e)], { full: true });
+    expect(h.reports.map((r) => r.round)).toEqual([1, 1]);
     h.dispose();
   });
 

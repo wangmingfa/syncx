@@ -203,6 +203,23 @@ export interface SyncPeerDeps {
    * 缺省(旧调用方/单测)不跑审计 —— 与 `SYNCX_DRIFT_SAMPLE_N=0` 同效。
    */
   onDriftAudit?: (report: DriftReport) => void;
+  /**
+   * drift 哨兵的节流状态(同一共享目录的**所有** SyncPeer 共享同一个对象,由上层创建传入):
+   * 设备对之间至多两条连接(每方向一条,设计内),每条会话各挂一份 SyncPeer,而它们审的是
+   * **同一份本机索引与同一块盘**。各记各的话,同一次分叉会按连接各报一遍(噪音),而轮次序号
+   * 每次重连都归零 —— 抽样靠 (path, round) 取点,round 一归零就等于永远验同一个槽。
+   * 与 receiveLedger 同理:共享的是「这一台机器上的事实」,不是「这一条连接上的事实」。
+   * 缺省(旧调用方/单测)退化成每连接一份,行为与从前一致。
+   */
+  driftState?: DriftState;
+}
+
+/** drift 哨兵按目录共享的节流状态(见 SyncPeerDeps.driftState)。 */
+export interface DriftState {
+  /** 上次真跑审计的时刻(被闸门跳过的轮**不**推进它)。 */
+  lastAt: number;
+  /** 已跑过的轮次序号:抽样的步进与取槽都按它滚动。 */
+  round: number;
 }
 
 export interface SyncPeer {
@@ -378,7 +395,7 @@ let NEXT_CLAIM_ID = 1;
  * complete, then apply it via the executor.
  */
 export function createSyncPeer(deps: SyncPeerDeps): SyncPeer {
-  const { transport, localIndex, executor, readLocalBlock, readLocalChunk, deviceId, remoteDeviceId, root, onEvent, onTraffic, readIgnoreLines, receiveOnly, getConflictPolicy, getOnDemand, isPausedPath, checkDiskSpace, onHardIgnoredDropped, onLanded, onStallDrop, e2eKey, receiveLedger, onDriftAudit } = deps;
+  const { transport, localIndex, executor, readLocalBlock, readLocalChunk, deviceId, remoteDeviceId, root, onEvent, onTraffic, readIgnoreLines, receiveOnly, getConflictPolicy, getOnDemand, isPausedPath, checkDiskSpace, onHardIgnoredDropped, onLanded, onStallDrop, e2eKey, receiveLedger, onDriftAudit, driftState } = deps;
   const pending = new Map<string, PendingEntry>();
   // 逐块跟踪超时重试:块响应丢失/丢弃时自动重发,避免文件永远收不齐
   const pendingBlocks = new Map<string, PendingBlockRequest>();
@@ -681,17 +698,20 @@ export function createSyncPeer(deps: SyncPeerDeps): SyncPeer {
     return !!local && !local.deleted && !local.placeholder && cdcUsable(local);
   }
 
-  // drift 哨兵的节流状态:上次真跑了审计的时刻 + 轮次序号(抽样按轮次滚动取点)。
-  // 放在每条 SyncPeer 各自一份:抽样集合是「这个对端的宣告 ∩ 本机索引」,按连接独立才说得通。
+  // drift 哨兵的旋钮:抽样条数与最小间隔。envInt 而不是 `Number(x) || 默认值`:显式 0
+  // (整道关掉)必须能表达。两个都在**建管线时**读,不做模块常量,否则值冻在 import 时。
   const sampleN = envInt('SYNCX_DRIFT_SAMPLE_N', DRIFT_SAMPLE_N_DEFAULT);
   const intervalMs = envInt('SYNCX_DRIFT_INTERVAL_MS', DRIFT_INTERVAL_MS_DEFAULT);
-  let driftLastAt = 0;
-  let driftRound = 0;
+  // 节流状态按目录共享(见 deps.driftState):同一条连接上的两份 SyncPeer 审的是同一块盘,
+  // 各记各的会把一次分叉按连接报两遍,而轮次归零等于抽样槽位永远不轮换。
+  // 未传时退化成每连接一份(旧调用方与单测的路径)。
+  const drift = driftState ?? { lastAt: 0, round: 0 };
 
   /**
    * 闲时抽样审计(drift 哨兵)。三道门:①上层没接线或旋钮关到 0;②这条连接此刻有传输在跑
    * (`pending` 非空 = 本机正在收,盘上同一批路径正被逐块写;`serving` 非空 = 本机正在供块,
-   * 再加 8 次定位读只是跟传输抢盘);③距上次审计未到间隔。
+   * 再加 8 次定位读只是跟传输抢盘);③距**本目录**上次审计未到间隔(状态见 deps.driftState,
+   * 所以这条闸门管的是整个目录,不是某一条连接)。
    *
    * 挂在 `onPeerIndex` 末尾而不是扫描器里,是因为**候选集只在这一刻拿得起来**:本机不持久化
    * 每个对端的索引(每轮临时建一个 Map 就丢掉),离开这轮消息就没有「对端宣告」可比了。
@@ -705,20 +725,21 @@ export function createSyncPeer(deps: SyncPeerDeps): SyncPeer {
     if (onDriftAudit === undefined || sampleN === 0) return;
     if (pending.size > 0 || serving.size > 0) return;
     const now = Date.now();
-    if (now - driftLastAt < intervalMs) return;
-    driftLastAt = now;
+    if (now - drift.lastAt < intervalMs) return;
+    drift.lastAt = now;
 
     const candidates = equalPairs(remote.values(), localIndex);
     // 没有候选也照发报告:日志里的 sampled 计数就是「这一轮真跑了」的证据。
     // 少了它,「一切干净」与「哨兵从没跑起来」在日志里长得一模一样。
+    drift.round++;
     const report = runAudit(candidates, {
-      round: ++driftRound,
+      round: drift.round,
       n: sampleN,
       cdcOf: (pair) => planCdc(pair.remote),
       // 没有执行器就只跑 A:少了 verify 是「这道检查没做」,报成「做了且干净」是假安心。
       verify: executor ? (samples) => executor.verifySampledSlots(samples) : undefined,
     });
-    onDriftAudit({ ...report, peer: remoteDeviceId ?? '', round: driftRound });
+    onDriftAudit({ ...report, peer: remoteDeviceId ?? '', round: drift.round });
   }
 
   /**

@@ -37,7 +37,7 @@ import {
   type IgnoreVerdict,
 } from './ignore.js';
 import type { WebhookEvent } from './webhook.js';
-import { createSyncPeer, type PeerTransport, type ReceiveClaim, type SyncPeer } from './peer.js';
+import { createSyncPeer, type DriftState, type PeerTransport, type ReceiveClaim, type SyncPeer } from './peer.js';
 import { freeBytesAt, DISK_GUARD_MIN_FREE_BYTES } from './disk.js';
 import { scanFolder } from './scanner.js';
 import type { IndexEntry } from './index.js';
@@ -161,6 +161,13 @@ export interface FolderState {
    * (静默分叉,2026-09 混版本实测)。规划接收前先认领,已被他人认领则跳过。
    */
   receiveLedger: Map<string, ReceiveClaim>;
+  /**
+   * drift 哨兵的节流状态(本目录所有 SyncPeer 共享,同 receiveLedger 一个道理):
+   * 设备对之间至多两条连接,各挂一份 SyncPeer,而它们审的是同一份本机索引与同一块盘 ——
+   * 各记各的话,同一次分叉按连接各报一遍(纯噪音),而轮次序号每次重连归零会让抽样
+   * 永远验同一个槽(槽位按 (path, round) 取点)。2026-09-30 双真 daemon 冒烟实测到这两条。
+   */
+  driftState: DriftState;
   config: SharedFolderConfig;
   /**
    * 首轮扫描是否只建基线(不写同步记录):索引为空(新目录)时为 true,
@@ -716,7 +723,7 @@ export class SyncSessionManager {
     // 索引为空 → 首扫是建基线(存量文件不算新增);索引有存量 → 首扫 diff 是
     // daemon 离线期间的真实改动,要写同步记录
     const baselinePending = usable.length === 0;
-    return { id, indexKey, path: f.path, index, executor, localIndex, ignoreLines, transports: [], peers: new Map(), transportDevice: new Map(), receiveLedger: new Map(), config: f, baselinePending, conflictCount: 0, lastCommitHash: f.gitLastCommitHash ?? null, processedRemoteCommits: new Set(), gitBroadcast: readGitPending(id, f.gitBroadcastPending), pendingGitNotify: null, gitDrainWarned: false, gitRelay: readGitPending(id, f.gitRelayPending), diskBlocked: false };
+    return { id, indexKey, path: f.path, index, executor, localIndex, ignoreLines, transports: [], peers: new Map(), transportDevice: new Map(), receiveLedger: new Map(), driftState: { lastAt: 0, round: 0 }, config: f, baselinePending, conflictCount: 0, lastCommitHash: f.gitLastCommitHash ?? null, processedRemoteCommits: new Set(), gitBroadcast: readGitPending(id, f.gitBroadcastPending), pendingGitNotify: null, gitDrainWarned: false, gitRelay: readGitPending(id, f.gitRelayPending), diskBlocked: false };
   }
 
   /**
@@ -1722,6 +1729,9 @@ export class SyncSessionManager {
       e2eKey,
       // 接收认领台账:本目录全部 SyncPeer 共用一份,挡住双向连接重复落地(见 FolderState)
       receiveLedger: folder.receiveLedger,
+      // drift 哨兵的节流状态:同一目录的全部 SyncPeer 共用一份(见 FolderState.driftState),
+      // 否则同一次检出按连接各报一遍、且轮次每次重连归零使抽样永远验同一个槽。
+      driftState: folder.driftState,
       // drift 哨兵(抽样审计):每轮抽几条路径验「索引 vs 对端宣告 vs 盘上字节」,只落日志。
       onDriftAudit: (report) => this.reportDrift(folder.id, report),
       // 中转(ADR-0014):收到并落地远程条目后,转发给同目录其它 transport(排除来源端本身)。
