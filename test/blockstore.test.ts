@@ -269,12 +269,18 @@ describe('流式视图扫描 hashFileViews', () => {
   });
 
   it('被 CDC_MAX_CHUNK 强制收块的路径同样吻合', () => {
-    // 10174529 = 这条伪随机流里第一块「撑到 4MB 仍没命中掩码、被强制收块」的结束位置
-    // 再加 5 字节:强制边界落在窗口中间(不是 1MB 整数倍),后面还跟着一个 EOF 末块。
-    const data = pseudoRandom(10_174_529, 0x12345678);
+    // 常量 0x41 区在 4MB 内一次都不命中掩码(实测),所以必然撑到上限被强制收块;
+    // 前面垫 1MB 伪随机造出两个自然边界,好让那条强制边界落在窗口**中间**、
+    // 而不是恰好压在 1MB 整数倍上(那正是最容易把「片段起点算错」掩盖掉的巧合)。
+    // 末尾再留一块 EOF 收尾块,覆盖「强制边界之后还有内容」这条分支。
+    const data = Buffer.concat([
+      pseudoRandom(BLOCK_SIZE, 0x12345678),
+      Buffer.alloc(5 * BLOCK_SIZE + 7, 0x41),
+    ]);
     withTempFile(data, (file) => {
       const views = hashFileViews(file);
       expect(views.clens).toContain(CDC_MAX_CHUNK); // 确认这条用例真的走到了强制分支
+      expect(views.clens.reduce((s, l) => s + l, 0)).toBe(data.length);
       expect(views).toEqual(inMemory(data));
     });
   });
@@ -349,5 +355,84 @@ describe('流式内容比对 blocksMatchOnDisk', () => {
     } finally {
       rmSync(dir, { recursive: true, force: true });
     }
+  });
+});
+
+/**
+ * CDC 的省流量承诺最终落在一条算术性质上:滚动指纹必须带**窗口移出项**,一个字节的
+ * 贡献才只在随后 32 字节内有效,越过即归零,扰动之后的边界与原文逐位吻合(重同步)。
+ * 只有累入项时,循环移位 32 次回到原值 → 扰动永不衰减,「重同步」退化成「转到某一步
+ * 低 20 位恰好为 0」,取决于改动长度而非内容局部性;1 字节改写会让其后所有块作废,
+ * 全文件重传 —— CDC 的收益归零,而且没人会察觉,因为数据始终是对的。
+ *
+ * 所以本组断言的是**行为**(改动能复用多少块),不是「流式 == 内存」:等价性只保证两处
+ * 实现一致,两者一起错它照样绿。流式那条刻意把改动点压在读取窗口边界上,32 字节 carry
+ * 跨窗口写错只会在「块集合与内存实现不一致」时露出来。
+ */
+describe('CDC 重同步局部性(指纹的窗口移出项)', () => {
+  const FILE_SIZE = 8 * 1024 * 1024;
+
+  /** 改动点:文件头/尾、CDC_MIN_CHUNK 刚过、窗口边界前后(含扰动区横跨边界的位置)。 */
+  const OFFSETS = [
+    4096,
+    CDC_MIN_CHUNK + 1,
+    BLOCK_SIZE - 3, // 32 字节扰动区正好跨过第 1、2 个读取窗口
+    BLOCK_SIZE + 20,
+    2 * BLOCK_SIZE - 16,
+    4 * 1024 * 1024,
+    FILE_SIZE - 8192,
+  ];
+
+  /** after 里有多少块的内容在 before 中不存在(= 必须重新过网的量)。 */
+  function changedChunks(before: string[], after: string[]): number {
+    const seen = new Set(before);
+    return after.filter((h) => !seen.has(h)).length;
+  }
+
+  function withTempFiles(contents: Buffer[], fn: (files: string[]) => void): void {
+    const dir = mkdtempSync(join(tmpdir(), 'syncx-resync-'));
+    try {
+      fn(contents.map((c, i) => {
+        const file = join(dir, `f${i}.bin`);
+        writeFileSync(file, c);
+        return file;
+      }));
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  }
+
+  const base = () => pseudoRandom(FILE_SIZE, 0x2468ace1);
+
+  it.each(OFFSETS)('1 字节就地改写(偏移 %i)只废改动所在的那一块', (at) => {
+    const data = base();
+    const touched = Buffer.from(data);
+    touched[at] = (touched[at]! + 1) & 0xff;
+    const before = chunkContent(data).map(hashBlock);
+    expect(before.length).toBeGreaterThanOrEqual(5); // 这尺寸确实切出了多块,断言不是空转
+    expect(changedChunks(before, chunkContent(touched).map(hashBlock))).toBeLessThanOrEqual(2);
+  });
+
+  it.each(OFFSETS)('中部插入 7 字节(偏移 %i)只废改动附近的块', (at) => {
+    const data = base();
+    const touched = Buffer.concat([data.subarray(0, at), Buffer.from([9, 8, 7, 6, 5, 4, 3]), data.subarray(at)]);
+    const before = chunkContent(data).map(hashBlock);
+    expect(before.length).toBeGreaterThanOrEqual(5);
+    expect(changedChunks(before, chunkContent(touched).map(hashBlock))).toBeLessThanOrEqual(2);
+  });
+
+  it.each(OFFSETS)('流式扫描在小改动下复用同样的块(偏移 %i)', (at) => {
+    const data = base();
+    const touched = Buffer.from(data);
+    touched[at] = (touched[at]! + 1) & 0xff;
+    withTempFiles([data, touched], ([fileA, fileB]) => {
+      const before = hashFileViews(fileA!);
+      const after = hashFileViews(fileB!);
+      // 与内存实现给出同样的块集合:一次改写只该改一处内容,两侧必须同判
+      expect(after.cdh.map((h, i) => [h, after.clens[i]]).sort()).toEqual(
+        chunkContent(touched).map((c) => [hashBlock(c), c.length]).sort(),
+      );
+      expect(changedChunks(before.cdh, after.cdh)).toBeLessThanOrEqual(2);
+    });
   });
 });

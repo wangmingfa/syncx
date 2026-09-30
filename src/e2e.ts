@@ -213,5 +213,12 @@ export function wrapTransportBlind(t: PeerTransport, key: Buffer, root: string):
     sendBlockResponse(response, opts) {
       t.sendBlockResponse(response, opts);
     },
+    // 在途量与空间通知一律原样转发:包装只是改写索引,不该让供块侧「看不见」背压。
+    // 用展开保持**可选性** —— 内层不提供时这一项必须继续缺席,而不是谎报 0
+    // (0 = 「永远有位置」,窗口就此失效)。
+    ...(t.pendingOutboundBytes ? { pendingOutboundBytes: () => t.pendingOutboundBytes!() } : {}),
+    ...(t.onOutboundSpace
+      ? { onOutboundSpace: (cb: () => void) => t.onOutboundSpace!(cb) }
+      : {}),
   };
 }

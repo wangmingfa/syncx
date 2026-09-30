@@ -42,7 +42,15 @@ _Avoid_: delete marker, ghost
 
 **Block**:
 A fixed-size chunk of a file identified by a content hash; only changed blocks are transferred during incremental sync.
-_Avoid_: chunk (when meaning hash-addressed), part, segment
+_Avoid_: chunk (that word names the content-defined unit below), part, segment
+
+**Chunk**:
+A variable-length, content-defined unit of a file, announced alongside the fixed block view as `cdh`/`clens` (ADR-0017). Its boundaries come from a rolling fingerprint that carries a *window-eviction term*, which is what makes an edit repaint only the chunk containing it (ADR-0019) — drop that term and the content-defined property is gone while everything still looks correct.
+_Avoid_: variable block, smart block, slice
+
+**Send Window**:
+The cap on how many bytes the sender of a block response may have queued-but-not-yet-flushed (`src/peer.ts` SEND_WINDOW_BYTES). A block request that would exceed it is *deferred* as metadata and replayed when the link drains, so the sender's memory peak is a property of this window rather than of how many blocks the peer asks for at once (ADR-0020).
+_Avoid_: backpressure (too vague — it names the effect, not the mechanism), throttle (that word belongs to the rate limiter, which shapes speed and does not bound memory), drop-on-busy (the rejected alternative: silently ignoring a request turns a slow link into a 10-minute timeout race)
 
 **Ignore Rule**:
 A pattern (gitignore-style) that excludes files or directories from synchronization within a shared folder.

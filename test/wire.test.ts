@@ -124,3 +124,54 @@ describe('priority outbox (makePeerTransport)', () => {
     expect(paths).toEqual(['p0', 'p1', 'p2', 'p3', 'p4', 'p5']);
   });
 });
+
+describe('在途字节记账 (makePeerTransport)', () => {
+  const req = (i: number) => ({ deviceId: 'DEV-A', path: `p${i}`, blockIndex: 0, hash: 'h' });
+
+  it('排队中的信封算作在途,排空后归零并叫醒订阅者;退订后不再叫醒', async () => {
+    const sent: string[] = [];
+    const socket = { send: (data: string) => sent.push(data) } as unknown as WebSocket;
+    const transport = makePeerTransport(socket, key, 'main', new RateLimiter(1));
+    let wakes = 0;
+    const off = transport.onOutboundSpace!(() => {
+      wakes += 1;
+    });
+
+    vi.useFakeTimers();
+    try {
+      for (let i = 0; i < 12; i++) transport.sendBlockRequest(req(i));
+      // 令牌桶只有 1 秒容量(1 KB/s),够不着 12 条:剩下的仍在队列里 —— 它们已经
+      // 读好、加密、就等发出去,在内存意义上与「已交给 socket」没有区别,必须计进在途量
+      expect(sent.length).toBeGreaterThan(0);
+      expect(sent.length).toBeLessThan(12);
+      expect(transport.pendingOutboundBytes!()).toBeGreaterThan(0);
+
+      await vi.advanceTimersByTimeAsync(60_000);
+      expect(sent).toHaveLength(12);
+      expect(transport.pendingOutboundBytes!()).toBe(0);
+      expect(wakes).toBeGreaterThan(0);
+
+      const before = wakes;
+      off();
+      for (let i = 0; i < 12; i++) transport.sendBlockRequest(req(i)); // 又要排队:若仍订阅,一定会被叫醒
+      await vi.advanceTimersByTimeAsync(60_000);
+      expect(sent).toHaveLength(24);
+      expect(wakes).toBe(before); // 退订是真实的退订,不是换了个来源继续叫醒
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('把协议栈写缓冲一起计入,且容忍 socket 没有 bufferedAmount', () => {
+    // 真实 ws 的 bufferedAmount 就是底层 socket 的 writableLength:交给它 ≠ 离开本机
+    const withBuffer = { send: () => {}, bufferedAmount: 4096 } as unknown as WebSocket;
+    const t1 = makePeerTransport(withBuffer, key, 'main');
+    expect(t1.pendingOutboundBytes!()).toBe(4096);
+
+    // 测试替身与任何不提供该属性的实现:按 0 算,绝不能算成 NaN ——
+    // NaN 会让「inFlight + 一块 ≤ 窗口」永远为 false,即整条发送路径静默停摆
+    const without = { send: () => {} } as unknown as WebSocket;
+    const t2 = makePeerTransport(without, key, 'main');
+    expect(t2.pendingOutboundBytes!()).toBe(0);
+  });
+});

@@ -25,6 +25,19 @@ export interface PeerTransport {
   sendBlockRequest(request: BlockRequest): void;
   /** opts.priority = 源块请求带「优先同步」标记:实现侧据此把响应插到发送队列最前。 */
   sendBlockResponse(response: BlockResponse, opts?: { priority?: boolean }): void;
+  /**
+   * 本端「已经生成、还没真正离开本机」的字节数:排队中的信封 + 协议栈写缓冲。
+   * 供块前的窗口判定用(见 SEND_WINDOW_BYTES)。
+   *
+   * 可选:它只是「实现侧愿意看见背压」的能力探测 —— 测试替身与不具备缓冲可见性的
+   * 实现不提供时,调用方退回「不设限」的旧行为,而不是误判成「永远满」。
+   */
+  pendingOutboundBytes?(): number;
+  /**
+   * 订阅「发送侧腾出了空间」,返回退订函数。回调必须**幂等且轻量**:实现侧可能在
+   * 每次出队与每次轮询都触发一次,不保证「刚好凑够一块」才叫醒。
+   */
+  onOutboundSpace?(cb: () => void): () => void;
 }
 
 /** 对端索引到达时的附加说明。缺省(undefined)按 delta 处理,见 IndexMode。 */
@@ -273,6 +286,30 @@ const MAX_BLOCK_RETRIES_TOTAL = 23;
 const SERVE_LEASE_MS = Number(process.env.SYNCX_SERVE_LEASE_MS) || 15_000;
 
 /**
+ * 发送侧在途字节窗口:供一块之前先看「本机还悬着多少没发出去的字节」,超过上限就把
+ * 这条块请求挂进延迟队列,而不是无脑把响应压进发送队列。
+ *
+ * 为什么必须有上限:接收端会为整个文件**一次性**发出全部缺块请求(见
+ * requestMissingBlocks / requestMissingChunks),而发送队列的排空速度只受 TCP 与
+ * 限速器支配。2.2GB 文件 = 550 条 4MB 块请求,每条在队列里都是一份 base64 后的
+ * JSON 字符串(≈1.34 倍明文),实测把 daemon 顶到 8GB 堆上限 OOM —— 峰值正比于
+ * 「对端一次要多少块」,而本机对此毫无发言权。
+ *
+ * 取 64MB:约 1GbE 上 0.5 秒的在途量,链路不会因为等本机放行而空转;又远大于一个
+ * CDC 块的上线体量(4MB → ≈5.6MB),不至于一块就把窗口占死。慢链路上它退化成
+ * 「至多攒 0.5 秒的量」,而「与文件大小无关」这条性质保持不变。
+ * 集成测试可用 SYNCX_SEND_WINDOW_BYTES 调小,在小文件上触发挂起与重放。
+ */
+const SEND_WINDOW_BYTES = Number(process.env.SYNCX_SEND_WINDOW_BYTES) || 64 * 1024 * 1024;
+
+/**
+ * 延迟队列的长度上限(条数,不是字节)。挂起的只是请求元数据,给上限是因为请求由
+ * 对端决定:不设限的话,一个恶意或陈旧的接收端可以无限索块,把「省内存」的机制
+ * 变成另一种内存耗尽。到顶即视同「这条请求我没听见」,对端自会重试。
+ */
+const DEFERRED_MAX = 4096;
+
+/**
  * 速率采样窗口:瞬时速率 = 最近这段时间内实测字节的平均值。
  * 与兜底状态推送周期(5s)同阶,保证每次快照都能看到窗口内的新鲜数据。
  */
@@ -362,6 +399,93 @@ export function createSyncPeer(deps: SyncPeerDeps): SyncPeer {
   function blockKey(path: string, blockIndex: number, cdc: boolean): string {
     return `${cdc ? 'c' : 'b'}:${path}:${blockIndex}`;
   }
+
+  // ---- 发送侧在途窗口(见 SEND_WINDOW_BYTES)----
+  /**
+   * 被窗口挡下来的块请求,按 FIFO 等待重放;带 priority 标记的插到队首。
+   * 只存请求本身(几十字节元数据),**不读盘、不加密** —— 这正是它省内存的地方:
+   * 挡在读取之前,而不是攒着已经读出来的块。
+   */
+  const deferredQueue: BlockRequest[] = [];
+  /** deferredQueue 的键集合:同一块被对端超时重试 N 次,队列里也只留一份。 */
+  const deferredKeys = new Set<string>();
+  let pumpScheduled = false;
+
+  /**
+   * 这条请求的响应上线后大概占多少在途字节 —— **不读盘**的估算:索引里拿得到块长就按
+   * 实际长度(CDC 块的 clens / 定长块的末尾残块),拿不到按该口径的上限;再加密文
+   * tag(16B)、base64(×4/3)与 JSON 信封。宁可高估:高估只是这一轮少供一块,
+   * 低估会让窗口形同虚设。
+   */
+  function expectedWireBytes(request: BlockRequest): number {
+    let plain = request.cdc ? CDC_MAX_CHUNK : BLOCK_SIZE;
+    const entry = localIndex.get(request.path);
+    if (entry && !entry.deleted) {
+      if (request.cdc) {
+        if (cdcUsable(entry)) plain = entry.clens[request.blockIndex] ?? CDC_MAX_CHUNK;
+      } else {
+        const remain = entry.size - request.blockIndex * BLOCK_SIZE;
+        if (remain > 0 && remain < BLOCK_SIZE) plain = remain;
+      }
+    }
+    return Math.ceil((plain + 16) / 3) * 4 + 256;
+  }
+
+  /**
+   * 发送侧还放得下这一块的量吗。transport 不报在途量(测试替身、无缓冲可见性的
+   * 实现)时恒为 true:退回不设限的旧行为,绝不因「拿不到数据」而永远挂起请求。
+   */
+  function hasSendRoom(wireBytes: number): boolean {
+    const inFlight = transport.pendingOutboundBytes?.();
+    if (inFlight === undefined) return true;
+    // 单块就超过整个窗口时窗口没有意义(4MB 的 CDC 上限远小于 64MB,这条只防
+    // 未来把窗口调小或把块调大时踩到):放行它,否则它会永远卡在队首,
+    // 让整条延迟队列停摆 —— 那比当初的 OOM 更难查。
+    if (wireBytes >= SEND_WINDOW_BYTES) return true;
+    return inFlight + wireBytes <= SEND_WINDOW_BYTES;
+  }
+
+  /** 把一条供块请求挂进延迟队列(去重;优先请求插队到队首)。 */
+  function deferRequest(request: BlockRequest): void {
+    if (deferredQueue.length >= DEFERRED_MAX) return; // 满则装作没听见,对端的重试会再来
+    const key = blockKey(request.path, request.blockIndex, request.cdc === true);
+    if (deferredKeys.has(key)) return;
+    deferredKeys.add(key);
+    if (request.priority === true) deferredQueue.unshift(request);
+    else deferredQueue.push(request);
+  }
+
+  /**
+   * 重放延迟队列,直到窗口再次装满或队列清空。每次都重新读在途量:上一次重放
+   * 自己就把窗口用掉了,不重新判定就会一路放行到 OOM。
+   * fromPump=true 让 handleBlockRequest 跳过复检(复检已在队列头做过;再挡会形成
+   * 「弹出→重新入队」的空转,而且重放时窗口判定刚通过)。
+   */
+  function pumpDeferred(): void {
+    while (deferredQueue.length > 0) {
+      const head = deferredQueue[0]!;
+      if (!hasSendRoom(expectedWireBytes(head))) return;
+      deferredQueue.shift();
+      deferredKeys.delete(blockKey(head.path, head.blockIndex, head.cdc === true));
+      handleBlockRequest(head, true);
+    }
+  }
+
+  /**
+   * 「腾出空间」回调的入口:合并到下一个微任务再重放。直接在回调栈里 pump 等于把
+   * 「读盘 + 加密 + base64 一整窗」压在发送队列的出队循环里,一个 tick 能把 socket
+   * 发送堵几百毫秒 —— 内存省了,链路反而抖。
+   */
+  function schedulePump(): void {
+    if (pumpScheduled || deferredQueue.length === 0) return;
+    pumpScheduled = true;
+    queueMicrotask(() => {
+      pumpScheduled = false;
+      pumpDeferred();
+    });
+  }
+  // 订阅一次即可:回调列表随 transport 一起回收,而 transport 与本管线同生共死。
+  transport.onOutboundSpace?.(schedulePump);
 
   /**
    * 条目的版本指纹:尺寸 + 全部块哈希(CDC 视图一并计入)的摘要。只用于台账里
@@ -682,7 +806,7 @@ export function createSyncPeer(deps: SyncPeerDeps): SyncPeer {
    * 密文哈希不符)一律静默忽略:不符说明宣告与请求之间内容变过,或对端在乱问,
    * 让它的超时重试 + 下轮索引自然收敛即可。
    */
-  function serveE2EBlock(request: BlockRequest): void {
+  function serveE2EBlock(request: BlockRequest, fromPump: boolean): void {
     if (e2eKey === undefined) return;
     // 盲区视图永远不带 cdh/clens(块长序列是内容侧信道,见 IndexEntry.cdh),
     // 盲区端也就只可能按定长口径索块;带 CDC 标记的请求不属于该会话的协议,忽略。
@@ -696,6 +820,13 @@ export function createSyncPeer(deps: SyncPeerDeps): SyncPeer {
     const local = localIndex.get(realPath);
     if (!local || local.deleted) return;
     if (!Number.isInteger(request.blockIndex) || request.blockIndex < 0 || request.blockIndex >= local.blocks.length) return;
+    // 在途窗口:挡在解路径与查索引之后、读盘与加密之前(见 SEND_WINDOW_BYTES)。
+    // 估算按**明文**块长走 —— 密文比明文多一个 tag,响应再经 base64,已在
+    // expectedWireBytes 里计入;盲区路径查不到本地条目,自然退回 BLOCK_SIZE 上限。
+    if (!fromPump && !hasSendRoom(expectedWireBytes(request))) {
+      deferRequest(request);
+      return;
+    }
     let plain: Buffer;
     try {
       plain = readLocalBlock(realPath, request.blockIndex);
@@ -716,6 +847,94 @@ export function createSyncPeer(deps: SyncPeerDeps): SyncPeer {
     recordBytes(cipher.length, 0);
     transport.sendBlockResponse(
       { deviceId, path: request.path, blockIndex: request.blockIndex, hash: request.hash, data: cipher },
+      { priority: request.priority === true },
+    );
+  }
+
+  /**
+   * 供块总入口:校验请求 → (窗口允许才)读盘 → 加密上线。
+   *
+   * `fromPump` = true 表示这条来自延迟队列重放:pumpDeferred 已在队列头确认过窗口
+   * 有位置,这里不再复检 —— 复检会因估算误差把它重新挂回队列,和「弹出→入队」一起
+   * 构成空转。其余闸门(路径防护、索引越界、本地读取)一律照走,重放的请求
+   * 与刚到的请求在同一条代码路径上,不存在「重放绕过了校验」的暗道。
+   */
+  function handleBlockRequest(request: BlockRequest, fromPump: boolean): void {
+    // 端到端加密视图:盲区按「密文路径 + 密文块哈希」索块,服务路径完全不同,整支移交
+    if (e2eKey !== undefined) {
+      serveE2EBlock(request, fromPump);
+      return;
+    }
+    // 越界/非整数索引直接拒绝,避免对本地文件做无谓的整文件读取
+    if (!Number.isInteger(request.blockIndex) || request.blockIndex < 0) return;
+    // 读取侧路径防护(与写入侧 resolveSharePath 同款):拒绝 ../ 与经符号链接
+    // 逃逸共享目录的路径,防止恶意对端经块请求读取目录外文件
+    if (root !== undefined) {
+      try {
+        resolveSharePath(root, request.path);
+      } catch {
+        return;
+      }
+    }
+    // 在途窗口:必须挡在读盘之前 —— 读出来再挂起等于什么都没省(见 SEND_WINDOW_BYTES)
+    if (!fromPump && !hasSendRoom(expectedWireBytes(request))) {
+      deferRequest(request);
+      return;
+    }
+    let data: Buffer;
+    let layoutHash: string;
+    if (request.cdc) {
+      // CDC 口径:按本机条目 clens 前缀和定位偏移,只供那一块。
+      // 本机没有该路径的 CDC 视图(旧数据/版本错位)时静默忽略 —— 对端走
+      // 超时重试;错位是有界的(本机扫描重算后下一轮宣告就带上 cdh),且对端
+      // 若真是旧版口径混发,哈希闸门自会拦下,不会落错内容。
+      const entry = localIndex.get(request.path);
+      if (readLocalChunk === undefined || !entry || entry.deleted || !cdcUsable(entry)) return;
+      if (request.blockIndex >= entry.cdh.length) return;
+      let offset = 0;
+      for (let i = 0; i < request.blockIndex; i++) offset += entry.clens[i]!;
+      try {
+        data = readLocalChunk(request.path, offset, entry.clens[request.blockIndex]!);
+      } catch {
+        return;
+      }
+      layoutHash = entry.cdh[request.blockIndex]!;
+    } else {
+      try {
+        data = readLocalBlock(request.path, request.blockIndex);
+      } catch {
+        // 本地文件可能在块请求在途时被删除或重命名(如同步冲突处理),
+        // 对端会在下一轮索引交换中收敛;忽略该请求即可。
+        return;
+      }
+      layoutHash = request.hash;
+    }
+    // 块确实发出去了 → 该路径进入「发送中」,并按最后一个块续期租约
+    serving.set(request.path, Date.now());
+    // 文件级发送进度:按块精确累计,跳过已发过的块(对端重试不重复计)
+    const sentSet = servedBlocks.get(request.path) ?? new Set<number>();
+    if (!sentSet.has(request.blockIndex)) {
+      sentSet.add(request.blockIndex);
+      servedBlocks.set(request.path, sentSet);
+      const total = localIndex.get(request.path)?.size ?? 0;
+      const rec = servingBytes.get(request.path) ?? { done: 0, total };
+      rec.total = total || rec.total;
+      rec.done += data.length;
+      servingBytes.set(request.path, rec);
+    }
+    // 块确实发出去了:记一笔发送字节,供瞬时速率统计
+    recordBytes(data.length, 0);
+    // 源请求带「优先同步」标记 → 本端发送队列把这个响应插到最前(见 wire.ts)
+    transport.sendBlockResponse(
+      {
+        deviceId,
+        path: request.path,
+        blockIndex: request.blockIndex,
+        // CDC 响应回填的是块的真实哈希(clens 若与对端认知有错位,接收端校验自然不过)
+        hash: layoutHash,
+        data,
+        ...(request.cdc ? { cdc: true } : {}),
+      },
       { priority: request.priority === true },
     );
   }
@@ -989,78 +1208,7 @@ export function createSyncPeer(deps: SyncPeerDeps): SyncPeer {
     },
 
     onBlockRequest(request: BlockRequest): void {
-      // 端到端加密视图:盲区按「密文路径 + 密文块哈希」索块,服务路径完全不同,整支移交
-      if (e2eKey !== undefined) {
-        serveE2EBlock(request);
-        return;
-      }
-      // 越界/非整数索引直接拒绝,避免对本地文件做无谓的整文件读取
-      if (!Number.isInteger(request.blockIndex) || request.blockIndex < 0) return;
-      // 读取侧路径防护(与写入侧 resolveSharePath 同款):拒绝 ../ 与经符号链接
-      // 逃逸共享目录的路径,防止恶意对端经块请求读取目录外文件
-      if (root !== undefined) {
-        try {
-          resolveSharePath(root, request.path);
-        } catch {
-          return;
-        }
-      }
-      let data: Buffer;
-      let layoutHash: string;
-      if (request.cdc) {
-        // CDC 口径:按本机条目 clens 前缀和定位偏移,只供那一块。
-        // 本机没有该路径的 CDC 视图(旧数据/版本错位)时静默忽略 —— 对端走
-        // 超时重试;错位是有界的(本机扫描重算后下一轮宣告就带上 cdh),且对端
-        // 若真是旧版口径混发,哈希闸门自会拦下,不会落错内容。
-        const entry = localIndex.get(request.path);
-        if (readLocalChunk === undefined || !entry || entry.deleted || !cdcUsable(entry)) return;
-        if (request.blockIndex >= entry.cdh.length) return;
-        let offset = 0;
-        for (let i = 0; i < request.blockIndex; i++) offset += entry.clens[i]!;
-        try {
-          data = readLocalChunk(request.path, offset, entry.clens[request.blockIndex]!);
-        } catch {
-          return;
-        }
-        layoutHash = entry.cdh[request.blockIndex]!;
-      } else {
-        try {
-          data = readLocalBlock(request.path, request.blockIndex);
-        } catch {
-          // 本地文件可能在块请求在途时被删除或重命名(如同步冲突处理),
-          // 对端会在下一轮索引交换中收敛;忽略该请求即可。
-          return;
-        }
-        layoutHash = request.hash;
-      }
-      // 块确实发出去了 → 该路径进入「发送中」,并按最后一个块续期租约
-      serving.set(request.path, Date.now());
-      // 文件级发送进度:按块精确累计,跳过已发过的块(对端重试不重复计)
-      const sentSet = servedBlocks.get(request.path) ?? new Set<number>();
-      if (!sentSet.has(request.blockIndex)) {
-        sentSet.add(request.blockIndex);
-        servedBlocks.set(request.path, sentSet);
-        const total = localIndex.get(request.path)?.size ?? 0;
-        const rec = servingBytes.get(request.path) ?? { done: 0, total };
-        rec.total = total || rec.total;
-        rec.done += data.length;
-        servingBytes.set(request.path, rec);
-      }
-      // 块确实发出去了:记一笔发送字节,供瞬时速率统计
-      recordBytes(data.length, 0);
-      // 源请求带「优先同步」标记 → 本端发送队列把这个响应插到最前(见 wire.ts)
-      transport.sendBlockResponse(
-        {
-          deviceId,
-          path: request.path,
-          blockIndex: request.blockIndex,
-          // CDC 响应回填的是块的真实哈希(clens 若与对端认知有错位,接收端校验自然不过)
-          hash: layoutHash,
-          data,
-          ...(request.cdc ? { cdc: true } : {}),
-        },
-        { priority: request.priority === true },
-      );
+      handleBlockRequest(request, false);
     },
 
     async onBlockResponse(response: BlockResponse): Promise<void> {

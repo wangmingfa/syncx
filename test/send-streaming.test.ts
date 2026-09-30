@@ -34,7 +34,7 @@ vi.mock('node:fs', async (importOriginal) => {
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { BLOCK_SIZE, CDC_MAX_CHUNK, hashBlock, hashFileViews, splitIntoBlocks } from '../src/blockstore.js';
+import { BLOCK_SIZE, chunkHashes, hashBlock, splitIntoBlocks } from '../src/blockstore.js';
 import { createLocalExecutor } from '../src/executor.js';
 import { openIndexStore } from '../src/indexstore.js';
 import { scanFolder } from '../src/scanner.js';
@@ -101,15 +101,15 @@ describe('发送侧内存守卫(不得整文件读入)', () => {
     });
     const written = index.getEntry('big.bin')!;
 
-    // 正确性先断言:流式算出来的定长视图 + CDC 视图,与整读实现逐字节相同
-    const expected = hashFileViews(join(root, 'big.bin'));
+    // 正确性先断言,而且拿**内存实现**当参照(不是拿同一条流式函数当参照 —— 那个几乎
+    // 恒等,只能证明"没加工")。守卫管的是分配方式,哈希错了它看不见:索引里错一个字节,
+    // 症状是"这个文件永远同步不动",接收端每块校验都红却没有异常抛出。
+    const reference = chunkHashes(data);
     expect(written.size).toBe(FILE_BYTES);
-    expect(written.blocks).toEqual(expected.blocks);
-    expect(written.cdh).toEqual(expected.cdh);
-    expect(written.clens).toEqual(expected.clens);
-    // 内容够长,CDC 里应有被强制收块的满块(否则这条用例覆盖不到那条分支)
-    expect(expected.cdh.length).toBeGreaterThan(1);
-    expect(expected.clens.some((l) => l >= CDC_MAX_CHUNK)).toBe(true);
+    expect(written.blocks).toEqual(splitIntoBlocks(data).map(hashBlock));
+    expect(written.cdh).toEqual(reference.hashes);
+    expect(written.clens).toEqual(reference.lengths);
+    expect(reference.hashes.length).toBeGreaterThan(1); // 24MB 不该退化成一块,否则上面几条是空转
 
     expect(peak).toBeLessThan(WHOLE_READ_LIMIT);
     index.close();

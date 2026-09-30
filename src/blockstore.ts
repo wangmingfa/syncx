@@ -59,8 +59,9 @@ export function verifyBlock(block: Buffer, hash: string): boolean {
 // 关键性质(全部实现都必须守住):
 //  - **纯函数**:边界只由内容决定,不依赖文件路径/大小/既有索引。两端各自算出
 //    相同结果,才谈得上「按哈希预填本地已有块」。
-//  - **种子永久冻结**: Gear 表一旦换,所有历史 cdh 作废(表现为全量重传,不损坏
-//    数据,但改种子必须当成协议变更对待)。
+//  - **种子与折叠式永久冻结**: Gear 表、窗口宽度、移出项的算法一旦换,所有历史 cdh
+//    作废(表现为全量重传,不损坏数据),必须当成协议变更对待 —— 见 ADR-0017 与
+//    ADR-0019(后者就是一次这样的变更:补上缺失的窗口移出项)。
 //  - 与定长块**共存而非替换**:索引里 blocks 仍是定长哈希(旧对端只认它),
 //    cdh/clens 是附加视图(见 IndexEntry),新对端两边都拿到、各取所需。
 // ---------------------------------------------------------------------------
@@ -91,18 +92,55 @@ const GEAR_TABLE: Uint32Array = (() => {
   return table;
 })();
 
+/** 指纹窗口宽度:一个字节只对随后这么多字节内的边界判定有影响,越过即被移出项抵消。 */
+const BUZ_WINDOW = 32;
+
+/**
+ * 带**窗口移出项**的 Buzhash 滚动指纹。全仓只在这里定义一次折叠式:内存切块
+ * (chunkContent)与流式扫描(hashFileViews)共用它,因为两处算出的边界必须逐位相同
+ * —— 一处记得 carry、一处忘了,写进索引的 cdh 就和实际内容不符,而症状只是"这个文件
+ * 永远同步不动",比崩掉难查得多。
+ *
+ * 折叠式:fp_i = XOR_{d=0}^{W-1} rot^d(GEAR[b_{i-d}]),由此推出逐步形式
+ *   fp_i = rot1(fp_{i-1}) ^ GEAR[in] ^ rot^W(GEAR[out])
+ * out 是 W 个字节前进场、现在离开窗口的那个字节。32 位整数上 rot^32 是恒等,所以移出项
+ * 就是 GEAR[out] 本身。**移出项不能省**:只留累入项时,同一个字节被循环移位 32 次后回到
+ * 原值,改动带来的差分会永久旋转下去而不消失,其后每个边界都跟着错位 —— 这正是当初
+ * 「1 字节改写让整文件重传」的根因(记档见 ADR-0019)。
+ */
+class RollingFingerprint {
+  /** 环形缓冲:槽位 i & (W-1) 存 W 个字节前进场的那个字节。 */
+  private readonly entered = new Uint8Array(BUZ_WINDOW);
+  private fp = 0;
+  private seen = 0;
+
+  /** 吃进一个字节,返回滚动后的指纹。 */
+  step(byte: number): number {
+    const i = this.seen++;
+    const slot = i & (BUZ_WINDOW - 1);
+    // 窗口还在填(前 W 个字节)时没有移出项,与上面的定义式一致
+    const removal = i >= BUZ_WINDOW ? GEAR_TABLE[this.entered[slot]!]! : 0;
+    this.entered[slot] = byte;
+    this.fp = ((((this.fp << 1) | (this.fp >>> 31)) >>> 0) ^ GEAR_TABLE[byte]! ^ removal) >>> 0;
+    return this.fp;
+  }
+}
+
 /**
  * 按内容定义的边界切块,语义与 splitIntoBlocks 对齐(返回子数组视图、拼接即原文)。
  *
- * 指纹是 32 位循环移位后异或 GEAR 表,形式取自 Buzhash,但**没有「把移出窗口的字节
- * 异或掉」那一项** —— 循环移位 32 次回到原值,所以扰动不随距离衰减,只是整值旋转。
- * 于是「改动之后重同步」是概率事件而不是 32 字节后的必然:能不能重新对齐,取决于扰动
- * rot^k(D) 的低 20 位何时恰好为 0(边界判定只看低 20 位)。实测 4MiB 伪随机文件、改动点
- * 固定在 1MiB+512、对块哈希求交集:1 字节就地改写或 7 字节中部插入 → 其后所有块作废
- * (复用 0/4);插入 64B 及以上就回到「只废改动所在那一块」(3/4);4KB 尾部追加也是
- * 3/4(只有末块变)。门限落在哪与内容有关,不是一条保证。
- * 相比朴素累加式 Gear(改动之后每个边界永久错位,追加以外一律全废)循环移位仍划算,
- * 但它买不到「任意小改动都局部」这个口径 —— 对外承诺省流量时按上面实测说。
+ * 边界由 RollingFingerprint 的低 20 位命中决定,而那个指纹带窗口移出项,所以**一个字节的
+ * 影响只在随后 32 字节内有效**:扰动越过改动点 32 字节之后指纹与原文逐位相同,边界重新
+ * 对齐(重同步)。实测 4MiB 伪随机文件、改动点固定在 1MiB+512、四个种子各自求块哈希交集:
+ * 1 字节就地改写、7B/512B/10KB 中部插入、4KB 尾部追加,一律**只废改动所在的那一块**
+ * (每个种子切出 3~6 块,作废数恒为 1)。改动前这里是"其后所有块全废"(复用 0)。
+ * 说"一处改动"是就块**集合**而言:插入让其后所有块的偏移平移,但内容不变,而 CDC 的差集按
+ * 哈希集合匹配(见 peer.requestMissingChunks),不按偏移 —— 偏移平移正是 CDC 相对定长块
+ * 买到的东西。
+ * 唯一超出保证的是那 32 字节扰动区本身:里面若恰好该有一个边界,改动会让它落在别的位置,
+ * 于是要多费一块。实测 8MiB 文件、7 个改动点(含扰动区跨读取窗口边界的)1 字节改写与
+ * 7 字节插入都是 1/11 块作废,但那是这批内容的结果、不是上界,所以测试按 ≤2 放宽
+ * (test/blockstore.test.ts「CDC 重同步局部性」)。
  *
  * 规则:距上一边界不足 CDC_MIN_CHUNK 不判边界;此后逐字节滚动指纹,低 20 位全 0
  * 即收块(期望平均 ≈ 1MB),达 CDC_MAX_CHUNK 强制收块;EOF 就是边界(末块可短)。
@@ -110,10 +148,10 @@ const GEAR_TABLE: Uint32Array = (() => {
 export function chunkContent(data: Buffer): Buffer[] {
   const chunks: Buffer[] = [];
   if (data.length === 0) return chunks;
-  let fp = 0;
+  const buz = new RollingFingerprint();
   let start = 0;
   for (let i = 0; i < data.length; i++) {
-    fp = ((((fp << 1) | (fp >>> 31)) >>> 0) ^ GEAR_TABLE[data[i]!]!) >>> 0;
+    const fp = buz.step(data[i]!);
     const len = i + 1 - start;
     if (
       (len >= CDC_MIN_CHUNK && (fp & CDC_MASK) === 0) ||
@@ -147,12 +185,12 @@ export function chunkHashes(data: Buffer): { hashes: string[]; lengths: number[]
 // 两个视图都能流式算,且必须与内存实现**逐字节等价**(写进索引的哈希只要错一个,
 // 接收端每块校验都失败、文件永远落不了地,是数据完整性事故而不是性能退化):
 //  - 定长块:窗口尺寸取 BLOCK_SIZE,一个窗口就是一块,哈希彼此独立,无需跨窗口状态;
-//  - CDC:边界由滚动指纹决定,而 fp 是**逐字节的纯折叠**(只由字节序列决定,与读取
-//    方式无关),把它做成跨窗口的持久状态就能复现同一串边界;块哈希用一个持续的
-//    createHash 按片段喂(SHA-256 本身就是流式折叠,分段 update 与整体 update 同值),
-//    边界落在窗口中间也只是换个片段。
-//    ⚠️ 别把这条等价性推广成「改动只影响附近几块」:扰动是否衰减见 chunkContent 的
-//    注释(短改动实测会让其后全部块作废)。流式实现只保证「与内存实现算得一样」。
+//  - CDC:边界由滚动指纹决定,而指纹是**逐字节的纯折叠**(只由字节序列决定,与读取方式
+//    无关),做成跨窗口的持久状态就能复现同一串边界。折叠式与它的状态都收在
+//    RollingFingerprint 里,内存实现与这里用的是同一个类(只此一份,不给两边写歪的机会);
+//    它带 32 字节窗口移出项,所以跨窗口时"最近 32 字节的进场记录"必须跟着过来,否则
+//    移出项会读到脏槽位。块哈希用一个持续的 createHash 按片段喂(SHA-256 本身就是流式
+//    折叠,分段 update 与整体 update 同值),边界落在窗口中间也只是换个片段。
 // EOF 那一边界不在字节循环里判,而是「读完后若还有未收的块就收尾」—— 与内存实现
 // 里 `i + 1 === data.length` 强制收块等价,这样文件长度恰为窗口整数倍时也不会漏末块。
 // ---------------------------------------------------------------------------
@@ -193,7 +231,7 @@ export function hashFileViews(absPath: string): FileViews {
     const clens: number[] = [];
     const window = Buffer.allocUnsafe(SCAN_WINDOW);
     let size = 0; // 本窗口首字节的全局偏移,循环结束后即文件总长
-    let fp = 0; // CDC 滚动指纹:跨窗口连续
+    const buz = new RollingFingerprint(); // CDC 指纹:跨窗口连续(移出项要读前 32 字节的记录)
     let chunkStart = 0; // 当前 CDC 块的全局起点
     let chunkHash = createHash('sha256');
     for (;;) {
@@ -214,7 +252,7 @@ export function hashFileViews(absPath: string): FileViews {
 
       let segStart = 0; // 本窗口内尚未喂进 chunkHash 的片段起点
       for (let j = 0; j < filled; j++) {
-        fp = ((((fp << 1) | (fp >>> 31)) >>> 0) ^ GEAR_TABLE[window[j]!]!) >>> 0;
+        const fp = buz.step(window[j]!);
         const len = size + j + 1 - chunkStart;
         if ((len >= CDC_MIN_CHUNK && (fp & CDC_MASK) === 0) || len >= CDC_MAX_CHUNK) {
           chunkHash.update(window.subarray(segStart, j + 1));

@@ -211,6 +211,33 @@ describe('wrapTransportBlind', () => {
     expect(sent.res).toEqual([res]);
   });
 
+  it('在途量与空间通知照旧转发:包装不该让供块侧看不见背压', () => {
+    const root = mkdtempSync(join(tmpdir(), 'syncx-e2e-wrap-'));
+    let wakes = 0;
+    const inner: PeerTransport = {
+      sendEntries: () => {},
+      sendBlockRequest: () => {},
+      sendBlockResponse: () => {},
+      pendingOutboundBytes: () => 4096,
+      onOutboundSpace: (cb) => {
+        cb();
+        return () => {};
+      },
+    };
+    const w = wrapTransportBlind(inner, KEY, root);
+    expect(w.pendingOutboundBytes!()).toBe(4096); // 谎报 0 = 窗口失效,转发的必须是真数字
+    w.onOutboundSpace!(() => {
+      wakes += 1;
+    });
+    expect(wakes).toBe(1);
+
+    // 内层不提供时,包装也不该「凭空造出一个 0」—— 缺席才是「不设限」的信号
+    const plain = capture().t;
+    const w2 = wrapTransportBlind(plain, KEY, root);
+    expect(w2.pendingOutboundBytes).toBeUndefined();
+    expect(w2.onOutboundSpace).toBeUndefined();
+  });
+
   it('活文件全读不到时不发帧(空 full 会让盲区端误判);tombstone 仍会发出', () => {
     const { t, sent } = capture();
     const w = wrapTransportBlind(t, KEY, mkdtempSync(join(tmpdir(), 'syncx-e2e-empty-')));

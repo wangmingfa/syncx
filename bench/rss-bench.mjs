@@ -1,11 +1,20 @@
 #!/usr/bin/env node
 /**
- * 接收端 RSS 基准:两个真 daemon 之间同步一个大文件,采样接收端的 RSS 峰值。
+ * RSS 基准:两个真 daemon 之间同步一个大文件,采样**两侧**的 RSS 峰值。
  *
- * 用途(断点续传阶段 1a/1b 与阶段 2 的前后对比,见 docs/adr/0018):
- *  - 峰值 ≈ 2× 文件大小 → 落地仍是整文件 concat(阶段 1a 之前);
- *  - 峰值 ≈ 1× 文件大小 → concat 已去,但块仍全量驻留内存(阶段 1a 之后);
- *  - 峰值 ≈ O(块大小)  → 真流式 + 断点续传(阶段 2)。
+ * 用途(断点续传阶段 1a/1b 与阶段 2 的前后对比,见 docs/adr/0018;
+ * 发送侧在途窗口的对比见 docs/adr/0020):
+ *  - 接收端 B:峰值 ≈ 2× 文件大小 → 落地仍是整文件 concat(阶段 1a 之前);
+ *    ≈ 1× → concat 已去,但块仍全量驻留内存(阶段 1a 之后,阶段 2 未做);
+ *    ≈ O(块大小) → 真流式 + 断点续传(阶段 2)。
+ *  - 发送端 A:峰值应与**文件大小无关**(窗口生效,ADR-0020)。若它开始随尺寸线性
+ *    增长,说明有代码路径绕过了在途窗口(新增了不报 pendingOutboundBytes 的
+ *    transport,或在读盘之前就把响应压进了发送队列)。
+ *
+ * 对照跑法:同一份构建下用环境变量关掉窗口再量一次 ——
+ *   SYNCX_SEND_WINDOW_BYTES=1099511627776 npx tsx bench/rss-bench.mjs <目录> <MB>
+ * 注意:传输失败时基准不会杀子进程(waitFor 超时直接抛出),跑「关掉窗口」那一侧
+ * 之后要手工清理: pkill -f "syncx.js start --config /tmp/syncx-rss-"
  *
  * 用法:
  *   npx tsx bench/rss-bench.mjs [工作目录] [文件大小MB]
@@ -13,7 +22,7 @@
  *   - 需要 dist/syncx.js(先 npm run build)与 tsx(脚本 import 了 src 的身份模块);
  *   - 结束后工作目录原样保留,供检查/复测,整目录删掉即可。
  *
- * 采样方式:接收端以 `node --require <采样器>` 启动,采样器每 100ms 把
+ * 采样方式:两侧进程各以 `node --require <采样器>` 启动,采样器每 100ms 把
  * process.memoryUsage().rss 追加进自己的日志 —— 直接读进程内 RSS,
  * 比外部 Get-Process/tasklist 采样准(那两者受工作集裁剪影响,峰量会被低估)。
  */
@@ -141,10 +150,10 @@ const run = async () => {
   const rssLogA = samplerFor(aDir);
   const rssLogB = samplerFor(bDir);
 
-  log('启动 A(发送方)…');
+  log('启动 A(发送方,也被采样)…');
   const procA = spawnDaemon(aDir, PORT_A, CTRL_A, rssLogA);
   await waitPort(CTRL_A, 30000);
-  log('启动 B(接收方,被采样)…');
+  log('启动 B(接收方)…');
   const procB = spawnDaemon(bDir, PORT_B, CTRL_B, rssLogB);
   await waitPort(CTRL_B, 30000);
 
@@ -190,12 +199,24 @@ const run = async () => {
 
   const ha = await sha256Of(join(shareA, bigBin));
   const hb = await sha256Of(join(shareB, bigBin));
-  const samples = readFileSync(rssLogB, 'utf8').split('\n').filter(Boolean).map(Number);
-  const peak = Math.max(...samples);
-  const peakGB = (peak / 1073741824).toFixed(2);
+  // 两侧都报峰值:接收端是阶段 1a/2 的判读对象,发送端是「在途窗口」的判读对象
+  // (发送侧不设限时峰值正比于「对端一次索多少块」= 整个文件,见 ADR-0020)。
+  const readSamples = (file) => readFileSync(file, 'utf8').split('\n').filter(Boolean).map(Number);
+  const samplesB = readSamples(rssLogB);
+  const samplesA = readSamples(rssLogA);
+  const peakB = Math.max(...samplesB);
+  const peakA = Math.max(...samplesA);
+  const gb = (n) => (n / 1073741824).toFixed(2);
   log(`sha256 一致: ${ha === hb}`);
-  log(`B 侧 RSS 峰值: ${peakGB} GB(采样 ${samples.length} 点)`);
-  console.log(JSON.stringify({ peakRssBytes: peak, samples: samples.length, shaMatch: ha === hb }));
+  log(`A(发送方) RSS 峰值: ${gb(peakA)} GB(采样 ${samplesA.length} 点)`);
+  log(`B(接收方) RSS 峰值: ${gb(peakB)} GB(采样 ${samplesB.length} 点)`);
+  console.log(JSON.stringify({
+    fileBytes: FILE_BYTES,
+    senderPeakRssBytes: peakA,
+    receiverPeakRssBytes: peakB,
+    samples: samplesB.length,
+    shaMatch: ha === hb,
+  }));
   log(`工作目录保留在 ${workDir}(量完可整目录删除)`);
 };
 

@@ -12,12 +12,17 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { spawn, type ChildProcess } from 'node:child_process';
 import { loadOrCreateIdentity } from '../../src/identity.js';
+import { chunkContent, hashBlock, splitIntoBlocks } from '../../src/blockstore.js';
 import { allocatePort, cleanDaemonEnv } from './ports.js';
 
 /**
  * CDC 内容定义分块的「真进程收益」证明:两个真实 daemon 之间,对 6MB 文件做
- * 一次中部 10KB 插入后,接收侧的**网络字节增量**应远小于一遍文件(2MB 预算),
- * 而不是定长块口径下的整文件重传(≈6MB)。
+ * 一次中部 10KB 插入后,接收侧的**网络字节增量**应只有插入点所在那一块的量级,
+ * 而不是定长块口径下的整尾重传。
+ *
+ * 预算不从文件尺寸拍脑袋,而是用同一套 chunkContent 在测试里算出差集:期望过网量 =
+ * v2 中内容不在 v1 块集合里的那些块。定长口径的对照量一并算出来,断言它比 CDC 口径大过
+ * 四倍 —— 这样"省了"这件事本身也是被验证的,不是从日志里读出来的印象。
  *
  * 单元层(test/peer.test.ts)已钉死协议语义;这里守的是装配层 —— 索引构造、
  * 线格式、存储、供块偏移换算在真实进程里整条链是否真的接通(任何一环没接上,
@@ -163,11 +168,38 @@ describe('two daemons over CDC', () => {
     '中部 10KB 插入后,接收侧网络字节增量远小于一遍文件',
     async () => {
       const v1 = pseudoRandom(6_000_000, 0x2468ace);
+      // 插入点不写死:取 v1 **最短**那个 CDC 块的中部。这样「本轮应过网的字节数」是由内容
+      // 算出来的期望值,而不是一个碰运气调出来的魔数预算 —— 换指纹、换种子都不用重调这条用例。
+      const v1Chunks = chunkContent(v1);
+      const starts: number[] = [];
+      let cum = 0;
+      for (const c of v1Chunks) {
+        starts.push(cum);
+        cum += c.length;
+      }
+      const si = v1Chunks.reduce((best, c, i) => (c.length < v1Chunks[best]!.length ? i : best), 0);
+      const at = starts[si]! + Math.floor(v1Chunks[si]!.length / 2);
       const v2 = Buffer.concat([
-        v1.subarray(0, 3_000_000),
+        v1.subarray(0, at),
         Buffer.alloc(10_240, 0x5c),
-        v1.subarray(3_000_000),
+        v1.subarray(at),
       ]);
+      // CDC 差集 = 这轮真正必须过网的字节:v2 里内容不在 v1 块集合中的那些块
+      const v1Hashes = new Set(v1Chunks.map(hashBlock));
+      const cdcBytes = chunkContent(v2)
+        .filter((c) => !v1Hashes.has(hashBlock(c)))
+        .reduce((s, c) => s + c.length, 0);
+      // 前提自查:这轮改动在 CDC 口径下确实只值一小块(否则下面的预算只是在描述巧合,
+      // 用例退化成"传了多少算多少")
+      expect(cdcBytes).toBeGreaterThan(0);
+      expect(cdcBytes * 4).toBeLessThan(v1.length);
+      // 对照组:同样的插入在定长口径下按块下标匹配几乎全废 —— 收益确实来自 CDC
+      const v1Blocks = splitIntoBlocks(v1).map(hashBlock);
+      const fixedBytes = splitIntoBlocks(v2).reduce(
+        (s, c, i) => (hashBlock(c) !== v1Blocks[i] ? s + c.length : s),
+        0,
+      );
+      expect(fixedBytes).toBeGreaterThan(cdcBytes * 4);
 
       const a = await setupDaemon('a');
       const b = await setupDaemon('b');
@@ -214,14 +246,15 @@ describe('two daemons over CDC', () => {
       const bReceived = after.b.received - base.b.received;
       const aSent = after.a.sent - base.a.sent;
       // 失败时能直接看到差值,判断是「退回全量」还是「账本没接上」
-      console.log(`[cdc-transfer] bReceived=${bReceived} aSent=${aSent} (bytes)`);
+      console.log(
+        `[cdc-transfer] cdcBytes=${cdcBytes} fixedBytes=${fixedBytes} bReceived=${bReceived} aSent=${aSent}`,
+      );
 
-      // 定长口径下这一轮是 ≈6MB(6 个整块重传,外加 B 无块可预填);
-      // CDC 下只有插入点所在的那一个块(≈0.6MB)过网。留 2MB 宽松预算:
-      // 版本竞态多一轮重放的余地都有,但绝不可能是一遍文件的量级。
-      expect(bReceived).toBeGreaterThan(0);
-      expect(bReceived).toBeLessThan(2 * 1024 * 1024);
-      expect(aSent).toBeLessThan(2 * 1024 * 1024);
+      // 期望值由内容算出(见上):下限是「该传的确实传了」,上限给一轮版本竞态重放留出
+      // 余地(整轮重放的量仍是 cdcBytes 级别,和一遍文件差着一个数量级)。
+      expect(bReceived).toBeGreaterThanOrEqual(cdcBytes);
+      expect(bReceived).toBeLessThanOrEqual(2 * cdcBytes);
+      expect(aSent).toBeLessThanOrEqual(2 * cdcBytes);
 
       await stopChildren();
       rmDir(a.dir);

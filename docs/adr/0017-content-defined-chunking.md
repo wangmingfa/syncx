@@ -5,6 +5,11 @@
 Accepted. Supersedes the fixed-block-only assumption in ADR-0003; the fixed
 1MB layout remains as the fallback and as what every legacy peer still sees.
 
+2026-09-30: **amended by ADR-0019.** The last consequence bullet below described the
+sliding-window property as if it were implemented; it was the intent, and the shipped
+fingerprint had no eviction term, so short edits did not re-sync. The fix is a protocol
+change in the sense this ADR already defines (it invalidates every `cdh` computed before it).
+
 ## Context
 
 ADR-0003 pinned the transfer unit to fixed 1MB blocks: a mid-file insertion
@@ -90,3 +95,6 @@ cannot corrupt content.
   with an accumulating fingerprint, inserting bytes permanently shifts every
   downstream boundary (the classic gear failure mode), while a 32-byte window
   expires each byte's influence and re-syncs boundaries almost immediately.
+  *(Intent, not history: the shipped fingerprint lacked the eviction term that
+  makes this true, so edits shorter than ~512B repainted the whole rest of the
+  file. Corrected in ADR-0019, which also records the retransmission cost.)*

@@ -153,6 +153,21 @@ export function decryptMessage(key: Buffer, raw: string): WireMessage {
 }
 
 /**
+ * 「发送侧腾出了空间」的轮询间隔(毫秒)。为什么需要轮询:ws 没有公开「写缓冲
+ * 排空了一点」的信号(底层 socket 的 drain 事件不对外暴露),而队列入空之后
+ * drain 循环也不会再跑,就没有任何时机回调订阅者 —— 只靠对端的块请求重试来
+ * 驱动重放,等于把供块速率压到「每 5 秒一块」。100ms 只在真有字节卡在上面时
+ * 运行(在途归零即停表),空转成本是一次加法。
+ */
+const SPACE_POLL_MS = 100;
+
+/** 底层 socket 的写缓冲字节数。测试替身常常没有这个属性,缺省按 0 算。 */
+function bufferedBytes(socket: WebSocket): number {
+  const n = socket.bufferedAmount;
+  return Number.isFinite(n) && n > 0 ? n : 0;
+}
+
+/**
  * Send-side transport bound to one shared folder: every message carries
  * the folder path so a single socket can multiplex several folders.
  */
@@ -167,8 +182,38 @@ export function makePeerTransport(
   // 等待,不会基于同一令牌快照同时醒来造成约 2 倍速率的突发发送。
   // 「优先同步」的块响应插到队首(见 enqueue 的 priority),让被大队列卡住的
   // 小文件越过普通消息先走;限速语义不变(插队不省令牌,只换个位置等)。
-  const outbox: Array<{ data: string; priority: boolean }> = [];
+  const outbox: Array<{ data: string; bytes: number; priority: boolean }> = [];
   let draining = false;
+  // outbox 里「已加密、排队待发」的信封字节总和。它 + socket 的写缓冲 = 本端在途量,
+  // 供块侧的窗口判定用(见 peer.ts 的 SEND_WINDOW_BYTES):整文件爆发索块时,这个
+  // 数字就是内存曲线 —— 没有它,队列长度只由对端一次发出多少请求决定。
+  let outboxBytes = 0;
+
+  const spaceWatchers = new Set<() => void>();
+  let spaceTimer: ReturnType<typeof setInterval> | undefined;
+
+  function notifySpace(): void {
+    for (const cb of spaceWatchers) cb();
+  }
+
+  function disarmSpaceWatch(): void {
+    if (spaceTimer === undefined) return;
+    clearInterval(spaceTimer);
+    spaceTimer = undefined;
+  }
+
+  /** 有订阅者且真有字节悬在上面时才轮询;在途归零即停表,等下一次发送重新武装。 */
+  function armSpaceWatch(): void {
+    if (spaceTimer !== undefined || spaceWatchers.size === 0) return;
+    if (outboxBytes + bufferedBytes(socket) === 0) return;
+    spaceTimer = setInterval(() => {
+      // 先叫醒再停表:排空即「空间最大」,若停表在先,延迟队列就只能等下一个进来的
+      // 请求才被唤起 —— 链路上没有新请求可等的这段时间纯属浪费。
+      notifySpace();
+      if (outboxBytes + bufferedBytes(socket) === 0) disarmSpaceWatch();
+    }, SPACE_POLL_MS);
+    spaceTimer.unref(); // 轮询不该拖住进程退出(测试、CLI 一次性命令)
+  }
 
   async function drainOutbox(): Promise<void> {
     if (draining) return;
@@ -176,17 +221,23 @@ export function makePeerTransport(
     try {
       while (outbox.length > 0) {
         const item = outbox.shift()!;
-        const bytes = Buffer.byteLength(item.data);
-        const wait = limiter.waitTime(bytes);
+        const wait = limiter.waitTime(item.bytes);
         if (wait > 0) {
           await new Promise((resolve) => setTimeout(resolve, wait));
         }
         // 等待后重新评估并消耗令牌;超大消息(超过桶容量)无法一次消耗,
         // 清空桶后照常发送,避免其完全绕过限速。
-        if (!limiter.tryConsume(bytes)) {
+        if (!limiter.tryConsume(item.bytes)) {
           limiter.drain();
         }
-        socket.send(item.data);
+        try {
+          socket.send(item.data);
+        } finally {
+          // 成败都要扣:漏扣会让在途量只涨不跌,窗口从此永久关闭 —— 比当初的
+          // OOM 更难查(表现为「同步卡住但没有任何错误」)。
+          outboxBytes -= item.bytes;
+          notifySpace();
+        }
       }
     } finally {
       draining = false;
@@ -195,11 +246,14 @@ export function makePeerTransport(
 
   /** 按限速发送一条消息:入队(priority = true 插队到队首)并由 drain 循环串行发出。 */
   function sendRateLimited(data: string, priority = false): void {
+    const bytes = Buffer.byteLength(data); // 只在入队时量一次:每条都是 MB 级字符串,别在出队时再扫一遍
     if (priority) {
-      outbox.unshift({ data, priority: true });
+      outbox.unshift({ data, bytes, priority: true });
     } else {
-      outbox.push({ data, priority: false });
+      outbox.push({ data, bytes, priority: false });
     }
+    outboxBytes += bytes;
+    armSpaceWatch(); // 订阅者此刻可能正因为窗口满而等着被叫醒
     void drainOutbox();
   }
 
@@ -229,6 +283,16 @@ export function makePeerTransport(
         }),
         opts?.priority === true,
       );
+    },
+    pendingOutboundBytes(): number {
+      return outboxBytes + bufferedBytes(socket);
+    },
+    onOutboundSpace(cb): () => void {
+      spaceWatchers.add(cb);
+      return () => {
+        spaceWatchers.delete(cb);
+        if (spaceWatchers.size === 0) disarmSpaceWatch();
+      };
     },
   };
 }
