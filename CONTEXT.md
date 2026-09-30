@@ -52,6 +52,10 @@ _Avoid_: variable block, smart block, slice
 The cap on how many bytes the sender of a block response may have queued-but-not-yet-flushed (`src/peer.ts` SEND_WINDOW_BYTES). A block request that would exceed it is *deferred* as metadata and replayed when the link drains, so the sender's memory peak is a property of this window rather than of how many blocks the peer asks for at once (ADR-0020).
 _Avoid_: backpressure (too vague — it names the effect, not the mechanism), throttle (that word belongs to the rate limiter, which shapes speed and does not bound memory), drop-on-busy (the rejected alternative: silently ignoring a request turns a slow link into a 10-minute timeout race)
 
+**Resume Pair**:
+The two files one in-flight receive leaves beside its target — the bytes gathered so far, and the record of which of them are already durable. They appear and disappear together, are invisible to synchronization in both directions, and are what turns an interruption (disconnect, restart, crash) into a pause instead of a restart.
+_Avoid_: temp file (names only the content half, and reads as "safe to delete"), partial download, scratch file (that is the wider class — every resume pair is scratch, but not every in-flight file is resumable)
+
 **Ignore Rule**:
 A pattern (gitignore-style) that excludes files or directories from synchronization within a shared folder.
 _Avoid_: filter, exclude list

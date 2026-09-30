@@ -169,6 +169,22 @@ describe('hard ignore', () => {
     expect(isHardIgnored('normal.sync.txt')).toBe(false);
   });
 
+  it('hard-ignores in-flight scratch names, in either direction', () => {
+    // 断点续传的中间态(<目标>.syncx-tmp / <目标>.syncx-partial)必须走硬忽略而不是
+    // 普通内置忽略行:半写的文件推给对端没有意义,两台机器互相收对方的 tmp 还会成对繁殖。
+    expect(isHardIgnored('a.txt.syncx-tmp')).toBe(true);
+    expect(isHardIgnored('a.txt.syncx-partial')).toBe(true);
+    expect(isHardIgnored('docs/plan.md.syncx-tmp')).toBe(true);
+    expect(isHardIgnored('A.TXT.SYNCX-TMP')).toBe(true); // 大小写不敏感,理由同 .GIT
+    expect(isHardIgnored('a.txt.syncx-tmp'.toUpperCase())).toBe(true);
+    // 不命中:普通 .tmp / 只是前缀相同
+    expect(isHardIgnored('notes.tmp')).toBe(false);
+    expect(isHardIgnored('a.syncx-tmpx')).toBe(false);
+    expect(isHardIgnored('syncx-tmp')).toBe(false);
+    // 负向规则翻不动它(这是它与 BUILTIN_IGNORE_LINES 的区别所在)
+    expect(isIgnoredPath(parseIgnoreRules(['!a.txt.syncx-tmp']), 'a.txt.syncx-tmp', false)).toBe(true);
+  });
+
   it('is case-insensitive, so a .GIT directory cannot sneak through', () => {
     // Windows 与 macOS 默认文件系统大小写不敏感:'.GIT' 与 '.git' 是同一个目录,
     // 只按小写匹配等于给对端留了一条「改个大小写就绕过」的路

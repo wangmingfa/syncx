@@ -109,7 +109,9 @@ currently knows nothing about socket identity.
   asserted through `pendingOutboundBytes()` in the unit test rather than through RSS in the bench.
   Shrinking the RSS figure is a different change — reuse the per-block buffers on the send path — and
   is not part of this one.
-- **The receiver is still O(file).** `PendingEntry.blocks` holds every block that arrives before the
+- **The receiver is still O(file)** *(superseded by ADR-0021 — stage 2 landed 2026-09-30; kept here
+  because it is why that change was scoped the way it was)*. `PendingEntry.blocks` holds every block
+  that arrives before the
   file is complete — that is stage 2 (断点续传) territory and this change does not touch it. Bounding
   the sender does not make the pair constant-memory; it removes one of the two ceilings, and the one
   it removes is the one that killed the daemon *first* (the sender OOM'd before the receiver did).

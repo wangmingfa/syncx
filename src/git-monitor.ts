@@ -5,7 +5,7 @@
  *  - 检测共享目录是否为 git 仓库
  *  - 读取 HEAD 提交哈希(用于检测新提交)
  *  - 收集提交信息(消息、变更文件列表、diff stat)
- *  - 执行自动提交(git add -A && git commit);调用方应先用
+ *  - 执行自动提交(git add -A && git commit;syncx 的在途中间态两头都排除);调用方应先用
  *    hasUncommittedChanges 判定有无待提交内容,无变更不必提交
  *
  * 所有 git 命令通过 execFileSync 同步执行(本地仓库操作通常 <100ms),
@@ -21,6 +21,7 @@
 import { existsSync } from 'node:fs';
 import { join } from 'node:path';
 import { execFileSync } from 'node:child_process';
+import { SCRATCH_SUFFIXES } from './ignore.js';
 
 export interface CommitInfo {
   /** 新提交的完整哈希 */
@@ -134,12 +135,28 @@ export function getCommitInfo(folderPath: string, fromHash: string, toHash: stri
 }
 
 /**
+ * 把 syncx 的在途中间态从 git 的视野里排除:`<目标>.syncx-tmp`(在途内容)与
+ * `<目标>.syncx-partial`(它的块位图 sidecar)。
+ *
+ * 断点续传之后,这两个文件会在目标文件旁边躺上**一整个传输过程**(大文件按分钟计),
+ * 而原先它们只存在于落地的那一瞬间。放任 `git add -A` 把它们收进去,代价是几百 MB 的
+ * 半截内容进仓库历史(共享目录本身是 git 仓库时),并经 git 提交同步镜像给对端 —— 那正是
+ * 「同步侧的残骸不该进版本库」的边界。后缀取自 ignore.ts 的 SCRATCH_SUFFIXES,两处共用一份
+ * 事实,免得将来加第三个后缀时忘了这里。
+ *
+ * 只给负向 pathspec 不改变其余语义:实测在仓库的**子目录**里执行
+ * `git add -A -- ':(exclude)*.syncx-tmp'`,仓库里该子目录**之外**的新文件照样被 stage,
+ * 与不带 pathspec 的 `git add -A` 一致(负向 pattern 通配跨 `/`,故任意深度命中)。
+ */
+const SCRATCH_PATHSPECS = SCRATCH_SUFFIXES.flatMap((suffix) => [`:(exclude)*${suffix}`]);
+
+/**
  * 检查工作区是否有未提交的变更(含未跟踪文件)。
  * 返回 true 表示有变更可以提交。
  */
 export function hasUncommittedChanges(folderPath: string): boolean {
   try {
-    const status = execFileSync('git', ['status', '--porcelain'], {
+    const status = execFileSync('git', ['status', '--porcelain', '--', ...SCRATCH_PATHSPECS], {
       cwd: folderPath,
       encoding: 'utf8',
       stdio: ['ignore', 'pipe', 'ignore'],
@@ -167,8 +184,8 @@ export interface AutoCommitResult {
  */
 export function autoCommit(folderPath: string, message: string): AutoCommitResult {
   try {
-    // 先 stage 所有变更(含删除、新增)
-    execFileSync('git', ['add', '-A'], {
+    // 先 stage 所有变更(含删除、新增),但把 syncx 的在途中间态挡在外面(见 SCRATCH_PATHSPECS)
+    execFileSync('git', ['add', '-A', '--', ...SCRATCH_PATHSPECS], {
       cwd: folderPath,
       stdio: ['ignore', 'ignore', 'pipe'],
       windowsHide: true,

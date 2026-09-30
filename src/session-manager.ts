@@ -832,9 +832,13 @@ export class SyncSessionManager {
   }
 
   /**
-   * 给 executor 的四个写操作包一层错误捕获:任何 apply*(本地扫描应用与对端推送
-   * 接收/冲突/删除共用同一执行器)抛错都归到所属目录,失败原因原样抛出,
-   * 不改变既有重试语义。
+   * 给 executor 的写操作包一层错误捕获:任何 apply 系列与 beginReceive /
+   * finalizeReceive(本地扫描应用与对端推送接收、冲突、删除共用同一执行器)抛错
+   * 都归到所属目录,失败原因原样抛出,不改变既有重试语义。
+   *
+   * 句柄两个方法分两种包法:beginReceive 是同步的(只算槽位布局、读磁盘上的旧位图),
+   * 用 wrapSync —— 它会在句柄创建当场因路径不安全抛错,那条接收随即作废;
+   * finalizeReceive 是异步收尾,走常规 wrap。
    */
   private captureFolderErrors(folderId: string, executor: LocalExecutor): LocalExecutor {
     const wrap = <A extends unknown[]>(fn: (...args: A) => Promise<unknown>) =>
@@ -846,11 +850,21 @@ export class SyncSessionManager {
           throw error;
         }
       };
+    const wrapSync = <A extends unknown[], R>(fn: (...args: A) => R) =>
+      (...args: A): R => {
+        try {
+          return fn(...args);
+        } catch (error) {
+          this.recordFolderError(folderId, error);
+          throw error;
+        }
+      };
     return {
-      applyReceive: wrap((entry, provider) => executor.applyReceive(entry, provider)) as LocalExecutor['applyReceive'],
+      beginReceive: wrapSync((entry, opts) => executor.beginReceive(entry, opts)) as LocalExecutor['beginReceive'],
+      finalizeReceive: wrap((entry, handle) => executor.finalizeReceive(entry, handle)) as LocalExecutor['finalizeReceive'],
       applyDelete: wrap((path, tombstone) => executor.applyDelete(path, tombstone)) as LocalExecutor['applyDelete'],
-      applyConflict: wrap((path, local, remote, provider, deviceId) =>
-        executor.applyConflict(path, local, remote, provider, deviceId),
+      applyConflict: wrap((path, local, remote, handle, deviceId) =>
+        executor.applyConflict(path, local, remote, handle, deviceId),
       ) as LocalExecutor['applyConflict'],
       applySend: wrap((path, deviceId) => executor.applySend(path, deviceId)) as LocalExecutor['applySend'],
       applyConflictKeepLocal: wrap((local, remote) =>
@@ -2359,7 +2373,11 @@ export class SyncSessionManager {
   private writeLocalFile(folder: FolderState, path: string, data: Buffer, version: VersionVector): IndexEntry {
     const abs = resolveSharePath(folder.path, path);
     mkdirSync(dirname(abs), { recursive: true });
-    const tmp = `${abs}.syncx-tmp`;
+    // 临时名带时间戳,不复用 `<abs>.syncx-tmp`:那个名字现在是**断点续传的在途文件**
+    // (见 partial-store.ts),一次强制写入把它截断就等于删掉别人正在收的内容,随后
+    // rename 还会把它的落地目标搬走 —— 那边的接收只会剩一个「找不到 tmp」的错。
+    // 后缀保持 .syncx-tmp:扫描器照旧跳过它,崩溃残留也归进同一条 TTL 回收。
+    const tmp = `${abs}.${Date.now().toString(36)}.syncx-tmp`;
     writeFileSync(tmp, data);
     renameSync(tmp, abs);
     const { hashes: cdh, lengths: clens } = chunkHashes(data);

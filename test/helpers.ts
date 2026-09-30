@@ -9,6 +9,66 @@ import {
 
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import { splitIntoBlocks } from '../src/blockstore.js';
+import type { IndexEntry } from '../src/index.js';
+import type { LocalExecutor, ReceiveHandle } from '../src/executor.js';
+
+/**
+ * 把一份内容切成条目所声明的那些槽位字节(按本次收的口径)。
+ *
+ * 定长口径就是 `splitIntoBlocks`;CDC 口径的块长由条目自己带着(`clens` 是发送侧扫出来的
+ * 实际边界),所以按它切片,和 `beginReceive` 里算偏移用的同一份数据 —— 换别的切法,
+ * append 会撞上「块长与槽位不符」。顺带验一条不变式:`clens` 之和必须等于内容长度,
+ * 条目自相矛盾时在这里就报出来,而不是让用例收到一半莫名失败。
+ */
+export function slotBlocks(entry: IndexEntry, data: Buffer, opts?: { cdc?: boolean }): Buffer[] {
+  if (opts?.cdc !== true) return splitIntoBlocks(data);
+  const out: Buffer[] = [];
+  let off = 0;
+  for (const len of entry.clens ?? []) {
+    const part = data.subarray(off, off + len);
+    if (part.length !== len) throw new Error(`entry ${entry.path}: clens 与实际内容长度不符`);
+    out.push(part);
+    off += len;
+  }
+  if (off !== data.length) throw new Error(`entry ${entry.path}: clens 之和 ${off} != 内容 ${data.length}`);
+  return out;
+}
+
+/**
+ * 把一份内容逐块喂进一个新建句柄(不落地),返回句柄本身。
+ *
+ * 冲突用例需要「先收齐、确认内容对,才把本地文件挪开」的那一段,以及要考察收完之后的
+ * 中间态长什么样的用例,都从这里进 —— 正常落地请直接调用 landAll。
+ * 要交付**与条目声明不符**的块(错块 / 缺块),请自己 beginReceive 再 append。
+ */
+export function fillHandle(
+  executor: LocalExecutor,
+  entry: IndexEntry,
+  data: Buffer,
+  opts?: { cdc?: boolean },
+): ReceiveHandle {
+  const handle = executor.beginReceive(entry, { cdc: opts?.cdc === true });
+  const blocks = slotBlocks(entry, data, opts);
+  for (let i = 0; i < blocks.length; i++) handle.append(i, blocks[i]!);
+  return handle;
+}
+
+/**
+ * 走完整接收管线落一份内容:beginReceive → 逐块 append → finalizeReceive。
+ *
+ * 阶段 2 之后这是接收侧**唯一**的落地通道(把块攒在内存里交给执行器的旧 API 已删除),
+ * 所以测试要落地一个条目都得从这里进 —— 也就顺手把「句柄收得下自己宣告的块数」
+ * 这条契约在每个用例里跑一遍。
+ */
+export async function landAll(
+  executor: LocalExecutor,
+  entry: IndexEntry,
+  data: Buffer,
+  opts?: { cdc?: boolean },
+): Promise<void> {
+  await executor.finalizeReceive(entry, fillHandle(executor, entry, data, opts));
+}
 
 
 /**

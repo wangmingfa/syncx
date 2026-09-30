@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { mkdtempSync, mkdirSync, writeFileSync, rmSync as rm, statSync } from 'node:fs';
+import { mkdtempSync, mkdirSync, writeFileSync, rmSync as rm, statSync, existsSync, utimesSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
 import { scanFolder } from '../src/scanner.js';
@@ -88,6 +88,40 @@ describe('scanFolder', () => {
     // scanner 返回的始终是 POSIX 分隔符(协议与索引一律用 '/'),与运行平台无关;
     // 此前这里写的是 join(...) 期望 OS 原生分隔符,在 Windows 上必然失败(commit 6213456)
     expect(changed).toEqual(['sub/deep/nested.txt']);
+    index.close();
+    rmDir(dir);
+  });
+
+  /**
+   * 断点续传让半截 tmp 可能躺在盘上几小时,所以扫描器对中间态有两件事要做,
+   * 而且两件都得钉住:在途的绝不能碰(碰了就是把进度吃了),超期的必须收走
+   * (那里面有一类是「对端根本供不出这些块」,永远不会有人来续,不回收就是共享目录里
+   * 一堆没人认领的巨型文件)。
+   */
+  it('leaves in-flight scratch pairs alone but reaps expired ones (both halves)', () => {
+    const { dir, root, index } = setup();
+    writeFileSync(join(root, 'a.txt'), 'real');
+    const fresh = join(root, 'fresh.bin.syncx-tmp');
+    writeFileSync(fresh, 'bytes written a moment ago');
+    writeFileSync(join(root, 'fresh.bin.syncx-partial'), '{"v":1}');
+    const stale = join(root, 'stale.bin.syncx-tmp');
+    writeFileSync(stale, 'nobody will resume this');
+    writeFileSync(join(root, 'stale.bin.syncx-partial'), '{"v":1}');
+    const old = (Date.now() - 8 * 24 * 3600 * 1000) / 1000; // 超过 PARTIAL_TTL_MS(7 天)
+    // utimesSync 的单位是**秒**不是毫秒:传 ms 会把时间推到公元五万年,判据反过来成立
+    utimesSync(stale, old, old);
+    utimesSync(join(root, 'stale.bin.syncx-partial'), old, old);
+
+    const { changed, filesSeen } = scanFolder(root, index, [], 'DEV-A');
+
+    // 中间态既不宣告也不计入 filesSeen(它们不是用户文件,不该撑住结构性守卫)
+    expect(changed).toEqual(['a.txt']);
+    expect(filesSeen).toBe(1);
+    expect(existsSync(fresh)).toBe(true);
+    expect(existsSync(join(root, 'fresh.bin.syncx-partial'))).toBe(true);
+    // 过期的一整对都被收走,不留半对
+    expect(existsSync(stale)).toBe(false);
+    expect(existsSync(join(root, 'stale.bin.syncx-partial'))).toBe(false);
     index.close();
     rmDir(dir);
   });

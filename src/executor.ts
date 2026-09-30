@@ -1,23 +1,63 @@
-import { closeSync, fsyncSync, mkdirSync, openSync, renameSync, writeFileSync, writeSync, rmSync, existsSync, statSync, realpathSync, copyFileSync, readdirSync } from 'node:fs';
+import { closeSync, fsyncSync, mkdirSync, openSync, readSync, renameSync, writeSync, rmSync, existsSync, statSync, realpathSync, copyFileSync, readdirSync } from 'node:fs';
 import { dirname, basename, join, relative, isAbsolute, extname, sep } from 'node:path';
 import type { IndexEntry } from './index.js';
 import type { IndexStore } from './indexstore.js';
-import { verifyBlock, hashFileViews } from './blockstore.js';
+import { verifyBlock, hashFileViews, blocksMatchOnDisk, BLOCK_SIZE } from './blockstore.js';
 import { isHardIgnored } from './ignore.js';
 import { mergeVersions, incrementVersion, createVersionVector } from './version.js';
+import { entryFingerprint, partialPaths, readManifest, removePartial, writeManifest, SlotBitmap, type PartialManifest } from './partial-store.js';
 
-export interface BlockProvider {
-  getBlocks(entry: IndexEntry): Promise<Buffer[]>;
+/**
+ * 一个在途接收的落盘句柄:块到达即按最终偏移写进 `<target>.syncx-tmp`,
+ * 位图与条目指纹落在 `<target>.syncx-partial`(见 partial-store.ts)。
+ *
+ * 这是断点续传的载体:daemon 重启后,同一内容的接收会经 beginReceive 读到旧位图,
+ * 只补缺的槽位。内存占用从 O(文件大小) 降到 O(单块)。
+ *
+ * 它是接收侧**唯一**的落地通道:旧的入口要求调用方先把全部块攒成一个数组再交出来
+ * (那正是 O(文件) 的来源,CDC 口径还要再把它们整份拼接一次),已随阶段 2 一并删除 ——
+ * 留着它就会给「先攒内存再落地」留一条回头路。
+ */
+export interface ReceiveHandle {
+  /** 该槽位是否已正确写入。 */
+  has(index: number): boolean;
+  /** 已收槽位数。 */
+  count(): number;
+  /** 已收字节数(供传输进度统计)。 */
+  bytes(): number;
+  /** 写入一个槽位(乱序安全:按预计算偏移随机写)。块校验由调用方在到达时完成。 */
+  append(index: number, data: Buffer): void;
+  /**
+   * 只读检查「这份内容现在就能落地」:位图已满,且 tmp 的定长块视图与条目一致。
+   * 不碰磁盘,也只可能抛这两种错(没收齐 / 收齐了但内容不符)。冲突路径用它做前置判断
+   * (见 applyConflict):校验不过时本地文件还不能动。
+   */
+  preflight(): void;
+  /** 校验 + 版本快照 + rename 落地 + 清中间态,返回落盘 mtime。位图不满会抛错。 */
+  finalize(): Promise<number>;
+  /** 放弃:keepPartial=true 保留 tmp+manifest 供续传,false 整份作废。 */
+  abort(keepPartial: boolean): void;
 }
 
 export interface LocalExecutor {
-  applyReceive(entry: IndexEntry, provider: BlockProvider): Promise<void>;
+  /**
+   * 把一个**已经收齐**的句柄落地(校验/快照/rename)并登记索引。块是逐块 append 进
+   * 句柄的,这里只收尾 —— 不再有任何一次「整份内容」的搬运。
+   */
+  finalizeReceive(entry: IndexEntry, handle: ReceiveHandle): Promise<void>;
+  /** 开启(或续上)一个在途接收。同内容重入会复用磁盘上的中间态。 */
+  beginReceive(entry: IndexEntry, opts: { cdc: boolean }): ReceiveHandle;
   applyDelete(path: string, tombstone: IndexEntry): Promise<void>;
+  /**
+   * 双方都改过同一份文件:本地内容保留成 `.sync-conflict-` 副本,远端内容落地。
+   * `handle` 是远端内容**已经收齐**的接收句柄(同一管线 beginReceive 拿到的那个);
+   * 先 preflight 再动本地文件,校验不过时本地保持原样。
+   */
   applyConflict(
     path: string,
     local: IndexEntry,
     remote: IndexEntry,
-    provider: BlockProvider,
+    handle: ReceiveHandle,
     remoteDeviceId: string,
   ): Promise<IndexEntry>;
   /**
@@ -37,14 +77,51 @@ export interface LocalExecutor {
 }
 
 /**
+ * 接收句柄的**进程内**替身:调用方没有本地执行器时用(测试管线、执行器缺失的降级路径)。
+ * 块攒在内存里、finalize 不碰磁盘 —— 它只承担块管线必需的那件事:记住哪些槽位收到了、
+ * 收了多少字节,让请求/校验/收齐判定/进度统计都按同一套接口跑。
+ *
+ * 生产路径永远走 executor.beginReceive 的磁盘句柄;这里之所以还留一份内存实现,是为了
+ * 不让 peer.ts 到处写 `handle?.` 分支 —— 那种分支会让「有没有落盘能力」变成调用方要
+ * 关心的事,而它本来只该关心「收没收到」。
+ */
+export function createMemoryReceiveHandle(slots: number): ReceiveHandle {
+  const got = new Array<Buffer | undefined>(slots);
+  let done = 0;
+  let bytes = 0;
+  return {
+    has: (index) => got[index] !== undefined,
+    count: () => done,
+    bytes: () => bytes,
+    preflight(): void {
+      if (done !== slots) throw new Error(`incomplete receive: ${done}/${slots} block(s)`);
+    },
+    append(index, data) {
+      if (index < 0 || index >= slots || got[index] !== undefined) return;
+      got[index] = data;
+      done += 1;
+      bytes += data.length;
+    },
+    async finalize() {
+      if (done !== slots) throw new Error(`incomplete receive: ${done}/${slots} block(s)`);
+      return Date.now();
+    },
+    abort() {
+      /* 内存替身没有中间态可保留,也没有可清理的磁盘残骸 */
+    },
+  };
+}
+
+/**
  * 解析共享目录内的相对路径为绝对路径,并做符号链接越界校验:
  * 沿路径各段自顶向下,对**已存在**的段做 realpath 检查,任何段解析后指向
- * 共享目录之外则抛错。读写两侧共用(applyReceive/applyDelete/applyConflict
+ * 共享目录之外则抛错。读写两侧共用(finalizeReceive/applyDelete/applyConflict
  * 与 readLocalBlock),防止对端利用目录内符号链接读写共享目录之外的文件。
  * 尚不存在的路径段(将由 mkdirSync recursive 安全创建)跳过。
  *
  * 同时拒绝硬忽略路径(HARD_IGNORE_NAMES:`.git`/`.hg`/`.svn`/`.syncx-trash`/
- * `.syncx-folder`,以及冲突副本命名)。这是硬忽略的**最后一道、也是唯一一道文件系统级闸门**:
+ * `.syncx-folder`,加上冲突副本命名与 `.syncx-tmp`/`.syncx-partial` 中间态后缀)。
+ * 这是硬忽略的**最后一道、也是唯一一道文件系统级闸门**:
  * 即使上游某个调用方漏了过滤,同步也无法把对端内容写进本机 `.git`,更无法把本机的 `.git`
  * 移进回收站。放在这里而不是只放在 peer/scanner 里,是因为「不碰这些路径」最终要由
  * 真正动文件的那一层保证,而这一层是全部读写操作的必经之路。
@@ -234,57 +311,195 @@ export function createLocalExecutor(
     }
   }
 
-  /** 校验块完整性并原子落地一个条目:写临时文件 + rename,返回落盘后的 mtime。 */
-  async function landRemote(entry: IndexEntry, blocks: Buffer[]): Promise<number> {
-    if (blocks.length !== entry.blocks.length) {
-      throw new Error(`block count mismatch for ${entry.path}`);
-    }
-    for (let i = 0; i < blocks.length; i++) {
-      if (!verifyBlock(blocks[i]!, entry.blocks[i]!)) {
-        throw new Error(`block ${i} hash mismatch for ${entry.path}`);
-      }
-    }
+  /**
+   * 组提交节奏:每攒够这么多槽位,先 fsync tmp 再写 manifest。
+   *
+   * 顺序是铁律,不可颠倒 —— manifest 说「这块已在盘上」而字节还没刷盘,崩溃后续传就会
+   * 把一个空洞当成好块跳过(所以续传自检也只兜住一部分,顺序才是根保证)。
+   * 取 8:再密就退化成「每块一次 fsync」,大文件会被刷盘拖慢;再稀则崩溃时多丢几个块的重传量。
+   */
+  const PARTIAL_COMMIT_SLOTS = 8;
 
+  /**
+   * 开启(或续上)一个在途接收,返回逐块落盘句柄。
+   *
+   * 槽位偏移在规划时就按条目算死(CDC 口径取 `clens` 前缀和,定长口径取 `i * BLOCK_SIZE`),
+   * 块因此可以按任意到达顺序随机写进 `<target>.syncx-tmp` —— 每个块落在它最终该在的位置,
+   * 收齐后 rename 即落地,全程没有任何一次「整份内容」的搬运,内存峰值 = 单个块。
+   */
+  function beginReceive(entry: IndexEntry, opts: { cdc: boolean }): ReceiveHandle {
     const target = resolvePath(entry.path);
-    // 覆盖现存文件前先留存旧内容(全新文件接收不产生版本)。applyConflict 路径
-    // 的本地文件已 rename 成 .sync-conflict- 副本让出原路径,天然不会重复快照。
-    snapshotVersion(entry.path);
-    pruneVersions(entry.path);
-    mkdirSync(dirname(target), { recursive: true });
-
-    const tmp = `${target}.syncx-tmp`;
-    // 逐块写盘而不是 Buffer.concat 整文件:concat 会让接收峰值内存变成「块的 2 倍」
-    // (blocks 数组 + concat 结果同时驻留),大文件直接把 daemon 顶到 OOM。
-    // 随机写用 5 参形式 —— writeSync(fd, buf, offset, length, position) 的第 3 参是
-    // **buffer 内偏移**、不是文件位置,3 参形式会把每一块都覆盖到文件开头。
-    // 写完必须 fsync 再 rename:流式落盘后"崩在写中间"是常态,rename 前不刷盘,
-    // 崩溃可能留下"已改名但内容未刷"的文件(比丢一个 tmp 严重得多)。
-    const fd = openSync(tmp, 'w');
-    try {
-      let offset = 0;
-      for (const block of blocks) {
-        let written = 0;
-        while (written < block.length) {
-          written += writeSync(fd, block, written, block.length - written, offset + written);
-        }
-        offset += block.length;
-      }
-      fsyncSync(fd);
-    } finally {
-      closeSync(fd);
+    const paths = partialPaths(target);
+    const hashes = opts.cdc ? entry.cdh! : entry.blocks;
+    const slots = hashes.length;
+    const offsets = new Array<number>(slots);
+    const lengths = new Array<number>(slots);
+    let total = 0;
+    let maxLen = 0;
+    for (let i = 0; i < slots; i++) {
+      offsets[i] = total;
+      // 定长末块按 size 收口;CDC 块长直接来自条目(两者之和即 total = 文件字节数)
+      lengths[i] = opts.cdc ? entry.clens![i]! : Math.min(BLOCK_SIZE, entry.size - total);
+      total += lengths[i]!;
+      if (lengths[i]! > maxLen) maxLen = lengths[i]!;
     }
-    renameSync(tmp, target);
+    const fingerprint = entryFingerprint(entry);
 
-    return statSync(target).mtimeMs;
+    let bitmap = new SlotBitmap(slots);
+    let bytes = 0;
+    let startedAt = Date.now();
+    const prev = readManifest(paths.manifest, { fingerprint, cdc: opts.cdc, slots });
+    // 只认「manifest 说得清这份内容」:tmp 的长度不用等式校验 —— 条目的声明尺寸与块实长
+    // 可能本就不等(旧对端的 size 是它自己看到的),而长度不符的槽位在下面的自检里
+    // 一律读不满、自动清位退回重传,末尾还有 blocksMatchOnDisk 这道全量闸门兜着。
+    const resumed = prev !== null && existsSync(paths.tmp);
+    if (resumed) {
+      bitmap = new SlotBitmap(slots, prev!.bitmap);
+      startedAt = prev!.startedAt;
+      // 续传自检:位图声称已写的槽位逐个回读验哈希。半截块(崩在写中间)、被别的进程
+      // 改过的区间都在这里清掉位、退回缺失态重传。宁可多读一遍盘,不可把坏块当成已收 ——
+      // 代价只在重启后的第一次接收上付,而它省下的是整份重传。
+      const vf = openSync(paths.tmp, 'r');
+      try {
+        const buf = Buffer.allocUnsafe(maxLen);
+        for (let i = 0; i < slots; i++) {
+          if (!bitmap.has(i)) continue;
+          const n = readSync(vf, buf, 0, lengths[i]!, offsets[i]!);
+          if (n !== lengths[i]! || !verifyBlock(buf.subarray(0, n), hashes[i]!)) {
+            bitmap.clear(i);
+            continue;
+          }
+          bytes += n;
+        }
+      } finally {
+        closeSync(vf);
+      }
+    }
+
+    // 磁盘中间态是**按需**创建的:第一个块到达(或确实要落地)才建目录、开句柄。
+    // beginReceive 一进来就 fopen 的话,一条「规划完却一个块都没收」的接收(占位、
+    // 双方同删、路径被判不安全)会在用户目录里留下一个没人认领的空 tmp。
+    let fd: number | undefined;
+    let dirty = 0;
+
+    function ensureFd(): number {
+      if (fd !== undefined) return fd;
+      mkdirSync(dirname(target), { recursive: true });
+      // 自认为已有内容 → 'r+':'w' 会把写好的 tmp 截成空文件,那等于把断点续传删了。
+      // 全新接收(或空文件)→ 'w',顺带把上一轮的残骸截干净。
+      fd = openSync(paths.tmp, bitmap.count() > 0 ? 'r+' : 'w');
+      return fd;
+    }
+
+    /** 关掉写句柄(幂等)。Windows 上句柄不关就 rename / 删不掉,每条终态路径都必须先过这里。 */
+    function closeFd(): void {
+      if (fd === undefined) return;
+      closeSync(fd);
+      fd = undefined;
+    }
+
+    /** 把「哪些槽位已在盘上」交代给磁盘:先 fsync 字节,再写位图(见 PARTIAL_COMMIT_SLOTS)。 */
+    function commit(): void {
+      if (dirty === 0 || fd === undefined) return;
+      fsyncSync(fd);
+      const m: PartialManifest = {
+        v: 1,
+        fingerprint,
+        cdc: opts.cdc,
+        slots,
+        bitmap: bitmap.toBase64(),
+        startedAt,
+        updatedAt: Date.now(),
+      };
+      writeManifest(paths.manifest, m);
+      dirty = 0;
+    }
+
+    /**
+     * 定长视图是两种口径共用的正确性依据:CDC 块拼起来就是同一份字节,重切一次必然
+     * 得到 entry.blocks,所以这里不需要知道本次按哪种口径收的。流式逐块读、首处不符
+     * 立刻返回,内存峰值仍然只有块级。空文件没有字节可验,直接判定通过。
+     */
+    function contentMatches(): boolean {
+      return slots === 0 || blocksMatchOnDisk(paths.tmp, entry.blocks);
+    }
+
+    /** 只读闸门:位图已满,且 tmp 的定长块视图与条目逐块吻合。不抛这两种情况以外的错。 */
+    function preflight(): void {
+      if (!bitmap.full()) {
+        throw new Error(`incomplete receive for ${entry.path}: ${bitmap.count()}/${slots} block(s)`);
+      }
+      if (!contentMatches()) throw new Error(`content mismatch for ${entry.path}`);
+    }
+
+    return {
+      has: (index) => bitmap.has(index),
+      count: () => bitmap.count(),
+      bytes: () => bytes,
+      preflight,
+
+      append(index: number, data: Buffer): void {
+        if (bitmap.has(index)) return; // 重复响应:幂等,不重写也不重复计数
+        // 落盘前逐块验哈希(越界一并挡住)。peer 在块到达时已经验过一次,这道是执行器
+        // 自己的:位图一旦说「这块已在盘上」就必须是真的对,续传与终验才敢信它。
+        const expected = hashes[index];
+        if (expected === undefined || !verifyBlock(data, expected)) {
+          throw new Error(`block ${index} hash mismatch for ${entry.path}`);
+        }
+        const handle = ensureFd();
+        // 5 参形式 —— 第 3 参是 buffer 内偏移、不是文件位置,3 参形式会把每块都写到文件开头
+        let written = 0;
+        while (written < data.length) {
+          written += writeSync(handle, data, written, data.length - written, offsets[index]! + written);
+        }
+        bitmap.set(index);
+        bytes += data.length;
+        dirty += 1;
+        if (dirty >= PARTIAL_COMMIT_SLOTS || bitmap.full()) commit();
+      },
+
+      async finalize(): Promise<number> {
+        if (!bitmap.full()) {
+          // 还没收齐就落地 = 把空洞当成内容。中间态**保留**:这条接收本来就还能续。
+          throw new Error(`incomplete receive for ${entry.path}: ${bitmap.count()}/${slots} block(s)`);
+        }
+        if (!contentMatches()) {
+          // 位图说齐了、盘上内容不对(块被篡改 / tmp 被动过):留着也没用,整对作废重传
+          closeFd();
+          removePartial(target);
+          throw new Error(`content mismatch for ${entry.path}`);
+        }
+        // 空文件的接收一个块都没有(不会创建 tmp),落地就是一份空文件:补上创建这一步。
+        if (fd === undefined) ensureFd();
+        closeFd();
+        // 覆盖本机现存文件前留存旧内容(全新文件不产生版本)。冲突路径的本地文件已经
+        // rename 成 .sync-conflict- 副本让出原路径,这里天然不会重复快照。
+        snapshotVersion(entry.path);
+        pruneVersions(entry.path);
+        renameSync(paths.tmp, target);
+        removePartial(target); // tmp 已改名,这里真正清掉的是 manifest
+        return statSync(target).mtimeMs;
+      },
+
+      abort(keepPartial: boolean): void {
+        // 保留中间态时先把最后一批字节交代干净,否则这段进度在重启后就是白写的。
+        // 落地成功后再调(终态收口会统一走这里)必须是无操作:句柄已关、位图已清零。
+        if (fd !== undefined) {
+          if (keepPartial) commit();
+          closeFd();
+        }
+        if (!keepPartial) removePartial(target);
+      },
+    };
   }
 
   return {
-    async applyReceive(entry: IndexEntry, provider: BlockProvider): Promise<void> {
-      const blocks = await provider.getBlocks(entry);
+    async finalizeReceive(entry: IndexEntry, handle: ReceiveHandle): Promise<void> {
+      const mtime = await handle.finalize();
       // 记录落盘后的 mtime,供扫描免哈希快速跳过未变更文件
-      const mtime = await landRemote(entry, blocks);
       index.saveEntry({ ...entry, mtime });
     },
+    beginReceive,
     async applyDelete(path: string, tombstone: IndexEntry): Promise<void> {
       const target = resolvePath(path);
       if (existsSync(target) && statSync(target).isFile()) {
@@ -297,7 +512,7 @@ export function createLocalExecutor(
       path: string,
       local: IndexEntry,
       remote: IndexEntry,
-      provider: BlockProvider,
+      handle: ReceiveHandle,
       remoteDeviceId: string,
     ): Promise<IndexEntry> {
       // 双方同时删除:只合并版本向量写墓碑,绝不落盘空文件复活删除
@@ -317,17 +532,9 @@ export function createLocalExecutor(
       const ext = extname(path);
       const base = path.slice(0, path.length - ext.length);
 
-      // 先获取并校验远端块:失败(对端失联/块校验不符)时本地文件保持不动,
-      // 避免本地被 rename 成冲突副本后原路径变空,下一轮扫描产生墓碑并传播删除
-      const blocks = await provider.getBlocks(remote);
-      if (blocks.length !== remote.blocks.length) {
-        throw new Error(`block count mismatch for ${remote.path}`);
-      }
-      for (let i = 0; i < blocks.length; i++) {
-        if (!verifyBlock(blocks[i]!, remote.blocks[i]!)) {
-          throw new Error(`block ${i} hash mismatch for ${remote.path}`);
-        }
-      }
+      // 先确认远端内容齐了而且对(位图满 + 逐块哈希吻合):校验不过时本地文件保持不动,
+      // 避免本地被 rename 成冲突副本后原路径变空,下一轮扫描产生墓碑并传播删除。
+      handle.preflight();
 
       // 校验通过后才动本地文件:本地内容保留为冲突副本,绝不静默丢弃。
       // 时间戳精度到毫秒 + 逐次递增序号,防止同一毫秒多次冲突时副本文件名碰撞被覆盖
@@ -343,7 +550,7 @@ export function createLocalExecutor(
         renameSync(target, resolveConflictCopyPath(copyName));
       }
 
-      const mtime = await landRemote(remote, blocks);
+      const mtime = await handle.finalize();
 
       // 索引记录合并版本(双方修改都保留),并写入落地后的 mtime
       const landed: IndexEntry = {

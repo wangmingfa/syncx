@@ -105,6 +105,21 @@ afterEach(() => {
   }
 });
 
+/**
+ * 关一个 manager 的正确顺序:先把在途扫描排空,再 close()。
+ *
+ * close() 是同步的,也不会等 runScan —— 扫描进行中关掉,索引库(sqlite)句柄就还攥着
+ * 临时目录,Windows 上 afterEach 的 rmDir 直接 EPERM(macOS/Linux 不锁,所以这条只在
+ * 那边红)。而 `await runScan()` 单独用也不够:它在已有扫描在跑时只置一个 scanQueued
+ * 就立刻返回(见其重入注释),所以要先让出一格真实时间、再 await 一轮。同款处理见
+ * test/folder-identity.test.ts 的收尾。
+ */
+async function shutdown(manager: SyncSessionManager): Promise<void> {
+  await new Promise((r) => setTimeout(r, 250));
+  await manager.runScan();
+  manager.close();
+}
+
 function notify(hash: string, message = 'feat: 远端提交'): NotifyMsg {
   return {
     kind: 'git-commit-notify',
@@ -147,7 +162,8 @@ function patchDiskFolder(dir: string, patch: Record<string, unknown>): void {
 
 /**
  * 用同一份配置再启一个 manager —— 模拟 daemon 重启:内存台账全丢,一切都得从
- * config.json 还原。调用前必须先 close() 掉前一个(索引库同一文件,别双开)。
+ * config.json 还原。调用前必须先经 shutdown() 关掉前一个(索引库同一文件,别双开;
+ * 直接 close() 不算关 —— 在途扫描会让句柄还攥着目录,见 shutdown 的注释)。
  */
 function reboot(dir: string): { manager: SyncSessionManager; folder: SyncSessionManager['folderStates'][number] } {
   const config = JSON.parse(readFileSync(join(dir, 'config.json'), 'utf8')) as {
@@ -656,6 +672,10 @@ describe('git commit broadcast reaches every device of the folder', () => {
     expect(folder.lastCommitHash).toBe(head);
     expect(broadcastOnDisk(dir)).toMatchObject({ commitHash: head });
 
+    // 「重启」意味着旧进程先死:不关掉它,索引的 sqlite 句柄会一直攥着临时目录,
+    // Windows 上 afterEach 的 rmDir 直接 EPERM(其余用例都关了自己的 manager,
+    // 这条有两个 manager 却只关了后者 —— 漏的那个就是旧进程)。
+    await shutdown(manager);
     const restarted = reboot(dir);
     expect(restarted.folder.gitBroadcast?.targets.sort()).toEqual(['PEER000001', 'PEER000002']);
     const sent = spyControls(restarted.manager, () => true);
@@ -669,7 +689,7 @@ describe('git commit broadcast reaches every device of the folder', () => {
     expect(restarted.folder.gitBroadcast).toBeNull();
     expect(broadcastOnDisk(dir)).toBeUndefined();
 
-    (restarted.manager as unknown as { close(): void }).close();
+    await shutdown(restarted.manager);
   });
 
   it.skipIf(!HAS_GIT)('drops the pending broadcast when the folder stops sending or loses its targets', async () => {

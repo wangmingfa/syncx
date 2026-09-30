@@ -13,7 +13,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { createSyncPeer, type PeerTransport, type IndexMode } from '../src/peer.js';
 import type { BlockRequest, BlockResponse } from '../src/messages.js';
-import { createLocalExecutor, type LocalExecutor } from '../src/executor.js';
+import { createLocalExecutor, createMemoryReceiveHandle, type LocalExecutor } from '../src/executor.js';
 import { openIndexStore } from '../src/indexstore.js';
 import {
   hashBlock,
@@ -22,7 +22,14 @@ import {
   readBlockAt,
   readChunkAt,
   chunkHashes,
+  blocksMatchOnDisk,
 } from '../src/blockstore.js';
+import {
+  SlotBitmap,
+  entryFingerprint,
+  partialPaths,
+  readManifest,
+} from '../src/partial-store.js';
 import { mergeVersions } from '../src/version.js';
 import type { IndexEntry } from '../src/index.js';
 
@@ -520,6 +527,10 @@ describe('sync peer session', () => {
       transport,
       localIndex,
       executor: {
+        // 桩执行器只关心冲突裁决那一步,但要够得着管线:阶段 2 之后 peer 在规划时就
+        // 调 beginReceive 开落盘句柄(开不出来这条接收根本不会进 pending),
+        // 所以这里也得给一个 —— 内存替身足够,本用例不落盘。
+        beginReceive: (e: IndexEntry) => createMemoryReceiveHandle(e.blocks.length),
         applyConflict: async (path: string, local: IndexEntry, remote: IndexEntry) => {
           const merged: IndexEntry = {
             path,
@@ -2182,3 +2193,140 @@ describe('双连接重复落地闸门(receiveLedger 单飞台账)', () => {
     }
   });
 });
+
+/**
+ * 断点续传的**管线**面:句柄在磁盘上,所以「重连」不需要任何协议改动 —— 新连接重新
+ * 规划同一条接收时,beginReceive 读回位图,于是请求侧天然只补缺的槽位。
+ *
+ * 这里钉的是三件在真机上最容易做错的事:①断线不能顺手把半截 tmp 删了(那是唯一的
+ * 进度);②重连后不能再把已收到的块整份重request(那是断点续传的全部收益);
+ * ③续上的进度要报给 UI(否则用户看到的是「重连后从 0 开始」)。
+ */
+describe('断点续传管线(重连只补缺块)', () => {
+  function fakeTransport() {
+    const requests: BlockRequest[] = [];
+    return {
+      transport: {
+        sendEntries(): void {},
+        sendBlockRequest(request: BlockRequest): void {
+          requests.push(request);
+        },
+        sendBlockResponse(): void {},
+      } satisfies PeerTransport,
+      requests,
+    };
+  }
+
+  function harness() {
+    const dir = mkdtempSync(join(tmpdir(), 'syncx-resume-pipe-'));
+    const root = join(dir, 'share');
+    mkdirSync(root, { recursive: true });
+    const index = openIndexStore(join(dir, 'index.db'));
+    const executor = createLocalExecutor(root, index, join(root, '.syncx-trash'));
+    const localIndex = new Map<string, IndexEntry>();
+    const receiveLedger = new Map<string, import('../src/peer.js').ReceiveClaim>();
+    const mkPeer = () => {
+      const f = fakeTransport();
+      const peer = createSyncPeer({
+        transport: f.transport,
+        localIndex,
+        executor,
+        readLocalBlock: (p, i) => readBlockAt(join(root, p), i),
+        deviceId: 'DEV-A',
+        remoteDeviceId: 'DEV-B',
+        receiveLedger,
+      });
+      return { peer, requests: f.requests };
+    };
+    // 三块各不相同:哪一块被重request、哪一块落在哪个偏移,都看得出来
+    const chunks = [0x41, 0x42, 0x43].map((b) => {
+      const buf = Buffer.alloc(BLOCK_SIZE, b);
+      buf[9] = b;
+      return buf;
+    });
+    const remote = entry(
+      'big.bin',
+      [['dev-b', 1]],
+      chunks.map(hashBlock),
+      chunks.length * BLOCK_SIZE,
+    );
+    return { dir, root, index, localIndex, receiveLedger, chunks, remote, mkPeer };
+  }
+
+  const respond = (peer: ReturnType<typeof createSyncPeer>, h: ReturnType<typeof harness>, i: number) =>
+    peer.onBlockResponse({
+      deviceId: 'DEV-B',
+      path: 'big.bin',
+      blockIndex: i,
+      hash: hashBlock(h.chunks[i]!),
+      data: h.chunks[i]!,
+    });
+
+  it('keeps the partial across the disconnect and requests only what is still missing', async () => {
+    const h = harness();
+    try {
+      const first = h.mkPeer();
+      await first.peer.onPeerIndex([h.remote]);
+      expect(first.requests.map((r) => r.blockIndex)).toEqual([0, 1, 2]);
+
+      await respond(first.peer, h, 0);
+      await respond(first.peer, h, 1);
+      expect(existsSync(join(h.root, 'big.bin'))).toBe(false); // 还差一块,谁也不许落地
+      const progress = first.peer.getSyncProgress();
+      expect(progress.files?.[0]).toMatchObject({ direction: 'receive', bytesDone: 2 * BLOCK_SIZE });
+
+      // 连接作废:句柄关掉、最后一批字节交代给位图,中间态原地留着
+      first.peer.releaseClaims();
+      const { tmp, manifest } = partialPaths(join(h.root, 'big.bin'));
+      expect(existsSync(tmp)).toBe(true);
+      const stored = readManifest(manifest, {
+        fingerprint: entryFingerprint(h.remote),
+        cdc: false,
+        slots: 3,
+      });
+      expect(stored).not.toBeNull();
+      expect(new SlotBitmap(3, stored!.bitmap).count()).toBe(2);
+      expect(h.receiveLedger.size).toBe(0); // 认领当场交还,不等保鲜期
+
+      // 重连:同一份内容再次规划,已收的两块既不再请求也不被重写
+      const second = h.mkPeer();
+      await second.peer.onPeerIndex([h.remote]);
+      expect(second.requests.map((r) => r.blockIndex)).toEqual([2]);
+      // 进度从盘上接着算(UI 上那条传输不会退回 0%)
+      expect(second.peer.getSyncProgress().files?.[0]).toMatchObject({ bytesDone: 2 * BLOCK_SIZE });
+
+      await respond(second.peer, h, 2);
+      expect(blocksMatchOnDisk(join(h.root, 'big.bin'), h.remote.blocks)).toBe(true);
+      expect(existsSync(tmp)).toBe(false);
+      expect(existsSync(manifest)).toBe(false);
+      h.index.close();
+    } finally {
+      rmDir(h.dir);
+    }
+  });
+
+  it('drops the whole pair when the peer takes the path back while it is still in flight', async () => {
+    const h = harness();
+    try {
+      const a = h.mkPeer();
+      // 本机先有这一版(实体 + 索引),规划才会认得这个路径,墓碑才走 delete 分支
+      const v1 = entry('big.bin', [['dev-b', 0]], [], 0);
+      writeFileSync(join(h.root, 'big.bin'), h.chunks[0]!);
+      h.localIndex.set('big.bin', v1);
+
+      await a.peer.onPeerIndex([h.remote]);
+      await respond(a.peer, h, 0);
+      expect(existsSync(join(h.root, 'big.bin.syncx-tmp'))).toBe(true);
+
+      const tombstone = { ...entry('big.bin', [['dev-b', 1]], [], 0), deleted: true };
+      await a.peer.onPeerIndex([tombstone]);
+      // 这份内容已经没有出处了:留着只是盘上残骸,而且下一轮的 beginReceive 会拿它当进度
+      expect(existsSync(join(h.root, 'big.bin.syncx-tmp'))).toBe(false);
+      expect(existsSync(join(h.root, 'big.bin.syncx-partial'))).toBe(false);
+      h.index.close();
+    } finally {
+      rmDir(h.dir);
+    }
+  });
+});
+

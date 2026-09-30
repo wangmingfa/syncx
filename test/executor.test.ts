@@ -8,10 +8,15 @@ import {
   readdirSync,
   symlinkSync,
 } from 'node:fs';
-import { rmDir, canCreateSymlinks } from './helpers.js';
+import { rmDir, canCreateSymlinks, landAll, fillHandle } from './helpers.js';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { createLocalExecutor, resolveSharePath, preserveLocalAsConflict } from '../src/executor.js';
+import {
+  createLocalExecutor,
+  createMemoryReceiveHandle,
+  resolveSharePath,
+  preserveLocalAsConflict,
+} from '../src/executor.js';
 import { openIndexStore } from '../src/indexstore.js';
 import { BLOCK_SIZE, hashBlock } from '../src/blockstore.js';
 
@@ -32,7 +37,7 @@ function entry(
 }
 
 describe('local executor receive', () => {
-  it('writes a new file in a nested path from provider blocks and records it in the index', async () => {
+  it('writes a new file in a nested path from received blocks and records it in the index', async () => {
     const dir = mkdtempSync(join(tmpdir(), 'syncx-exec-'));
     const root = join(dir, 'share');
     mkdirSync(root, { recursive: true });
@@ -41,11 +46,8 @@ describe('local executor receive', () => {
     const executor = createLocalExecutor(root, index, join(root, '.syncx-trash'));
     const content = Buffer.from('hello world');
     const remote = entry('docs/plan.md', [['dev-a', 1]], [hashBlock(content)], content.length);
-    const provider = {
-      getBlocks: async (): Promise<Buffer[]> => [content],
-    };
 
-    await executor.applyReceive(remote, provider);
+    await landAll(executor, remote, content);
 
     expect(readFileSync(join(root, 'docs/plan.md'))).toEqual(content);
     expect(index.getEntry('docs/plan.md')).toMatchObject(remote);
@@ -66,14 +68,13 @@ describe('local executor receive', () => {
 
     const newContent = Buffer.from('new');
     const remote = entry('doc.txt', [['dev-b', 1]], [hashBlock(newContent)], newContent.length);
-    const provider = {
-      getBlocks: async (): Promise<Buffer[]> => [newContent],
-    };
 
-    await executor.applyReceive(remote, provider);
+    await landAll(executor, remote, newContent);
 
     expect(readFileSync(target)).toEqual(newContent);
+    // 落地即清中间态:tmp 与 manifest 都不该留下
     expect(existsSync(`${target}.syncx-tmp`)).toBe(false);
+    expect(existsSync(`${target}.syncx-partial`)).toBe(false);
     expect(index.getEntry('doc.txt')).toMatchObject(remote);
 
     index.close();
@@ -88,12 +89,11 @@ describe('local executor receive', () => {
 
     const executor = createLocalExecutor(root, index, join(root, '.syncx-trash'));
     const remote = entry('doc.txt', [['dev-a', 1]], [hashBlock(Buffer.from('expected'))]);
-    const provider = {
-      getBlocks: async (): Promise<Buffer[]> => [Buffer.from('corrupted')],
-    };
-
-    await expect(executor.applyReceive(remote, provider)).rejects.toThrow(/hash mismatch/);
+    // 校验发生在写盘**之前**:错块既进不了 tmp,也不会给它开句柄建文件
+    const handle = executor.beginReceive(remote, { cdc: false });
+    expect(() => handle.append(0, Buffer.from('corrupted'))).toThrow(/hash mismatch/);
     expect(index.getEntry('doc.txt')).toBeUndefined();
+    expect(existsSync(join(root, 'doc.txt.syncx-tmp'))).toBe(false);
 
     index.close();
     rmDir(dir);
@@ -113,13 +113,10 @@ describe('local executor receive', () => {
 
     const executor = createLocalExecutor(root, index, join(root, '.syncx-trash'));
     const content = Buffer.from('injected');
-    // 恶意对端:经符号链接写入共享目录之外
+    // 恶意对端:经符号链接写入共享目录之外。守卫在 beginReceive 就拦住(路径解析是开
+    // 接收的第一步),块根本到不了盘上。
     const remote = entry('escape/secret.txt', [['dev-b', 1]], [hashBlock(content)], content.length);
-    const provider = {
-      getBlocks: async (): Promise<Buffer[]> => [content],
-    };
-
-    await expect(executor.applyReceive(remote, provider)).rejects.toThrow(/unsafe path|escape/i);
+    expect(() => executor.beginReceive(remote, { cdc: false })).toThrow(/unsafe path|escape/i);
     // 目录外的文件应保持不变
     expect(readFileSync(join(escape, 'secret.txt'))).toEqual(Buffer.from('top secret'));
 
@@ -175,10 +172,14 @@ describe('local executor receive', () => {
     expect(() => resolveSharePath(root, '.GIT/config')).toThrow(/hard-ignored/);
     // 段相同才算命中:.github 是普通目录
     expect(() => resolveSharePath(root, '.github/workflows/ci.yml')).not.toThrow();
+    // 断点续传的中间态后缀同样入闸:旧对端或乱发的对端把 x.syncx-tmp 当普通文件推过来时,
+    // 这台机器的接收管线必须拒收(否则两台机器互相收对方的 tmp 会成对繁殖)
+    expect(() => resolveSharePath(root, 'a.txt.syncx-tmp')).toThrow(/hard-ignored/);
+    expect(() => resolveSharePath(root, 'a.txt.SYNCX-PARTIAL')).toThrow(/hard-ignored/);
 
     // 端到端:接收与删除都被拒,本机 .git 分毫未动
-    await expect(
-      executor.applyReceive(
+    expect(() =>
+      executor.beginReceive(
         {
           path: '.git/config',
           version: new Map([['dev-b', 1]]),
@@ -186,9 +187,9 @@ describe('local executor receive', () => {
           deleted: false,
           blocks: [hashBlock(Buffer.from('evil'))],
         },
-        { getBlocks: async () => [Buffer.from('evil')] },
+        { cdc: false },
       ),
-    ).rejects.toThrow(/hard-ignored/);
+    ).toThrow(/hard-ignored/);
     await expect(
       executor.applyDelete('.git/config', {
         path: '.git/config',
@@ -318,11 +319,13 @@ describe('local executor conflict', () => {
       [hashBlock(remoteContent)],
       remoteContent.length,
     );
-    const provider = {
-      getBlocks: async (): Promise<Buffer[]> => [remoteContent],
-    };
-
-    await executor.applyConflict('doc.txt', index.getEntry('doc.txt')!, remote, provider, 'dev-b');
+    await executor.applyConflict(
+      'doc.txt',
+      index.getEntry('doc.txt')!,
+      remote,
+      fillHandle(executor, remote, remoteContent),
+      'dev-b',
+    );
 
     // 本地内容保留为冲突副本,远端版本落地,索引记录合并版本
     const copies = readdirSync(root).filter((name) => name.startsWith('doc.sync-conflict-'));
@@ -354,7 +357,7 @@ describe('local executor conflict', () => {
       'doc.txt',
       localTombstone,
       remoteTombstone,
-      { getBlocks: async (): Promise<Buffer[]> => [] },
+      createMemoryReceiveHandle(0),
       'dev-b',
     );
 
@@ -397,7 +400,7 @@ describe('local executor conflict', () => {
       'doc.txt',
       index.getEntry('doc.txt')!,
       remote1,
-      { getBlocks: async (): Promise<Buffer[]> => [remoteContent1] },
+      fillHandle(executor, remote1, remoteContent1),
       'dev-a',
     );
 
@@ -417,7 +420,7 @@ describe('local executor conflict', () => {
       'doc.txt',
       local2,
       remote2,
-      { getBlocks: async (): Promise<Buffer[]> => [remoteContent2] },
+      fillHandle(executor, remote2, remoteContent2),
       'dev-a',
     );
 
@@ -433,7 +436,7 @@ describe('local executor conflict', () => {
     rmDir(dir);
   });
 
-  it('keeps the local file intact when remote blocks cannot be fetched during a conflict', async () => {
+  it('keeps the local file intact when the remote content has not been fully received', async () => {
     const dir = mkdtempSync(join(tmpdir(), 'syncx-exec-'));
     const root = join(dir, 'share');
     mkdirSync(root, { recursive: true });
@@ -456,25 +459,23 @@ describe('local executor conflict', () => {
       6,
     );
 
-    // 对端中途失联:块获取抛错。修复前本地文件已被 rename 成冲突副本,
+    // 对端中途失联:块一个都没到(句柄空着)。修复前本地文件已被 rename 成冲突副本,
     // 原路径变空 → 下一轮扫描产生墓碑并传播删除;修复后本地文件保持不动。
     await expect(
       executor.applyConflict(
         'doc.txt',
         index.getEntry('doc.txt')!,
         remote,
-        {
-          getBlocks: async (): Promise<Buffer[]> => {
-            throw new Error('peer disconnected');
-          },
-        },
+        executor.beginReceive(remote, { cdc: false }),
         'dev-b',
       ),
-    ).rejects.toThrow('peer disconnected');
+    ).rejects.toThrow(/incomplete receive/);
 
     expect(readFileSync(target)).toEqual(localContent);
     expect(readdirSync(root).filter((n) => n.includes('.sync-conflict-'))).toHaveLength(0);
     expect(index.getEntry('doc.txt')?.deleted).toBe(false);
+    // 一个块都没收 → 连 tmp 都不该被创建出来(中间态是按需建的)
+    expect(existsSync(`${target}.syncx-tmp`)).toBe(false);
 
     index.close();
     rmDir(dir);
@@ -495,9 +496,10 @@ describe('local executor file versions', () => {
     writeFileSync(target, oldContent);
 
     const newContent = Buffer.from('new content');
-    await executor.applyReceive(
+    await landAll(
+      executor,
       entry('doc.txt', [['dev-b', 1]], [hashBlock(newContent)], newContent.length),
-      { getBlocks: async (): Promise<Buffer[]> => [newContent] },
+      newContent,
     );
 
     // 原路径已是对端新内容;旧内容留存于版本目录(带 .syncx-v- 时间戳后缀)
@@ -521,9 +523,10 @@ describe('local executor file versions', () => {
 
     const executor = createLocalExecutor(root, index, join(dir, 'trash'), versionsDir);
     const content = Buffer.from('first arrival');
-    await executor.applyReceive(
+    await landAll(
+      executor,
       entry('fresh.txt', [['dev-b', 1]], [hashBlock(content)], content.length),
-      { getBlocks: async (): Promise<Buffer[]> => [content] },
+      content,
     );
 
     expect(existsSync(versionsDir)).toBe(false);
@@ -545,9 +548,10 @@ describe('local executor file versions', () => {
     writeFileSync(join(root, 'docs', 'plan.md'), oldContent);
 
     const newContent = Buffer.from('v2');
-    await executor.applyReceive(
+    await landAll(
+      executor,
       entry('docs/plan.md', [['dev-b', 1]], [hashBlock(newContent)], newContent.length),
-      { getBlocks: async (): Promise<Buffer[]> => [newContent] },
+      newContent,
     );
 
     const versions = readdirSync(join(versionsDir, 'docs'));
@@ -573,9 +577,10 @@ describe('local executor file versions', () => {
     // 覆盖 12 次:每次的旧内容都会留档,超出上限的最旧版本应被清理
     for (let i = 0; i < 12; i++) {
       const content = Buffer.from(`content-${i}`);
-      await executor.applyReceive(
+      await landAll(
+        executor,
         entry('doc.txt', [['dev-b', i + 1]], [hashBlock(content)], content.length),
-        { getBlocks: async (): Promise<Buffer[]> => [content] },
+        content,
       );
     }
 
@@ -607,9 +612,10 @@ describe('local executor file versions', () => {
     // 嵌套路径的版本留档在 <versionsDir>/docs/ 子目录里,修剪必须扫到这一层
     for (let i = 0; i < 12; i++) {
       const content = Buffer.from(`content-${i}`);
-      await executor.applyReceive(
+      await landAll(
+        executor,
         entry('docs/plan.md', [['dev-b', i + 1]], [hashBlock(content)], content.length),
-        { getBlocks: async (): Promise<Buffer[]> => [content] },
+        content,
       );
     }
 
@@ -638,12 +644,8 @@ describe('local executor file versions', () => {
     for (let i = 0; i < 5; i++) {
       const content = Buffer.from(`content-${i}`);
       const blocks = [hashBlock(content)];
-      await capTwo.applyReceive(entry('a.txt', [['dev-b', i + 1]], blocks, content.length), {
-        getBlocks: async (): Promise<Buffer[]> => [content],
-      });
-      await capZero.applyReceive(entry('b.txt', [['dev-b', i + 1]], blocks, content.length), {
-        getBlocks: async (): Promise<Buffer[]> => [content],
-      });
+      await landAll(capTwo, entry('a.txt', [['dev-b', i + 1]], blocks, content.length), content);
+      await landAll(capZero, entry('b.txt', [['dev-b', i + 1]], blocks, content.length), content);
     }
 
     const contentsOf = (names: string[]) => names.map((n) => readFileSync(join(versionsDir, n)).toString());
@@ -678,11 +680,17 @@ describe('local executor file versions', () => {
     index.saveEntry(entry('doc.txt', [['dev-a', 2]], [hashBlock(localContent)], localContent.length));
 
     const remoteContent = Buffer.from('remote edit');
+    const remote = entry(
+      'doc.txt',
+      [['dev-a', 1], ['dev-b', 2]],
+      [hashBlock(remoteContent)],
+      remoteContent.length,
+    );
     await executor.applyConflict(
       'doc.txt',
       index.getEntry('doc.txt')!,
-      entry('doc.txt', [['dev-a', 1], ['dev-b', 2]], [hashBlock(remoteContent)], remoteContent.length),
-      { getBlocks: async (): Promise<Buffer[]> => [remoteContent] },
+      remote,
+      fillHandle(executor, remote, remoteContent),
       'dev-b',
     );
 
@@ -796,18 +804,18 @@ describe('conflict policy keep-local (applyConflictKeepLocal)', () => {
 });
 
 /**
- * 阶段 1a 内存守卫:接收落地**不得**把整个文件再拼进内存。
+ * 阶段 1a/2 内存守卫:接收落地**不得**把整个文件拼进内存。
  *
  * 改前 landRemote 用 `writeFileSync(tmp, Buffer.concat(blocks))` —— blocks 数组本就
  * 攒着全部块,concat 再来一份,峰值是文件大小的 2 倍,大文件直接顶爆 V8 堆
- * (1.5GB 文件在默认 4GB 堆限下复现过 OOM,daemon 整个崩掉)。
+ * (1.5GB 文件在默认 4GB 堆限下复现过 OOM,daemon 整个崩掉)。阶段 2 把块直接从
+ * 网络缓冲写进 tmp 的最终偏移,`PendingEntry.blocks` 也随之消失。
  *
- * 量法:provider 的块数组在**测量开始前**分配好,applyReceive 期间只可能新增
- * concat 那一份 —— 所以「RSS 峰值增长」在改前 ≈ 文件大小、改后 ≈ 0。
- * 用 0.4× 的上限把两者分开;50ms 采样覆盖整个写循环,不依赖恰好采样到峰值的瞬间。
+ * 量法:喂给句柄的是**同一个** 1MB buffer(全测试的活集就 1MB + 一块读盘缓冲),
+ * 所以期间任何一次 O(文件大小) 的 concat 都只可能是实现自己造的。
  */
 describe('接收落地内存守卫', () => {
-  it('192MB 条目落地时 RSS 峰值增长 < 文件大小的 40%(流式写盘,无整文件 concat)', async () => {
+  it('192MB 条目落地时不出现 O(文件大小) 的整文件拼接(逐块随机写,无 concat)', async () => {
     const dir = mkdtempSync(join(tmpdir(), 'syncx-exec-mem-'));
     const root = join(dir, 'share');
     mkdirSync(root, { recursive: true });
@@ -818,11 +826,9 @@ describe('接收落地内存守卫', () => {
     const oneBlock = Buffer.alloc(BLOCK_SIZE, 7);
     const blocks = Array.from({ length: N }, () => hashBlock(oneBlock));
     const remote = entry('big.bin', [['dev-b', 1]], blocks, N * BLOCK_SIZE);
-    const delivered = Array.from({ length: N }, () => Buffer.from(oneBlock));
-    const provider = { getBlocks: async (): Promise<Buffer[]> => delivered };
 
     // 内存守卫用「追踪 Buffer.concat」而不是采样 RSS/arrayBuffers:
-    //  - landRemote 整个是同步执行,采样器在它跑完前没有任何机会运行,峰值必被漏掉;
+    //  - 落地整条链是同步执行的,采样器在它跑完前没有任何机会运行,峰值必被漏掉;
     //  - RSS 在 Windows 受工作集裁剪影响,192MB 的 concat 实测抓不到。
     // concat 正是旧实现的分配方式(OOM 的直接来源),追踪它 = 钉住「不得出现
     // O(文件大小) 的整文件拼接」这条不变式。
@@ -835,7 +841,9 @@ describe('接收落地内存守卫', () => {
     }) as typeof Buffer.concat;
 
     try {
-      await executor.applyReceive(remote, provider);
+      const handle = executor.beginReceive(remote, { cdc: false });
+      for (let i = 0; i < N; i++) handle.append(i, oneBlock);
+      await executor.finalizeReceive(remote, handle);
 
       // 正确性先断言:文件字节与逐块拼接完全一致(每块内容相同,长度即块数×1MB)
       const landed = readFileSync(join(root, 'big.bin'));

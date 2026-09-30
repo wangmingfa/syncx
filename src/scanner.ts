@@ -3,7 +3,8 @@ import { join, resolve, sep } from 'node:path';
 import type { IndexEntry } from './index.js';
 import type { IndexStore } from './indexstore.js';
 import type { IgnoreRule } from './ignore.js';
-import { isIgnoredPath, isConflictCopyName } from './ignore.js';
+import { isIgnoredPath, isConflictCopyName, isScratchSegment } from './ignore.js';
+import { pruneScratchFile } from './partial-store.js';
 import { blocksMatchOnDisk } from './blockstore.js';
 import { incrementVersion } from './version.js';
 
@@ -16,9 +17,6 @@ function isUnchanged(entry: IndexEntry, stat: { size: number; mtimeMs: number })
   if (entry.mtime === undefined) return false;
   return Math.abs(stat.mtimeMs - entry.mtime) <= MTIME_TOLERANCE_MS;
 }
-
-/** executor 原子写用的临时文件后缀,扫描时跳过。 */
-const TMP_SUFFIX = '.syncx-tmp';
 
 export interface ScanDiff {
   /** 新增或内容变化的相对路径(需重新索引并发送)。 */
@@ -111,7 +109,14 @@ export function scanFolder(
         if (!isIgnoredPath(rules, rel, true)) walk(abs, rel);
         continue;
       }
-      if (!dirent.isFile() || rel.endsWith(TMP_SUFFIX)) continue;
+      if (!dirent.isFile()) continue;
+      // 接收中间态(在途 tmp + 位图 sidecar):不参与索引/宣告,顺带回收过期残骸
+      // (断点续传让半截 tmp 能在盘上躺很久,没人续的那些必须有人收)。
+      // 非中间态的目录项不付这个 stat:pruneScratchFile 自己按后缀短路。
+      if (isScratchSegment(dirent.name)) {
+        pruneScratchFile(dir, dirent.name);
+        continue;
+      }
       // 冲突副本被硬忽略跳过,但先计数供目录卡徽标(它们不参与同步/索引/墓碑)
       if (isConflictCopyName(dirent.name)) conflictCount += 1;
       if (isIgnoredPath(rules, rel, false)) continue;

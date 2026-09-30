@@ -1,9 +1,9 @@
 import type { IndexEntry } from './index.js';
 import { buildPlan, buildDeltaPlan } from './plan.js';
 import type { BlockRequest, BlockResponse } from './messages.js';
-import type { LocalExecutor } from './executor.js';
-import { resolveSharePath, preserveLocalAsConflict } from './executor.js';
-import { verifyBlock, hashBlock, splitIntoBlocks, BLOCK_SIZE, CDC_MAX_CHUNK } from './blockstore.js';
+import type { LocalExecutor, ReceiveHandle } from './executor.js';
+import { resolveSharePath, preserveLocalAsConflict, createMemoryReceiveHandle } from './executor.js';
+import { verifyBlock, hashBlock, BLOCK_SIZE, CDC_MAX_CHUNK } from './blockstore.js';
 import { decPathFor, encryptBlock } from './e2e.js';
 import { parseIgnoreRules, isIgnoredPath, isHardIgnored, type IgnoreRule } from './ignore.js';
 import { mergeVersions } from './version.js';
@@ -220,7 +220,8 @@ export interface SyncPeer {
    */
   materialize(path: string): boolean;
   /**
-   * 释放本管线在接收认领台账(见 deps.receiveLedger)中的**全部**在手持仓。
+   * 释放本管线在接收认领台账(见 deps.receiveLedger)中的**全部**在手持仓,并作废本管线的
+   * 在途接收(句柄收口、pending 清空)。
    * 连接拆除时必须调用:死掉的管线不落地也不重试,若留着认领,另一条(活着的)
    * 连接对同一版本会一直跳到保鲜期过,把一次普通的断开演变成分钟级的收敛延迟。
    */
@@ -233,17 +234,23 @@ interface PendingEntry {
   entry: IndexEntry;
   /** The local entry, only for conflicts. */
   local?: IndexEntry;
-  blocks: Array<Buffer | undefined>;
-  received: number;
   /**
-   * 本次接收按 CDC 内容分块口径规划:true 时 blocks 槽位与块下标对应
-   * entry.cdh/clens(而不是 entry.blocks);落地前拼接还原后按定长口径重新切块,
-   * 执行器与校验完全不用感知两种布局(见 completeIfReady)。
+   * 落盘句柄:块到达即交给它逐块写盘(executor.beginReceive 的磁盘句柄,或无执行器时的
+   * 内存替身)。「已收到哪些槽位 / 收了多少字节」都以它为准 —— pending 里不再留任何
+   * 内容缓冲,接收侧的内存峰值因此与文件大小无关。
+   */
+  handle: ReceiveHandle;
+  /**
+   * 本次接收按 CDC 内容分块口径规划:true 时槽位下标对应 entry.cdh/clens
+   * (而不是 entry.blocks);句柄据此决定每块的落盘偏移。
    */
   cdc: boolean;
   /**
    * 待接收的**规划时刻**(openPending 那一刻)。收齐落地时用它算 durationMs 写进同步记录。
    * 语义是「本机决定要收这个版本」→「文件落地完成」,含排队与逐块传输,不含对端生成内容。
+   *
+   * 注意它是**本轮规划**的时刻:断点续传接上旧 tmp 时磁盘进度可能来自更早的一轮,
+   * 于是 durationMs 只计本次续传用时。宁可短报,不要把两轮之前的等待算进来。
    */
   startedAt: number;
 }
@@ -530,8 +537,10 @@ export function createSyncPeer(deps: SyncPeerDeps): SyncPeer {
   }
 
   /** 中止某路径的在途接收与块重试:对端声明它已删除时,继续拉块毫无意义,
-   *  而且迟到的块响应会把刚删除的文件临时复活。 */
+   *  而且迟到的块响应会把刚删除的文件临时复活。中间态一并作废 —— 这份内容已经
+   *  没有出处了,留着只是盘上残骸。 */
   function abortPending(path: string): void {
+    pending.get(path)?.handle.abort(false);
     pending.delete(path);
     priorities.delete(path);
     releaseClaim(path);
@@ -548,6 +557,10 @@ export function createSyncPeer(deps: SyncPeerDeps): SyncPeer {
    * 分支本就会清 pending);②对端文件回来后推新版本增量(onPeerIndex 重新
    * 规划 receive,从零重排);③任何重连都会互发全量索引(full 轮重建)。
    * 反之留着只会让「接收中」永久虚报,误导用户以为传输卡死。
+   *
+   * 中间态这里**保留**(keepPartial):放弃的成因里有一大类是「对端这会儿供不出」
+   * (文件被占用、链路抖动、对端重启),而不是「这份内容不存在」。等它回来重新宣告时,
+   * 已收到的字节不必再传一遍。真有内容不存在的残骸由扫描器的 TTL 回收兜底。
    */
   function dropIfUnservable(path: string): void {
     const item = pending.get(path);
@@ -555,10 +568,11 @@ export function createSyncPeer(deps: SyncPeerDeps): SyncPeer {
     for (const request of pendingBlocks.values()) {
       if (request.path === path) return; // 还有别的块在途
     }
+    item.handle.abort(true);
     pending.delete(path);
     priorities.delete(path);
     releaseClaim(path);
-    onStallDrop?.(path, slotCount(item) - item.received);
+    onStallDrop?.(path, slotCount(item) - item.handle.count());
   }
 
   /** 发送单个块请求并设置超时重试。cdc = 请求按内容分块口径索块(见 BlockRequest.cdc)。 */
@@ -632,16 +646,31 @@ export function createSyncPeer(deps: SyncPeerDeps): SyncPeer {
   /**
    * 开启某路径的待接收:规划时刻定块口径(CDC / 定长),槽位数随口径取对应
    * 列表长度;此后请求、响应校验、收齐判定都用 slotCount/slotHashes 统一换算,
-   * 落地时再还原成定长内容交给执行器(见 completeIfReady)。
+   * 内容则逐块交给落盘句柄(见 completeIfReady)。
+   *
+   * 句柄是断点续传的载体:同一内容的接收重新开启时,beginReceive 会读回磁盘上的旧位图,
+   * 只补缺的槽位。**只可能**出现在全新规划的时刻 —— 若该路径已有在途接收(含半截 tmp),
+   * 调用方要么走 materialize 的幂等分支,要么本轮直接跳过,不会重复 open。
    */
   function openPending(kind: 'receive' | 'conflict', remoteEntry: IndexEntry, local?: IndexEntry): void {
     const cdc = planCdc(remoteEntry);
+    const slots = cdc ? remoteEntry.cdh!.length : remoteEntry.blocks.length;
+    // 句柄创建即路径校验(执行器的硬忽略/越界闸门在这里是最后一道):不安全就整条不接收,
+    // 后续 requestMissingBlocks 取不到 pending 项自然空转,本轮该路径不产生任何磁盘动作。
+    let handle: ReceiveHandle;
+    try {
+      handle = executor?.beginReceive(remoteEntry, { cdc }) ?? createMemoryReceiveHandle(slots);
+    } catch {
+      // 不收这条:路径在执行器闸门处被拒(硬忽略 / 符号链接越界)。认领当场交还,
+      // 否则台账要空挂到保鲜期过,把同一设备上别的版本一并挡在门外。
+      releaseClaim(remoteEntry.path);
+      return;
+    }
     pending.set(remoteEntry.path, {
       kind,
       entry: remoteEntry,
       ...(local ? { local } : {}),
-      blocks: new Array<Buffer | undefined>(cdc ? remoteEntry.cdh!.length : remoteEntry.blocks.length),
-      received: 0,
+      handle,
       cdc,
       startedAt: Date.now(),
     });
@@ -666,14 +695,13 @@ export function createSyncPeer(deps: SyncPeerDeps): SyncPeer {
     // 墓碑条目内容不可信(文件已删,块哈希指向旧内容):整体走网络请求
     const localBlocks = localEntry && !localEntry.deleted ? localEntry.blocks : undefined;
     entry.blocks.forEach((hash, blockIndex) => {
-      if (item.blocks[blockIndex] !== undefined) return; // 已预填或已收到,不重复
+      if (item.handle.has(blockIndex)) return; // 已预填或已收到,不重复
       if (localBlocks?.[blockIndex] === hash) {
         try {
           const data = readLocalBlock(path, blockIndex);
           // 本地文件可能在扫描与规划之间被改写:哈希校验不过就不信本地块
           if (verifyBlock(data, hash)) {
-            item.blocks[blockIndex] = data;
-            item.received += 1;
+            item.handle.append(blockIndex, data);
             return;
           }
         } catch {
@@ -707,39 +735,28 @@ export function createSyncPeer(deps: SyncPeerDeps): SyncPeer {
     }
     for (let i = 0; i < cdh.length; i++) {
       const hash = cdh[i]!;
-      if (item.blocks[i] === undefined) {
+      if (!item.handle.has(i)) {
         const hit = localHits.get(hash);
         if (hit) {
           try {
             const data = readLocalChunk!(path, hit.offset, hit.length);
-            if (verifyBlock(data, hash)) {
-              item.blocks[i] = data;
-              item.received += 1;
-            }
+            if (verifyBlock(data, hash)) item.handle.append(i, data);
           } catch {
             // 文件被移动/删除/暂时不可读:回退网络请求
           }
         }
       }
-      if (item.blocks[i] === undefined) requestBlock(path, i, hash, true);
+      if (!item.handle.has(i)) requestBlock(path, i, hash, true);
     }
   }
 
-  /** 收齐全部块(或空文件本身)后把条目落地;未就绪则无操作。 */
+  /** 收齐全部块(或空文件本身)后把句柄落地;未就绪则无操作。 */
   async function completeIfReady(path: string): Promise<void> {
     const item = pending.get(path);
-    if (!item || item.received !== slotCount(item)) return;
+    if (!item || item.handle.count() !== slotCount(item)) return;
 
     pending.delete(path);
     priorities.delete(path); // 已落地:优先标记的使命完成,后续该路径的新传输回到默认排队
-    const provider = {
-      getBlocks: async (): Promise<Buffer[]> => {
-        const bufs = item.blocks.map((b) => b ?? Buffer.alloc(0));
-        // CDC 口径收来的块先拼接还原,再按定长口径重切:执行器的逐块校验
-        // (对 entry.blocks)与落地逻辑因此完全不用感知两种布局,内容对了哈希就对。
-        return item.cdc ? splitIntoBlocks(Buffer.concat(bufs)) : bufs;
-      },
-    };
 
     try {
       if (item.kind === 'conflict' && item.local) {
@@ -750,7 +767,7 @@ export function createSyncPeer(deps: SyncPeerDeps): SyncPeer {
           path,
           currentLocal,
           item.entry,
-          provider,
+          item.handle,
           remoteDeviceId ?? '',
         );
         // 同步内存索引,使后续规划基于最新本地状态:以实际落盘结果为准
@@ -781,7 +798,7 @@ export function createSyncPeer(deps: SyncPeerDeps): SyncPeer {
             preserved = false;
           }
         }
-        await executor?.applyReceive(item.entry, provider);
+        await executor?.finalizeReceive(item.entry, item.handle);
         localIndex.set(path, item.entry);
         onEvent?.({
           ts: Date.now(),
@@ -793,8 +810,13 @@ export function createSyncPeer(deps: SyncPeerDeps): SyncPeer {
         });
       }
     } finally {
-      // 接收有了确定结局(成功落地,或抛错半途而废——pending 已删不会续传):
-      // 交还认领,让同一设备的另一条连接在后续轮次仍能接手这一版本
+      // 句柄统一在此收口:落地成功时它是空操作(句柄已关、中间态已清),抛错时它关掉写句柄
+      // 并把已收的字节留在盘上(keepPartial)—— 半途而废的接收下一轮 beginReceive 会接着写。
+      // 不关句柄的代价是 Windows 上 tmp 一直被攥着:rename 不了、删不掉、目录也清不空。
+      item.handle.abort(true);
+      // 接收有了确定结局(成功落地,或抛错半途而废):交还认领,让同一设备的另一条
+      // 连接在后续轮次仍能接手这一版本 —— 抛错那一种还会从磁盘中间态接着收
+      // (pending 已删,但下一轮规划会经 beginReceive 读回位图续传)。
       releaseClaim(path);
     }
   }
@@ -1188,9 +1210,14 @@ export function createSyncPeer(deps: SyncPeerDeps): SyncPeer {
       // 可能把刚删除的文件临时复活。增量轮次不做这件事 —— 消息里没有的路径
       // 只是「这轮没提」,清掉就会把正在传的文件腰斩、且不会再有谁重新规划它。
       // 这里只需删 pending:本轮的 pendingBlocks 已在上面整体清掉(含全部定时器)。
+      //
+      // 中间态只关句柄、不删文件(abort(true)):同一台设备的另一条连接可能正在写同一个
+      // tmp(认领保鲜期 5min 短于块重试预算 10min,两条管线确实能重叠),这里没有资格
+      // 判它的字节没用。真没用的残骸由扫描器的 TTL 回收。
       if (full) {
         for (const path of pending.keys()) {
           if (!livePending.has(path)) {
+            pending.get(path)!.handle.abort(true);
             pending.delete(path);
             releaseClaim(path);
           }
@@ -1217,7 +1244,7 @@ export function createSyncPeer(deps: SyncPeerDeps): SyncPeer {
       // 口径以 pending 规划时定下的为准(响应里的 cdc 回显只是线索,不作判据):
       // 期望哈希与槽位边界都从对应列表取,任何口径的迟到/杂散响应都过不了哈希闸门
       const hashes = slotHashes(item);
-      // 边界校验:非法/越界 blockIndex 会撑大 pending.blocks 数组,造成内存耗尽型 DoS
+      // 边界校验:非法/越界 blockIndex 会写进句柄算出的偏移之外,污染 tmp 的字节布局
       if (
         !Number.isInteger(response.blockIndex) ||
         response.blockIndex < 0 ||
@@ -1232,10 +1259,10 @@ export function createSyncPeer(deps: SyncPeerDeps): SyncPeer {
       if (response.data.length > (item.cdc ? CDC_MAX_CHUNK : BLOCK_SIZE)) return;
       if (!verifyBlock(response.data, response.hash)) return;
       // 重复响应(如重传)不重复计数,避免虚增提前落地不完整文件
-      if (item.blocks[response.blockIndex] !== undefined) return;
+      if (item.handle.has(response.blockIndex)) return;
 
-      item.blocks[response.blockIndex] = response.data;
-      item.received += 1;
+      // 到达即落盘:句柄把它写进 tmp 的最终偏移,内存里不再攒任何块
+      item.handle.append(response.blockIndex, response.data);
       // 块真的收下了(重复响应在上面已被挡掉):记一笔接收字节,供瞬时速率统计
       recordBytes(0, response.data.length);
       // 块在到达 = 这条认领还活着:保鲜期随进度滚动。上层拿「认领新鲜度」当
@@ -1258,15 +1285,14 @@ export function createSyncPeer(deps: SyncPeerDeps): SyncPeer {
 
     getSyncProgress(): ProgressCounts {
       const files: TransferFile[] = [];
-      // 接收中:逐项累加已收块缓冲的字节数(本地预填的块也是真实 Buffer,一并计入)
+      // 接收中:已收字节直接问句柄(本地预填与断点续传接上的旧进度同样计入,因为
+      // 它们都是真的落在了 tmp 里)
       for (const [path, item] of pending) {
         if (item.kind !== 'receive') continue;
-        let done = 0;
-        for (const b of item.blocks) done += b?.length ?? 0;
         files.push({
           path,
           direction: 'receive',
-          bytesDone: done,
+          bytesDone: item.handle.bytes(),
           bytesTotal: item.entry.size,
           // 被「优先同步」点名中的行:UI 据此显示已提队状态,再点一次也无妨(幂等)
           ...(priorities.has(path) ? { priority: true } : {}),
@@ -1321,7 +1347,7 @@ export function createSyncPeer(deps: SyncPeerDeps): SyncPeer {
       // requestBlock 自身会清旧定时器,重试链不重复叠加。口径跟随该条待接收的规划。
       const hashes = slotHashes(item);
       for (let i = 0; i < hashes.length; i++) {
-        if (item.blocks[i] === undefined) requestBlock(path, i, hashes[i]!, item.cdc);
+        if (!item.handle.has(i)) requestBlock(path, i, hashes[i]!, item.cdc);
       }
     },
     materialize(path: string): boolean {
@@ -1342,6 +1368,11 @@ export function createSyncPeer(deps: SyncPeerDeps): SyncPeer {
     },
 
     releaseClaims(): void {
+      // 管线随连接一起作废:在途接收的写句柄必须先关掉。Node 不会替你关打开的 fd,
+      // 而一个被攥住句柄的 tmp 在 Windows 上既 rename 不掉也删不掉(内存版句柄无操作)。
+      // 中间态一律保留:重连后的新管线经 beginReceive 读回位图,已收的字节不必重传。
+      for (const item of pending.values()) item.handle.abort(true);
+      pending.clear();
       if (!receiveLedger) return;
       for (const path of myClaims) {
         if (receiveLedger.get(path)?.claimId === claimId) receiveLedger.delete(path);

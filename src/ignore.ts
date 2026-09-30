@@ -279,8 +279,29 @@ export function isConflictCopyName(name: string): boolean {
 }
 
 /**
+ * syncx 自己在目标文件旁边留下的**在途中间态**后缀(见 partial-store.ts):
+ * `<目标>.syncx-tmp` 是在途内容,`<目标>.syncx-partial` 是它的块位图 sidecar。
+ *
+ * 它们属于本机这一次接收的残骸,和冲突副本同理:参与同步会把「半写的文件」推给对端,
+ * 更糟的是两台机器互相收对方的 tmp 会成对繁殖。断点续传让它们可能躺在盘上几小时,
+ * 所以这道闸门不能只靠 scanner 那边跳过文件(那只让本机不**宣告**它们)—— 旧版本对端
+ * 或乱发的对端把 `x.syncx-tmp` 当普通文件推过来时,入向也要挡住。
+ *
+ * 走硬忽略而不是加进 `BUILTIN_IGNORE_LINES`:那一组是「默认值」,用户写一条
+ * `!.syncx-tmp` 之类的负向规则就能放开,而中间态参与同步是坏行为,不给这个口子
+ * (代价是它在「忽略规则编辑器」里不作为规则出现 —— 与冲突副本同一套处理方式)。
+ */
+export const SCRATCH_SUFFIXES = ['.syncx-tmp', '.syncx-partial'] as const;
+
+/** 路径段是否为 syncx 在途中间态(按后缀,大小写不敏感,理由同 HARD_IGNORE_NAMES)。 */
+export function isScratchSegment(name: string): boolean {
+  const lower = name.toLowerCase();
+  return SCRATCH_SUFFIXES.some((suffix) => lower.endsWith(suffix));
+}
+
+/**
  * 相对路径中任一段命中硬忽略名单(大小写不敏感,兼容 '\' 分隔符),
- * 或 basename 符合冲突副本命名。
+ * 或 basename 符合冲突副本命名,或某段是 syncx 在途中间态(见 SCRATCH_SUFFIXES)。
  * 路径段比较而非子串比较:`.github` / `.svnignore` 这类前缀相同但段不同的名字不受影响。
  */
 export function isHardIgnored(relPath: string): boolean {
@@ -288,6 +309,7 @@ export function isHardIgnored(relPath: string): boolean {
     if (segment === '') continue;
     if (HARD_IGNORE_SET.has(segment.toLowerCase())) return true;
     if (isConflictCopyName(segment)) return true;
+    if (isScratchSegment(segment)) return true;
   }
   return false;
 }

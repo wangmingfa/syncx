@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import { execFileSync } from 'node:child_process';
-import { mkdirSync, mkdtempSync, unlinkSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, mkdtempSync, unlinkSync, writeFileSync } from 'node:fs';
 import { rmDir } from './helpers.js';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -171,6 +171,35 @@ describe('auto commit', () => {
     }
   });
 
+  /**
+   * 断点续传的中间态必须留在版本库之外:它现在会躺上一整个传输过程(大文件按分钟计),
+   * 而自动提交常在**别的文件**落地时被触发 —— 放任 `git add -A` 就等于把几百 MB 的半截
+   * 内容写进历史,还会经 git 提交同步镜像给对端。
+   */
+  it.skipIf(!HAS_GIT)('leaves syncx 在途中间态 out of the commit, at any depth, while staging real changes', () => {
+    const repo = tempGitRepo();
+    try {
+      writeFileSync(join(repo, 'a.txt'), 'A');
+      commitAll(repo, '基线');
+
+      writeFileSync(join(repo, 'big.bin.syncx-tmp'), '半截内容');
+      writeFileSync(join(repo, 'big.bin.syncx-partial'), '{"v":1,"bitmap":"gA=="}');
+      mkdirSync(join(repo, 'sub'), { recursive: true });
+      writeFileSync(join(repo, 'sub', 'nested.bin.syncx-tmp'), '半截内容');
+      writeFileSync(join(repo, 'b.txt'), 'B');
+
+      const result = autoCommit(repo, '来自对端的提交信息');
+      expect(result.success).toBe(true);
+      expect(git(repo, ['ls-files']).trim().split(/\r?\n/).sort()).toEqual(['a.txt', 'b.txt']);
+
+      // 中间态还在盘上(它是续传的载体),只是不被 track
+      expect(existsSync(join(repo, 'big.bin.syncx-tmp'))).toBe(true);
+      expect(existsSync(join(repo, 'sub', 'nested.bin.syncx-tmp'))).toBe(true);
+    } finally {
+      rmDir(repo);
+    }
+  });
+
   it.skipIf(!HAS_GIT)('creates an empty commit when there is nothing to commit', () => {
     const repo = tempGitRepo();
     try {
@@ -229,6 +258,28 @@ describe('uncommitted changes probe', () => {
       expect(hasUncommittedChanges(repo)).toBe(false);
 
       writeFileSync(join(repo, 'a.txt'), 'A2');
+      expect(hasUncommittedChanges(repo)).toBe(true);
+    } finally {
+      rmDir(repo);
+    }
+  });
+
+  /**
+   * 断点续传让中间态在目标旁边躺上一整个传输过程,而自动提交是**接收别的文件**时触发的:
+   * 若工作树里只剩这一对在途文件就判「有变更」,--allow-empty 会为它造一笔空提交并广播出去。
+   */
+  it.skipIf(!HAS_GIT)('treats a worktree holding only syncx 在途中间态 as clean', () => {
+    const repo = tempGitRepo();
+    try {
+      writeFileSync(join(repo, 'a.txt'), 'A');
+      commitAll(repo, '基线');
+
+      writeFileSync(join(repo, 'big.bin.syncx-tmp'), '半截内容');
+      writeFileSync(join(repo, 'big.bin.syncx-partial'), '{"v":1,"bitmap":"gA=="}');
+      expect(hasUncommittedChanges(repo)).toBe(false);
+
+      // 排除规则不能把闸门糊住:真改动来了必须照样看得见
+      writeFileSync(join(repo, 'c.txt'), 'C');
       expect(hasUncommittedChanges(repo)).toBe(true);
     } finally {
       rmDir(repo);
