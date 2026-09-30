@@ -139,10 +139,25 @@ had a manifest.
   pipeline half: after `releaseClaims()` the pair is still on disk with the two committed slots, the
   reconnected peer requests **only** the missing one, and a peer-declared deletion during flight takes
   the whole pair with it. A real two-daemon kill-mid-transfer test has *not* been run.
-- **The disk guard now over-counts a resumed round.** The pre-plan estimate in `src/peer.ts`
-  (`needed = incoming.size − current.size`) does not subtract what the in-flight tmp already holds, so
-  a resume asks for more free space than it will use and can be deferred a round longer than
-  necessary. Safe direction (the guard delays, never corrupts); left as a known imprecision.
+- **The disk guard credits the pair, and only what the manifest has committed.** Before this, the
+  pre-plan estimate in `src/peer.ts` (`needed = incoming.size − current.size`) ignored the tmp
+  entirely — which was harmless while the tmp lived for milliseconds, and became a real defect once
+  it lives for the whole transfer: a resumed round asked for the full file's space again, so a folder
+  taking several large files in sequence could be deferred for lack of space it did not need. The
+  estimate now subtracts `executor.partialBytes(entry, { cdc: planCdc(entry) })`, which reads the
+  manifest bitmap and sums the *committed* slot lengths under the same `slotLayout` the landing uses
+  (one layout function, so the estimate cannot drift from where the bytes actually go). Zero credit
+  when the fingerprint does not match, when the manifest has no tmp beside it, and on any error —
+  `partialBytes` never throws, because a failed estimate that breaks the round is a worse bug than a
+  pessimistic one. The credit is deliberately conservative in two ways: up to `PARTIAL_COMMIT_SLOTS − 1`
+  freshly written slots are not yet in the manifest and so still count as needed, and the guard does
+  not re-read/verify those slots (a slot later cleared by the resume self-check is re-written into the
+  same already-allocated range, so the space claim stays true even when the content claim does not).
+- **What the guard is still optimistic about (unchanged here).** It nets the overwritten local file's
+  size against the incoming size, which assumes that space is released before the tmp fills up — but
+  tmp and target coexist until the rename, and `snapshotVersion` copies the old content out to the
+  versions directory first, which the estimate never counted. That model predates stage 2 and was not
+  touched: making it honest means the guard starts refusing rounds it currently completes fine.
 - **`writeLocalFile`'s own tmp had to move off the name.** It used to be `<abs>.syncx-tmp`; that name
   is now the resume carrier, so reusing it would truncate another pipeline's progress *and* steal its
   rename target. It writes `<abs>.<stamp36>.syncx-tmp` now (`writeLocalFile`, `src/session-manager.ts`) — same

@@ -1014,8 +1014,9 @@ export function createSyncPeer(deps: SyncPeerDeps): SyncPeer {
       }
 
       const actions = full ? buildPlan(localIndex, remote) : buildDeltaPlan(localIndex, remote);
-      // 磁盘空间守卫:先预估本轮入向体积(扣除被覆盖的本地文件将释放的空间),
-      // 不足就整轮跳过 receive/conflict —— 宁可推迟,也不要写到一半失败。
+      // 磁盘空间守卫:先预估本轮入向体积(扣除被覆盖的本地文件将释放的空间,
+      // 再扣除已在磁盘中间态里的那些字节),不足就整轮跳过 receive/conflict ——
+      // 宁可推迟,也不要写到一半失败。
       // 删除照常应用(它是释放空间的方向),send 照常外推(不占本机盘);
       // 本轮索引原文记下,空间恢复后由上层调 retryDiskBlocked 重放。
       let diskSkipsReceive = false;
@@ -1027,7 +1028,12 @@ export function createSyncPeer(deps: SyncPeerDeps): SyncPeer {
           // 按需同步下 receive 会变成占位(不占盘),不计入预估;冲突仍需内容,照算
           if (action.kind === 'receive' && incoming.blocks.length > 0 && getOnDemand?.(action.path)) continue;
           const current = localIndex.get(action.path);
-          needed += Math.max(0, incoming.size - (current && !current.deleted ? current.size : 0));
+          // 在途 tmp 已占的字节要扣:阶段 2 之后 tmp 活到整场传输结束(断线重连还留着),
+          // 不扣就把「已经写好的那一半」当成新一轮需求 —— 同目录连续传几个大文件会误报空间不足。
+          // 块口径必须与 openPending 同一个 planCdc:口径不同则指纹与槽位数都不同,位图读不出来,
+          // 这一段就白扣了(偏保守,不写坏数据)。partialBytes 自己保证不抛错。
+          const already = executor?.partialBytes(incoming, { cdc: planCdc(incoming) }) ?? 0;
+          needed += Math.max(0, incoming.size - (current && !current.deleted ? current.size : 0) - already);
         }
         if (needed > 0 && !checkDiskSpace(needed)) {
           diskSkipsReceive = true;

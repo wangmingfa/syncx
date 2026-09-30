@@ -861,6 +861,9 @@ export class SyncSessionManager {
       };
     return {
       beginReceive: wrapSync((entry, opts) => executor.beginReceive(entry, opts)) as LocalExecutor['beginReceive'],
+      // 磁盘守卫的预估读取:partialBytes 自己保证不抛错(失败即退回「不扣在途」的旧口径),
+      // 所以不套 wrap —— 一次预估读不出来不该记进目录错误、更不该影响本轮。
+      partialBytes: (entry, opts) => executor.partialBytes(entry, opts),
       finalizeReceive: wrap((entry, handle) => executor.finalizeReceive(entry, handle)) as LocalExecutor['finalizeReceive'],
       applyDelete: wrap((path, tombstone) => executor.applyDelete(path, tombstone)) as LocalExecutor['applyDelete'],
       applyConflict: wrap((path, local, remote, handle, deviceId) =>

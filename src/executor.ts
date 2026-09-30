@@ -47,6 +47,19 @@ export interface LocalExecutor {
   finalizeReceive(entry: IndexEntry, handle: ReceiveHandle): Promise<void>;
   /** 开启(或续上)一个在途接收。同内容重入会复用磁盘上的中间态。 */
   beginReceive(entry: IndexEntry, opts: { cdc: boolean }): ReceiveHandle;
+  /**
+   * 这份内容**已经**有多少字节躺在磁盘中间态里(见 partial-store.ts)。
+   * 磁盘空间守卫用它把「本轮还要腾多少地方」估准:阶段 2 之后 tmp 活到整场传输结束,
+   * 不扣这一段就会把已经写好的字节当成新需求,连续传几个大文件的目录会被误判空间不足。
+   *
+   * 只信 manifest 的位图,不做回读验哈希:验块是 beginReceive 的职责(它关系到内容对不对),
+   * 这里问的只是空间 —— 位图声称的槽位即便随后被验失败、退回重传,写的也是同一段区间,
+   * 那块盘本来就已经被占了。预估因此偏保守方向:少扣只是这一轮多拦一点,不会写坏数据。
+   *
+   * **绝不抛错**:一条预估失败掀翻整轮同步是不成比例的代价,任何异常(路径被拒 / 残骸读不出)
+   * 都只返回 0,即退回「不扣在途」的旧口径。
+   */
+  partialBytes(entry: IndexEntry, opts: { cdc: boolean }): number;
   applyDelete(path: string, tombstone: IndexEntry): Promise<void>;
   /**
    * 双方都改过同一份文件:本地内容保留成 `.sync-conflict-` 副本,远端内容落地。
@@ -192,6 +205,34 @@ export function preserveLocalAsConflict(root: string, path: string, remoteDevice
 }
 
 /**
+ * 槽位布局:每槽的偏移与前缀和长宽,以及总字节数、最长槽(读缓冲按其分配)。
+ *
+ * 口径只有两种:CDC 取 `clens` 前缀和,定长取 `BLOCK_SIZE`、末块按 size 收口。
+ * beginReceive(随机写的落点)与 partialBytes(磁盘守卫的体积预估)**必须共用这一份** ——
+ * 各写一遍的话,预估就会按另一套布局说话:块长差一个字节,「盘上已经有多少」就是假的,
+ * 而假的预估只会让守卫在真正该拦的时候放行。
+ */
+function slotLayout(entry: IndexEntry, cdc: boolean): {
+  offsets: number[];
+  lengths: number[];
+  total: number;
+  maxLen: number;
+} {
+  const hashes = cdc ? entry.cdh! : entry.blocks;
+  const offsets = new Array<number>(hashes.length);
+  const lengths = new Array<number>(hashes.length);
+  let total = 0;
+  let maxLen = 0;
+  for (let i = 0; i < hashes.length; i++) {
+    offsets[i] = total;
+    lengths[i] = cdc ? entry.clens![i]! : Math.min(BLOCK_SIZE, entry.size - total);
+    total += lengths[i]!;
+    if (lengths[i]! > maxLen) maxLen = lengths[i]!;
+  }
+  return { offsets, lengths, total, maxLen };
+}
+
+/**
  * 创建一个共享目录的本地执行器。
  *
  * @param trashDir 删除回收站目录的绝对路径。**刻意由调用方传入而不是在共享根下现算**:
@@ -332,17 +373,7 @@ export function createLocalExecutor(
     const paths = partialPaths(target);
     const hashes = opts.cdc ? entry.cdh! : entry.blocks;
     const slots = hashes.length;
-    const offsets = new Array<number>(slots);
-    const lengths = new Array<number>(slots);
-    let total = 0;
-    let maxLen = 0;
-    for (let i = 0; i < slots; i++) {
-      offsets[i] = total;
-      // 定长末块按 size 收口;CDC 块长直接来自条目(两者之和即 total = 文件字节数)
-      lengths[i] = opts.cdc ? entry.clens![i]! : Math.min(BLOCK_SIZE, entry.size - total);
-      total += lengths[i]!;
-      if (lengths[i]! > maxLen) maxLen = lengths[i]!;
-    }
+    const { offsets, lengths, maxLen } = slotLayout(entry, opts.cdc);
     const fingerprint = entryFingerprint(entry);
 
     let bitmap = new SlotBitmap(slots);
@@ -493,6 +524,35 @@ export function createLocalExecutor(
     };
   }
 
+  /**
+   * 磁盘中间态已占的字节(见 LocalExecutor.partialBytes 的语义)。
+   * 一次 existsSync + 一次 JSON 读,只在守卫拦本轮前对每个入向项各跑一遍。
+   */
+  function partialBytes(entry: IndexEntry, opts: { cdc: boolean }): number {
+    try {
+      const paths = partialPaths(resolvePath(entry.path));
+      // 位图在、tmp 不在 = 没有字节可扣(beginReceive 也会整对作废重来)
+      if (!existsSync(paths.tmp)) return 0;
+      const { lengths } = slotLayout(entry, opts.cdc);
+      const prev = readManifest(paths.manifest, {
+        fingerprint: entryFingerprint(entry),
+        cdc: opts.cdc,
+        slots: lengths.length,
+      });
+      // 指纹不符(内容哪怕只变了一块)→ 续传会整对作废,这一段一分都算不上已占
+      if (prev === null) return 0;
+      const bitmap = new SlotBitmap(prev.slots, prev.bitmap);
+      let bytes = 0;
+      for (let i = 0; i < lengths.length; i++) {
+        if (bitmap.has(i)) bytes += lengths[i]!;
+      }
+      // size 是条目自己声明的期望字节数:残骸比它「多」时不认(宁可多估需求)
+      return Math.min(bytes, entry.size);
+    } catch {
+      return 0;
+    }
+  }
+
   return {
     async finalizeReceive(entry: IndexEntry, handle: ReceiveHandle): Promise<void> {
       const mtime = await handle.finalize();
@@ -500,6 +560,7 @@ export function createLocalExecutor(
       index.saveEntry({ ...entry, mtime });
     },
     beginReceive,
+    partialBytes,
     async applyDelete(path: string, tombstone: IndexEntry): Promise<void> {
       const target = resolvePath(path);
       if (existsSync(target) && statSync(target).isFile()) {

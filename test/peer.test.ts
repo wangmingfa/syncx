@@ -1618,6 +1618,176 @@ describe('disk space guard (checkDiskSpace)', () => {
     await new Promise((r) => setTimeout(r, 0));
     expect(requests).toHaveLength(0);
   });
+
+  it('credits the bytes already written into the resume pair instead of requiring them again', async () => {
+    const dir = mkdtempSync(join(tmpdir(), 'syncx-diskguard-fixed-'));
+    const index = openIndexStore(join(dir, 'index.db'));
+    try {
+      const root = join(dir, 'share');
+      mkdirSync(root, { recursive: true });
+      const executor = createLocalExecutor(root, index, join(dir, 'trash'));
+
+      // 3MB = 3 个定长块;本机既没有这个文件,索引里也没有
+      const data = Buffer.alloc(3 * BLOCK_SIZE, 0x41);
+      const blocks = splitIntoBlocks(data);
+      const remote = entry('big.bin', [['dev-b', 1]], blocks.map(hashBlock), data.length);
+      // 上一轮断在半路:前两块已在 tmp 里并进了位图(abort(true) 保留中间态)
+      const first = executor.beginReceive(remote, { cdc: false });
+      first.append(0, blocks[0]!);
+      first.append(1, blocks[1]!);
+      first.abort(true);
+      expect(existsSync(partialPaths(join(root, 'big.bin')).manifest)).toBe(true);
+
+      const calls: number[] = [];
+      const { transport, requests } = fakeTransport();
+      const peer = createSyncPeer({
+        transport,
+        localIndex: new Map(),
+        executor,
+        readLocalBlock: () => Buffer.alloc(0),
+        deviceId: 'dev-a',
+        root,
+        checkDiskSpace: (needed) => {
+          calls.push(needed);
+          return needed <= 1_572_864; // 1.5MB:只够补最后那一块
+        },
+      });
+
+      await peer.onPeerIndex([remote], { full: true });
+
+      // 预估 = 3MB 减去已在盘上的 2MB。不扣在途就是 3MB → 守卫整轮拦下(阶段 2 前的行为)
+      expect(calls).toEqual([BLOCK_SIZE]);
+      // 放行之后续传确实接上了:只有一块没收到,就只请求那一块
+      expect(requests.map((r) => r.blockIndex)).toEqual([2]);
+    } finally {
+      index.close();
+      rmDir(dir);
+    }
+  });
+
+  it('does not credit a stale pair: same path and size but different content still needs the whole file', async () => {
+    // 扣减的另一半是「别扣多」:守卫不能因为目录里躺着一个 tmp 就放行一轮装不下的接收。
+    // 内容变了 → 指纹变 → 续传会整对作废,那一段盘就不是这份内容的(见 partial-store 的宁可重传)。
+    const dir = mkdtempSync(join(tmpdir(), 'syncx-diskguard-stale-'));
+    const index = openIndexStore(join(dir, 'index.db'));
+    try {
+      const root = join(dir, 'share');
+      mkdirSync(root, { recursive: true });
+      const executor = createLocalExecutor(root, index, join(dir, 'trash'));
+
+      const oldData = Buffer.alloc(3 * BLOCK_SIZE, 0x41);
+      const old = entry('big.bin', [['dev-b', 1]], splitIntoBlocks(oldData).map(hashBlock), oldData.length);
+      const first = executor.beginReceive(old, { cdc: false });
+      const blocks = splitIntoBlocks(oldData);
+      first.append(0, blocks[0]!);
+      first.append(1, blocks[1]!);
+      first.abort(true);
+
+      // 同一路径、同一尺寸,只有一个字节不同 → 对端这份内容是新的
+      const newData = Buffer.from(oldData);
+      newData[0] = 0x5a;
+      const remote = entry('big.bin', [['dev-b', 2]], splitIntoBlocks(newData).map(hashBlock), newData.length);
+
+      const calls: number[] = [];
+      const { transport, requests } = fakeTransport();
+      const peer = createSyncPeer({
+        transport,
+        localIndex: new Map(),
+        executor,
+        readLocalBlock: () => Buffer.alloc(0),
+        deviceId: 'dev-a',
+        root,
+        checkDiskSpace: (needed) => {
+          calls.push(needed);
+          return needed <= 1_572_864;
+        },
+      });
+
+      await peer.onPeerIndex([remote], { full: true });
+
+      expect(calls).toEqual([3 * BLOCK_SIZE]); // 一分未扣
+      expect(requests).toHaveLength(0); // 守卫照常拦下
+    } finally {
+      index.close();
+      rmDir(dir);
+    }
+  });
+
+  it('credits the pair under the layout the plan actually picks (CDC)', async () => {
+    // 块口径由 planCdc 决定,预估必须问同一个判定:口径不同则槽位数与指纹都对不上,
+    // 位图读不出来 → 一分都扣不到 → 这条用例立刻红。
+    const dir = mkdtempSync(join(tmpdir(), 'syncx-diskguard-cdc-'));
+    const index = openIndexStore(join(dir, 'index.db'));
+    try {
+      const root = join(dir, 'share');
+      mkdirSync(root, { recursive: true });
+      const executor = createLocalExecutor(root, index, join(dir, 'trash'));
+
+      const oldData = Buffer.alloc(BLOCK_SIZE, 0x42);
+      const newData = Buffer.alloc(3 * BLOCK_SIZE, 0x41);
+      // 262144 = CDC_MIN_CHUNK:合法块长,和不必等分,预估按 clens 前缀和算
+      const clens = [262_144, 262_144, newData.length - 524_288];
+      const chunks: Buffer[] = [];
+      for (let off = 0, i = 0; i < clens.length; i++) {
+        chunks.push(newData.subarray(off, off + clens[i]!));
+        off += clens[i]!;
+      }
+      const remote: IndexEntry = {
+        path: 'f.bin',
+        version: new Map([['dev-b', 2]]),
+        size: newData.length,
+        deleted: false,
+        blocks: splitIntoBlocks(newData).map(hashBlock),
+        cdh: chunks.map(hashBlock),
+        clens,
+      };
+      const localViews = chunkHashes(oldData);
+      const local: IndexEntry = {
+        path: 'f.bin',
+        version: new Map([['dev-b', 1]]),
+        size: oldData.length,
+        deleted: false,
+        blocks: splitIntoBlocks(oldData).map(hashBlock),
+        cdh: localViews.hashes,
+        clens: localViews.lengths,
+        mtime: 1,
+      };
+      writeFileSync(join(root, 'f.bin'), oldData);
+      index.saveEntry(local);
+
+      // 上一轮按 CDC 口径收了前两块(共 512KB)就断了
+      const first = executor.beginReceive(remote, { cdc: true });
+      first.append(0, chunks[0]!);
+      first.append(1, chunks[1]!);
+      first.abort(true);
+
+      const calls: number[] = [];
+      const { transport, requests } = fakeTransport();
+      const peer = createSyncPeer({
+        transport,
+        localIndex: new Map([['f.bin', local]]),
+        executor,
+        readLocalBlock: (p, i) => readBlockAt(join(root, p), i),
+        readLocalChunk: (p, o, l) => readChunkAt(join(root, p), o, l),
+        deviceId: 'dev-a',
+        root,
+        checkDiskSpace: (needed) => {
+          calls.push(needed);
+          return needed <= 1_600_000;
+        },
+      });
+
+      await peer.onPeerIndex([remote], { full: true });
+
+      // 3MB - 本地 1MB - 在途 512KB = 1.5MB;按定长口径读位图则得到 2MB,守卫会拦下整轮
+      expect(calls).toEqual([1_572_864]);
+      expect(requests.map((r) => r.blockIndex)).toEqual([2]);
+      expect(requests.every((r) => r.cdc === true)).toBe(true);
+    } finally {
+      index.close();
+      rmDir(dir);
+    }
+  });
 });
 
 describe('transfer priority (markPriority)', () => {

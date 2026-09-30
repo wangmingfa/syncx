@@ -364,3 +364,113 @@ describe('接收句柄续传', () => {
     env.close();
   });
 });
+
+/**
+ * 磁盘空间守卫的「已经占了多少盘」预估(见 executor.partialBytes)。
+ *
+ * 守卫只在 needed > 0 时才调用回调,所以这里的断言全都是**精确数字**:
+ * 扣多了(把没提交的进度算进去)会让守卫在该拦的时候放行,写坏的方向是磁盘;
+ * 扣少了是回到旧行为,大文件目录被误判空间不足。两个方向都得有用例钉住。
+ */
+describe('磁盘守卫的在途字节预估', () => {
+  it('is zero when nothing has been received yet', () => {
+    const env = setup();
+    const entry = entryFor('big.bin', contentOf(3));
+    expect(env.mk().partialBytes(entry, { cdc: false })).toBe(0);
+    env.close();
+  });
+
+  it('credits exactly the slots the manifest has committed', () => {
+    const env = setup();
+    const data = contentOf(3);
+    const blocks = splitIntoBlocks(data);
+    const entry = entryFor('big.bin', data);
+    const executor = env.mk();
+    const h = executor.beginReceive(entry, { cdc: false });
+    appendSlots(h, blocks, 2);
+    h.abort(true); // 组提交在这里补做:位图落到 manifest 才算「已在盘上」
+    expect(executor.partialBytes(entry, { cdc: false })).toBe(blocks[0]!.length + blocks[1]!.length);
+    env.close();
+  });
+
+  it('credits nothing that the manifest has not committed yet', () => {
+    const env = setup();
+    const data = contentOf(3);
+    const blocks = splitIntoBlocks(data);
+    const entry = entryFor('big.bin', data);
+    const executor = env.mk();
+    const h = executor.beginReceive(entry, { cdc: false });
+    appendSlots(h, blocks, 2);
+    // 没收口(既没满位图也没 abort):tmp 里有了字节,位图却还没交代给磁盘
+    expect(existsSync(env.scratch('big.bin').tmp)).toBe(true);
+    expect(existsSync(env.scratch('big.bin').manifest)).toBe(false);
+    expect(executor.partialBytes(entry, { cdc: false })).toBe(0);
+    h.abort(false);
+    env.close();
+  });
+
+  it('credits nothing once the content fingerprint stops matching', () => {
+    const env = setup();
+    const data = contentOf(3);
+    const blocks = splitIntoBlocks(data);
+    const entry = entryFor('big.bin', data);
+    const executor = env.mk();
+    const h = executor.beginReceive(entry, { cdc: false });
+    appendSlots(h, blocks, 2);
+    h.abort(true);
+
+    // 同一路径同一尺寸,只有一个块的内容不同:续传会整对作废,那一段盘就不是这条内容的
+    const altered = Buffer.from(data);
+    altered[BLOCK_SIZE] = (altered[BLOCK_SIZE]! + 1) & 0xff;
+    const other = entryFor('big.bin', altered);
+    expect(executor.partialBytes(other, { cdc: false })).toBe(0);
+    // 同一份内容仍然算得到,证明 0 是「内容不符」而不是「什么都没读到」
+    expect(executor.partialBytes(entry, { cdc: false })).toBe(BLOCK_SIZE * 2);
+    env.close();
+  });
+
+  it('credits nothing when the tmp is gone but the manifest survived', () => {
+    const env = setup();
+    const data = contentOf(3);
+    const blocks = splitIntoBlocks(data);
+    const entry = entryFor('big.bin', data);
+    const executor = env.mk();
+    const h = executor.beginReceive(entry, { cdc: false });
+    appendSlots(h, blocks, 2);
+    h.abort(true);
+    rmSync(env.scratch('big.bin').tmp); // 残骸被外部清掉:位图还在,字节已经没了
+    expect(executor.partialBytes(entry, { cdc: false })).toBe(0);
+    expect(executor.partialBytes(entry, { cdc: false })).toBe(0);
+    env.close();
+  });
+
+  it('credits the clens lengths under CDC and nothing under the other layout', () => {
+    // 口径不同 → 槽位数与偏移布局都不同,位图不能挪用。peer 侧的 planCdc 与这里必须同口径,
+    // 否则预估读不到位图,白扣一段(退回旧行为)。
+    const env = setup();
+    const data = contentOf(3);
+    const { hashes: cdh, lengths: clens } = chunkHashes(data);
+    const entry = entryFor('cdc.bin', data, { cdh, clens });
+    expect(clens.length).toBeGreaterThan(1);
+    const chunks: Buffer[] = [];
+    for (let off = 0, i = 0; i < clens.length; i++) {
+      chunks.push(data.subarray(off, off + clens[i]!));
+      off += clens[i]!;
+    }
+    const executor = env.mk();
+    const h = executor.beginReceive(entry, { cdc: true });
+    appendSlots(h, chunks, 2);
+    h.abort(true);
+    expect(executor.partialBytes(entry, { cdc: true })).toBe(clens[0]! + clens[1]!);
+    expect(executor.partialBytes(entry, { cdc: false })).toBe(0);
+    env.close();
+  });
+
+  it('never throws: an unsafe path estimates zero, it does not break the round', () => {
+    const env = setup();
+    const entry = entryFor('../escape/secret.txt', contentOf(1));
+    expect(() => env.mk().beginReceive(entry, { cdc: false })).toThrow(/unsafe path/);
+    expect(env.mk().partialBytes(entry, { cdc: false })).toBe(0);
+    env.close();
+  });
+});
