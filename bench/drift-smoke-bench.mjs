@@ -5,13 +5,19 @@
  * 没有经过 session-manager 的接线、logger 的落盘与真扫描器写的索引。
  *
  * 判据(同时成立才算过):
- *  1. 干净舰队:文件同步完成后重连一轮,B 的日志里出现 `audit … sampled=3 declared=0 disk=0`;
- *  2. 篡改一字节必须报红:把 B 盘上三份文件的每 256KB 各翻一字节(**size 与 mtime 都还原**),
- *     下一轮 B 报 `disk>0` 并带 `drift … disk <path> slot=` 明细,而**同轮的 A 报 disk=0**
- *     (哨兵不在诚实的一侧哭狼);
- *  3. 只报不回修:报完之后 B 的字节仍然是坏的、两侧 sha256 仍然不一致 —— v1 没有任何动作;
- *  4. 负向对照:B 以 SYNCX_DRIFT_SAMPLE_N=0 重启后,同一套触发一次审计行都不出,
- *     而它**照常同步新文件**(第 4 份文件照样落地)—— 否则判据 1/2 只是「没连上」的假绿。
+ *  1. 干净舰队:文件同步完成后重连一轮,B 的日志里两种轮次都出现且都干净 ——
+ *     `peer=<deviceId>`(对端轮,declared=0 disk=0)与 `peer=local`(本地轮,disk=0);
+ *     A 侧同样要有这两种且 disk=0(哨兵不在诚实的一侧哭狼);
+ *  2. 篡改一字节必须报红,而且**不需要任何对端参与**:把 B 盘上三份文件的每 256KB 各翻一字节
+ *     (**size 与 mtime 都还原**)后不重启任何一方,B 按扫描时钟自己报 `peer=local … disk>0`
+ *     并带 `drift … peer=local disk <path> slot=` 明细;随后重启 A,B 的对端轮仍报 disk=0
+ *     (验盘这道已经从对端轮拆走,不在上面重复报);
+ *  3. 对端完全离线也能检出(A 杀掉、B 一台对端都不剩,B 照样报 disk>0)—— 这是把本地轮
+ *     从对端轮拆出来的全部理由:覆盖对端长期离线的盘;
+ *  4. 只报不回修:报完之后 B 的字节仍然是坏的、两侧 sha256 仍然不一致 —— v1 没有任何动作;
+ *  5. 负向对照:B 以 SYNCX_DRIFT_SAMPLE_N=0 重启后,同一套触发一次审计行都不出(两种轮次
+ *     同一个旋钮一起关),而它**照常同步新文件**(第 4 份文件照样落地)—— 否则判据 1/2 只是
+ *     「没连上」的假绿。
  *
  * 为什么把损坏打在每 256KB 一个点上:CDC 块长下界是 CDC_MIN_CHUNK(256KB),任意长度 ≥256KB
  * 的半开区间必含一个这样的格点,所以不论 pickSlot 抽中哪个槽都必然落在被改过的字节上;
@@ -147,7 +153,7 @@ function auditLines(path) {
   const out = [];
   for (const line of readFileSync(path, 'utf8').split('\n')) {
     const m = AUDIT_RE.exec(line);
-    if (m) out.push({ raw: line.trim(), round: +m[3], candidates: +m[4], sampled: +m[5], declared: +m[6], disk: +m[7], unreadable: +m[8] });
+    if (m) out.push({ raw: line.trim(), peer: m[2], round: +m[3], candidates: +m[4], sampled: +m[5], declared: +m[6], disk: +m[7], unreadable: +m[8] });
   }
   return out;
 }
@@ -210,52 +216,82 @@ const run = async () => {
   log(`A=${aId.deviceId} B=${bId.deviceId} 工作目录=${workDir}`);
   await sleep(2500); // 会话建立 + 互发 full 索引
 
-  // —— 判据 1:干净舰队必须报 sampled>0 declared=0 disk=0
+  // —— 判据 1:干净舰队,两种轮次都必须报 sampled>0 且干净
   for (const n of NAMES) dropIntoShareA(n);
   await waitFor(
     () => NAMES.every((x) => existsSync(join(shareB, x)) && statSync(join(shareB, x)).size === FILE_BYTES),
     60_000, '三份文件落地 B',
   );
-  log('三份文件已落地 B,等收敛后重连 A 触发一轮审计…');
+  log('三份文件已落地 B,等收敛后重连 A 触发一轮对端审计…');
   await sleep(2000);
   const bBefore = auditLines(logB).length;
   const aBefore = auditLines(logA).length;
   await restart('A', aDir, PORT_A, CTRL_A, {});
-  const bRound = await waitFor(() => {
+  const bPeerClean = await waitFor(() => {
     const ls = auditLines(logB).slice(bBefore);
-    return ls.find((l) => l.sampled > 0) ?? false;
-  }, 30_000, 'B 的 sampled>0 审计行');
+    return ls.find((l) => l.peer !== 'local' && l.sampled > 0) ?? false;
+  }, 30_000, 'B 的对端轮 sampled>0 审计行');
+  const bLocalClean = await waitFor(() => {
+    const ls = auditLines(logB).slice(bBefore);
+    return ls.find((l) => l.peer === 'local' && l.sampled > 0) ?? false;
+  }, 30_000, 'B 的本地轮 sampled>0 审计行');
   await sleep(1500);
-  const aClean = auditLines(logA).slice(aBefore).find((l) => l.sampled > 0);
-  log(`干净一轮  B: ${bRound.raw}`);
-  log(`          A: ${aClean?.raw ?? '(无)'}`);
-  const cleanPass = bRound.declared === 0 && bRound.disk === 0 && aClean !== undefined
-    && aClean.declared === 0 && aClean.disk === 0;
+  const aCleanLines = auditLines(logA).slice(aBefore).filter((l) => l.sampled > 0);
+  const aCleanPeer = aCleanLines.find((l) => l.peer !== 'local');
+  const aCleanLocal = aCleanLines.find((l) => l.peer === 'local');
+  log(`干净一轮  B(对端轮): ${bPeerClean.raw}`);
+  log(`          B(本地轮): ${bLocalClean.raw}`);
+  log(`          A(对端轮): ${aCleanPeer?.raw ?? '(无)'}`);
+  log(`          A(本地轮): ${aCleanLocal?.raw ?? '(无)'}`);
+  const cleanPass = bPeerClean.declared === 0 && bPeerClean.disk === 0 && bLocalClean.disk === 0
+    && aCleanPeer !== undefined && aCleanPeer.declared === 0 && aCleanPeer.disk === 0
+    && aCleanLocal !== undefined && aCleanLocal.disk === 0;
 
-  // —— 判据 2:篡改一字节(size/mtime 都还原)必须报红
+  // —— 判据 2:篡改一字节(size/mtime 都还原)必须报红,**不重启任何一方**
+  const bMark2 = auditLines(logB).length;
+  const aMark2 = auditLines(logA).length;
   let flips = 0;
   for (const n of NAMES) flips += corruptInPlace(join(shareB, n));
   const corruptedSha = NAMES.map((n) => sha256File(join(shareB, n)));
   const stB = statSync(join(shareB, NAMES[0]));
-  log(`已在 B 盘上翻掉 ${flips} 个字节(size 仍 ${stB.size},mtime 已还原)`);
-  await sleep(1500); // 让扫描器跑几轮:它必须完全无感
-  const bBefore2 = auditLines(logB).length;
-  const aBefore2 = auditLines(logA).length;
-  await restart('A', aDir, PORT_A, CTRL_A, {});
-  const bDrift = await waitFor(() => {
-    const ls = auditLines(logB).slice(bBefore2);
-    return ls.find((l) => l.disk > 0) ?? false;
-  }, 30_000, 'B 的 disk>0 审计行');
-  await sleep(1500);
-  const aAtDrift = auditLines(logA).slice(aBefore2).find((l) => l.sampled > 0);
-  const details = driftDetails(logB);
-  log(`篡改一轮  B: ${bDrift.raw}`);
-  log(`          A(诚实侧): ${aAtDrift?.raw ?? '(无)'}`);
-  for (const d of details.slice(-6)) log(`          明细 ${d}`);
-  const driftPass = bDrift.disk > 0 && details.some((d) => / disk /.test(d))
-    && aAtDrift !== undefined && aAtDrift.disk === 0 && aAtDrift.declared === 0;
+  log(`已在 B 盘上翻掉 ${flips} 个字节(size 仍 ${stB.size},mtime 已还原),等本地轮自己报…`);
+  const bLocalDrift = await waitFor(() => {
+    const ls = auditLines(logB).slice(bMark2);
+    return ls.find((l) => l.peer === 'local' && l.disk > 0) ?? false;
+  }, 30_000, 'B 本地轮的 disk>0 行(对端零参与)');
+  const localDetails = driftDetails(logB).filter((d) => / peer=local disk /.test(d));
+  log(`篡改后 B(本地轮): ${bLocalDrift.raw}`);
+  for (const d of localDetails.slice(-3)) log(`          明细 ${d}`);
 
-  // —— 判据 3:只报不回修
+  // 再重启 A:B 的对端轮此刻仍报 disk=0(验盘已从它这道拆走,不重复报)
+  await restart('A', aDir, PORT_A, CTRL_A, {});
+  const bPeerAtDrift = await waitFor(() => {
+    const ls = auditLines(logB).slice(bMark2);
+    return ls.find((l) => l.peer !== 'local' && l.sampled > 0) ?? false;
+  }, 30_000, 'B 篡改后的对端轮行');
+  await sleep(1500);
+  const aAtDrift = auditLines(logA).slice(aMark2).filter((l) => l.sampled > 0);
+  log(`篡改一轮  B(对端轮): ${bPeerAtDrift.raw}`);
+  log(`          A(诚实侧 ${aAtDrift.length} 行): ${aAtDrift.map((l) => `${l.peer}:disk=${l.disk}`).join(' ') || '(无)'}`);
+  const driftPass = bLocalDrift.disk > 0 && localDetails.length > 0
+    && bPeerAtDrift.declared === 0 && bPeerAtDrift.disk === 0
+    && aAtDrift.length > 0 && aAtDrift.every((l) => l.disk === 0 && l.declared === 0);
+
+  // —— 判据 3:对端完全离线也能检出(A 杀掉,B 一台对端都不剩)
+  const aProc = procs.get('A');
+  aProc.kill('SIGKILL');
+  await new Promise((r) => { aProc.once('exit', r); setTimeout(r, 3000); });
+  procs.delete('A');
+  const bOfflineMark = auditLines(logB).length;
+  log('已杀掉 A(对端为零),等 B 的本地轮继续报…');
+  const bOffline = await waitFor(() => {
+    const ls = auditLines(logB).slice(bOfflineMark);
+    return ls.find((l) => l.peer === 'local' && l.disk > 0) ?? false;
+  }, 30_000, 'A 离线后 B 的 local disk>0 行');
+  log(`离线一轮  B(已无对端): ${bOffline.raw}`);
+  const offlinePass = bOffline.disk > 0;
+
+  // —— 判据 4:只报不回修
   await sleep(3000);
   const nowShaB = NAMES.map((n) => sha256File(join(shareB, n)));
   const nowShaA = NAMES.map((n) => sha256File(join(shareA, n)));
@@ -264,9 +300,10 @@ const run = async () => {
   log(`报完之后:B 字节未被动过 = ${untouched},两侧仍不一致 = ${stillDifferent}(只报不回修)`);
   const noRepairPass = untouched && stillDifferent;
 
-  // —— 判据 4:负向对照 —— 旋钮关到 0 后一次审计都不报,而同步照常
-  const bBefore3 = auditLines(logB).length;
+  // —— 判据 5:负向对照 —— 旋钮关到 0 后一次审计都不报,而同步照常
+  await restart('A', aDir, PORT_A, CTRL_A, {});
   await restart('B', bDir, PORT_B, CTRL_B, { SYNCX_DRIFT_SAMPLE_N: '0' });
+  const bBefore3 = auditLines(logB).length; // B 已带 N=0 起来,此后的每一行都算数
   await sleep(1000);
   dropIntoShareA('f4.bin');
   await waitFor(() => existsSync(join(shareB, 'f4.bin')), 60_000, 'B 关闭哨兵后仍能收到新文件');
@@ -278,18 +315,22 @@ const run = async () => {
 
   const verdict = {
     workDir,
-    cleanRound: { sampled: bRound.sampled, declared: bRound.declared, disk: bRound.disk, aDisk: aClean?.disk ?? null },
+    cleanPeerRound: { peer: bPeerClean.peer, sampled: bPeerClean.sampled, declared: bPeerClean.declared, disk: bPeerClean.disk },
+    cleanLocalRound: { sampled: bLocalClean.sampled, disk: bLocalClean.disk },
+    honestSide: { peer: aCleanPeer?.peer ?? null, disk: aCleanPeer?.disk ?? null, localDisk: aCleanLocal?.disk ?? null },
     cleanPass,
     corruptedBytes: flips,
-    driftRound: { sampled: bDrift.sampled, declared: bDrift.declared, disk: bDrift.disk, unreadable: bDrift.unreadable },
-    honestSideDisk: aAtDrift?.disk ?? null,
+    offlineCapableRound: { round: bLocalDrift.round, disk: bLocalDrift.disk, detailLines: localDetails.length },
+    peerRoundAfterCorruption: { declared: bPeerAtDrift.declared, disk: bPeerAtDrift.disk },
+    offlineRound: { disk: bOffline.disk },
     driftPass,
+    offlinePass,
     bBytesUntouchedAfterReport: untouched,
     sidesStillDiffer: stillDifferent,
     noRepairPass,
     sentinelOffAuditLines: newB.length,
     negativeControlPass: offPass,
-    pass: cleanPass && driftPass && noRepairPass && offPass,
+    pass: cleanPass && driftPass && offlinePass && noRepairPass && offPass,
   };
   console.log(JSON.stringify(verdict, null, 2));
   log(`工作目录保留在 ${workDir}`);

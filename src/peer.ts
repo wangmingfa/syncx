@@ -9,7 +9,7 @@ import { parseIgnoreRules, isIgnoredPath, isHardIgnored, type IgnoreRule } from 
 import { mergeVersions } from './version.js';
 import type { ConflictPolicy } from './config.js';
 import type { ProgressCounts, TransferFile } from './status.js';
-import { equalPairs, runAudit, type DriftReport } from './drift.js';
+import { equalPairs, readDriftKnobs, runAudit, type DriftReport } from './drift.js';
 
 /**
  * 索引消息的两种语义:
@@ -345,31 +345,10 @@ const SEND_WINDOW_BYTES = Number(process.env.SYNCX_SEND_WINDOW_BYTES) || 64 * 10
 const DEFERRED_MAX = 4096;
 
 /**
- * drift 哨兵每轮抽样的路径条数默认值(见 drift.ts)。取 8:成本上界 = 8 次「读一块 + 一次
- * sha256」,与目录里有多少文件无关。一块的字节数按被验的那套视图定:定长块 ≤ BLOCK_SIZE,
- * 内容定义块 ≤ CDC_MAX_CHUNK —— 所以两侧都有 CDC 视图时,一轮的最坏情况是 32MB 而不是 8MB
- * (平均块长 ≈1MB,8MB 是典型值不是上限)。环境变量 SYNCX_DRIFT_SAMPLE_N 设 0 整道关闭。
+ * drift 哨兵的两个旋钮(抽样条数 / 最小间隔)与它们的默认值、解析口径都在 drift.ts
+ * (`readDriftKnobs`):本地巡检那条腿在 session-manager 里读的是同一对,写在这里会让
+ * 「N=0 整道关掉」这种语义有两份真相。
  */
-const DRIFT_SAMPLE_N_DEFAULT = 8;
-/**
- * 两次审计的最小间隔默认值:半小时。哨兵要抓的是「静默分叉」,它以周为单位积累,
- * 半小时一轮已经把覆盖转完一圈绰绰有余(每轮 8 条、槽位随轮次轮换),再把间隔收紧
- * 就只是在给一个几乎不响的东西分配盘读预算。环境变量 SYNCX_DRIFT_INTERVAL_MS 覆盖。
- *
- * 两个旋钮都在**建管线时**读(见 createSyncPeer),不做成模块常量:那会把值冻在
- * import 那一刻,而「把抽样数压到 2、间隔压到 0」正是集成用例走到这条路径的办法。
- * 用 envInt 而不是本文件常见的 `Number(env) || 默认`:对抽样数来说 **0 是要能生效的
- * 取值**(关掉哨兵),而 `|| 8` 会把用户明确写下的 0 悄悄变回 8。
- */
-const DRIFT_INTERVAL_MS_DEFAULT = 30 * 60 * 1000;
-
-/** 读整型环境旋钮:未设/空串/非有限/负数都退回默认值。 */
-function envInt(name: string, fallback: number): number {
-  const raw = process.env[name];
-  if (raw === undefined || raw === '') return fallback;
-  const v = Number(raw);
-  return Number.isFinite(v) && v >= 0 ? Math.floor(v) : fallback;
-}
 
 /**
  * 速率采样窗口:瞬时速率 = 最近这段时间内实测字节的平均值。
@@ -698,30 +677,30 @@ export function createSyncPeer(deps: SyncPeerDeps): SyncPeer {
     return !!local && !local.deleted && !local.placeholder && cdcUsable(local);
   }
 
-  // drift 哨兵的旋钮:抽样条数与最小间隔。envInt 而不是 `Number(x) || 默认值`:显式 0
-  // (整道关掉)必须能表达。两个都在**建管线时**读,不做模块常量,否则值冻在 import 时。
-  const sampleN = envInt('SYNCX_DRIFT_SAMPLE_N', DRIFT_SAMPLE_N_DEFAULT);
-  const intervalMs = envInt('SYNCX_DRIFT_INTERVAL_MS', DRIFT_INTERVAL_MS_DEFAULT);
+  // drift 哨兵的旋钮:与本地巡检共用同一对(见 drift.ts 的 readDriftKnobs —— 默认值与
+  // 「显式 0 要能生效」的解析口径都只有一份真相)。在建管线时读,不做模块常量。
+  const { sampleN, intervalMs } = readDriftKnobs();
   // 节流状态按目录共享(见 deps.driftState):同一设备的两条连接各挂一份 SyncPeer,审的是同一块盘,
   // 各记各的会把一次分叉按连接报两遍,而轮次归零等于抽样槽位永远不轮换。
   // 未传时退化成每连接一份(旧调用方与单测的路径)。
   const drift = driftState ?? { lastAt: 0, round: 0 };
 
   /**
-   * 闲时抽样审计(drift 哨兵)。三道门:①上层没接线或旋钮关到 0;②这条连接此刻有传输在跑
-   * (`pending` 非空 = 本机正在收,盘上同一批路径正被逐块写;`serving` 非空 = 本机正在供块,
-   * 再加 8 次定位读只是跟传输抢盘);③距**本目录**上次审计未到间隔(状态见 deps.driftState,
-   * 所以这条闸门管的是整个目录,不是某一条连接 —— 代价是间隔到点后第一个交换索引的对端跑掉这一轮,
-   * 其余对端整个窗口内被跳过;A 检查比的是那个对端的宣告,所以三台以上设备时安静的那几台覆盖率
-   * 低于按轮数算出的上界,取舍见 ADR-0022 的 Consequences)。
+   * 闲时抽样审计(drift 哨兵的 A 侧:宣告 vs 宣告,零 IO)。三道门:①上层没接线或旋钮关到 0;
+   * ②这条连接此刻有传输在跑(`pending` 非空 = 本机正在收,`serving` 非空 = 本机正在供块)——
+   * 理由**不是**「别跟传输抢盘」(A 已经不读盘,那是 B 的理由,现在归扫描器),而是**在途期间
+   * 两边的宣告各自都在动**:这一刻拿到的对端索引可能比本机刚落地的内容旧,比出来的不等是时序
+   * 假象而不是持久分叉,而误报是哨兵最贵的失败;③距**本目录**上次审计未到间隔(状态见
+   * deps.driftState,所以这条闸门管的是整个目录,不是某一条连接 —— 代价是间隔到点后第一个交换
+   * 索引的对端跑掉这一轮,其余对端整个窗口内被跳过;A 检查比的是那个对端的宣告,所以三台以上
+   * 设备时安静的那几台覆盖率低于按轮数算出的上界,取舍见 ADR-0022 的 Consequences)。
    *
    * 挂在 `onPeerIndex` 末尾而不是扫描器里,是因为**候选集只在这一刻拿得起来**:本机不持久化
    * 每个对端的索引(每轮临时建一个 Map 就丢掉),离开这轮消息就没有「对端宣告」可比了。
-   * 代价是审计跟着「有人来交换索引」走而不是跟着时钟走 —— 长期空闲意味着没有改动在流动,
-   * 也就没有分叉在积累,这个方向上不亏。
+   * B(验盘)不需要对端任何东西,所以它不在这里,跟着扫描器心跳跑(见 session-manager 的本地巡检)。
    *
    * 端到端加密的对端走不到这里(`onPeerIndex` 开头就返回),这是对的:盲区端宣告的是密文视图
-   * 的块哈希,拿它比本机明文盘等于把每条路径都报成漂移。
+   * 的块哈希,拿它比本机明文宣告等于把每条路径都报成分叉。
    */
   function runDriftAudit(remote: Map<string, IndexEntry>): void {
     if (onDriftAudit === undefined || sampleN === 0) return;
@@ -734,13 +713,7 @@ export function createSyncPeer(deps: SyncPeerDeps): SyncPeer {
     // 没有候选也照发报告:日志里的 sampled 计数就是「这一轮真跑了」的证据。
     // 少了它,「一切干净」与「哨兵从没跑起来」在日志里长得一模一样。
     drift.round++;
-    const report = runAudit(candidates, {
-      round: drift.round,
-      n: sampleN,
-      cdcOf: (pair) => planCdc(pair.remote),
-      // 没有执行器就只跑 A:少了 verify 是「这道检查没做」,报成「做了且干净」是假安心。
-      verify: executor ? (samples) => executor.verifySampledSlots(samples) : undefined,
-    });
+    const report = runAudit(candidates, { round: drift.round, n: sampleN });
     onDriftAudit({ ...report, peer: remoteDeviceId ?? '', round: drift.round });
   }
 

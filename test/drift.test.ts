@@ -13,11 +13,15 @@ import {
 } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import pino from 'pino';
 import { rmDir } from './helpers.js';
 import { openIndexStore, type IndexStore } from '../src/indexstore.js';
 import { createLocalExecutor, type LocalExecutor } from '../src/executor.js';
 import { hashBlock, splitIntoBlocks, BLOCK_SIZE } from '../src/blockstore.js';
 import { createSyncPeer, type DriftState, type PeerTransport } from '../src/peer.js';
+import { loadConfig } from '../src/config.js';
+import { loadOrCreateIdentity } from '../src/identity.js';
+import { SyncSessionManager } from '../src/session-manager.js';
 import type { BlockRequest } from '../src/messages.js';
 import type { IndexEntry } from '../src/index.js';
 import {
@@ -25,6 +29,7 @@ import {
   equalPairs,
   pickSlot,
   runAudit,
+  runLocalAudit,
   strideSample,
   type DriftPair,
   type DriftReport,
@@ -70,6 +75,45 @@ function declare(local: IndexEntry, over: Partial<IndexEntry> = {}): IndexEntry 
 
 function ok(entry: IndexEntry, slot: number): SlotVerdict {
   return { kind: 'ok', path: entry.path, slot };
+}
+
+// ---------------------------------------------------------------------------
+// 真盘小搭子(检查 B 与本地巡检共用)
+//
+// 从「检查 B」那组提上来:本地轮(runLocalAudit)的端到端用例要的是同一套
+// 「写盘 + 建条目 + 改一字节」,一份就够。
+// ---------------------------------------------------------------------------
+
+function fixture(): { dir: string; root: string; index: IndexStore; executor: LocalExecutor } {
+  const dir = mkdtempSync(join(tmpdir(), 'syncx-drift-'));
+  const root = join(dir, 'share');
+  mkdirSync(root, { recursive: true });
+  const index = openIndexStore(join(dir, 'index.db'));
+  const executor = createLocalExecutor(root, index, join(root, '.syncx-trash'));
+  return { dir, root, index, executor };
+}
+
+/** 写盘 + 建条目,mtime 取落盘后的真值(与扫描器落库的形态一致)。 */
+function seed(root: string, rel: string, data: Buffer, over: Partial<IndexEntry> = {}): IndexEntry {
+  const target = join(root, rel);
+  mkdirSync(join(target, '..'), { recursive: true });
+  writeFileSync(target, data);
+  return { ...mkEntry(rel, data, over), mtime: statSync(target).mtimeMs };
+}
+
+/**
+ * 改一个字节并把 mtime 复位。
+ *
+ * 复位不是取巧:要仿真的是「落地路径自己把字节写坏了」那一类故障(ADR-0021 记过的
+ * 「3 参 writeSync 把每块都写到文件开头」就是它),那种坏法写完照样 stat 得出正常的
+ * mtime 与 size —— 扫描器因此**永远不会**重算这份文件,只有哨兵看得见。
+ */
+function corruptByte(target: string, offset: number): void {
+  const before = statSync(target);
+  const buf = readFileSync(target);
+  buf[offset] = buf[offset]! ^ 0xff;
+  writeFileSync(target, buf);
+  utimesSync(target, before.atime, before.mtime);
 }
 
 describe('检查 A:本机宣告 vs 对端宣告', () => {
@@ -204,15 +248,14 @@ describe('抽样:确定性地轮转,而不是随机', () => {
   });
 });
 
-describe('一轮审计的编排', () => {
+describe('对端轮(runAudit):只做 A', () => {
   const e = mkEntry('clean.bin', Buffer.from('hello drift'));
   const pair = (over: Partial<IndexEntry> = {}): DriftPair[] => [
     { path: e.path, local: e, remote: declare(e, over) },
   ];
-  const allOk = (samples: readonly SlotSample[]): SlotVerdict[] => samples.map((s) => ok(s.entry, s.slot));
 
   it('干净舰队报 sampled>0 且两个检出计数都是 0 —— 让「没检出」与「没跑」可区分', () => {
-    const { summary, findings } = runAudit(pair(), { round: 0, n: 8, verify: allOk });
+    const { summary, findings } = runAudit(pair(), { round: 0, n: 8 });
     expect(summary).toMatchObject({ candidates: 1, sampled: 1, declared: 0, disk: 0, unreadable: 0 });
     expect(findings).toEqual([]);
   });
@@ -223,10 +266,45 @@ describe('一轮审计的编排', () => {
     expect(findings[0]).toMatchObject({ kind: 'declared', path: 'clean.bin' });
   });
 
-  it('占位条目不送去验盘(盘上本就没有实体),但仍受 A 审', () => {
-    const ph: DriftPair = { path: 'ph.bin', local: { ...e, placeholder: true }, remote: e };
+  it('盘上字节坏掉也不影响它:对端轮没有验盘这道(接口里连 verify 都没有)', () => {
+    const f = fixture();
+    const entry = seed(f.root, 'quiet.bin', Buffer.alloc(64, 3));
+    corruptByte(join(f.root, 'quiet.bin'), 0);
+    const { summary, findings } = runAudit(
+      [{ path: entry.path, local: entry, remote: declare(entry) }],
+      { round: 0, n: 8 },
+    );
+    expect(summary).toMatchObject({ declared: 0, disk: 0, unreadable: 0 });
+    expect(findings).toEqual([]);
+    rmDir(f.dir);
+  });
+});
+
+describe('本地轮(runLocalAudit):只做 B', () => {
+  const e = mkEntry('clean.bin', Buffer.from('hello drift'));
+  const allOk = (samples: readonly SlotSample[]): SlotVerdict[] => samples.map((s) => ok(s.entry, s.slot));
+
+  it('干净条目报 sampled>0 且两个检出计数都是 0;declared 恒为 0(没有第二台设备)', () => {
     const seen: SlotSample[] = [];
-    const { summary } = runAudit([ph], {
+    const { summary, findings } = runLocalAudit([e], {
+      round: 0,
+      n: 8,
+      verify: (samples) => {
+        seen.push(...samples);
+        return allOk(samples);
+      },
+    });
+    expect(seen.map((s) => [s.entry.path, s.cdc])).toEqual([['clean.bin', false]]);
+    expect(summary).toMatchObject({ candidates: 1, sampled: 1, declared: 0, disk: 0, unreadable: 0 });
+    expect(findings).toEqual([]);
+  });
+
+  it('候选过滤:墓碑 / 占位条目 / 无宣告可验(0 字节)一条都不进', () => {
+    const dead = { ...e, path: 'gone.bin', deleted: true, blocks: [], size: 0 };
+    const ph = { ...e, path: 'ph.bin', placeholder: true };
+    const empty = mkEntry('empty.bin', Buffer.alloc(0));
+    const seen: SlotSample[] = [];
+    const { summary } = runLocalAudit([dead, ph, empty], {
       round: 0,
       n: 8,
       verify: (samples) => {
@@ -235,54 +313,47 @@ describe('一轮审计的编排', () => {
       },
     });
     expect(seen).toEqual([]);
-    expect(summary).toMatchObject({ sampled: 1, disk: 0 });
+    expect(summary).toMatchObject({ candidates: 0, sampled: 0 });
   });
 
-  it('验盘结论按 kind 分流:盘读不出不计入漂移', () => {
-    const { summary, findings } = runAudit(pair(), {
+  it('n=0 连 verify 都不调:整道关掉时一次盘读都不发生', () => {
+    let called = 0;
+    const { summary } = runLocalAudit([e], {
       round: 0,
-      n: 8,
-      verify: (samples) => samples.map((s) => ({ kind: 'unreadable', path: s.entry.path, slot: s.slot, error: 'file absent' })),
-    });
-    expect(summary).toMatchObject({ disk: 0, unreadable: 1 });
-    expect(findings[0]).toMatchObject({ kind: 'unreadable', detail: 'file absent' });
-  });
-
-  it('A 检出的条目照样送去验盘:两道问的是不同问题', () => {
-    const seen: SlotSample[] = [];
-    runAudit(pair({ blocks: ['bad'] }), {
-      round: 0,
-      n: 8,
+      n: 0,
       verify: (samples) => {
-        seen.push(...samples);
+        called++;
         return allOk(samples);
       },
     });
-    expect(seen.map((s) => s.entry.path)).toEqual(['clean.bin']);
+    expect(called).toBe(0);
+    expect(summary).toMatchObject({ candidates: 1, sampled: 0, disk: 0 });
   });
 
-  it('没有 CDC 视图的条目按定长口径抽槽(cdc=false 传进 executor)', () => {
-    const seen: SlotSample[] = [];
-    runAudit(pair(), {
-      round: 0,
-      n: 8,
-      verify: (samples) => {
-        seen.push(...samples);
-        return allOk(samples);
-      },
-    });
-    expect(seen[0]!.cdc).toBe(false);
-    expect(seen[0]!.entry).toBe(e);
+  it('验盘结论按 kind 分流:drift 记 disk 并带出两个哈希,unreadable 单列', () => {
+    const verdictsFor = (kind: 'drift' | 'unreadable') => (samples: readonly SlotSample[]): SlotVerdict[] =>
+      samples.map((s) =>
+        kind === 'drift'
+          ? { kind: 'drift', path: s.entry.path, slot: s.slot, declared: 'aaaa1111aaaa', actual: 'bbbb2222bbbb' }
+          : { kind: 'unreadable', path: s.entry.path, slot: s.slot, error: 'file absent' },
+      );
+    const d = runLocalAudit([e], { round: 0, n: 8, verify: verdictsFor('drift') });
+    expect(d.summary).toMatchObject({ disk: 1, unreadable: 0 });
+    expect(d.findings[0]).toMatchObject({ kind: 'disk', path: 'clean.bin' });
+    expect(d.findings[0]!.detail).toContain('declared aaaa1111aaaa… != on disk bbbb2222bbbb…');
+
+    const u = runLocalAudit([e], { round: 0, n: 8, verify: verdictsFor('unreadable') });
+    expect(u.summary).toMatchObject({ disk: 0, unreadable: 1 });
+    expect(u.findings[0]).toMatchObject({ kind: 'unreadable', detail: 'file absent' });
   });
 
-  it('两侧都有可用 CDC 视图且调用方点名按 CDC 验时,抽的是 cdh 的那套槽位', () => {
+  it('验盘口径自己定:有可用 CDC 视图就用它(偏移是 prefix-sum,ADR-0021 的算错路径)', () => {
     const data = Buffer.alloc(10, 7);
     const c = withCdc(mkEntry('cdc.bin', data), data, [6, 4]);
     const seen: SlotSample[] = [];
-    runAudit([{ path: 'cdc.bin', local: c, remote: declare(c) }], {
+    runLocalAudit([c], {
       round: 0,
       n: 8,
-      cdcOf: () => true,
       verify: (samples) => {
         seen.push(...samples);
         return allOk(samples);
@@ -292,55 +363,46 @@ describe('一轮审计的编排', () => {
     expect(seen[0]!.slot).toBeLessThan(2);
   });
 
-  it('0 字节文件没有可验的槽位:计入 sampled 却不送验(两种视图列表都空)', () => {
-    const z = mkEntry('empty.bin', Buffer.alloc(0));
-    const seen: SlotSample[] = [];
-    const { summary } = runAudit([{ path: 'empty.bin', local: z, remote: declare(z) }], {
+  it('换轮真换槽:同一份索引在后续轮次抽到不同的块(不是永远读第 0 块)', () => {
+    const data = Buffer.from('0123456789abcdef');
+    const c = withCdc(mkEntry('rot.bin', data), data, Array.from({ length: 16 }, () => 1));
+    const slots = new Set<number>();
+    for (let round = 1; round <= 8; round++) {
+      runLocalAudit([c], {
+        round,
+        n: 8,
+        verify: (samples) => {
+          slots.add(samples[0]!.slot);
+          return allOk(samples);
+        },
+      });
+    }
+    expect(slots.size).toBeGreaterThan(1);
+  });
+
+  it('篡改一字节必须报红(真盘 + 真 executor):报 disk 且只报不改', () => {
+    const f = fixture();
+    const intact = seed(f.root, 'intact.bin', Buffer.from('good content'));
+    const broken = seed(f.root, 'broken.bin', Buffer.alloc(64, 3));
+    const before = readFileSync(join(f.root, 'broken.bin'));
+    corruptByte(join(f.root, 'broken.bin'), 5);
+    const after = readFileSync(join(f.root, 'broken.bin'));
+    expect(after).not.toEqual(before);
+
+    const { summary, findings } = runLocalAudit([intact, broken], {
       round: 0,
       n: 8,
-      verify: (samples) => {
-        seen.push(...samples);
-        return allOk(samples);
-      },
+      verify: (samples) => f.executor.verifySampledSlots(samples),
     });
-    expect(summary.sampled).toBe(1);
-    expect(seen).toEqual([]);
+    expect(summary).toMatchObject({ candidates: 2, sampled: 2, declared: 0, disk: 1, unreadable: 0 });
+    expect(findings).toEqual([expect.objectContaining({ kind: 'disk', path: 'broken.bin', slot: 0 })]);
+    // 只报不回修:坏字节还在原处,哨兵不裁决「谁的内容是对的」
+    expect(readFileSync(join(f.root, 'broken.bin'))).toEqual(after);
+    rmDir(f.dir);
   });
 });
 
 describe('检查 B:本机宣告 vs 盘上字节(executor.verifySampledSlots)', () => {
-  function fixture(): { dir: string; root: string; index: IndexStore; executor: LocalExecutor } {
-    const dir = mkdtempSync(join(tmpdir(), 'syncx-drift-'));
-    const root = join(dir, 'share');
-    mkdirSync(root, { recursive: true });
-    const index = openIndexStore(join(dir, 'index.db'));
-    const executor = createLocalExecutor(root, index, join(root, '.syncx-trash'));
-    return { dir, root, index, executor };
-  }
-
-  /** 写盘 + 建条目,mtime 取落盘后的真值(与扫描器落库的形态一致)。 */
-  function seed(root: string, rel: string, data: Buffer, over: Partial<IndexEntry> = {}): IndexEntry {
-    const target = join(root, rel);
-    mkdirSync(join(target, '..'), { recursive: true });
-    writeFileSync(target, data);
-    return { ...mkEntry(rel, data, over), mtime: statSync(target).mtimeMs };
-  }
-
-  /**
-   * 改一个字节并把 mtime 复位。
-   *
-   * 复位不是取巧:要仿真的是「落地路径自己把字节写坏了」那一类故障(ADR-0021 记过的
-   * 「3 参 writeSync 把每块都写到文件开头」就是它),那种坏法写完照样 stat 得出正常的
-   * mtime 与 size —— 扫描器因此**永远不会**重算这份文件,只有哨兵看得见。
-   */
-  function corruptByte(target: string, offset: number): void {
-    const before = statSync(target);
-    const buf = readFileSync(target);
-    buf[offset] = buf[offset]! ^ 0xff;
-    writeFileSync(target, buf);
-    utimesSync(target, before.atime, before.mtime);
-  }
-
   it('完好文件的每个槽位都判 ok:非零偏移也对得上,才证明偏移算术而不只是「开头一段」', () => {
     const { dir, root, index } = fixture();
     const data = Buffer.concat([Buffer.alloc(BLOCK_SIZE, 1), Buffer.alloc(BLOCK_SIZE, 2), Buffer.from('tail')]);
@@ -553,6 +615,7 @@ describe('哨兵接线:peer 侧的门控与上报', () => {
     return {
       dir,
       root,
+      executor,
       localIndex,
       requests,
       reports,
@@ -602,7 +665,7 @@ describe('哨兵接线:peer 侧的门控与上报', () => {
     h.dispose();
   });
 
-  it('盘上字节被改坏而索引没动 → 报 disk:这是唯一能抓到「本机在撒谎」的一道', async () => {
+  it('盘上字节被改坏:对端轮不报(A 只看宣告),同一份坏象由本地轮报 disk —— 拆分后的分工', async () => {
     const h = harness({ n: '8', intervalMs: '0' });
     const data = Buffer.alloc(64, 3); // 单块文件:抽到哪一格都是它
     const e = h.seed('c.bin', data);
@@ -612,9 +675,18 @@ describe('哨兵接线:peer 侧的门控与上报', () => {
     buf[0] = 9;
     writeFileSync(target, buf);
     utimesSync(target, st.atime, st.mtime); // 坏的是字节,stat 一切如常 —— 扫描器看不见这种坏法
+
     await h.peer.onPeerIndex([declare(e)], { full: true });
-    expect(h.reports[0]!.summary).toMatchObject({ declared: 0, disk: 1 });
-    expect(h.reports[0]!.findings[0]!.kind).toBe('disk');
+    expect(h.reports[0]!.summary).toMatchObject({ declared: 0, disk: 0 });
+    expect(h.reports[0]!.findings).toEqual([]);
+
+    const local = runLocalAudit(h.localIndex.values(), {
+      round: 1,
+      n: 8,
+      verify: (samples) => h.executor.verifySampledSlots(samples),
+    });
+    expect(local.summary).toMatchObject({ declared: 0, disk: 1, unreadable: 0 });
+    expect(local.findings[0]!.kind).toBe('disk');
     h.dispose();
   });
 
@@ -707,5 +779,113 @@ describe('哨兵接线:peer 侧的门控与上报', () => {
     expect(requests.length).toBeGreaterThan(0);
     index.close();
     rmDir(dir);
+  });
+});
+
+describe('接线:session-manager 的本地巡检按时钟跑(peer=local)', () => {
+  /**
+   * 起一台只有本地目录、**一个对端都没有**的 manager —— 这正是这道巡检存在的理由:
+   * 对端长期离线或目录安静到没有索引交换时,盘上坏掉的东西也得有人看得见。日志走
+   * 自建的 pino 目的地流(而不是 createLogger 的 stdout / 文件),断言可以直接读行。
+   */
+  function bootLocal(prefix: string): {
+    dir: string;
+    share: string;
+    manager: SyncSessionManager;
+    lines: string[];
+    auditLines: () => string[];
+  } {
+    const dir = mkdtempSync(join(tmpdir(), prefix));
+    const share = join(dir, 'share');
+    mkdirSync(share, { recursive: true });
+    const configPath = join(dir, 'config.json');
+    writeFileSync(
+      configPath,
+      JSON.stringify({ sharedFolders: [{ id: 'main', path: share, devices: [] }], knownDevices: [], peers: [] }),
+    );
+    const lines: string[] = [];
+    const logger = pino(
+      { level: 'debug' },
+      {
+        write: (s: string) => {
+          lines.push(s);
+        },
+      },
+    );
+    const manager = new SyncSessionManager(
+      { identity: loadOrCreateIdentity(dir), configPath, configDir: dir, peerPort: 0, logger },
+      loadConfig(configPath).sharedFolders,
+    );
+    return { dir, share, manager, lines, auditLines: () => lines.filter((l) => l.includes('audit folder=main')) };
+  }
+
+  /** 两个旋钮在 manager 构造时读;无论用例怎么结束都要还原,否则污染同文件后面的构建。 */
+  function withKnobs<T>(n: string, intervalMs: string, fn: () => Promise<T>): Promise<T> {
+    const saved = { n: process.env.SYNCX_DRIFT_SAMPLE_N, interval: process.env.SYNCX_DRIFT_INTERVAL_MS };
+    process.env.SYNCX_DRIFT_SAMPLE_N = n;
+    process.env.SYNCX_DRIFT_INTERVAL_MS = intervalMs;
+    return fn().finally(() => {
+      if (saved.n === undefined) delete process.env.SYNCX_DRIFT_SAMPLE_N;
+      else process.env.SYNCX_DRIFT_SAMPLE_N = saved.n;
+      if (saved.interval === undefined) delete process.env.SYNCX_DRIFT_INTERVAL_MS;
+      else process.env.SYNCX_DRIFT_INTERVAL_MS = saved.interval;
+    });
+  }
+
+  it('对端一台都不在:盘上改坏一个字节,下一轮扫描就报 peer=local + disk=1', async () => {
+    await withKnobs('8', '0', async () => {
+      const h = bootLocal('syncx-drift-local-');
+      try {
+        writeFileSync(join(h.share, 'victim.bin'), Buffer.alloc(64, 3));
+        await h.manager.runScan(); // 第一轮:扫描器把条目建进索引,巡检干净收场
+        const first = h.auditLines();
+        expect(first.length).toBe(1);
+        expect(first[0]).toContain('peer=local');
+        expect(first[0]).toContain('disk=0');
+
+        corruptByte(join(h.share, 'victim.bin'), 0); // 坏字节 + mtime 复位:扫描器看不见
+        await h.manager.runScan();
+
+        const audits = h.auditLines();
+        expect(audits.length).toBe(2);
+        expect(audits[1]).toContain('peer=local');
+        expect(audits[1]).toContain('disk=1');
+        const drift = h.lines.find((l) => l.includes('drift folder=main peer=local disk victim.bin'));
+        expect(drift).toBeDefined();
+        expect(drift).toContain('slot=0');
+      } finally {
+        h.manager.close();
+        rmDir(h.dir);
+      }
+    });
+  });
+
+  it('间隔未到就不跑:两轮扫描之间只该有一条计数行(巡检的状态是目录级的)', async () => {
+    await withKnobs('8', '600000', async () => {
+      const h = bootLocal('syncx-drift-local-gap-');
+      try {
+        writeFileSync(join(h.share, 'a.txt'), Buffer.from('content a'));
+        await h.manager.runScan();
+        await h.manager.runScan();
+        expect(h.auditLines().length).toBe(1);
+      } finally {
+        h.manager.close();
+        rmDir(h.dir);
+      }
+    });
+  });
+
+  it('抽样数设 0 整道关掉:一行都不发(与对端轮同一个旋钮)', async () => {
+    await withKnobs('0', '0', async () => {
+      const h = bootLocal('syncx-drift-local-off-');
+      try {
+        writeFileSync(join(h.share, 'a.txt'), Buffer.from('content a'));
+        await h.manager.runScan();
+        expect(h.auditLines()).toEqual([]);
+      } finally {
+        h.manager.close();
+        rmDir(h.dir);
+      }
+    });
   });
 });

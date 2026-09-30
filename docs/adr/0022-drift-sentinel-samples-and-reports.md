@@ -4,7 +4,8 @@
 
 Accepted. v1 of the ROADMAP item 「抽样审计(drift 哨兵)」. It rests on ADR-0002 (version vectors are
 the conflict primitive) and is deliberately shaped so it works on a mixed-version fleet (ADR-0018)
-without a wire change.
+without a wire change. Amended 2026-09-30 (still within v1, no wire change): the disk check moved
+off the peer round onto the scan clock — see 「The two checks run in different rounds」.
 
 ## Context
 
@@ -51,20 +52,40 @@ start" mistake, and under a fixed slot 0 that bug looks perfectly healthy.
 **Cost ceiling: one slot read per sampled path** (default 8 per round **per folder**), independent
 of folder size — 8 reads and 8 sha256. A slot is `BLOCK_SIZE` (1 MiB) on the fixed view but up to
 `CDC_MAX_CHUNK` (4 MiB) on the content-defined view, which is what an audit between two
-CDC-carrying sides uses, so a round reads ~8 MB typically and 32 MB in the worst case.
+CDC-carrying sides uses, so a round reads ~8 MB typically and 32 MB in the worst case. All of those
+reads live in the **local** round; the peer round reads nothing (below), so the per-interval budget
+is the same one v1 had, spent where it now buys coverage that does not depend on a peer.
 Knobs are environment-only —
-`SYNCX_DRIFT_SAMPLE_N` (0 = off), `SYNCX_DRIFT_INTERVAL_MS` (30 min) — read when the pipeline is
-built rather than as module constants so a test can drive them.
+`SYNCX_DRIFT_SAMPLE_N` (0 = off, both rounds together), `SYNCX_DRIFT_INTERVAL_MS` (30 min) — read
+when the pipeline is built / the manager is constructed rather than as module constants so a test
+can drive them.
 They are not in `config.json` on purpose: a config key implies UI, migration and a user decision,
 and this is a diagnostic that should never need touching.
 
-**It runs at the tail of `onPeerIndex`, gated on an idle connection and a folder-wide interval** — `pending`
-non-empty means the receive path is writing those very files; `serving` non-empty means the disk is
-busy for the transfer. Not hooked into the scanner, because the candidate set only exists *in this
-message*: no per-peer index is persisted (`onPeerIndex` builds a request-local Map and drops it), so
-outside a round there is nothing to compare declarations against. The cost is that the audit follows
-index traffic rather than the clock; that direction is safe, since a device exchanging no index
-changes is not accumulating divergence.
+**The two checks run in different rounds.** Not a detail of scheduling — it follows from where each
+check's inputs live. A can only be computed the moment an index arrives: nothing persists a
+per-peer index (`onPeerIndex` builds a request-local Map and drops it), so outside that message
+there is no second declaration set to compare against. B needs nothing from a peer (`blocks` is a
+required field of the local entry, `cdh`/`clens` are the same file's other view, and the bytes are
+on this disk), so it is not tied to that message at all and runs at the tail of the folder's scan
+pass (`runLocalAudit` via `runLocalAuditPass`, `sessionManager.scanOnce`) — the heartbeat that
+already carries pause, schedule, folder-identity and disk-guard gates.
+
+Splitting them buys two things v1 could not have:
+
+- **Coverage.** On the peer-triggered schedule, a disk with no index traffic is never verified:
+  a peer offline for weeks, a folder quiet enough that nothing changes, and — structurally — a
+  blind (e2e) peer's folder, where the peer round returns before auditing anything. B follows the
+  clock instead, so the local lie ("my index advertises a block my disk no longer holds") is
+  checked on every folder that is being scanned, peers or not.
+- **Zero cost on the wire-triggered path.** A is pure comparison of bytes already in hand, so the
+  peer round can now run on *every* index exchange rather than sharing one interval budget with a
+  disk read.
+
+The peer round keeps its idle gate (`pending`/`serving` empty), but its reason changed: it no
+longer protects the disk from contention (there is no IO left to contend with). With transfers in
+flight the two sides' declarations are mid-convergence, and a mismatch there is a timing artifact —
+false alarms are the sentinel's costliest failure, so the round waits for the connection to settle.
 
 **The throttle state belongs to the folder, not to the connection** (`SyncPeerDeps.driftState`, one
 object per `FolderState`, same reasoning as the receive-claim ledger in ADR-0021). A device pair runs
@@ -77,13 +98,23 @@ forever, i.e. the rotation that keeps an offset bug from hiding (above) silently
 Callers that pass no state (old callers, unit tests) keep the per-connection behaviour. What this costs
 in per-peer coverage is recorded under Consequences.
 
+**The local round keeps its own `{ lastAt, round }`** (`FolderState.localAuditState`), deliberately
+not shared with the peer round's. They are two independent clocks: sharing one `lastAt` would let
+whichever round fires first starve the other for the whole interval — visible in the log as
+"only `peer=<dev>` lines, never a `peer=local` one" — and sharing `round` would couple the slot
+rotation of the disk verification to unrelated index traffic.
+
 **Report only. This is the load-bearing decision.** A detection produces a log line and nothing
 else:
 
 ```
-audit folder=<id> peer=<dev> round=<n> candidates=<c> sampled=<s> declared=<a> disk=<b> unreadable=<u>
-drift folder=<id> peer=<dev> disk <path> slot=<i>: slot[i] declared abcd1234… != on disk ff00ee11…
+audit folder=<id> peer=<dev|local> round=<n> candidates=<c> sampled=<s> declared=<a> disk=<b> unreadable=<u>
+drift folder=<id> peer=<dev|local> disk <path> slot=<i>: slot[i] declared abcd1234… != on disk ff00ee11…
 ```
+
+`peer=local` is the local round: `declared` is always 0 there (no second device to disagree with),
+and `disk` is always 0 on a peer round (no disk is read). Two counters, one line shape — the same
+`grep` and the same judgement read both.
 
 Repair is refused for v1 for three reasons:
 
@@ -121,18 +152,25 @@ a sample it did not check.
   (2 s) of the stat that produced the entry, same size, can raise one `disk` line that the next scan
   resolves on its own. Tightening it to a strict `mtime >` comparison would disable check B entirely
   on FAT/exFAT shares, where every re-stat reads up to 2 s newer than the recorded value.
-- **Blind (e2e) peers are not audited**: `onPeerIndex` returns before any of this when `e2eKey` is
-  set (`src/peer.ts:1047`), which is correct — a blind peer declares ciphertext-view hashes, and
-  comparing those against the plaintext disk would report every path as drift.
+- **Check A does not run for blind (e2e) peers**: `onPeerIndex` returns before any of this when
+  `e2eKey` is set (`src/peer.ts:1047`), which is correct — a blind peer declares ciphertext-view
+  hashes, and comparing those against the plaintext disk would report every path as drift. Check B
+  is unaffected and is now the *only* thing auditing such a folder: it never looks at a peer.
 - **Folder-level gating means one peer per interval, not every peer.** `{ lastAt, round }` is shared by
   *all* SyncPeers in the folder, so the first device to exchange an index after the interval fires the
-  round and the rest are skipped until the next one. Check B is unaffected — it reads the local disk,
-  which is the same disk whichever peer triggered — but check A compares against *that peer's*
-  declarations, so in a folder of three or more devices the quiet ones are audited less often than
-  `(N/8) × interval` suggests. Keying the state per `remoteDeviceId` would restore per-peer coverage and
-  still dedupe (the duplicate reports came from one device's two connections); it is the follow-up if
-  that ever matters, and it is not taken now because the folder-level object is what the bench verified
-  end to end, and no detection sample yet turns on *which* peer triggered.
+  round and the rest are skipped until the next one. That now only limits check A, which compares
+  against *that peer's* declarations; in a folder of three or more devices the quiet ones are audited
+  less often than `(N/8) × interval` suggests. Check B moved off this schedule entirely (it is on
+  `localAuditState`), so the disk side no longer inherits the gap. Keying the state per
+  `remoteDeviceId` would restore per-peer coverage and still dedupe (the duplicate reports came from
+  one device's two connections); it is the follow-up if that ever matters, and it is not taken now
+  because the folder-level object is what the bench verified end to end, and no detection sample yet
+  turns on *which* peer triggered.
+- **The two rounds can disagree about the same path, and that is the design:** the local round
+  reports "my disk does not match my own declaration", the peer round reports "your declaration does
+  not match mine". A folder where only one of the two is red is information — e.g. a disk-only
+  corruption is *invisible* to the peer round (both sides still declare the same, stale hashes)
+  until the liar's next scan rewrites its own entry.
 - **Coverage is a rotation, not a guarantee**: at 8 paths per round, a file is audited about once
   per `(N/8) × interval`. Three cases stay invisible by design: a path never sampled in the window,
   a fork where both devices' disks agree with their own declarations *and* the declarations are

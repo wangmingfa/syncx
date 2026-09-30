@@ -52,7 +52,7 @@ import { buildFolderDiff, checkDiffAgainstDisk, toSnapshotEntry, type FolderDiff
 import { broadcastFolderUpdates } from './broadcast.js';
 import { relayToSiblings } from './relay.js';
 import { compareContentLimit, imageMimeOf, TEXT_COMPARE_MAX_BYTES } from './file-kind.js';
-import type { DriftReport } from './drift.js';
+import { readDriftKnobs, runLocalAudit, type DriftReport } from './drift.js';
 import { connectPeer } from './net/client.js';
 import { makePeerTransport, attachPeerMessages, sendControlMessage, type ControlMessage } from './net/wire.js';
 import { learnPeerUrl, learnPeerIp, getLanAddresses } from './net/addresses.js';
@@ -168,6 +168,14 @@ export interface FolderState {
    * 永远验同一个槽(槽位按 (path, round) 取点)。2026-09-30 双真 daemon 冒烟实测到这两条。
    */
   driftState: DriftState;
+  /**
+   * drift 哨兵**本地巡检**(验盘那道)的节流状态,与上面那份分开两份。
+   *
+   * 分开是因为两条腿的触发源不同(一条跟着对端索引交换,一条跟着扫描心跳),而间隔都是半小时:
+   * 共用一个 `lastAt` 的话谁先跑谁把整个间隔吃掉,另一条腿就此饿死 —— 表现为「日志里永远只有
+   * `peer=…` 那几种行,`peer=local` 一条也没有」,而那是这台机器唯一不依赖对端就能验盘的路径。
+   */
+  localAuditState: DriftState;
   config: SharedFolderConfig;
   /**
    * 首轮扫描是否只建基线(不写同步记录):索引为空(新目录)时为 true,
@@ -549,6 +557,12 @@ export class SyncSessionManager {
   /** 扫描进行中新收到的触发不丢弃,合并成「本轮跑完补跑一轮」(见 runScan)。 */
   private scanQueued = false;
   /**
+   * drift 哨兵本地巡检的两个旋钮(抽样条数 / 最小间隔),构造时读一次 —— 与 peer 侧
+   * 「建管线时读」同一口径(见 drift.ts 的 readDriftKnobs)。`sampleN === 0` 整道关掉。
+   */
+  private readonly driftSampleN: number;
+  private readonly driftIntervalMs: number;
+  /**
    * 全局暂停开关(config.paused 的内存镜像):为 true 时所有目录的数据面停摆。
    * 构造时从配置读取,热重载 / setGlobalPaused 时同步;各目录自己的 paused
    * 存在 folder.config 上,两者任一生效即视为暂停(见 folderPausedNow)。
@@ -594,6 +608,10 @@ export class SyncSessionManager {
     this.logger = deps.logger;
     this.notifyStatus = deps.onStatusChanged ?? ((): void => {});
     this.emitWebhook = deps.onWebhookEvent ?? ((): void => {});
+    // drift 哨兵本地巡检的旋钮:构造时读一次,与 peer 侧建管线时读的是同一对环境变量
+    const driftKnobs = readDriftKnobs();
+    this.driftSampleN = driftKnobs.sampleN;
+    this.driftIntervalMs = driftKnobs.intervalMs;
     // 全局开关与全局设置都是 config.json 的顶层字段,不在 initialFolders 里:构造时读一次
     const bootConfig = loadConfig(deps.configPath);
     this.globalPaused = bootConfig.paused === true;
@@ -723,7 +741,7 @@ export class SyncSessionManager {
     // 索引为空 → 首扫是建基线(存量文件不算新增);索引有存量 → 首扫 diff 是
     // daemon 离线期间的真实改动,要写同步记录
     const baselinePending = usable.length === 0;
-    return { id, indexKey, path: f.path, index, executor, localIndex, ignoreLines, transports: [], peers: new Map(), transportDevice: new Map(), receiveLedger: new Map(), driftState: { lastAt: 0, round: 0 }, config: f, baselinePending, conflictCount: 0, lastCommitHash: f.gitLastCommitHash ?? null, processedRemoteCommits: new Set(), gitBroadcast: readGitPending(id, f.gitBroadcastPending), pendingGitNotify: null, gitDrainWarned: false, gitRelay: readGitPending(id, f.gitRelayPending), diskBlocked: false };
+    return { id, indexKey, path: f.path, index, executor, localIndex, ignoreLines, transports: [], peers: new Map(), transportDevice: new Map(), receiveLedger: new Map(), driftState: { lastAt: 0, round: 0 }, localAuditState: { lastAt: 0, round: 0 }, config: f, baselinePending, conflictCount: 0, lastCommitHash: f.gitLastCommitHash ?? null, processedRemoteCommits: new Set(), gitBroadcast: readGitPending(id, f.gitBroadcastPending), pendingGitNotify: null, gitDrainWarned: false, gitRelay: readGitPending(id, f.gitRelayPending), diskBlocked: false };
   }
 
   /**
@@ -795,6 +813,40 @@ export class SyncSessionManager {
       this.lastWebhookError.delete(folderId);
       this.notifyStatus();
     }
+  }
+
+  /**
+   * drift 哨兵的本地巡检(检查 B:本机宣告 vs 本机盘,按时钟跑)。
+   *
+   * 与对端轮(peer.ts 的 `runDriftAudit`)的分工是按**数据来源**划的:A 比两份宣告,只有在收到对端
+   * 索引的那一刻才拿得起候选集;B 的输入全在本机索引里(`blocks` 是 IndexEntry 的必填字段),
+   * 不需要任何对端配合,所以它跟着扫描心跳走。继续挂在对端轮上的话有两类盘永远验不到:对端长期
+   * 离线 / 目录安静到没有索引交换的盘,以及端到端加密的盲区设备(那边只能比密文视图)。
+   *
+   * 三道门:①旋钮关到 0(与对端轮同一个 `SYNCX_DRIFT_SAMPLE_N`,一起关);②这个目录此刻没在传
+   * —— 收与供都算,口径是各 SyncPeer 的 `getSyncProgress()`(它的 `sending` 是**租约内**的供块
+   * 文件数,比 peer 侧那道裸 `serving.size > 0` 略宽,过期租约不再挡巡检);③距**本目录**上次巡检
+   * 未到间隔。状态用 `folder.localAuditState`,与对端轮那份分开,理由见那个字段的注释。
+   *
+   * 没有候选也照发计数行:「一切干净」与「这道从没跑起来」在日志里必须长得不一样。
+   */
+  private runLocalAuditPass(folder: FolderState): void {
+    if (this.driftSampleN === 0) return;
+    for (const peer of folder.peers.values()) {
+      const p = peer.getSyncProgress();
+      if (p.pending > 0 || p.sending > 0) return;
+    }
+    const now = Date.now();
+    if (now - folder.localAuditState.lastAt < this.driftIntervalMs) return;
+    folder.localAuditState.lastAt = now;
+    folder.localAuditState.round++;
+    const report = runLocalAudit(folder.localIndex.values(), {
+      round: folder.localAuditState.round,
+      n: this.driftSampleN,
+      verify: (samples) => folder.executor.verifySampledSlots(samples),
+    });
+    // peer=local 标明这一轮没有对端参与(对端轮填的是那台设备的 id),日志里两种轮次一眼分得开。
+    this.reportDrift(folder.id, { ...report, peer: 'local', round: folder.localAuditState.round });
   }
 
   /**
@@ -1113,6 +1165,9 @@ export class SyncSessionManager {
         broadcastFolderUpdates(folder, sends);
       }
       folder.baselinePending = false;
+      // drift 哨兵的本地巡检:验「本机宣告 vs 本机盘」。放在本轮扫描与本地改动落地之后 ——
+      // 此刻索引就是刚被更新过的那份,也正是我们即将外推给舰队的东西。
+      this.runLocalAuditPass(folder);
     }
     // 扫描完成后检查 git 提交(若有目录启用了 gitSync)
     await this.checkGitCommits();
