@@ -45,9 +45,11 @@ ehthumbs.db
 coverage/
 .nyc_output/
 
-# syncx 运行时目录
+# syncx 运行时目录(含本机临时实例,如 .syncx-icon-test/)
+# 只匹配目录:写成 .syncx-*/ 而不是 .syncx-*,避免顺带吞掉共享目录里
+# 恰好同名的文件(syncx 遵循 .gitignore,被 ignore 的路径扫描器不再回溯)
 .syncx/
-.syncx-dev/
+.syncx-*/
 .workbuddy/
 
 # 本地调试文件
