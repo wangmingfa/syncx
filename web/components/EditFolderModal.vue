@@ -142,7 +142,9 @@ function deviceAddrLine(p: DeviceInfo): string {
     </p>
     <p v-if="scheduleIncomplete" class="confirm-note-extra schedule-incomplete">开始与结束需同时设置,或都留空。</p>
 
-    <div class="edit-section-label">Git 提交同步</div>
+    <!-- label 右侧的实时警告:daemon 探测到目录不是 git 仓库时,先把「开关是空头支票」点破,
+         不然绿色下拉选完、保存后毫无效果,用户只能困惑 -->
+    <div class="edit-section-label">Git 提交同步<span v-if="folder?.gitRepo === false" class="label-warn">此目录不是 git 仓库,开关开启后也不会生效</span></div>
     <n-select
       v-model:value="gitSync"
       class="schedule-input"
@@ -183,3 +185,19 @@ function deviceAddrLine(p: DeviceInfo): string {
     </template>
   </ModalShell>
 </template>
+
+<style scoped>
+/* 「Git 提交同步」label 右侧的实时警告:类名仅本组件使用,故 scoped 成立。
+   琥珀取 paused 徽标一族色值 —— 勾选之前就该看到,不能沿用「绿色 = 已启用」的开关语汇;
+   深色主题跟随 paused 徽标同样提亮。 */
+.label-warn {
+  margin-left: 8px;
+  font-size: 11px;
+  font-weight: 500;
+  color: #c47c14;
+}
+
+html[data-theme='dark'] .label-warn {
+  color: #e0a94a;
+}
+</style>

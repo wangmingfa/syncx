@@ -1,5 +1,6 @@
 import type { DeviceIdentity } from './identity.js';
 import type { Config, SharedFolderConfig, PendingOffer } from './config.js';
+import { isGitRepo } from './git-monitor.js';
 
 export interface IndexStats {
   entries: number;
@@ -224,7 +225,13 @@ export function buildStatus(
     version: selfVersion,
     platform: process.platform,
     // 端到端密钥本体永不出 daemon:有 e2eKey 的目录只外发「已设置」标志(置布尔、抹记录)。
-    folders: config.sharedFolders.map((f) => (f.e2eKey ? { ...f, e2eKey: undefined, e2eKeySet: true } : f)),
+    // gitRepo 每轮实时探测(existsSync 一次,元级开销;与 session-manager 的 git 闸门同口径):
+    // 前端据此对「目录非 git 仓库 + 开了提交同步」的组合给出「不会生效」警告。
+    folders: config.sharedFolders.map((f) => ({
+      ...f,
+      ...(f.e2eKey ? { e2eKey: undefined, e2eKeySet: true } : {}),
+      gitRepo: isGitRepo(f.path),
+    })),
     paused: config.paused === true,
     entries: stats.entries,
     tombstones: stats.tombstones,

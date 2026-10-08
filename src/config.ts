@@ -201,6 +201,12 @@ export interface SharedFolderConfig {
   e2eUntrusted?: string[];
   /** 是否已设置口令(buildStatus 出站内存 e2eKey 后置此标志;密钥本体永不出 daemon)。 */
   e2eKeySet?: boolean;
+  /**
+   * 目录当前是否为 git 仓库(非持久化:buildStatus 每轮出站时用 git-monitor 实时探测补上,
+   * 与 session-manager 的 git 闸门同一口径)。设置弹窗与目录卡据此对「非仓库 + 开了提交
+   * 同步」的组合给出「不会生效」警告;缺省/undefined = 未探测(旧口径载荷)。
+   */
+  gitRepo?: boolean;
 }
 
 /** Git 提交同步的四种模式;定义见 SharedFolderConfig.gitSync 的注释。 */

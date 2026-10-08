@@ -41,15 +41,20 @@ function conflictCountOf(f: FolderInfo): number {
  *  - send  只广播本机提交(见 session-manager 的 `mode === 'receive'` 跳过),不自动提交;
  *  - receive 只自动提交对端通知,既不广播也不中继(`gitSync !== 'full'` 直接 return);
  *  - full  两者都做,且把收到的通知一跳一跳转给其他对端。
+ *
+ * gitRepo(daemon 每轮实时探测)为 false 时整条徽标转警告态:尾句从笼统的「是仓库才生效」
+ * 改成点名现状,徽标本体换琥珀并挂警示三角 —— 目录不是仓库却开着模式,是看得见的空转。
  */
-function gitBadgeOf(f: FolderInfo): { label: string; tip: string } | null {
+function gitBadgeOf(f: FolderInfo): { label: string; tip: string; warn: boolean } | null {
+  const warn = f.gitRepo === false;
+  const tail = warn ? '⚠ 此目录不是 git 仓库,开启后也不会生效' : '目录本身是 git 仓库时才生效';
   switch (f.gitSync) {
     case 'send':
-      return { label: '仅发送', tip: 'Git 提交同步 · 仅发送:本机提交会广播给对端,但本机不自动提交对端的提交通知,也不中继;目录本身是 git 仓库时才生效' };
+      return { label: '仅发送', warn, tip: `Git 提交同步 · 仅发送:本机提交会广播给对端,但本机不自动提交对端的提交通知,也不中继;${tail}` };
     case 'receive':
-      return { label: '仅接收', tip: 'Git 提交同步 · 仅接收:对端的提交通知落地后本机自动提交,但不广播本机提交、也不中继给其他设备;目录本身是 git 仓库时才生效' };
+      return { label: '仅接收', warn, tip: `Git 提交同步 · 仅接收:对端的提交通知落地后本机自动提交,但不广播本机提交、也不中继给其他设备;${tail}` };
     case 'full':
-      return { label: '双向', tip: 'Git 提交同步 · 双向:既广播本机提交、也自动提交对端通知,并把通知一跳一跳中继给其他对端;目录本身是 git 仓库时才生效' };
+      return { label: '双向', warn, tip: `Git 提交同步 · 双向:既广播本机提交、也自动提交对端通知,并把通知一跳一跳中继给其他对端;${tail}` };
     default:
       return null;
   }
@@ -373,11 +378,12 @@ function visibleFiles(f: FolderInfo): TransferFile[] {
       <div v-if="f.receiveOnly || (f.gitSync && f.gitSync !== 'off') || f.paused || outsideSchedule(f) || conflictCountOf(f) > 0" class="card-floats">
         <span v-if="f.receiveOnly" class="float-badge receive-badge" title="接收模式:只拉不推,本机改动不会同步出去">接收</span>
         <!-- Git 提交同步:模式文案与编辑弹窗的下拉框逐字一致,方向由文字给出;
-             双向额外铺一层淡底,一眼能从「只做一边」的两条里分出来 -->
+             双向额外铺一层淡底,一眼能从「只做一边」的两条里分出来;
+             目录不是 git 仓库(daemon 实时探测)时转警告态:淡底让位、尾挂警示三角 -->
         <span
           v-if="gitBadgeOf(f)"
           class="float-badge git-badge"
-          :class="{ 'git-badge--full': f.gitSync === 'full' }"
+          :class="{ 'git-badge--full': f.gitSync === 'full' && f.gitRepo !== false, 'git-badge--warn': gitBadgeOf(f)!.warn }"
           :title="gitBadgeOf(f)!.tip"
         >
           <svg viewBox="0 0 24 24" width="10" height="10" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
@@ -387,6 +393,11 @@ function visibleFiles(f: FolderInfo): TransferFile[] {
             <path d="M18 9a9 9 0 0 1-9 9" />
           </svg>
           {{ gitBadgeOf(f)!.label }}
+          <svg v-if="gitBadgeOf(f)!.warn" viewBox="0 0 24 24" width="10" height="10" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+            <path d="M12 3 2.5 20h19z" />
+            <line x1="12" y1="10" x2="12" y2="14" />
+            <line x1="12" y1="17" x2="12" y2="17.1" />
+          </svg>
         </span>
         <span v-if="f.paused" class="float-badge paused-badge" title="已暂停:不扫描、不广播、不接收;连接与配对照常">已暂停</span>
         <span v-if="outsideSchedule(f)" class="float-badge paused-badge" :title="`同步时段外(${f.schedule}),到点自动恢复;连接与配对照常`">时段外</span>

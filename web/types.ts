@@ -38,6 +38,9 @@ export interface FolderInfo {
   schedule?: string;
   /** git 提交同步模式;缺省 = 'off'(未启用)。仅当目录本身是 git 仓库时才有实际作用。 */
   gitSync?: GitSyncMode;
+  /** 该目录当前是否为 git 仓库(daemon 每轮状态实时探测,与同步闸门同口径);
+   *  缺省 = 旧后端未提供,前端不展示「不会生效」警告。 */
+  gitRepo?: boolean;
   /** 冲突自动处理策略;缺省 = 'keep-both'(保留双方:拉回对端 + 本地留冲突副本)。 */
   conflictPolicy?: ConflictPolicy;
   /** 按需同步(稀疏文件):对端非空文件先只记占位不落盘,点「下载」才拉。缺省 = 关闭。 */
