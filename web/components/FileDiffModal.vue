@@ -285,7 +285,11 @@ const contentIdentical = computed<boolean>(() => {
  * 迟早与现实不符,而「这张图 12.4 MB」才是用户要的信息。
  */
 function reasonOf(side: FileSideData, role: string): string {
-  if (!side.exists) return `${role}没有这个文件${side.error ? `（${side.error}）` : ''}`;
+  // 带 error 的「取不到」不能写成「没有这个文件」:闸门拒绝 / 路径越界 / 读失败时文件
+  // 就在盘上,谎报缺失会把人支去查一个不存在的问题(冲突副本对比曾因此整块失灵)。
+  if (!side.exists) {
+    return side.error ? `${role}内容不可用（${side.error}）` : `${role}没有这个文件`;
+  }
   if (side.tooLarge) {
     return `${role}文件过大${side.size !== undefined ? `（${formatBytes(side.size)}）` : ''}`;
   }

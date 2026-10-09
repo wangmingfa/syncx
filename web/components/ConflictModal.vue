@@ -184,6 +184,12 @@ const diffRight = computed<DiffPaneData>(() => ({
   side: diffData.value?.remote ?? { exists: false },
 }));
 
+/** 副本那一侧取不到内容的说法:内部错误如实报,真缺失才说「已不存在」。 */
+function copyMissingHint(): string {
+  const err = diffData.value?.remote?.error;
+  return err ? `副本内容读不到,无法覆盖（${err}）` : '副本已不存在,无法覆盖';
+}
+
 /** 弹窗内两个整文件动作(与列表行同款语义,确认后走既有 resolve 通道)。 */
 const diffActions = computed<DiffFooterAction[]>(() => [
   {
@@ -192,7 +198,7 @@ const diffActions = computed<DiffFooterAction[]>(() => [
     disabled: (ctx) => !ctx.rightExists,
     hint: (ctx) =>
       !ctx.rightExists
-        ? '副本已不存在,无法覆盖'
+        ? copyMissingHint()
         : ctx.identical
           ? '两侧内容已经一致,无需覆盖,直接丢弃副本即可'
           : '用冲突副本内容完全替换原文件,结果会同步给对端',

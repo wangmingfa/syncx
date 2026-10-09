@@ -2551,14 +2551,26 @@ export class SyncSessionManager {
     return out;
   }
 
-  /** 读本机某文件在对比弹窗里的一侧状态(越界 / 缺失 / 二进制 / 过大都如实标记)。 */
-  private readLocalFileForCompare(folder: FolderState, path: string): FileSideState {
+  /**
+   * 读本机某文件在对比弹窗里的一侧状态(缺失 / 二进制 / 过大都如实标记)。
+   *
+   * `allowHardIgnored` 只为冲突副本而开:副本命名本身就是硬忽略对象(见 ignore.ts 的
+   * CONFLICT_COPY_RE),不透传这道口子时 `resolveSharePath` 直接抛错,而下面的 catch
+   * 会把它压成「文件不存在」—— 冲突「查看对比」因此永远说「副本没有这个文件」,连带把
+   * 弹窗里两个整文件动作锁死(2026-10-08)。原文件侧继续走默认闸门:那条路传的都是参与
+   * 同步的普通路径,真被闸门挡住说明调用方错了,不该由读盘函数替它兜着。
+   */
+  private readLocalFileForCompare(
+    folder: FolderState,
+    path: string,
+    opts?: { allowHardIgnored?: boolean },
+  ): FileSideState {
     const v = folder.localIndex.get(path);
     const version = v ? [...v.version.entries()] : undefined;
     const withVersion = (state: FileSideState): FileSideState =>
       version ? { ...state, version } : state;
     try {
-      const abs = resolveSharePath(folder.path, path);
+      const abs = resolveSharePath(folder.path, path, opts);
       const st = statSync(abs);
       if (!st.isFile()) return withVersion({ exists: false });
       if (st.size > compareContentLimit(path)) {
@@ -2569,8 +2581,14 @@ export class SyncSessionManager {
         size: st.size,
         ...this.describeBytes(path, readFileSync(abs)),
       });
-    } catch {
-      return withVersion({ exists: false });
+    } catch (e) {
+      // 「没有这个文件」与「有,但读不到」是两回事,糊成一种就会把人支去修一个不存在
+      // 的问题 —— 与 matchIgnoreRule 特意「能说出是哪一行挡住了」同一个理由。真缺失
+      // (ENOENT / 路径中的目录段不是目录)留空 error,闸门拒绝 / 越界 / IO 错误一律
+      // 把原因带上,由弹窗如实说。
+      const code = (e as NodeJS.ErrnoException).code;
+      if (code === 'ENOENT' || code === 'ENOTDIR') return withVersion({ exists: false });
+      return withVersion({ exists: false, error: e instanceof Error ? e.message : String(e) });
     }
   }
 
@@ -2586,11 +2604,13 @@ export class SyncSessionManager {
     }
   }
 
-  /** 同一个文件在本机与对端的两侧状态(内容对比弹窗的数据源)。只读。 */
   /**
    * 冲突收件箱「查看对比」的数据源:本机侧的两个文件(原文件 vs 冲突副本)。
    * 形状与 readFilePair 完全一致(local=原文件当前内容即对端版,remote=被让位的本机旧版),
    * 前端复用同一个对比弹窗;deviceId 从副本命名反解,标出冲突来源。
+   *
+   * 只有副本那一侧需要 `allowHardIgnored` —— 副本命名是硬忽略对象,而这一条链路正是
+   * 硬忽略闸门自己豁免的「冲突处理链路」(见 resolveSharePath 的说明);原文件走默认闸门。
    */
   readConflictPair(folderId: string, copyPath: string): FileCompareResult {
     const folder = this.folderStates.find((f) => f.id === folderId);
@@ -2605,10 +2625,11 @@ export class SyncSessionManager {
       deviceId: parsed.deviceId,
       path: originalRel,
       local: this.readLocalFileForCompare(folder, originalRel),
-      remote: this.readLocalFileForCompare(folder, copyPath),
+      remote: this.readLocalFileForCompare(folder, copyPath, { allowHardIgnored: true }),
     };
   }
 
+  /** 同一个文件在本机与对端的两侧状态(内容对比弹窗的数据源)。只读。 */
   async readFilePair(folderId: string, deviceId: string, path: string): Promise<FileCompareResult> {
     const folder = this.folderStates.find((f) => f.id === folderId);
     if (!folder) throw new Error('共享目录不存在(可能刚被移除)');
