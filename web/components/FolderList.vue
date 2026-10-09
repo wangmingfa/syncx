@@ -386,14 +386,14 @@ function visibleFiles(f: FolderInfo): TransferFile[] {
           :class="{ 'git-badge--full': f.gitSync === 'full' && f.gitRepo !== false, 'git-badge--warn': gitBadgeOf(f)!.warn }"
           :title="gitBadgeOf(f)!.tip"
         >
-          <svg viewBox="0 0 24 24" width="10" height="10" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+          <svg viewBox="0 0 24 24" width="9" height="9" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
             <line x1="6" y1="3" x2="6" y2="15" />
             <circle cx="18" cy="6" r="3" />
             <circle cx="6" cy="18" r="3" />
             <path d="M18 9a9 9 0 0 1-9 9" />
           </svg>
           {{ gitBadgeOf(f)!.label }}
-          <svg v-if="gitBadgeOf(f)!.warn" viewBox="0 0 24 24" width="10" height="10" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+          <svg v-if="gitBadgeOf(f)!.warn" viewBox="0 0 24 24" width="9" height="9" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
             <path d="M12 3 2.5 20h19z" />
             <line x1="12" y1="10" x2="12" y2="14" />
             <line x1="12" y1="17" x2="12" y2="17.1" />

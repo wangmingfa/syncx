@@ -790,14 +790,17 @@ html[data-theme='dark'] .chip-menu__item--danger {
   letter-spacing: 0.03em;
 }
 
-/* 目录卡状态悬浮标签:整组贴在卡片顶缘、外探 8px(列表卡间距 12px,不蹭上一张),
+/* 目录卡状态悬浮标签:整组贴在卡片顶缘、外探 9px(列表卡间距 12px,不蹭上一张),
    从标题行抽出 → 接收/暂停开关切换时标题与操作按钮不再整行横移。
    容器 pointer-events:none 让徽标之间的空隙鼠标穿透;单个徽标自开 auto 承接 hover
    (「接收」无专属按钮,只能靠徽标自身 title 解释)。底色用不透明 --card-hi 压住
-   穿过的卡缘描边(半透明底会让边框线从胶囊中间显形)。 */
+   穿过的卡缘描边(半透明底会让边框线从胶囊中间显形)。
+   外探取 9px 是算过的:盒高 18px → 底缘落在卡内 9px;标题行右侧 ActionRail 展开时的
+   胶囊比行高(36px)上下各探出约 4px,顶缘约在卡内 11px —— 徽标再往下就会与它叠上,
+   而胶囊 z-index 更高,会把「双向」咬掉一角。 */
 .card-floats {
   position: absolute;
-  top: -8px;
+  top: -9px;
   right: 22px;
   z-index: 1;
   display: flex;
@@ -805,12 +808,14 @@ html[data-theme='dark'] .chip-menu__item--danger {
   pointer-events: none;
 }
 
+/* 10px 字 + 3px 内衬 + 1px 描边 → 盒高 18px,底缘落在卡内 9px,给上面那条胶囊留出余量。
+   这一族(接收 / 已暂停 / 时段外 / 冲突 N / 双向)共用尺寸,只调这一处才不会出现同排高低不齐。 */
 .float-badge {
   pointer-events: auto;
-  font-size: 11px;
+  font-size: 10px;
   font-weight: 600;
   line-height: 1;
-  padding: 4px 9px;
+  padding: 3px 8px;
   border-radius: 999px;
   background: var(--card-hi);
   border: 1px solid transparent;
@@ -834,7 +839,7 @@ html[data-theme='dark'] .chip-menu__item--danger {
 .git-badge {
   display: inline-flex;
   align-items: center;
-  gap: 4px;
+  gap: 3px;
   color: var(--online);
   /* 描边与下面的淡底都从 var(--online) 推:深色块把该 token 换成更亮的 #46b877,
      徽标跟着一起提亮,不必像 receive/paused 那样另写一条 dark 覆盖。 */
