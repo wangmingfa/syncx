@@ -68,11 +68,6 @@ function deviceLabel(id: string): string {
   return dev?.hostname ? `${dev.hostname}（${id}）` : id;
 }
 
-function basename(p: string): string {
-  const i = p.lastIndexOf('/');
-  return i >= 0 ? p.slice(i + 1) : p;
-}
-
 async function doResolve(c: ConflictCopy, choice: 'keep-local' | 'discard'): Promise<void> {
   const f = props.folder;
   if (!f) return;
@@ -295,7 +290,10 @@ function askCleanIdentical(): void {
           <span class="history-time">{{ fmtTime(c.mtime) }}</span>
           <span class="history-action act-conflict">冲突</span>
           <div class="conflict-paths">
-            <span class="history-path mono break" :title="c.originalPath">原文件:{{ basename(c.originalPath) }}</span>
+            <!-- 原文件按**相对共享根的完整路径**显示(协议口径,'/' 分隔):同名文件散在
+                 多个子目录时,basename 分不出是哪一条。整行会换行而不是截断,所以不再挂
+                 title 重复一遍。 -->
+            <span class="history-path mono break">原文件:{{ c.originalPath }}</span>
             <span class="conflict-from muted">
               来源 {{ deviceLabel(c.deviceId) }} · {{ formatBytes(c.size) }} ·
               <span :class="c.identical === true ? 'conflict-state-ok' : c.identical === false ? 'conflict-state-diff' : 'muted'">
