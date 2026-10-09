@@ -141,11 +141,11 @@ const qrOpen = ref(false);
           <n-button size="small" type="error" tertiary class="btn-inline" :disabled="busy" @click="askRemoveDevice(p.deviceId)">移除</n-button>
         </span>
       </div>
-      <div class="item-sub">
-        共享 {{ deviceFolderCount(p.deviceId) }} 个目录
-      </div>
-      <div class="item-addr">
-        <span class="addr-label">版本</span><span class="addr-value mono">{{ p.version ?? '未知' }}</span>
+      <div class="item-meta">
+        <span class="item-sub">共享 {{ deviceFolderCount(p.deviceId) }} 个目录</span>
+        <span class="item-addr">
+          <span class="addr-label">版本</span><span class="addr-value mono">{{ p.version ?? '未知' }}</span>
+        </span>
       </div>
       <div v-if="p.url || p.hostname" class="item-addr">
         <span class="addr-label">{{ p.url ? '地址' : '主机名' }}</span><span class="addr-value mono">{{ deviceAddrLine(p) }}</span>
@@ -167,3 +167,32 @@ const qrOpen = ref(false);
     <PairQrModal :open="qrOpen" @close="qrOpen = false" />
   </section>
 </template>
+
+<style scoped>
+/* 设备卡把「共享 N 个目录」和「版本」并成一行,省一档竖向空间。
+   .item-sub / .item-addr / .addr-* 的视觉骨架来自 style.css(多组件共用),
+   这里只管本卡的排布:左侧文字可收缩省略,版本 chip 保持完整不换行。 */
+.item-meta {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+}
+.item-meta .item-sub {
+  flex: 0 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.item-meta .item-addr {
+  flex: 0 0 auto;
+}
+/* 「共享 N 个目录」和「版本」是两块内容,用中点隔开(同 OffersPanel
+   「来自 A · B」的写法),避免挤在一起被误读成一整句。 */
+.item-meta .item-addr::before {
+  content: '·';
+  color: var(--muted);
+}
+</style>
+
