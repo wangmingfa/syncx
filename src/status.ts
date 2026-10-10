@@ -148,6 +148,8 @@ export interface StatusPayload {
   discovered?: DiscoveredDeviceStatus[];
   /** 电源守卫当前挂起原因(计费网络/低电量,数据面被自动挂起;旧后端缺省 = null)。 */
   powerGuard?: string | null;
+  /** 是否在网(无非回环可用接口 = 离线;旧后端缺省 = true)。顶栏提示用。 */
+  networkOnline?: boolean;
 }
 
 /** 一个采样窗口的流量增量(窗口内发/收的字节数)。 */
@@ -205,6 +207,8 @@ export interface StatusExtras {
   discovered?: DiscoveredDeviceStatus[];
   /** 电源守卫当前挂起原因(计费网络/低电量;null 或缺省 = 未挂起)。 */
   powerGuard?: string | null;
+  /** 是否在网(无非回环可用接口 = 离线;null/缺省 = 在线,旧后端兼容)。 */
+  networkOnline?: boolean;
 }
 
 export function buildStatus(
@@ -249,5 +253,6 @@ export function buildStatus(
     settings: extras.settings,
     discovered: extras.discovered,
     powerGuard: extras.powerGuard ?? null,
+    networkOnline: extras.networkOnline ?? true,
   };
 }

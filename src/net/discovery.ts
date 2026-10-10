@@ -26,8 +26,19 @@ export interface DiscoveredPeer {
   address?: string;
 }
 
+export interface DiscoveryOptions {
+  /**
+   * 在网门控:返回 false 时**暂停**周期性的 advertise + query(无网省电,移动端
+   * 关 WiFi 后组播发不出去还照样烧电)。恢复由上层在状态翻转时调用 kick() 立即
+   * 补一轮,不依赖下一个 30s tick。缺省(未提供)= 永远在线,行为与旧版一致。
+   */
+  isOnline?: () => boolean;
+}
+
 export interface Discovery {
   close(): void;
+  /** 立即补一轮 advertise + query(网络恢复时调用;ready 之前调用是空操作)。 */
+  kick(): void;
 }
 
 /** mDNS 实例类型( multicast-dns 默认导出的返回值)。便于测试时注入假对象。 */
@@ -63,6 +74,7 @@ export function startDiscovery(
   port: number,
   onPeerFound: (peer: DiscoveredPeer) => void,
   createMdns: () => MdnsInstance = multicastDNS,
+  opts: DiscoveryOptions = {},
 ): Discovery {
   const mdns = createMdns();
   let timer: ReturnType<typeof setInterval> | undefined;
@@ -91,15 +103,23 @@ export function startDiscovery(
     });
   };
 
+  const announceAndQuery = (): void => {
+    advertise();
+    mdns.query([
+      { name: SERVICE, type: 'SRV' },
+      { name: SERVICE, type: 'TXT' },
+    ]);
+  };
+
   mdns.on('ready', () => {
+    // 启动只广播不查询(保持既有语义):发起查询是周期 tick 的事,恢复补发走 kick()
     advertise();
     // 周期重播并主动查询:保证后加入节点既能被发现,也能发现已运行的节点
     timer = setInterval(() => {
-      advertise();
-      mdns.query([
-        { name: SERVICE, type: 'SRV' },
-        { name: SERVICE, type: 'TXT' },
-      ]);
+      // 无网门控:WiFi 关闭时组播既发不出去也收不到,白烧电(移动端尤甚);
+      // 恢复由上层调 kick() 立即补一轮,不等到下一个 tick
+      if (opts.isOnline && !opts.isOnline()) return;
+      announceAndQuery();
     }, 30000);
   });
 
@@ -122,6 +142,11 @@ export function startDiscovery(
   });
 
   return {
+    kick(): void {
+      // ready 之前(timer 未建)mdns 还没就绪,不补;恢复场景都在运行期,必然已建
+      if (timer === undefined) return;
+      announceAndQuery();
+    },
     close(): void {
       if (timer) clearInterval(timer);
       mdns.destroy();

@@ -27,6 +27,8 @@ const LOOPBACK_HOSTS = new Set(['127.0.0.1', '::1', 'localhost']);
 /** 断线重连退避基数与上限(指数退避 1s、2s、4s…,封顶 30s)。 */
 export const RECONNECT_BASE_MS = 1000;
 export const RECONNECT_MAX_MS = 30000;
+/** 无网络时的重连退避下限:关 WiFi/出门是常态,30s 一次的无效拨号在电池上是纯浪费。 */
+export const NETWORK_OFFLINE_BACKOFF_MS = 300_000;
 
 /**
  * 断线重连退避延迟:attempts 为已连续失败次数。
@@ -36,6 +38,16 @@ export const RECONNECT_MAX_MS = 30000;
 export function reconnectDelayMs(attempts: number): number {
   if (attempts <= 0) return 0;
   return Math.min(RECONNECT_BASE_MS * 2 ** (attempts - 1), RECONNECT_MAX_MS);
+}
+
+/**
+ * 在网感知的退避:无网络(无非回环可用接口)时把退避抬到 NETWORK_OFFLINE_BACKOFF_MS
+ * 下限 —— 拨号必败,重试节奏由「网络恢复事件」驱动而不是干等定时器(恢复时上层会
+ * 清掉这些定时器立即补拨,见 SyncSessionManager.checkNetworkState),所以拉长不影响
+ * 重连速度,只是别在没网时反复空转。
+ */
+export function offlineAwareReconnectDelay(delayMs: number, networkOnline: boolean): number {
+  return networkOnline ? delayMs : Math.max(delayMs, NETWORK_OFFLINE_BACKOFF_MS);
 }
 
 export function parseArgs(argv: string[]): ParsedArgs {

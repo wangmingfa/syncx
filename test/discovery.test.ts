@@ -122,4 +122,37 @@ describe('mDNS discovery', () => {
     disc.close();
     expect(fake.destroyed).toBe(true);
   });
+
+  it('pauses periodic announce/query while offline and catches up via kick()', () => {
+    vi.useFakeTimers();
+    const fake = new FakeMdns();
+    let online = true;
+    const disc = startDiscovery(
+      SELF,
+      22000,
+      () => {},
+      () => fake as unknown as MdnsInstance,
+      { isOnline: () => online },
+    );
+
+    // 启动照旧:只 advertise
+    fake.emit('ready');
+    expect(fake.responded).toHaveLength(1);
+    expect(fake.queried).toHaveLength(0);
+
+    // 离线期间周期 tick 全部跳过,不组播
+    online = false;
+    vi.advanceTimersByTime(60000);
+    expect(fake.responded).toHaveLength(1);
+    expect(fake.queried).toHaveLength(0);
+
+    // 恢复后 kick 立即补一轮 advertise+query,不等下一个 30s tick
+    online = true;
+    disc.kick();
+    expect(fake.responded).toHaveLength(2);
+    expect(fake.queried).toHaveLength(1);
+
+    disc.close();
+    vi.useRealTimers();
+  });
 });

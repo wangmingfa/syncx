@@ -436,6 +436,10 @@ export async function run(args: ParsedArgs): Promise<void> {
       // 同步事件外推(webhook):设置弹窗配的地址,完成/冲突/错误三类(见 webhook.ts)。
       // 通知器内部火后忘 + 串行队列,这里调用永不抛、不拖慢同步路径。
       onWebhookEvent: (ev) => webhook.notify(ev),
+      // 网络恢复:立即补一轮 mDNS 广播+查询(discovery 声明在下方,闭包延迟取用,
+      // 恢复事件最早也发生在首个心跳 tick,远晚于此处)。离线翻转不回调 —— mDNS
+      // 由 isOnline 门控暂停,无需动作。
+      onNetworkRecovered: () => discovery.kick(),
     },
     config.sharedFolders,
   );
@@ -641,6 +645,8 @@ export async function run(args: ParsedArgs): Promise<void> {
           },
           // 电源守卫当前挂起原因(顶栏徽标;未挂起为 null)
           powerGuard: manager.getPowerGuardReason(),
+          // 是否在网(无可用非回环接口 = 离线;无网时重连退避拉长、mDNS 暂停)
+          networkOnline: manager.isNetworkOnline(),
           // 数据目录:日志弹窗等处的示例命令要跟真实目录走(--config-dir 隔离时不误导)
           configDir,
           // 附近发现的设备:过 TTL 的先剪掉;已经配对上的从列表摘除(升格成设备卡)
@@ -1203,6 +1209,10 @@ export async function run(args: ParsedArgs): Promise<void> {
       onRejected: (error) =>
         logger.error(`connect to ${peer.deviceId} failed: ${error instanceof Error ? error.message : String(error)}`),
     });
+  }, undefined, {
+    // 无网门控:离线时暂停周期广播+查询(省电,移动端关 WiFi 后组播白烧电);
+    // 恢复由 manager 的 onNetworkRecovered → discovery.kick() 立即补一轮
+    isOnline: () => manager.isNetworkOnline(),
   });
 
   // 手动配置的对端(mDNS 不可用时的回退):启动时主动连接,失败仅日志

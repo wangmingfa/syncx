@@ -66,7 +66,8 @@ import type { DeviceIdentity } from './identity.js';
 import type { ProgressCounts, RelayActivity, TransferFile } from './status.js';
 import { isBundledRuntime, packSelfTgz, runSelfUpdate, runtimeVersion, sha256Hex } from './selfupdate.js';
 import { compareVersions } from './upgrade.js';
-import { reconnectDelayMs } from './args.js';
+import { NETWORK_OFFLINE_BACKOFF_MS, offlineAwareReconnectDelay, reconnectDelayMs } from './args.js';
+import { hasRoutableInterface } from './net/offline-probe.js';
 import { isGitRepo, getLastCommitHash, getCommitInfo, hasUncommittedChanges, autoCommit, type CommitInfo } from './git-monitor.js';
 
 /** 对端 git 提交通知的消息形状(入队、结算、中继共用一份)。 */
@@ -426,6 +427,16 @@ export interface SessionManagerDeps {
    * cli 注入通知器的 notify(火后忘);不注入 = 事件只走界面,不外推。
    */
   onWebhookEvent?: (ev: WebhookEvent) => void;
+  /**
+   * 在网判据(无网自动挂起,见 checkNetworkState):缺省用 os.networkInterfaces()
+   * 找非回环可用接口。测试/特殊环境可注入替身。
+   */
+  probeNetwork?: () => boolean;
+  /**
+   * 网络恢复回调(offline→online 翻转时调用一次):cli 接 discovery.kick() 立即
+   * 补一轮 mDNS 广播+查询,不等下一个 30s tick。离线翻转不回调(mDNS 是门控暂停)。
+   */
+  onNetworkRecovered?: () => void;
 }
 
 export class SyncSessionManager {
@@ -441,6 +452,17 @@ export class SyncSessionManager {
   private readonly notifyStatus: () => void;
   /** Webhook 事件出口(见 SessionManagerDeps.onWebhookEvent);缺省为空操作。 */
   private readonly emitWebhook: (ev: WebhookEvent) => void;
+  /** 在网判据(见 SessionManagerDeps.probeNetwork)。 */
+  private readonly probeNetwork: () => boolean;
+  /** 网络恢复回调(见 SessionManagerDeps.onNetworkRecovered)。 */
+  private readonly onNetworkRecovered?: () => void;
+  /**
+   * 当前是否在网(无非回环可用接口 = 离线)。驱动三件事:重连退避拉长、mDNS
+   * 广播门控、恢复时立即补拨。**不影响**扫描与心跳 —— 扫描照跑才能把本地改动
+   * 记进索引,网络恢复时两侧索引仍相等,指纹跳过(见 peer.beginInitialIndexExchange)
+   * 才能继续生效;心跳照发才能及时收割死 socket(对死 socket 的 ping 是零成本空操作)。
+   */
+  private networkOnline = true;
   /**
    * 各目录上一轮进度快照是否「真的有传输在跑」—— 传输完成(completed)事件的边沿
    * 检测状态:getSyncProgress 每次聚合时翻转,置落沿即发一条(见该函数)。
@@ -611,6 +633,8 @@ export class SyncSessionManager {
     this.logger = deps.logger;
     this.notifyStatus = deps.onStatusChanged ?? ((): void => {});
     this.emitWebhook = deps.onWebhookEvent ?? ((): void => {});
+    this.probeNetwork = deps.probeNetwork ?? hasRoutableInterface;
+    this.onNetworkRecovered = deps.onNetworkRecovered;
     // drift 哨兵本地巡检的旋钮:构造时读一次,与 peer 侧建管线时读的是同一对环境变量
     const driftKnobs = readDriftKnobs();
     this.driftSampleN = driftKnobs.sampleN;
@@ -622,6 +646,9 @@ export class SyncSessionManager {
     this.versionsPerPath = bootConfig.versionsPerPath;
     setHistoryMaxEvents(bootConfig.historyMaxEvents);
     this.folderStates = initialFolders.map((f) => this.createFolderState(f));
+    // 启动即探一次:带着关掉的 WiFi 起的 daemon 直接进离线形态(退避拉长/mDNS 停发),
+    // 不用等第一个心跳 tick 才发现
+    this.refreshNetworkStateAndApply();
     this.startHeartbeat();
     this.startScheduleTicker();
   }
@@ -673,6 +700,9 @@ export class SyncSessionManager {
   private startHeartbeat(): void {
     const INTERVAL_MS = 20000;
     this.heartbeatTimer = setInterval(() => {
+      // 在网巡检搭心跳的车:无网时重连退避拉长、mDNS 广播门控暂停,恢复立即补拨
+      // 补广播(见 checkNetworkState)。探测是纯内存读,20s 一次零成本,不新增定时器。
+      this.refreshNetworkStateAndApply();
       for (const socket of this.peerSockets) {
         const alive = this.peerLiveness.get(socket);
         if (alive === false) {
@@ -696,6 +726,51 @@ export class SyncSessionManager {
     }, INTERVAL_MS);
     // 心跳定时器不应阻止 daemon 在 SIGTERM 时退出
     if (typeof this.heartbeatTimer.unref === 'function') this.heartbeatTimer.unref();
+  }
+
+  /** 当前是否在网(无非回环可用接口 = 离线;供 mDNS 门控与状态透出)。 */
+  isNetworkOnline(): boolean {
+    return this.networkOnline;
+  }
+
+  /** 立即巡检一次在网状态并应用翻转(心跳节拍搭车;测试/运维也可直接调)。 */
+  checkNetworkState(): void {
+    this.refreshNetworkStateAndApply();
+  }
+
+  /**
+   * 巡检在网状态,翻转时统一应用:
+   *  - online→offline:记一行日志。重连退避由 scheduleReconnect 现读本状态拉长;
+   *    mDNS 广播由 cli 注入的门控暂停。**不动**扫描/git/心跳(理由见 networkOnline 字段注释)。
+   *  - offline→online:清掉所有在等的重连定时器立即补拨(否则最坏要干等 5 分钟),
+   *    并回调 onNetworkRecovered 让 cli 补一轮 mDNS 广播+查询。
+   * 状态没翻转时是纯内存比较,直接返回。
+   */
+  private refreshNetworkStateAndApply(): void {
+    // 与 scheduleReconnect 同一道闸:close() 之后不再巡检、不再触发恢复补拨
+    if (this.closed) return;
+    const online = this.probeNetwork();
+    if (online === this.networkOnline) return;
+    this.networkOnline = online;
+    if (!online) {
+      this.logger.info(
+        `network offline (no routable interface); reconnect backoff raised to ${NETWORK_OFFLINE_BACKOFF_MS / 1000}s, mDNS announcements paused`,
+      );
+    } else {
+      this.logger.info('network back online; flushing pending reconnects');
+      for (const deviceId of [...this.reconnectTimers.keys()]) {
+        const timer = this.reconnectTimers.get(deviceId);
+        if (timer) {
+          clearTimeout(timer);
+          this.reconnectTimers.delete(deviceId);
+        }
+        // forceReconnect 内部有 isPeerConnected 幂等守卫与「无地址即返回」,
+        // 重复调用安全;失败会落回正常重连调度
+        this.forceReconnect(deviceId);
+      }
+      this.onNetworkRecovered?.();
+    }
+    this.notifyStatus();
   }
 
   /* ==================== 目录运行期状态与错误采集 ==================== */
@@ -1670,10 +1745,13 @@ export class SyncSessionManager {
     const attempts = this.reconnectAttempts.get(deviceId) ?? 0;
     this.reconnectAttempts.set(deviceId, attempts + 1);
     const delay = reconnectDelayMs(attempts);
+    // 无网时把退避抬到 5 分钟下限:拨号必败,重试节奏交给「网络恢复事件」驱动
+    // (refreshNetworkStateAndApply 会清掉这些定时器立即补拨),拉长不影响重连速度
+    const effectiveDelay = offlineAwareReconnectDelay(delay, this.networkOnline);
     if (cause.kind === 'dial-failed') {
-      this.logger.info(`dial to ${deviceId} via ${url} failed: ${cause.error}; retrying in ${delay}ms (attempt ${attempts + 1})`);
+      this.logger.info(`dial to ${deviceId} via ${url} failed: ${cause.error}; retrying in ${effectiveDelay}ms (attempt ${attempts + 1})`);
     } else {
-      this.logger.info(`peer ${deviceId} session closed; reconnecting in ${delay}ms (attempt ${attempts + 1})`);
+      this.logger.info(`peer ${deviceId} session closed; reconnecting in ${effectiveDelay}ms (attempt ${attempts + 1})`);
     }
     const timer = setTimeout(() => {
       this.reconnectTimers.delete(deviceId);
@@ -1684,7 +1762,7 @@ export class SyncSessionManager {
             error: error instanceof Error ? error.message : String(error),
           }),
       });
-    }, delay);
+    }, effectiveDelay);
     this.reconnectTimers.set(deviceId, timer);
   }
 
