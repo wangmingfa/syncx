@@ -26,6 +26,7 @@ import { startPeerServer } from './net/server.js';
 
 import { startDiscovery } from './net/discovery.js';
 import { getLanAddresses, formatHost } from './net/addresses.js';
+import { isSelfPeerUrl, localInterfaceAddresses } from './net/peer-address.js';
 import { createControlServer, type ControlServerDeps } from './api.js';
 import { createStatusHub } from './status-hub.js';
 import { createWebhookNotifier } from './webhook.js';
@@ -1217,7 +1218,15 @@ export async function run(args: ParsedArgs): Promise<void> {
 
   // 手动配置的对端(mDNS 不可用时的回退):启动时主动连接,失败仅日志
   // 去重由服务端 onPeerConnected 负责:若对端已连,服务端会关闭重复 socket
+  // 自拨跳过:上一版反向发现会把「本机自己的 peer 地址」也写进 peers(自指条目),
+  // 于是每次启动都自己连自己、攒一条永远只对自己说话的控制面会话。命中本机地址 +
+  // 本机端口的条目直接不拨(同机不同端口的另一实例不受影响)。配置保持原样不改写。
+  const selfPeerAddrs = localInterfaceAddresses();
   for (const peerUrl of config.peers) {
+    if (isSelfPeerUrl(peerUrl, selfPeerAddrs, server.port)) {
+      logger.info(`skipping self-referential peer address ${peerUrl}`);
+      continue;
+    }
     manager.connectTo(peerUrl, {
       onConnected: (remoteDeviceId) => {
         logger.debug(`outbound connected to ${remoteDeviceId} at ${peerUrl}`);
@@ -1261,10 +1270,16 @@ export async function run(args: ParsedArgs): Promise<void> {
       for (const peerUrl of newConfig.peers) {
         if (!oldPeers.has(peerUrl)) {
           logger.info(`config updated: connecting to new peer ${peerUrl}`);
-          manager.connectTo(peerUrl, {
-            onRejected: (error) =>
-              logger.error(`connect to new peer ${peerUrl} failed: ${error instanceof Error ? error.message : String(error)}`),
-          });
+          if (isSelfPeerUrl(peerUrl, localInterfaceAddresses(), server.port)) {
+            // 与启动路径同一道闸:自指地址不拨(旧版反向发现会把自己写进配置,热重载
+            // 时会把它当"新增对端"再拨一遍)
+            logger.info(`skipping self-referential peer address ${peerUrl}`);
+          } else {
+            manager.connectTo(peerUrl, {
+              onRejected: (error) =>
+                logger.error(`connect to new peer ${peerUrl} failed: ${error instanceof Error ? error.message : String(error)}`),
+            });
+          }
         }
       }
       // 更新内存中的配置

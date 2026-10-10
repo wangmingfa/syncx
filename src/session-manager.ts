@@ -59,7 +59,7 @@ import { learnPeerUrl, learnPeerIp, getLanAddresses } from './net/addresses.js';
 import { e2eKeyForPeer, wrapTransportBlind } from './e2e.js';
 import { hostname as osHostname } from 'node:os';
 import { RateLimiter } from './ratelimit.js';
-import { isPeerAllowed, addPeer, setFolderPaused, setGlobalPaused, setFolderSchedule as persistFolderSchedule, setFolderGitSync as persistFolderGitSync, setFolderConflictPolicy as persistFolderConflictPolicy, setFolderOnDemand as persistFolderOnDemand, setFolderOnDemandDir as persistFolderOnDemandDir, setFolderPausedFile as persistFolderPausedFile, setFolderE2E as persistFolderE2E, setFolderGitLastCommitHash, setFolderGitRelayPending, setFolderGitBroadcastPending, setGlobalSettings as persistGlobalSettings, type GlobalSettingsPatch, type FolderE2EPatch } from './devices.js';
+import { isPeerAllowed, addPeer, removePeer, setFolderPaused, setGlobalPaused, setFolderSchedule as persistFolderSchedule, setFolderGitSync as persistFolderGitSync, setFolderConflictPolicy as persistFolderConflictPolicy, setFolderOnDemand as persistFolderOnDemand, setFolderOnDemandDir as persistFolderOnDemandDir, setFolderPausedFile as persistFolderPausedFile, setFolderE2E as persistFolderE2E, setFolderGitLastCommitHash, setFolderGitRelayPending, setFolderGitBroadcastPending, setGlobalSettings as persistGlobalSettings, type GlobalSettingsPatch, type FolderE2EPatch } from './devices.js';
 import { receiveOffer, makeOfferId, pruneRevokedOffers } from './offers.js';
 import { OfferRetryLedger, type TrackedOffer } from './net/offer-retry.js';
 import type { DeviceIdentity } from './identity.js';
@@ -68,6 +68,7 @@ import { isBundledRuntime, packSelfTgz, runSelfUpdate, runtimeVersion, sha256Hex
 import { compareVersions } from './upgrade.js';
 import { NETWORK_OFFLINE_BACKOFF_MS, offlineAwareReconnectDelay, reconnectDelayMs } from './args.js';
 import { hasRoutableInterface } from './net/offline-probe.js';
+import { isSelfPeerUrl, localInterfaceAddresses } from './net/peer-address.js';
 import { isGitRepo, getLastCommitHash, getCommitInfo, hasUncommittedChanges, autoCommit, type CommitInfo } from './git-monitor.js';
 
 /** 对端 git 提交通知的消息形状(入队、结算、中继共用一份)。 */
@@ -495,6 +496,15 @@ export class SyncSessionManager {
   // 记录由本机主动发起(outbound)的连接的 URL,断线后可按 URL 重连;
   // 入站连接(url 未知)依赖对端重连。
   private readonly outboundPeerUrls = new Map<string, string>();
+  /**
+   * 本机经反向发现**实际写进 config.peers** 的地址(deviceId → url)。
+   *
+   * 有了这层归属,对端换 IP(手机开关 WiFi / DHCP 续租)时才能把**自己写过的那条**摘掉
+   * 再写新地址,而不是只追加 —— 否则 peers 里逐月堆积拨不通的僵尸条目,每条都占一轮
+   * 30s 退避重连(实测某台机留着手机三个历史地址)。只记本机写的那条:用户手填的地址
+   * 永远不被自动删除,多实例同机(同一 host 不同端口)也不会被误伤。
+   */
+  private readonly writtenPeerUrls = new Map<string, string>();
   private readonly reconnectTimers = new Map<string, ReturnType<typeof setTimeout>>();
   private readonly reconnectAttempts = new Map<string, number>();
   // 跟踪所有 peer socket(入站 + 出站),关闭时统一断开,避免客户端 socket
@@ -1796,6 +1806,13 @@ export class SyncSessionManager {
   forgetAndCloseSessions(deviceId: string): number {
     this.outboundPeerUrls.delete(deviceId);
     this.peerInfo.delete(deviceId); // 忘记对端时一并清除其版本 / 主机名 / 平台缓存
+    // 本机为这台设备写进 peers 的那条地址一并摘掉(用户手填的不动):否则遗忘之后
+    // 学习地址还留在配置里,重启又会去拨一个已经不存在的对端。
+    const written = this.writtenPeerUrls.get(deviceId);
+    if (written) {
+      removePeer(this.configPath, written);
+      this.writtenPeerUrls.delete(deviceId);
+    }
     // 断开与该设备的所有会话连接(遍历 activeSessions 而非只取 peerSessions 里的
     // 当前一条)。close 回调会拆掉目录 peer;当前会话的 close 会清书签并尝试排定
     // 重连,但此时 outboundPeerUrls 已清空,scheduleReconnect 直接返回,不会重连。
@@ -2914,6 +2931,18 @@ export class SyncSessionManager {
     url?: string,
     takePendingFrames?: () => Buffer[],
   ): void {
+    // 同 deviceId 拒绝:两份安装共用了同一把 device.key(整目录拷贝配置是最常见成因),
+    // 或本机在拨自己。这样的"对端"无法作为独立设备参与同步(索引永远与自身相等、配对与
+    // 邀请自指),而留成控制面会话只会刷出「在线却不同步」的迷惑状态(实测某台机因此
+    // 攒下 2354 条自己的 folder-sync-list 日志)。明确拒掉并说清原因,便于发现误拷贝的 key。
+    if (remoteDeviceId === this.identity.deviceId) {
+      this.logger.warn(
+        `refusing connection from ${remoteDeviceId}: same device id as this install (two syncx instances sharing one device.key, or dialing ourselves); data plane blocked`,
+      );
+      // 在 registerPeer/挂 close 监听之前直接拆:不留书签、不排重连,自指连接不会滚成风暴
+      socket.close();
+      return;
+    }
     this.registerPeer(remoteDeviceId, url);
     this.peerSockets.add(socket);
     // 心跳探活:初始视为存活,收到 pong 刷新为存活;心跳 tick 会先置 false 再 ping,
@@ -3071,14 +3100,27 @@ export class SyncSessionManager {
     // 连接方在握手 kx 中广播了监听端口:结合源 IP 拼出反向地址并交给 startSyncSession
     // 记录到 outboundPeerUrls,使本机也能主动重连对端(只填一方地址即可双向重连)
     const learnedUrl = learnPeerUrl(socket, listenPort);
-    if (learnedUrl) {
-      this.logger.info(`learned peer ${remoteDeviceId} reachable at ${learnedUrl} (reverse discovery)`);
-      // 持久化反向发现的地址:重启 daemon 后本机也能主动重连对方,不依赖对方先连过来
-      // (原仅存内存 outboundPeerUrls,重启即丢)。addPeer 幂等去重,且 learnedUrl 已保证 ws:// 格式
-      try {
-        addPeer(this.configPath, learnedUrl);
-      } catch {
-        // learnedUrl 必为 ws://,正常情况下不会抛
+    if (learnedUrl && remoteDeviceId !== this.identity.deviceId) {
+      // 自拨防护:对端报的可达地址其实就是本机自己的 peer 端口(同一台机同一实例 —— 例如
+      // 上一版把自拨学到的地址写进了 peers,之后每次启动都自己连自己)。这种地址不写配置,
+      // 免得 peers 里多一条永远自指的条目。同机**不同端口**的另一实例不受影响(见 isSelfPeerUrl)。
+      if (isSelfPeerUrl(learnedUrl, localInterfaceAddresses(), this.peerPort)) {
+        this.logger.debug(`skip persisting self-referential peer address ${learnedUrl}`);
+      } else {
+        // 换地址即替换:摘掉本机先前为这台设备写过的那条,再写新地址。
+        // 只清「本机写过的」—— 用户手填的地址一律不动。
+        const written = this.writtenPeerUrls.get(remoteDeviceId);
+        if (written && written !== learnedUrl) {
+          removePeer(this.configPath, written);
+          this.logger.info(`peer ${remoteDeviceId} address changed: dropped stale ${written}`);
+        }
+        this.logger.info(`learned peer ${remoteDeviceId} reachable at ${learnedUrl} (reverse discovery)`);
+        try {
+          addPeer(this.configPath, learnedUrl);
+          this.writtenPeerUrls.set(remoteDeviceId, learnedUrl);
+        } catch {
+          // learnedUrl 必为 ws://,正常情况下不会抛
+        }
       }
     }
     this.startSyncSession(socket, remoteDeviceId, key, learnedUrl);

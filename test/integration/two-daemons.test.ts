@@ -10,6 +10,7 @@ import {
   readdirSync,
   createWriteStream,
   renameSync,
+  copyFileSync,
 } from 'node:fs';
 import { rmDir } from '../helpers.js';
 import { tmpdir } from 'node:os';
@@ -965,6 +966,79 @@ describe('initial index exchange: fingerprint skip + reconnect log separation', 
       await stopChildren();
       rmDir(a.dir);
       rmDir(b.dir);
+    },
+    60000,
+  );
+});
+
+describe('learned peer address bookkeeping (stale replacement + self identity)', () => {
+  function logOf(setup: DaemonSetup): string {
+    try {
+      return readFileSync(join(setup.dir, 'daemon.out.log'), 'utf8');
+    } catch {
+      return '';
+    }
+  }
+
+  function peersOf(setup: DaemonSetup): string[] {
+    return (JSON.parse(readFileSync(setup.configPath, 'utf8')) as { peers: string[] }).peers;
+  }
+
+  it(
+    'drops the previously learned address when the same device re-appears on a new port',
+    async () => {
+      // 场景:手机开关 WiFi / DHCP 换 IP。反向发现学到新地址时,必须把本机**先前为同一
+      // deviceId 写过**的那条摘掉 —— 否则 config.peers 里逐月堆积拨不通的僵尸条目,
+      // 每条都白占一轮重连退避(排查移动端耗电时实测某台机留着三个历史地址)。
+      const a = await setupDaemon('a', []);
+      const b1 = await setupDaemon('b1', []);
+      // 同一身份换端口 = 同一台设备换了可达地址(deviceId 派生自 device.key)
+      const b2 = await setupDaemon('b2', []);
+      copyFileSync(join(b1.dir, 'device.key'), join(b2.dir, 'device.key'));
+
+      startDaemon(a, [`ws://127.0.0.1:${b1.peerPort}`], [b1.deviceId]);
+      await waitForDaemonReady(a);
+      const c1 = startDaemon(b1, [`ws://127.0.0.1:${a.peerPort}`], [a.deviceId]);
+      await waitFor(() => logOf(a).includes(`learned peer ${b1.deviceId}`));
+      expect(peersOf(a).some((p) => p.endsWith(`:${b1.peerPort}`))).toBe(true);
+
+      c1.kill('SIGTERM');
+      await new Promise((r) => c1.once('exit', () => r(null)));
+
+      const c2 = startDaemon(b2, [`ws://127.0.0.1:${a.peerPort}`], [a.deviceId]);
+      await waitFor(() => logOf(a).includes(`dropped stale ws://127.0.0.1:${b1.peerPort}`));
+      await waitFor(() => peersOf(a).some((p) => p.endsWith(`:${b2.peerPort}`)));
+      expect(peersOf(a).some((p) => p.endsWith(`:${b1.peerPort}`))).toBe(false);
+
+      c2.kill('SIGTERM');
+      await stopChildren();
+      rmDir(a.dir);
+      rmDir(b1.dir);
+      rmDir(b2.dir);
+    },
+    60000,
+  );
+
+  it(
+    'refuses a connection presenting our own device id and does not persist its address',
+    async () => {
+      // 两份安装共用了同一把 device.key(整目录拷贝配置所致):它们会互相拨号,旧版留成
+      // 「在线却不同步」的控制面自指会话(实测某台机为此刷了 2354 条自己的目录清单)。
+      // 现在:明确拒掉、记一行 warn,且不再把对方的地址写进本机 peers。
+      const a = await setupDaemon('a', []);
+      const twin = await setupDaemon('twin', []);
+      copyFileSync(join(a.dir, 'device.key'), join(twin.dir, 'device.key'));
+
+      startDaemon(a, [], []);
+      await waitForDaemonReady(a);
+      startDaemon(twin, [`ws://127.0.0.1:${a.peerPort}`], [a.deviceId]);
+
+      await waitFor(() => logOf(a).includes('same device id as this install'));
+      expect(peersOf(a)).toEqual([]);
+
+      await stopChildren();
+      rmDir(a.dir);
+      rmDir(twin.dir);
     },
     60000,
   );
