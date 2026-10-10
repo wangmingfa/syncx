@@ -43,6 +43,8 @@ interface SessionRuntime {
   term: Terminal;
   fit: FitAddon;
   ws: WebSocket | null;
+  /** 挂载容器的尺寸观察器:布局结算/窗口变化都从这里触发重排(见 openTermFor)。 */
+  ro: ResizeObserver;
 }
 
 /** 深底顶栏上 ghost 按钮的亮色描边/文字(n-button color 属性统一取用)。 */
@@ -101,11 +103,29 @@ function openTermFor(meta: SessionMeta): void {
   const fit = new FitAddon();
   term.loadAddon(fit);
   term.open(box);
+  // resize 上报必须先于任何 fit 注册:fit 内部改尺寸会触发 onResize,若那时
+  // 还没监听,这次尺寸就永远递不到后端(PTY 停在 spawn 固定的 80x24)。
+  term.onResize(({ cols, rows }) => sendTo(meta.id, { t: 'resize', cols, rows }));
   try {
     fit.fit();
   } catch {
-    /* 容器尚未布局完成时 fit 可能量到 0,激活时会再触发 */
+    /* 容器尚未布局完成时 fit 可能量到 0,观察器会在有尺寸时再触发 */
   }
+
+  // 容器尺寸观察:nextTick 只保证 DOM 挂载,不保证弹性布局/字体已结算 ——
+  // 初次 fit 常常量到 0 而停在默认 80x24,TUI 程序按 PTY 的 ioctl 尺寸渲染,
+  // 「lazygit 占不满屏、拖一次浏览器窗口才恢复」正是这么来的(此前唯一的
+  // 补救是 window resize 事件)。观察容器自身,有真实尺寸(含首次结算)就重排。
+  const ro = new ResizeObserver(() => {
+    try {
+      fit.fit();
+    } catch {
+      /* 瞬时 0 尺寸(会话隐藏中)忽略 */
+    }
+  });
+  ro.observe(box);
+
+  runtime.set(meta.id, { term, fit, ws: null, ro });
 
   // ---- 键盘:把「复制选区」从 Ctrl+C(=SIGINT)里拆出来,其余原样透传 ----
   term.attachCustomKeyEventHandler((e) => {
@@ -129,10 +149,7 @@ function openTermFor(meta: SessionMeta): void {
   term.onData((data) => {
     if (meta.state === 'ready') sendTo(meta.id, { t: 'in', data });
   });
-  // 尺寸变化即上报(PTY 侧同步 ioctl,行编辑器/全屏程序立刻按新尺寸重排)
-  term.onResize(({ cols, rows }) => sendTo(meta.id, { t: 'resize', cols, rows }));
 
-  runtime.set(meta.id, { term, fit, ws: null });
   connectWs(meta);
   term.focus();
 }
@@ -159,6 +176,11 @@ function connectWs(meta: SessionMeta): void {
       meta.shellName = msg.shell ?? '';
       meta.ptyMode = msg.pty === true;
       meta.state = 'ready';
+      // PTY 固定以 80x24 spawn,真实视口要由前端补送。初次 fit 若发生在
+      // onResize 注册/WS 打开之前,那次尺寸变化没人递( resize 消息是唯一
+      // 通知渠道) —— 这里无条件把当前尺寸补一次,保证 shell 起跑时 PTY
+      // 与屏幕一致,全屏程序第一帧就按正确尺寸画。
+      sendTo(meta.id, { t: 'resize', cols: rt.term.cols, rows: rt.term.rows });
       if (meta.id === activeId.value) rt.term.focus();
       return;
     }
@@ -197,6 +219,7 @@ function reconnectActive(): void {
 /** 删除会话:关 WS、杀后端 shell(dispose 触发连接清理)、移出列表。 */
 function removeSession(id: number): void {
   const rt = runtime.get(id);
+  rt?.ro.disconnect();
   rt?.ws?.close();
   rt?.term.dispose();
   runtime.delete(id);
@@ -345,6 +368,7 @@ onUnmounted(() => {
   window.removeEventListener('resize', onWindowResize);
   window.clearInterval(keepaliveTimer);
   for (const [, rt] of runtime) {
+    rt.ro.disconnect();
     rt.ws?.close();
     rt.term.dispose();
   }
