@@ -96,6 +96,7 @@ function deviceAddrLine(p: DeviceInfo): string {
     title="设置"
     :description="path"
     description-mono
+    class="edit-folder-modal"
     @close="emit('close')"
   >
     <div class="edit-section-label">同步设备</div>

@@ -1446,6 +1446,12 @@ html[data-theme='dark'] .chip-menu__item--danger {
   max-width: 620px;
 }
 
+/* 共享目录设置弹窗加宽(默认 520 → 720,用户要求 +200:六个设置段各带说明文字,
+   520 下说明被挤成瘦长条)。双类提特异度,写法与 .settings-modal 同一条规矩。 */
+.modal.edit-folder-modal {
+  max-width: 720px;
+}
+
 /* 使用指南正文。这几个类名早就写在模板里,却一直没有对应样式:<ol class="guide-steps">
    的默认序号会和手写的 ①②③④ 叠成「1. ①」,各步之间也没有间距。这里补上基础排版,
    并去掉默认 marker(编号由正文自带,否则重复)。 */
