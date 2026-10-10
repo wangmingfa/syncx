@@ -104,6 +104,30 @@ describe('commit info collection', () => {
     }
   });
 
+  it.skipIf(!HAS_GIT)('collects the subjects of every commit in the batch, oldest first', () => {
+    const repo = tempGitRepo();
+    try {
+      writeFileSync(join(repo, 'a.txt'), 'A');
+      const first = commitAll(repo, '第一步:初始化');
+      writeFileSync(join(repo, 'b.txt'), 'B');
+      const second = commitAll(repo, '第二步:加文件');
+      writeFileSync(join(repo, 'c.txt'), 'C');
+      const third = commitAll(repo, '第三步:收尾');
+
+      // 一轮扫描攒下多笔:subjects 按旧→新收集,最后一笔就是 commitMessage 的来源。
+      // 范围不含 fromHash(与 git 的 first..third 语义一致)
+      const info = getCommitInfo(repo, first, third)!;
+      expect(info.commitSubjects).toEqual(['第二步:加文件', '第三步:收尾']);
+      expect(info.message).toBe('第三步:收尾');
+
+      // 单笔批次:subjects 只有这一笔,不附加任何东西
+      const single = getCommitInfo(repo, second, third)!;
+      expect(single.commitSubjects).toEqual(['第三步:收尾']);
+    } finally {
+      rmDir(repo);
+    }
+  });
+
   it.skipIf(!HAS_GIT)('carries the commit body through fullMessage while message stays the subject', () => {
     const repo = tempGitRepo();
     try {

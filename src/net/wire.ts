@@ -104,11 +104,13 @@ export type ControlMessage =
    * 接收方按 folderId 找到本地目录,等本次提交的内容在本地落齐后执行
    * git add -A && git commit,使用相同的提交信息(工作树干净则跳过)。
    * commitHash 用于去重(避免同一提交被多次处理);changedFiles 与 diffStat 仅用于日志展示。
+   * commitSubjects 是本批次**全部**提交的 subject(旧→新,可缺省 = 旧版/单笔):
+   * 接收方落镜像提交时把它们附进 body,一笔里保留整批提交脉络。
    * 完成镜像提交的对端会把这条通知**原样中继**给它该目录的其余对端(fromDeviceId
    * 与 commitHash 都不改写,中继设备的镜像哈希永不出门),链式拓扑的末端因此也能提交。
    * 旧版本对端不识别该 kind,直接忽略,不影响既有功能。
    */
-  | { kind: 'git-commit-notify'; fromDeviceId: string; folderId: string; commitHash: string; commitMessage: string; changedFiles: string[]; diffStat?: string; parentHash: string; version?: string; hostname?: string; platform?: string }
+  | { kind: 'git-commit-notify'; fromDeviceId: string; folderId: string; commitHash: string; commitMessage: string; changedFiles: string[]; diffStat?: string; commitSubjects?: string[]; parentHash: string; version?: string; hostname?: string; platform?: string }
   /**
    * Git 提交通知的**投递回执**(控制面「至少一次」的最后一道锁):接收方只要**处理了**
    * 这条通知就立刻回此帧,与它随后有没有落成一笔镜像提交无关 —— 提不提交取决于模式、

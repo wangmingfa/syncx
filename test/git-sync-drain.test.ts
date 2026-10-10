@@ -278,6 +278,30 @@ describe('git auto-commit deferred until receive ledger drains', () => {
     (manager as unknown as { close(): void }).close();
   });
 
+  it.skipIf(!HAS_GIT)('appends the batch subjects to the mirror commit message, oldest first', () => {
+    const { share, manager, folder } = boot('full');
+    const internals = manager as unknown as Internals;
+
+    // 离线积压多笔的通知:镜像提交正文用最后一笔,body 附上其余提交的 subject(旧→新)
+    writeFileSync(join(share, 'a.txt'), 'from peer');
+    const batch = notify('9'.repeat(40), 'feat: 最后一笔\n\n最后一笔的正文');
+    batch.commitSubjects = ['feat: 第一笔', 'feat: 第二笔', 'feat: 最后一笔'];
+    internals.onGitCommitNotify(batch);
+    internals.flushPendingGitNotify();
+    expect(commitCount(share)).toBe(2);
+    expect(git(share, ['log', '-1', '--format=%B']).trim())
+      .toBe('feat: 最后一笔\n\n最后一笔的正文\n\nfeat: 第一笔\nfeat: 第二笔');
+
+    // 缺 commitSubjects(旧版本对端):消息原样落库,不多一段
+    writeFileSync(join(share, 'b.txt'), 'again');
+    internals.onGitCommitNotify(notify('8'.repeat(40), 'feat: 单独一笔'));
+    internals.flushPendingGitNotify();
+    expect(commitCount(share)).toBe(3);
+    expect(git(share, ['log', '-1', '--format=%B']).trim()).toBe('feat: 单独一笔');
+
+    (manager as unknown as { close(): void }).close();
+  });
+
   it.skipIf(!HAS_GIT)('dedupes a redelivered notify before it is ever queued', () => {
     const { share, manager, folder } = boot('receive');
     const internals = manager as unknown as Internals;
@@ -528,6 +552,32 @@ describe('git commit broadcast reaches every device of the folder', () => {
    * 于是基线照样推进,掉线那台永远收不到这一笔通知(文件照常同步,工作树留一堆未提交
    * 改动)。这条测试钉住这个缺口:没送达的设备必须被记住并在下一轮补投。
    */
+  it.skipIf(!HAS_GIT)('carries the subjects of every commit in the batch on the broadcast', async () => {
+    const { share, manager } = boot('full', ['PEER000001']);
+    const internals = manager as unknown as Internals;
+    const sent = spyControls(manager);
+
+    await internals.checkGitCommits(); // 首轮建基线
+
+    // 两轮扫描之间攒下两笔:通知必须带全整批 subject,正文取最后一笔
+    writeFileSync(join(share, 'a.txt'), 'one');
+    git(share, ['add', '-A']);
+    git(share, ['commit', '-qm', 'feat: 第一笔']);
+    writeFileSync(join(share, 'b.txt'), 'two');
+    git(share, ['add', '-A']);
+    git(share, ['commit', '-qm', 'feat: 第二笔']);
+    await internals.checkGitCommits();
+
+    expect(sent).toHaveLength(1);
+    expect(sent[0]?.msg).toMatchObject({
+      kind: 'git-commit-notify',
+      commitMessage: 'feat: 第二笔',
+      commitSubjects: ['feat: 第一笔', 'feat: 第二笔'],
+    });
+
+    (manager as unknown as { close(): void }).close();
+  });
+
   it.skipIf(!HAS_GIT)('resends the commit notification to a device that was out of reach', async () => {
     const { share, manager } = boot('full', ['PEER000001', 'PEER000002']);
     const internals = manager as unknown as Internals;

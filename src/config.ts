@@ -224,6 +224,8 @@ export interface GitCommitPendingRecord {
   commitMessage: string;
   changedFiles: string[];
   diffStat?: string;
+  /** 本批次全部提交的 subject(旧→新,见 wire 的 git-commit-notify;缺省 = 旧版/单笔) */
+  commitSubjects?: string[];
   parentHash: string;
   /** 仍未送达的设备 id。 */
   targets: string[];

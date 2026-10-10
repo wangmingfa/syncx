@@ -36,6 +36,12 @@ export interface CommitInfo {
   changedFiles: string[];
   /** diff stat 输出(可选,信息展示用) */
   diffStat?: string;
+  /**
+   * 本批次**所有**提交的 subject(旧→新,含最后一笔)。一轮扫描可能攒下多笔提交,
+   * 镜像侧只落一笔;把整批 subject 随通知带过去,接收方在镜像提交的 body 里保留
+   * 这批变更的完整脉络(hash 两侧本就不同,消息是唯一可对上的线索)。
+   */
+  commitSubjects: string[];
 }
 
 /** 检测目录是否为 git 仓库(.git 存在,可以是目录或文件(worktree)) */
@@ -84,8 +90,19 @@ export function getCommitInfo(folderPath: string, fromHash: string, toHash: stri
     const entries = logOutput.split('---SYNCX-END---').filter((s) => s.trim());
     if (entries.length === 0) return null;
 
-    // 取最后一个提交(最新的)
-    const lastEntry = entries[entries.length - 1]!.trim();
+    // 整批提交的 subject,旧→新(git log 输出为新→旧,故倒序收集)。
+    // trim 不能省:分隔符之后的 entry 带前导换行,不剥掉取 [2] 会错位到父哈希
+    const commitSubjects = entries
+      .map((entry) => entry.trim().split('\n')[2]?.trim() ?? '')
+      .filter(Boolean)
+      .reverse();
+
+    // 取第一个提交(最新的):git log 输出为新→旧,过去取「最后一个 entry」在
+    // 批次只有一笔时碰巧正确,一轮攒多笔时取到的会是最旧的一笔(hash、消息、
+    // 变更清单全错位)。首个 entry 无前导换行,行号从 0 起算干净。
+    const lastEntry = entries[0]!.trim();
+
+    // 取第一个提交(最新的)
     const lines = lastEntry.split('\n');
     if (lines.length < 3) return null;
 
@@ -128,7 +145,7 @@ export function getCommitInfo(folderPath: string, fromHash: string, toHash: stri
       // stat 获取失败不影响主流程
     }
 
-    return { hash, parentHash, message, fullMessage, changedFiles, diffStat };
+    return { hash, parentHash, message, fullMessage, changedFiles, diffStat, commitSubjects };
   } catch {
     return null;
   }

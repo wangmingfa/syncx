@@ -103,6 +103,7 @@ function toGitPendingRecord(ledger: GitCommitLedger): GitCommitPendingRecord {
     commitMessage: msg.commitMessage,
     changedFiles: msg.changedFiles,
     ...(msg.diffStat !== undefined ? { diffStat: msg.diffStat } : {}),
+    ...(msg.commitSubjects?.length ? { commitSubjects: msg.commitSubjects } : {}),
     parentHash: msg.parentHash,
     targets: ledger.targets,
   };
@@ -129,9 +130,22 @@ function readGitPending(folderId: string, r: GitCommitPendingRecord | undefined)
       commitMessage: r.commitMessage,
       changedFiles: Array.isArray(r.changedFiles) ? r.changedFiles : [],
       ...(typeof r.diffStat === 'string' ? { diffStat: r.diffStat } : {}),
+      ...(Array.isArray(r.commitSubjects) ? { commitSubjects: r.commitSubjects.filter((s) => typeof s === 'string' && s) } : {}),
       parentHash: typeof r.parentHash === 'string' ? r.parentHash : '',
     },
   };
+}
+
+/**
+ * 组装镜像提交的提交信息:正文用本批最后一笔的 fullMessage,多于一笔时把其余
+ * 提交的 subject(旧→新)附在 body —— 一笔镜像提交里保留整批提交脉络(哈希两侧
+ * 本就不同,消息是唯一可对上的线索)。单笔、或通知缺 commitSubjects(旧版对端)
+ * 时与原消息一致,不多冗余。
+ */
+function composeMirrorCommitMessage(msg: GitCommitNotifyMsg): string {
+  const rest = (msg.commitSubjects ?? []).slice(0, -1).filter((s) => s.trim());
+  if (rest.length === 0) return msg.commitMessage;
+  return `${msg.commitMessage}\n\n${rest.join('\n')}`;
 }
 
 /**
@@ -1377,7 +1391,7 @@ export class SyncSessionManager {
       this.logger.info(
         `auto-committing: ${folder.id} (from ${msg.fromDeviceId}) "${msg.commitMessage.split('\n')[0]}" — ${filesDesc}`,
       );
-      const result = autoCommit(folder.path, msg.commitMessage);
+      const result = autoCommit(folder.path, composeMirrorCommitMessage(msg));
       if (result.success) {
         this.logger.info(`auto-commit success: ${folder.id} -> ${result.hash?.slice(0, 8)}`);
         // 更新基线并落盘:防止扫描循环把这个自动提交误判为「新提交」再广播回去(死循环防护)
@@ -1587,6 +1601,7 @@ export class SyncSessionManager {
       commitMessage: info.fullMessage,
       changedFiles: info.changedFiles,
       diffStat: info.diffStat,
+      commitSubjects: info.commitSubjects,
       parentHash: info.parentHash,
     };
     const attempts = new Map<string, number>();
