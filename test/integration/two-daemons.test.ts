@@ -915,6 +915,61 @@ async function getFilePair(
   return (await res.json()) as ComparePair;
 }
 
+describe('initial index exchange: fingerprint skip + reconnect log separation', () => {
+  function daemonLog(setup: DaemonSetup): string {
+    try {
+      return readFileSync(join(setup.dir, 'daemon.out.log'), 'utf8');
+    } catch {
+      return '';
+    }
+  }
+
+  it(
+    'skips the full index swap on fingerprint match after content converged, and logs dial failures / session closes separately',
+    async () => {
+      // 场景:两侧内容收敛后(第一次全量同步完成),断开重连。第二次会话建立时
+      // 两侧索引相等,应各自回指纹 ack、把数百 KB 的全量互换省掉(日志留痕);
+      // 同时「会话断开」与「拨号失败」必须是两种日志行 —— 以前都记成
+      // disconnected,关 WiFi 的常态拨号失败看起来像事故。
+      const content = Buffer.from('fingerprint skip fixture');
+      const a = await setupDaemon('a', [{ path: 'doc.txt', content }]);
+      const b = await setupDaemon('b', []);
+
+      // 先起 B 再起 A:A 的首轮拨号就能连上,避免「启动期拨号失败」混进断言
+      const bChild = startDaemon(b, [`ws://127.0.0.1:${a.peerPort}`], [a.deviceId]);
+      await waitForDaemonReady(b);
+      startDaemon(a, [`ws://127.0.0.1:${b.peerPort}`], [b.deviceId]);
+      await waitForDaemonReady(a);
+
+      // 等 B 把文件真正拉下来(首轮:指纹不一致 → request → 全量 → 供块)
+      await waitFor(() => existsSync(join(b.share, 'doc.txt')));
+      await waitFor(() => {
+        const log = daemonLog(a);
+        return log.includes('folder sync list') && daemonLog(b).includes('folder sync list');
+      });
+
+      // 杀掉 B:A 应记「session closed」;随后的重连拨不通,应记「dial to ... failed」
+      bChild.kill('SIGTERM');
+      await new Promise((r) => bChild.once('exit', () => r(null)));
+      await waitFor(() => daemonLog(a).includes('session closed; reconnecting'));
+      await waitFor(() => /dial to .* failed: .*(ECONNREFUSED|ECONNRESET)/.test(daemonLog(a)));
+
+      // 重启 B(同目录同端口,索引从盘上恢复):两侧索引相等 → 双方都应记「指纹一致跳过」
+      startDaemon(b, [`ws://127.0.0.1:${a.peerPort}`], [a.deviceId]);
+      await waitFor(
+        () =>
+          daemonLog(a).includes('initial index exchange skipped (fingerprint match)') &&
+          daemonLog(b).includes('initial index exchange skipped (fingerprint match)'),
+      );
+
+      await stopChildren();
+      rmDir(a.dir);
+      rmDir(b.dir);
+    },
+    60000,
+  );
+});
+
 describe('file compare:图片预览', () => {
   it(
     '图片两侧都带回 MIME 与 base64;体积上限按类型分档(3 MiB 的图可预览,同样大的非图片降级)',

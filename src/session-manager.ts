@@ -74,6 +74,9 @@ type GitCommitNotifyMsg = Extract<ControlMessage, { kind: 'git-commit-notify' }>
 /** 提交通知的投递回执(销账用),形状见 src/net/wire.ts。 */
 type GitCommitAckMsg = Extract<ControlMessage, { kind: 'git-commit-ack' }>;
 
+/** scheduleReconnect 的原因:决定日志措辞(链路断开 vs 拨号失败,见方法注释)。 */
+type ReconnectCause = { kind: 'session-closed' } | { kind: 'dial-failed'; error: string };
+
 /**
  * 尚未拿到投递回执的 git 提交通知:**出站广播**与**替别人转发**两条槽共用同一套
  * 投递/销账规则,差别只在目标怎么算(广播 = 该目录全部设备;中继 = 除来源以外)。
@@ -1652,7 +1655,14 @@ export class SyncSessionManager {
       });
   }
 
-  private scheduleReconnect(deviceId: string): void {
+  /**
+   * 重连原因:日志必须区分「链路断开」与「拨号失败」。后者(ECONNREFUSED /
+   * ENETUNREACH / 超时)是对端离线(手机关 WiFi / 换网)或本机记录的地址已失效的
+   * **常态**,不是事故;以前两者都记成「disconnected」,且失败原因被整个吞掉,
+   * 排查流量问题时完全无法定性(2026-10 排查移动端耗电时实测:某对端 30k 条
+   * 重连日志里七成是拨号失败)。
+   */
+  private scheduleReconnect(deviceId: string, cause: ReconnectCause): void {
     if (this.closed) return;
     const url = this.outboundPeerUrls.get(deviceId);
     if (!url) return;
@@ -1660,10 +1670,20 @@ export class SyncSessionManager {
     const attempts = this.reconnectAttempts.get(deviceId) ?? 0;
     this.reconnectAttempts.set(deviceId, attempts + 1);
     const delay = reconnectDelayMs(attempts);
-    this.logger.info(`peer ${deviceId} disconnected, reconnecting in ${delay}ms`);
+    if (cause.kind === 'dial-failed') {
+      this.logger.info(`dial to ${deviceId} via ${url} failed: ${cause.error}; retrying in ${delay}ms (attempt ${attempts + 1})`);
+    } else {
+      this.logger.info(`peer ${deviceId} session closed; reconnecting in ${delay}ms (attempt ${attempts + 1})`);
+    }
     const timer = setTimeout(() => {
       this.reconnectTimers.delete(deviceId);
-      this.connectTo(url, { onRejected: () => this.scheduleReconnect(deviceId) });
+      this.connectTo(url, {
+        onRejected: (error) =>
+          this.scheduleReconnect(deviceId, {
+            kind: 'dial-failed',
+            error: error instanceof Error ? error.message : String(error),
+          }),
+      });
     }, delay);
     this.reconnectTimers.set(deviceId, timer);
   }
@@ -1680,7 +1700,13 @@ export class SyncSessionManager {
     }
     this.reconnectAttempts.delete(deviceId);
     this.logger.info(`manually reconnecting to peer ${deviceId}`);
-    this.connectTo(url, { onRejected: () => this.scheduleReconnect(deviceId) });
+    this.connectTo(url, {
+      onRejected: (error) =>
+        this.scheduleReconnect(deviceId, {
+          kind: 'dial-failed',
+          error: error instanceof Error ? error.message : String(error),
+        }),
+    });
   }
 
   /** 本机记录的某对端可达地址(手动填写或反向发现学习)。 */
@@ -1818,13 +1844,29 @@ export class SyncSessionManager {
         );
         this.notifyStatus();
       },
+      // 初始索引交换的观测点(见 peer.beginInitialIndexExchange):指纹一致时全量
+      // 互换被省掉,这正是本条优化的收益点,info 留痕;等不到回应退回全量(旧对端 /
+      // attach 竞态)与旧行为等价,也留痕便于日后区分「真省了」和「没走到」。
+      onInitialIndexOutcome: (outcome) => {
+        if (outcome === 'skipped') {
+          this.logger.info(
+            `initial index exchange skipped (fingerprint match): folder ${folder.id} peer ${session.remoteDeviceId}`,
+          );
+        } else if (outcome === 'fallback') {
+          this.logger.info(
+            `index fingerprint unanswered (old peer or attach race); sending full index: folder ${folder.id} peer ${session.remoteDeviceId}`,
+          );
+        }
+      },
     });
     session.peers.set(folder.id, peer);
     folder.peers.set(session.remoteDeviceId, peer);
-    // 会话建立时互发的这份索引是本机索引的**完整声明**,必须标 full:对端据此
-    // 按并集规划,才能发现「本机有、对端缺」的文件并把它们拉过去。标成 delta
-    // 会让对端只判定这份清单里提到的路径,漏掉本机独有的存量文件。
-    transport.sendEntries([...folder.localIndex.values()], 'full');
+    // 会话建立时的初始索引交换挪进 peer(先发指纹,对端比对一致即跳过全量):
+    // 链路抖动场景下每次重建都无条件互发数百 KB 全量索引,是移动端流量尖峰与
+    // 编解码耗电的主因(实测 7 目录约 1.4MB/次 × 每天数十次)。不一致时对端回
+    // index-request,本机照旧发全量;旧对端不认识指纹消息则由 2s 兜底发全量
+    // —— 三条路都与旧的「无条件发全量」收敛等价。
+    peer.beginInitialIndexExchange();
   }
 
   /** 从一个存活会话上摘除指定目录的 peer/transport(设备被移出目录的 devices 时)。 */
@@ -1838,8 +1880,10 @@ export class SyncSessionManager {
       folder.transportDevice.delete(t);
     }
     folder.peers.delete(session.remoteDeviceId);
-    // 摘除即终局:交还该 peer 在台账里的全部接收认领,否则死仓会让同设备的另一条
-    // 连接跳过这一版本,直到保鲜期过(见 peer.ts tryClaim)
+    // 摘除即终局:撤掉初始交换兜底定时器(别向已死 socket 发),再交还该 peer 在
+    // 台账里的全部接收认领,否则死仓会让同设备的另一条连接跳过这一版本,直到
+    // 保鲜期过(见 peer.ts tryClaim)
+    session.peers.get(folder.id)?.dispose();
     session.peers.get(folder.id)?.releaseClaims();
     session.peers.delete(folder.id);
   }
@@ -2912,6 +2956,7 @@ export class SyncSessionManager {
         if (idx >= 0) folder.transports.splice(idx, 1);
         // 会话已死:它持有的接收认领全部交还台账,让同设备另一条活连接(或重连后的
         // 新会话)能立即接手,而不是等保鲜期(见 peer.ts receiveLedger)
+        session.peers.get(folder.id)?.dispose();
         session.peers.get(folder.id)?.releaseClaims();
         // 仅当 folder.peers 里登记的仍是本会话的 peer 时才删除:
         // 会话被新连接接管后,新会话可能已登记了自己的 peer,不能误删
@@ -2930,7 +2975,7 @@ export class SyncSessionManager {
           this.peerSessions.set(remoteDeviceId, backup);
         } else {
           this.peerSessions.delete(remoteDeviceId);
-          this.scheduleReconnect(remoteDeviceId);
+          this.scheduleReconnect(remoteDeviceId, { kind: 'session-closed' });
         }
       }
       // 掉线会同时改变设备卡的在线标记与各目录的传输进度

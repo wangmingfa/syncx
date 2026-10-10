@@ -16,6 +16,9 @@ export type WireMessage =
    * 两端互为回声、无限循环。旧版对端收到我们多出的字段会直接忽略,不受影响。
    */
   | { type: 'index'; folder: string; payload: string; full?: boolean; relayed?: boolean }
+  | { type: 'index-fingerprint'; folder: string; fingerprint: string }
+  | { type: 'index-ack'; folder: string }
+  | { type: 'index-request'; folder: string }
   | { type: 'block-request'; folder: string; payload: BlockRequest }
   | { type: 'block-response'; folder: string; payload: Omit<BlockResponse, 'data'> & { data: string } }
   | { type: 'control'; payload: ControlMessage };
@@ -272,6 +275,12 @@ export function makePeerTransport(
     sendBlockRequest(request: BlockRequest): void {
       sendRateLimited(encryptMessage(key, { type: 'block-request', folder: folderPath, payload: request }));
     },
+    sendIndexFingerprint(fingerprint: string): void {
+      sendRateLimited(encryptMessage(key, { type: 'index-fingerprint', folder: folderPath, fingerprint }));
+    },
+    sendIndexExchangeReply(kind: 'index-ack' | 'index-request'): void {
+      sendRateLimited(encryptMessage(key, { type: kind, folder: folderPath }));
+    },
     sendBlockResponse(response: BlockResponse, opts?: { priority?: boolean }): void {
       // 响应上线前不带 priority:它只是本端排队决策(源块请求的标记),对端无需感知
       const { priority: _drop, ...payload } = response as BlockResponse & { priority?: boolean };
@@ -343,6 +352,15 @@ export function attachPeerMessages(
           full: message.full === true,
           relayed: message.relayed === true,
         });
+        break;
+      case 'index-fingerprint':
+        peer.onIndexFingerprint(message.fingerprint);
+        break;
+      case 'index-ack':
+        peer.onIndexAck();
+        break;
+      case 'index-request':
+        peer.onIndexRequest();
         break;
       case 'block-request':
         peer.onBlockRequest(message.payload);

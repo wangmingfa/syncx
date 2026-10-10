@@ -1,4 +1,5 @@
 import type { IndexEntry } from './index.js';
+import { indexFingerprint } from './index-fingerprint.js';
 import { buildPlan, buildDeltaPlan } from './plan.js';
 import type { BlockRequest, BlockResponse } from './messages.js';
 import type { LocalExecutor, ReceiveHandle } from './executor.js';
@@ -26,6 +27,19 @@ export interface PeerTransport {
   sendBlockRequest(request: BlockRequest): void;
   /** opts.priority = 源块请求带「优先同步」标记:实现侧据此把响应插到发送队列最前。 */
   sendBlockResponse(response: BlockResponse, opts?: { priority?: boolean }): void;
+  /**
+   * 发送本机索引指纹(见 index-fingerprint.ts):会话建立时先比指纹,一致就省掉
+   * 全量索引互换。
+   *
+   * 可选:能力探测,口径同 pendingOutboundBytes —— 测试替身与未升级的实现不提供时,
+   * 初始索引交换退回「直接发全量」的旧行为,而不是静默丢掉建立时的收敛机会。
+   */
+  sendIndexFingerprint?(fingerprint: string): void;
+  /**
+   * 对收到的指纹表态:'index-ack' = 与本机索引一致(发端可跳过全量),
+   * 'index-request' = 不一致(请发全量)。可选,理由同上。
+   */
+  sendIndexExchangeReply?(kind: 'index-ack' | 'index-request'): void;
   /**
    * 本端「已经生成、还没真正离开本机」的字节数:排队中的信封 + 协议栈写缓冲。
    * 供块前的窗口判定用(见 SEND_WINDOW_BYTES)。
@@ -184,6 +198,19 @@ export interface SyncPeerDeps {
    */
   e2eKey?: Buffer;
   /**
+   * 初始索引交换的兜底时限(毫秒),缺省 2000:指纹发出后等不到 ack/request
+   * (旧对端不认识指纹消息 / 指纹在 attach 竞态中被丢)就退回发全量。
+   * 测试注入小值以免真等 2s。
+   */
+  initialIndexFallbackMs?: number;
+  /**
+   * 初始索引交换的观测点(日志/度量用):
+   *  - 'skipped'        指纹一致,全量互换被省掉(优化的收益点);
+   *  - 'fallback'       等不到回应,退回发全量(旧对端 / 竞态,与旧行为等价);
+   *  - 'request-served' 对端发现不一致索要全量,已照发(与旧行为等价,不记日志)。
+   */
+  onInitialIndexOutcome?: (outcome: 'skipped' | 'fallback' | 'request-served') => void;
+  /**
    * 接收认领台账(同一共享目录的**所有** SyncPeer 共享同一个 Map,由上层创建传入):
    * 设备对之间至多两条连接(每方向一条,设计内),每条会话各挂一份 SyncPeer,
    * 同一份增量会在两条连接各到一次 —— 两条管线并发比对同一份尚未前移的
@@ -247,6 +274,29 @@ export interface SyncPeer {
    * 该路径此刻不在占位态(不是占位/不存在/已落地)时是空操作;已在拉取中则幂等。
    */
   materialize(path: string): boolean;
+  /**
+   * 会话建立时的初始索引交换:先发本机索引指纹,对端比对一致(回 index-ack)就
+   * 免掉一次数百 KB 的全量索引互换,不一致(回 index-request)或 2s 内无响应
+   * (旧对端不认识指纹消息 / 指纹在 attach 竞态中被丢)则退回发全量。跳过与
+   * 兜底都与旧的「无条件发全量」收敛等价:全量发的是**当时**的 localIndex。
+   * 由 session-manager 在 attach 目录后调用,每会话每目录恰一次。
+   */
+  beginInitialIndexExchange(): void;
+  /**
+   * 收到对端的索引指纹:与本机索引指纹比对,一致回 index-ack,不一致回
+   * index-request。两侧各自独立跑一遍,谁也不等谁。
+   */
+  onIndexFingerprint(fingerprint: string): void;
+  /** 对端确认「你的指纹 = 我的索引」:本机免发全量,撤掉兜底定时器。 */
+  onIndexAck(): void;
+  /** 对端索引与本机不一致,索要全量:照旧发全量(当时快照),撤掉兜底定时器。 */
+  onIndexRequest(): void;
+  /**
+   * 作废本 peer 的初始交换兜底定时器(连接拆除时调用)。兜底若在 socket 死后
+   * 触发,ws 会把 send 静默吞掉,不清理也只是浪费一个定时器;显式 dispose 让
+   * 「会话已死」成为确定态,避免向已拆连接的 transport 发送。
+   */
+  dispose(): void;
   /**
    * 释放本管线在接收认领台账(见 deps.receiveLedger)中的**全部**在手持仓,并作废本管线的
    * 在途接收(句柄收口、pending 清空)。
@@ -374,7 +424,7 @@ let NEXT_CLAIM_ID = 1;
  * complete, then apply it via the executor.
  */
 export function createSyncPeer(deps: SyncPeerDeps): SyncPeer {
-  const { transport, localIndex, executor, readLocalBlock, readLocalChunk, deviceId, remoteDeviceId, root, onEvent, onTraffic, readIgnoreLines, receiveOnly, getConflictPolicy, getOnDemand, isPausedPath, checkDiskSpace, onHardIgnoredDropped, onLanded, onStallDrop, e2eKey, receiveLedger, onDriftAudit, driftState } = deps;
+  const { transport, localIndex, executor, readLocalBlock, readLocalChunk, deviceId, remoteDeviceId, root, onEvent, onTraffic, readIgnoreLines, receiveOnly, getConflictPolicy, getOnDemand, isPausedPath, checkDiskSpace, onHardIgnoredDropped, onLanded, onStallDrop, e2eKey, receiveLedger, onDriftAudit, driftState, initialIndexFallbackMs, onInitialIndexOutcome } = deps;
   const pending = new Map<string, PendingEntry>();
   // 逐块跟踪超时重试:块响应丢失/丢弃时自动重发,避免文件永远收不齐
   const pendingBlocks = new Map<string, PendingBlockRequest>();
@@ -406,6 +456,27 @@ export function createSyncPeer(deps: SyncPeerDeps): SyncPeer {
     pruneRateSamples(now);
     // 同一口径喂给全局流量账本(累计 + 采样环);本地预填不走这里,记的都是网络量
     if (onTraffic && (sent > 0 || recv > 0)) onTraffic(sent, recv);
+  }
+
+  // ---- 初始索引交换(指纹跳过,见 beginInitialIndexExchange) ----
+  const INITIAL_INDEX_FALLBACK_MS = initialIndexFallbackMs ?? 2000;
+  let initialExchangeSettled = false;
+  let initialFallbackTimer: ReturnType<typeof setTimeout> | undefined;
+  let initialExchangeDisposed = false;
+
+  /** 发一份「当时」的全量索引:兜底与 index-request 共用,保证拿到的快照不过期。 */
+  function sendFullIndexSnapshot(): void {
+    if (initialExchangeDisposed) return;
+    transport.sendEntries([...localIndex.values()], 'full');
+  }
+
+  /** 结算初始交换:撤兜底定时器。重复调用幂等。 */
+  function settleInitialExchange(): void {
+    if (initialFallbackTimer) {
+      clearTimeout(initialFallbackTimer);
+      initialFallbackTimer = undefined;
+    }
+    initialExchangeSettled = true;
   }
   /** 窗口内的平均速率(字节/秒);窗口里没有该方向的字节时返回 0(上层据此省略字段)。 */
   function bytesPerSecond(kind: 'sent' | 'recv'): number {
@@ -1449,6 +1520,54 @@ export function createSyncPeer(deps: SyncPeerDeps): SyncPeer {
       openPending('receive', target);
       requestMissingBlocks(path, target);
       return true;
+    },
+
+    beginInitialIndexExchange(): void {
+      // 会话已拆除后再 attach(理论上不会发生)是空操作:绝不向已死 socket 发送
+      if (initialExchangeDisposed) return;
+      // e2e 盲区通道(不可信对端):对端对本机「只出不进」,索引比对无从谈起;
+      // transport 没带指纹能力(测试替身/旧实现)同理 —— 都退回「直接发全量」的旧行为。
+      if (e2eKey !== undefined || !transport.sendIndexFingerprint || !transport.sendIndexExchangeReply) {
+        sendFullIndexSnapshot();
+        return;
+      }
+      transport.sendIndexFingerprint(indexFingerprint([...localIndex.values()]));
+      // 兜底:等不到对端表态(旧版本对端把指纹消息静默忽略 / 指纹在 attach 竞态中
+      // 被丢)就照旧发全量。跳过优化,不改变收敛语义。
+      initialFallbackTimer = setTimeout(() => {
+        initialFallbackTimer = undefined;
+        if (initialExchangeSettled) return;
+        initialExchangeSettled = true;
+        onInitialIndexOutcome?.('fallback');
+        sendFullIndexSnapshot();
+      }, INITIAL_INDEX_FALLBACK_MS);
+      initialFallbackTimer.unref?.();
+    },
+
+    onIndexFingerprint(fingerprint: string): void {
+      // 与本机索引比指纹:一致 → 索引相等,buildPlan 必为空,回 ack 让对端免发;
+      // 不一致才回 request 索要全量。忽略规则两侧不同时条目集合本就不同 → 必走
+      // request,失败方向是「多发一次全量」,安全。
+      const mine = indexFingerprint([...localIndex.values()]);
+      settleInitialExchange();
+      transport.sendIndexExchangeReply?.(mine === fingerprint ? 'index-ack' : 'index-request');
+    },
+
+    onIndexAck(): void {
+      // 对端确认「你的指纹 = 我的索引」:它不会再发全量,本机这份也省掉。
+      settleInitialExchange();
+      onInitialIndexOutcome?.('skipped');
+    },
+
+    onIndexRequest(): void {
+      settleInitialExchange();
+      onInitialIndexOutcome?.('request-served');
+      sendFullIndexSnapshot();
+    },
+
+    dispose(): void {
+      initialExchangeDisposed = true;
+      settleInitialExchange();
     },
 
     releaseClaims(): void {
