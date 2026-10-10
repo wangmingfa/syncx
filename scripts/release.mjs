@@ -28,6 +28,7 @@
  *   确认后 typecheck / build / 冒烟 / 版本号 / publish / commit 全程无人值守;
  *   唯一例外是本地 publish 时刻 npm 自己的 OTP / 浏览器 2FA(TOTP 30s 时效,无法前置)。
  *   传了 --tag / 升级方式 / --via / --redeploy 参数则跳过对应那一步;给了显式版本号则跳过 3、4 两步。
+ *   选了 GitHub 发布则整体跳过「发布前检查项」(build + test 由 Actions 在 publish 前执行,失败即中止发布)。
  *   非交互环境(管道 / CI / 沙箱,没有 TTY)自动跳过所有选择,用默认值继续。
  *
  * 用法:
@@ -73,6 +74,8 @@
  *   --dry-run          只做网络预检/校验/构建/冒烟/打包预览,不发布、不递增版本号、不 commit。
  *   --via=github       打 vX.Y.Z tag 并 push,由 GitHub Actions + npm Trusted Publishing 自动发布(免 OTP/Token)。
  *                      交互环境会提示选择;非交互环境默认 github。等价于 --github。
+ *                      GitHub 通道下跳过「发布前检查项」一步:CI 在 publish 前必跑 build + test,
+ *                      本地检查是纯等待(本地 status 冒烟仍保留兜底)。
  *   --via=local        沿用旧流程,本地 npm login + OTP 直接发布。等价于 --local。
  *   --redeploy [<ver>] 重发已存在版本号(如某次 tag 触发的 CI 因测试失败未真正发布)。
  *                      仅适用于 github 通道:强制把该 tag 移到当前 HEAD 并 force-push,重新触发 Actions 自动发布。
@@ -1109,8 +1112,16 @@ if (needLocalAuth) {
 }
 
 /* ---------- 1.5 交互:发布前检查项多选(默认全选,取消勾选即跳过) ---------- */
-// 交互环境下逐项勾选/取消;非交互或 --fast 直接沿用 flags(默认全开 / 全关)。
-if (isInteractive() && !opts.fast) {
+// GitHub 通道整体跳过:publish.yml 在 npm publish 前必跑 build + npm test,测试不过
+// Actions 直接失败、版本不会真正发出去 —— 本地再跑一遍是纯等待(全套约几分钟)。
+// 本地保留「本地冒烟(status)」兜底(见下方第 3 步,dist/syncx.js 必须存在)。
+if (opts.via === 'github') {
+  opts.doTypecheck = false;
+  opts.doTest = false;
+  opts.doBuild = false;
+  opts.doSmoke = false;
+  log('GitHub 发布:跳过发布前检查项(build + test 由 Actions 在 publish 前执行,失败即中止发布)');
+} else if (isInteractive() && !opts.fast) {
   const checkChoices = [
     { value: 'typecheck', label: 'typecheck', hint: 'tsc + vue-tsc 类型检查' },
     { value: 'test', label: 'test', hint: 'vitest 单元测试' },
@@ -1186,10 +1197,19 @@ if (opts.doBuild) {
   log('运行 npm run build…');
   await npm(['run', 'build'], { inherit: true });
 }
-if (!existsSync(DIST)) fail(`构建产物不存在:${DIST}(请先 npm run build,或确认 --no-build / --fast 用法)`);
+// GitHub 通道下本地 dist 不进发布物(CI 会自行构建),缺失时告警跳过本地验证,
+// 不阻断打 tag;本地发布仍必须要有产物(它就是被 publish 的东西)。
+const distReady = existsSync(DIST);
+if (!distReady) {
+  if (opts.via === 'github') {
+    warn(`构建产物不存在:${DIST},跳过本地冒烟与打包预览(CI 将自行构建发布物)`);
+  } else {
+    fail(`构建产物不存在:${DIST}(请先 npm run build,或确认 --no-build / --fast 用法)`);
+  }
+}
 
 /* ---------- 3. 本地冒烟:单文件可执行 ---------- */
-{
+if (distReady) {
   const tmp = track(mkdtempSync(join(tmpdir(), 'syncx-release-')));
   const cfg = join(tmp, 'config.json');
   log('本地冒烟:node dist/syncx.js status --config <tmp>/config.json');
@@ -1205,37 +1225,39 @@ if (!opts.dryRun && !opts.redeploy) {
 }
 
 /* ---------- 5. 打包预览 + 临时全局安装验证 ---------- */
-const packPreview = await npm(['pack', '--dry-run', '--json'], { forward: false });
-const preview = JSON.parse(packPreview.stdout)[0];
-log(`发布内容预览:${preview.entryCount} 个文件,tarball ${(preview.size / 1024).toFixed(0)} KB`);
-for (const f of preview.files.map((x) => x.path)) log(`  · ${f}`);
-if (!preview.files.some((f) => f.path === 'dist/syncx.js')) fail('打包结果缺少 dist/syncx.js,请检查 package.json 的 files/bin');
-// dist/web 是 vite 构建中间产物,已被 build-single.mjs 内联进 dist/syncx.js,运行时无需磁盘文件。
-// 一旦被误打包进发布物(如 files 又改回 ["dist"]),体积翻倍且属多余,直接拦截。
-if (preview.files.some((f) => f.path.startsWith('dist/web'))) {
-  fail('打包结果包含 dist/web/ (构建中间产物,已内联进 dist/syncx.js,不应发布)。请确认 package.json 的 files 仅含 dist/syncx.js。');
-}
+if (distReady) {
+  const packPreview = await npm(['pack', '--dry-run', '--json'], { forward: false });
+  const preview = JSON.parse(packPreview.stdout)[0];
+  log(`发布内容预览:${preview.entryCount} 个文件,tarball ${(preview.size / 1024).toFixed(0)} KB`);
+  for (const f of preview.files.map((x) => x.path)) log(`  · ${f}`);
+  if (!preview.files.some((f) => f.path === 'dist/syncx.js')) fail('打包结果缺少 dist/syncx.js,请检查 package.json 的 files/bin');
+  // dist/web 是 vite 构建中间产物,已被 build-single.mjs 内联进 dist/syncx.js,运行时无需磁盘文件。
+  // 一旦被误打包进发布物(如 files 又改回 ["dist"]),体积翻倍且属多余,直接拦截。
+  if (preview.files.some((f) => f.path.startsWith('dist/web'))) {
+    fail('打包结果包含 dist/web/ (构建中间产物,已内联进 dist/syncx.js,不应发布)。请确认 package.json 的 files 仅含 dist/syncx.js。');
+  }
 
-if (opts.doSmoke) {
-  const packed = JSON.parse((await npm(['pack', '--json'], { forward: false })).stdout)[0].filename;
-  const tgz = join(ROOT, packed);
-  track(tgz);
-  const prefix = track(mkdtempSync(join(tmpdir(), 'syncx-install-')));
-  const cfg2 = track(mkdtempSync(join(tmpdir(), 'syncx-run-')));
-  log(`模拟全局安装:npm i -g --prefix <tmp> ${packed}`);
-  await npm(['i', '-g', '--prefix', prefix, tgz], { inherit: true });
-  // npm 全局安装的模块根目录因平台而异:
-  //   - Windows : <prefix>/node_modules/@scope/name
-  //   - POSIX(Linux/macOS/termux): <prefix>/lib/node_modules/@scope/name
-  // 用 pkg.name 拆段拼接,scoped / unscoped 都兼容。此前错写成固定的 node_modules,
-  // 在 POSIX 上实际装在 lib/node_modules,导致「临时安装后找不到 dist/syncx.js」误报。
-  const globalModRoot = process.platform === 'win32' ? 'node_modules' : join('lib', 'node_modules');
-  const installed = join(prefix, globalModRoot, ...pkg.name.split('/'), 'dist', 'syncx.js');
-  if (!existsSync(installed)) fail(`临时安装后找不到 ${installed},请检查 package.json 的 files/bin`);
-  log('验证全局安装后的 syncx 命令可运行…');
-  const r2 = await exec(process.execPath, [installed, 'status', '--config', join(cfg2, 'config.json')]);
-  if (!r2.stdout.includes('device:')) fail('安装产物冒烟失败:status 输出缺少 device: 行');
-  log('模拟全局安装验证通过:syncx@' + (opts.dryRun ? cur : target) + ' 可正常运行');
+  if (opts.doSmoke) {
+    const packed = JSON.parse((await npm(['pack', '--json'], { forward: false })).stdout)[0].filename;
+    const tgz = join(ROOT, packed);
+    track(tgz);
+    const prefix = track(mkdtempSync(join(tmpdir(), 'syncx-install-')));
+    const cfg2 = track(mkdtempSync(join(tmpdir(), 'syncx-run-')));
+    log(`模拟全局安装:npm i -g --prefix <tmp> ${packed}`);
+    await npm(['i', '-g', '--prefix', prefix, tgz], { inherit: true });
+    // npm 全局安装的模块根目录因平台而异:
+    //   - Windows : <prefix>/node_modules/@scope/name
+    //   - POSIX(Linux/macOS/termux): <prefix>/lib/node_modules/@scope/name
+    // 用 pkg.name 拆段拼接,scoped / unscoped 都兼容。此前错写成固定的 node_modules,
+    // 在 POSIX 上实际装在 lib/node_modules,导致「临时安装后找不到 dist/syncx.js」误报。
+    const globalModRoot = process.platform === 'win32' ? 'node_modules' : join('lib', 'node_modules');
+    const installed = join(prefix, globalModRoot, ...pkg.name.split('/'), 'dist', 'syncx.js');
+    if (!existsSync(installed)) fail(`临时安装后找不到 ${installed},请检查 package.json 的 files/bin`);
+    log('验证全局安装后的 syncx 命令可运行…');
+    const r2 = await exec(process.execPath, [installed, 'status', '--config', join(cfg2, 'config.json')]);
+    if (!r2.stdout.includes('device:')) fail('安装产物冒烟失败:status 输出缺少 device: 行');
+    log('模拟全局安装验证通过:syncx@' + (opts.dryRun ? cur : target) + ' 可正常运行');
+  }
 }
 
 /* ---------- 6. 真正发布 ---------- */
