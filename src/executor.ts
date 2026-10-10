@@ -415,12 +415,19 @@ export function createLocalExecutor(
         const buf = Buffer.allocUnsafe(maxLen);
         for (let i = 0; i < slots; i++) {
           if (!bitmap.has(i)) continue;
-          const n = readSync(vf, buf, 0, lengths[i]!, offsets[i]!);
-          if (n !== lengths[i]! || !verifyBlock(buf.subarray(0, n), hashes[i]!)) {
+          // 循环读满(口径同 readBlockAt/hashFileViews):单次定位读的短读是 POSIX
+          // 允许的正常返回,拿短读去验哈希会把**写对了的槽位**误判成坏块清位重传。
+          let got = 0;
+          while (got < lengths[i]!) {
+            const n = readSync(vf, buf, got, lengths[i]! - got, offsets[i]! + got);
+            if (n <= 0) break;
+            got += n;
+          }
+          if (got !== lengths[i]! || !verifyBlock(buf.subarray(0, got), hashes[i]!)) {
             bitmap.clear(i);
             continue;
           }
-          bytes += n;
+          bytes += got;
         }
       } finally {
         closeSync(vf);

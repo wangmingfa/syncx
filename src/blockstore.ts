@@ -24,16 +24,28 @@ export function splitIntoBlocks(data: Buffer): Buffer[] {
  * 越界(下标超出文件实际块数,含文件被截短)抛错,与旧实现语义一致:调用方
  * (peer.onBlockRequest)捕获后忽略该请求,对端走超时重试/下一轮索引自愈。
  * 末块不足 1MB 时按实际字芔回(与 splitIntoBlocks 的末块行为一致)。
+ *
+ * 必须循环读满:单次 readSync 的短读是 POSIX 允许的正常返回,定位读尤其如此
+ * (大 offset / 大长度,FUSE 与网络文件系统上高发)。只读一次就把半截字节当成
+ * 整块送出去,对端逐块验哈希必然失败,整块传输作废;而读到的字节永远只暴露
+ * subarray(0, filled),allocUnsafe 的未初始化尾部绝不会混进内容 —— 发送端把
+ * 「没读到的内存」哈希进索引进而广播,正是 AALQHUYOGA 事故的形态
+ * (2026-10-10:同一个文件两次扫描广播出两种哈希,垃圾字节来自堆残留)。
  */
 export function readBlockAt(absPath: string, blockIndex: number): Buffer {
   const fd = openSync(absPath, 'r');
   try {
     const buf = Buffer.allocUnsafe(BLOCK_SIZE);
-    const bytes = readSync(fd, buf, 0, BLOCK_SIZE, blockIndex * BLOCK_SIZE);
-    if (bytes <= 0) {
+    let filled = 0;
+    while (filled < BLOCK_SIZE) {
+      const n = readSync(fd, buf, filled, BLOCK_SIZE - filled, blockIndex * BLOCK_SIZE + filled);
+      if (n <= 0) break; // EOF:末块按实际字节收,撕裂视图与 hashFileViews 同口径
+      filled += n;
+    }
+    if (filled === 0) {
       throw new Error(`block ${blockIndex} out of range for ${absPath}`);
     }
-    return bytes === BLOCK_SIZE ? buf : buf.subarray(0, bytes);
+    return buf.subarray(0, filled);
   } finally {
     closeSync(fd);
   }
