@@ -1282,6 +1282,35 @@ export function createSyncPeer(deps: SyncPeerDeps): SyncPeer {
               }
               break;
             }
+            // 字节级一致的「并发」不构成真冲突:版本向量判撞不看内容,两侧各自的存量
+            // 同内容文件(两台机器各有一份同一目录)首连时会互判 concurrent。定长块哈希
+            // 列表相等 ⟺ 字节完全一致,规划时零 IO 可判。此时盘上一字不动,只在索引里
+            // 合并版本向量;两侧对称执行各自合并即收敛到同一 merged 向量,刻意不回推 ——
+            // 回推会让对端按 receive 把相同字节重拉一遍。
+            if (
+              remoteEntry &&
+              localEntry &&
+              !remoteEntry.deleted &&
+              !localEntry.deleted &&
+              !localEntry.placeholder &&
+              localEntry.blocks.length === remoteEntry.blocks.length &&
+              localEntry.blocks.every((hash, i) => hash === remoteEntry.blocks[i])
+            ) {
+              const keep =
+                (await executor?.applyConflictKeepLocal(localEntry, remoteEntry)) ??
+                { ...localEntry, version: mergeVersions(localEntry.version, remoteEntry.version) };
+              localIndex.set(action.path, keep);
+              onEvent?.({
+                ts: Date.now(),
+                path: action.path,
+                action: 'conflict',
+                direction: 'local',
+                deviceId: remoteDeviceId,
+              });
+              // 即时短动作(不拉任何块):做完即交还认领
+              releaseClaim(action.path);
+              break;
+            }
             // 冲突自动策略(目录配置 conflictPolicy;缺省 keep-both = 下面的冲突副本行为)。
             // 只介入「真正的双活内容并发」:任一侧是墓碑时不判新旧/胜负,
             // 走既有 applyConflict 路径(双方删除有专门的墓碑合并)。

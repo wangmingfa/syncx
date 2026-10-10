@@ -373,6 +373,47 @@ describe('two-device end-to-end sync', () => {
     await teardown([a, b], [aDir, bDir]);
   });
 
+  it('two devices with identical existing content converge without conflict copies', async () => {
+    const aDir = mkdtempSync(join(tmpdir(), 'syncx-e2e-a-'));
+    const bDir = mkdtempSync(join(tmpdir(), 'syncx-e2e-b-'));
+    const aRoot = join(aDir, 'share');
+    const bRoot = join(bDir, 'share');
+    mkdirSync(aRoot, { recursive: true });
+    mkdirSync(bRoot, { recursive: true });
+
+    // 两侧各有同一份内容的存量文件:首扫给每个文件 {self:1},首连互判 concurrent。
+    // 内容逐字节一致时不得生成 .sync-conflict 副本(修复前每个文件两侧各刷一份)。
+    const content = Buffer.from('same on both sides');
+    writeFileSync(join(aRoot, 'doc.txt'), content);
+    writeFileSync(join(bRoot, 'doc.txt'), content);
+
+    const aLocal = new Map([
+      ['doc.txt', entry('doc.txt', [['dev-a', 1]], hashes(content), content.length)],
+    ]);
+    const bLocal = new Map([
+      ['doc.txt', entry('doc.txt', [['dev-b', 1]], hashes(content), content.length)],
+    ]);
+
+    const { a, b } = await connectPair(aLocal, bLocal, aRoot, bRoot, aDir, bDir);
+
+    // 双侧各自合并版本向量,收敛到 {dev-a:1, dev-b:1}
+    await waitFor(() => {
+      const av = a.index.getEntry('doc.txt')?.version;
+      const bv = b.index.getEntry('doc.txt')?.version;
+      return (
+        av?.get('dev-a') === 1 && av?.get('dev-b') === 1 && bv?.get('dev-a') === 1 && bv?.get('dev-b') === 1
+      );
+    });
+
+    // 盘上零副本,文件原样
+    expect(readdirSync(aRoot).filter((n) => n.includes('.sync-conflict-'))).toEqual([]);
+    expect(readdirSync(bRoot).filter((n) => n.includes('.sync-conflict-'))).toEqual([]);
+    expect(readFileSync(join(aRoot, 'doc.txt'))).toEqual(content);
+    expect(readFileSync(join(bRoot, 'doc.txt'))).toEqual(content);
+
+    await teardown([a, b], [aDir, bDir]);
+  });
+
   /**
    * 2026-09-16 事故的端到端回归:两端各有对方没有的存量条目时,任何一条增量广播
    * 都不该演变成「两端互相回推对方没提到的条目」的静默循环。

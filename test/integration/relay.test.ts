@@ -11,7 +11,7 @@ import { openIndexStore, type IndexStore } from '../../src/indexstore.js';
 import { createLocalExecutor, type LocalExecutor } from '../../src/executor.js';
 import { createSyncPeer, type SyncPeer, type PeerTransport, type IndexMode } from '../../src/peer.js';
 import { encodeIndex, decodeIndex } from '../../src/messages.js';
-import { splitIntoBlocks } from '../../src/blockstore.js';
+import { splitIntoBlocks, hashBlock } from '../../src/blockstore.js';
 import type { IndexEntry } from '../../src/index.js';
 
 function entry(
@@ -335,17 +335,33 @@ interface PeerHarness {
   index: IndexStore;
 }
 
-function makePeer(root: string, deviceId: string, local: Map<string, IndexEntry>): PeerHarness {
+function makePeer(
+  root: string,
+  deviceId: string,
+  local: Map<string, IndexEntry>,
+  /** 供块回路:该路径的「远端内容」由本进程直接供给,冲突路径(拉块→落地)得以单进程走完。 */
+  remoteContents?: Map<string, Buffer>,
+): PeerHarness {
   const dir = join(root, '..');
   const index = openIndexStore(join(dir, 'index.db'));
   const executor = createLocalExecutor(root, index, join(root, '.syncx-trash'));
-  const transport: PeerTransport = {
-    sendEntries(): void {},
-    sendBlockRequest(): void {},
-    sendBlockResponse(): void {},
-  };
   const peer = createSyncPeer({
-    transport, localIndex: local, executor,
+    transport: {
+      sendEntries(): void {},
+      sendBlockRequest(request): void {
+        const content = remoteContents?.get(request.path);
+        if (!content) return;
+        const data = splitIntoBlocks(content)[request.blockIndex];
+        if (!data) return;
+        // 异步应答,模拟真实回路;hash 回显请求期望值,数据本身就是该块内容
+        setTimeout(
+          () => void peer.onBlockResponse({ deviceId, path: request.path, blockIndex: request.blockIndex, hash: request.hash, data }),
+          0,
+        );
+      },
+      sendBlockResponse(): void {},
+    },
+    localIndex: local, executor,
     readLocalBlock: () => Buffer.alloc(0),
     deviceId, remoteDeviceId: 'dev-c',
   });
@@ -381,11 +397,16 @@ describe('relayed concurrent receive: overwrite stale copy, keep genuine edit (A
     writeFileSync(join(root, 'p.txt'), '');
     // 本机真改过:版本向量带本机计数器 dev-a:2
     const local = new Map([['p.txt', entry('p.txt', [['dev-a', 2]])]]);
-    const h = makePeer(root, 'dev-a', local);
+    // 对端内容与本机不同(两侧内容一致时按「字节一致跳过」走合并,不出副本)
+    const remoteContent = Buffer.from('edited elsewhere');
+    const h = makePeer(root, 'dev-a', local, new Map([['p.txt', remoteContent]]));
 
-    await h.peer.onPeerIndex([entry('p.txt', [['dev-c', 1]])], { relayed: true });
+    await h.peer.onPeerIndex(
+      [entry('p.txt', [['dev-c', 1]], splitIntoBlocks(remoteContent).map(hashBlock), remoteContent.length)],
+      { relayed: true },
+    );
 
-    expect(conflictCopies(root).length).toBeGreaterThan(0);
+    await waitFor(() => conflictCopies(root).length > 0);
     // 本地编辑版本保留在索引里(合并后仍带 dev-a:2)
     expect(local.get('p.txt')?.version.get('dev-a')).toBe(2);
 
@@ -400,11 +421,15 @@ describe('relayed concurrent receive: overwrite stale copy, keep genuine edit (A
     // 直连对端的并发版本:即便本机计数器为 0,也保持原冲突语义(生成冲突副本)。
     // 这正是「relayed 标记」存在的意义 —— 只放宽中转来的陈旧副本,不动直连语义。
     const local = new Map([['p.txt', entry('p.txt', [['dev-x', 3]])]]);
-    const h = makePeer(root, 'dev-a', local);
+    // 对端内容与本机不同(两侧内容一致时按「字节一致跳过」走合并,不出副本)
+    const remoteContent = Buffer.from('edited by peer');
+    const h = makePeer(root, 'dev-a', local, new Map([['p.txt', remoteContent]]));
 
-    await h.peer.onPeerIndex([entry('p.txt', [['dev-c', 1]])]);
+    await h.peer.onPeerIndex(
+      [entry('p.txt', [['dev-c', 1]], splitIntoBlocks(remoteContent).map(hashBlock), remoteContent.length)],
+    );
 
-    expect(conflictCopies(root).length).toBeGreaterThan(0);
+    await waitFor(() => conflictCopies(root).length > 0);
 
     h.index.close();
     rmDir(h.dir);
