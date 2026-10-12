@@ -344,10 +344,11 @@ const diffPanes = computed<{ left: DiffPaneData; right: DiffPaneData } | null>((
   font-size: 12.5px;
 }
 
+/* hover 要一眼可见:淡底 + 细描边(单靠 var(--card-hi) 在白卡上几乎看不出来) */
 .git-changes__file:hover,
 .git-changes__file:focus-visible {
-  background: var(--card-hi);
-  outline: none;
+  background: var(--bg-soft);
+  outline: 1px solid color-mix(in srgb, var(--online) 35%, transparent);
 }
 
 .git-changes__status {
