@@ -114,6 +114,29 @@ function isCollapsed(key: string): boolean {
   return collapsed.value.has(key);
 }
 
+/** 树里出现过的目录(不含根):一键展开/折叠的目标集合。 */
+const dirKeys = computed<string[]>(() => {
+  const out: string[] = [];
+  const walk = (node: TreeNode, prefix: string): void => {
+    for (const child of node.children.values()) {
+      if (!child.dir) continue;
+      const key = prefix ? `${prefix}/${child.name}` : child.name;
+      out.push(key);
+      walk(child, key);
+    }
+  };
+  walk(root.value, '');
+  return out;
+});
+
+function expandAll(): void {
+  collapsed.value = new Set();
+}
+
+function collapseAll(): void {
+  collapsed.value = new Set(dirKeys.value);
+}
+
 watch(
   () => props.folder,
   (f) => {
@@ -210,9 +233,11 @@ const diffPanes = computed<{ left: DiffPaneData; right: DiffPaneData } | null>((
             <span class="git-changes__legend-item is-deleted">删 {{ counts.deleted }}</span>
             <span v-if="counts.renamed" class="git-changes__legend-item is-renamed">移 {{ counts.renamed }}</span>
             <span class="git-changes__legend-note">
-              共 {{ entries.length }} 条{{ truncated ? '（超出上限已截断）' : '' }} · 未提交的改动不会随 Git 提交同步广播
+              共 {{ entries.length }} 条{{ truncated ? '（超出上限已截断）' : '' }} · 未提交的改动不会随 Git 提交同步广播 · 双击文件查看与 HEAD 的对比
             </span>
             <n-button size="tiny" quaternary class="git-changes__refresh" @click="refresh">刷新</n-button>
+            <n-button v-if="dirKeys.length > 0" size="tiny" quaternary @click="expandAll">全部展开</n-button>
+            <n-button v-if="dirKeys.length > 0" size="tiny" quaternary @click="collapseAll">全部折叠</n-button>
           </div>
           <ul class="git-changes__tree">
             <li v-for="row in rows" :key="row.key" class="git-changes__row" :style="{ paddingLeft: `${row.depth * 14}px` }">
@@ -340,7 +365,7 @@ const diffPanes = computed<{ left: DiffPaneData; right: DiffPaneData } | null>((
   gap: 6px;
   padding: 2px 4px;
   border-radius: 6px;
-  cursor: default; /* 双击才是对比,单击不承诺任何动作 */
+  cursor: pointer; /* 双击才是对比(图例有提示);单击不承诺任何动作 */
   font-size: 12.5px;
 }
 
