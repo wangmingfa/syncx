@@ -1,8 +1,9 @@
 <script setup lang="ts">
-import { computed, ref, watch } from 'vue';
-import { NButton, NCheckbox, NCheckboxGroup, NSelect, NTimePicker } from 'naive-ui';
-import type { ConflictPolicy, DeviceInfo, FolderInfo, GitSyncMode } from '../types';
+import { ref, watch } from 'vue';
+import { NButton, NCheckbox, NCheckboxGroup, NSelect } from 'naive-ui';
+import type { ConflictPolicy, DeviceInfo, FolderInfo, GitSyncMode, Schedule } from '../types';
 import ModalShell from './ModalShell.vue';
+import ScheduleRuleEditor from './ScheduleRuleEditor.vue';
 
 const props = defineProps<{
   open: boolean;
@@ -14,16 +15,14 @@ const props = defineProps<{
 const emit = defineEmits<{
   close: [];
   /** 「保存」:设备指派、.gitignore 开关、同步时段、git 同步模式与冲突策略一起提交给父级,真正的写操作只有父级那一处。 */
-  save: [payload: { path: string; devices: string[]; gitignore: boolean; schedule: string; gitSync: GitSyncMode; conflictPolicy: ConflictPolicy; onDemand: boolean }];
+  save: [payload: { path: string; devices: string[]; gitignore: boolean; schedule: Schedule | null; gitSync: GitSyncMode; conflictPolicy: ConflictPolicy; onDemand: boolean }];
 }>();
 
 const path = ref('');
 const selected = ref<string[]>([]);
 const gitignore = ref(true);
-// 时段拆成开始/结束两个时间戳(n-time-picker 的 value 是毫秒时间戳),保存时再拼回
-// 后端约定的 `HH:MM-HH:MM` 字符串;两端都空 = 全天同步。
-const scheduleFrom = ref<number | null>(null);
-const scheduleTo = ref<number | null>(null);
+// 时段规则(undefined = 全天);编辑器自带「填一半不生效」的宽松语义,见 ScheduleRuleEditor
+const schedule = ref<Schedule | undefined>(undefined);
 const gitSync = ref<GitSyncMode>('off');
 const conflictPolicy = ref<ConflictPolicy>('keep-both');
 const onDemand = ref(false);
@@ -48,38 +47,16 @@ watch(
     path.value = f.path;
     selected.value = [...f.devices];
     gitignore.value = f.useGitignore !== false;
-    const [from, to] = (f.schedule ?? '').split('-');
-    scheduleFrom.value = parseScheduleTime(from ?? '');
-    scheduleTo.value = parseScheduleTime(to ?? '');
+    schedule.value = f.schedule;
     gitSync.value = f.gitSync ?? 'off';
     conflictPolicy.value = f.conflictPolicy ?? 'keep-both';
     onDemand.value = f.onDemand === true;
   },
 );
 
-/** `HH:MM`(小时可一位数)→ 当日该时刻的时间戳;空串/非法返回 null。 */
-function parseScheduleTime(part: string): number | null {
-  const m = /^(\d{1,2}):(\d{2})$/.exec(part.trim());
-  if (!m || Number(m[1]) > 23 || Number(m[2]) > 59) return null;
-  return new Date(2000, 0, 1, Number(m[1]), Number(m[2])).getTime();
-}
-
-/** 时间戳 → 两位 `HH:MM`,用于拼回后端约定的时段字符串。 */
-function formatScheduleTime(ts: number): string {
-  const d = new Date(ts);
-  return `${String(d.getHours()).padStart(2, '0')}:${String(d.getMinutes()).padStart(2, '0')}`;
-}
-
-/** 只填了一端:拼不出合法时段,禁止保存并提示。 */
-const scheduleIncomplete = computed(() => (scheduleFrom.value === null) !== (scheduleTo.value === null));
-
 function onSave(): void {
-  if (props.busy || !props.folder || scheduleIncomplete.value) return;
-  const schedule =
-    scheduleFrom.value !== null && scheduleTo.value !== null
-      ? `${formatScheduleTime(scheduleFrom.value)}-${formatScheduleTime(scheduleTo.value)}`
-      : '';
-  emit('save', { path: path.value, devices: [...selected.value], gitignore: gitignore.value, schedule, gitSync: gitSync.value, conflictPolicy: conflictPolicy.value, onDemand: onDemand.value });
+  if (props.busy || !props.folder) return;
+  emit('save', { path: path.value, devices: [...selected.value], gitignore: gitignore.value, schedule: schedule.value ?? null, gitSync: gitSync.value, conflictPolicy: conflictPolicy.value, onDemand: onDemand.value });
 }
 
 // 地址(host:port)与主机名合并成一行,在设备 ID 之外提供可辨认的信息;两者都可能缺失
@@ -118,30 +95,12 @@ function deviceAddrLine(p: DeviceInfo): string {
     <p class="confirm-note-extra">勾选时,该目录内 .gitignore 命中的文件不参与同步(.syncxignore 优先级更高)。</p>
 
     <div class="edit-section-label">同步时段</div>
-    <!-- n-time-picker 不支持区间,用开始/结束两个选择器表达,天然支持跨午夜 -->
-    <div class="schedule-pickers">
-      <n-time-picker
-        v-model:value="scheduleFrom"
-        class="schedule-picker"
-        format="HH:mm"
-        placeholder="开始时间"
-        clearable
-        :disabled="busy"
-      />
-      <span class="schedule-sep">至</span>
-      <n-time-picker
-        v-model:value="scheduleTo"
-        class="schedule-picker"
-        format="HH:mm"
-        placeholder="结束时间"
-        clearable
-        :disabled="busy"
-      />
-    </div>
+    <ScheduleRuleEditor v-model:model-value="schedule" />
     <p class="confirm-note-extra">
-      两端都留空 = 全天同步;只在该时段内同步(支持跨午夜),时段外数据面停摆、到点自动恢复,控制面(连接 / 配对)不受影响。
+      留空 = 全天同步。时段外该目录数据面停摆(不扫描、不广播、不接收),到点自动恢复;连接与配对照常。
+      与「设置 → 全局同步时段」取交集:全局是硬闸门,这里只能在其内再收窄。
+      「工作日 / 休息日」按节假日日历判(设置里可配置来源与手动覆盖)。
     </p>
-    <p v-if="scheduleIncomplete" class="confirm-note-extra schedule-incomplete">开始与结束需同时设置,或都留空。</p>
 
     <!-- label 右侧的实时警告:daemon 探测到目录不是 git 仓库时,先把「开关是空头支票」点破,
          不然绿色下拉选完、保存后毫无效果,用户只能困惑 -->
@@ -182,7 +141,7 @@ function deviceAddrLine(p: DeviceInfo): string {
 
     <template #footer>
       <n-button class="modal-cancel" :disabled="busy" @click="emit('close')">取消</n-button>
-      <n-button type="primary" :loading="busy" :disabled="scheduleIncomplete" @click="onSave">保存</n-button>
+      <n-button type="primary" :loading="busy" @click="onSave">保存</n-button>
     </template>
   </ModalShell>
 </template>

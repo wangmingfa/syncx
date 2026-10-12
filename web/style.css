@@ -1132,30 +1132,8 @@ html[data-theme='dark'] .chip-menu__item--danger {
   color: var(--muted);
 }
 
-/* 编辑弹窗的同步时段:开始/结束两个时间选择器加「至」分隔,铺满弹窗内容列 */
-.schedule-pickers {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-}
-
-.schedule-pickers .schedule-picker {
-  flex: 1;
-  min-width: 0;
-}
-
-.schedule-sep {
-  flex: none;
-  font-size: 12px;
-  color: var(--muted);
-}
-
-/* 只填了一端时的行内提示(n-time-picker 的值不完整,保存被禁用) */
-.schedule-incomplete {
-  color: var(--offline);
-}
-
-/* 编辑弹窗的 Git 提交同步下拉框(n-select 默认宽度偏窄,铺满内容列) */
+/* 编辑弹窗的 Git 提交同步下拉框(n-select 默认宽度偏窄,铺满内容列)。
+   同步时段的样式已随模板搬进 ScheduleRuleEditor.vue(组件自包含),这里不再有它的规则。 */
 .schedule-input {
   width: 100%;
 }

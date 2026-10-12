@@ -36,7 +36,9 @@ import { createTerminalHub } from './api/terminal.js';
 import { listDirectory, resolveFolderSubpath, deleteFolderEntry } from './filebrowser.js';
 import { createShare, listShares, noteShareDownload, revokeShare, verifyShare } from './share.js';
 import { buildStatus, type DeviceStatus, type SyncProgress, type FolderErrorStatus } from './status.js';
-import { addSharedFolder, removeSharedFolder, isPeerAllowed, addKnownDevice, removeKnownDevice, addPeer, removePeer, setFolderDevices, setFolderGitignore, setGlobalSettings, acceptFolderInvitation } from './devices.js';
+import { addSharedFolder, removeSharedFolder, isPeerAllowed, addKnownDevice, removeKnownDevice, addPeer, removePeer, setFolderDevices, setFolderGitignore, setGlobalSettings, acceptFolderInvitation, effectiveHolidaySource } from './devices.js';
+import { createHolidayStore, DEFAULT_HOLIDAY_SOURCE } from './holidays.js';
+import type { Schedule } from './schedule.js';
 import { markOfferAccepted, markOfferDeclined, restoreDeclinedOffer, listOpenOffers, findPendingOffer } from './offers.js';
 import { createInviteCode, parseInviteCode, revokeInviteCode } from './invite.js';
 import { folderIdFor, folderIndexKey, folderIndexPath, purgeOrphanIndexFiles, type SharedFolderConfig } from './config.js';
@@ -423,6 +425,20 @@ export async function run(args: ParsedArgs): Promise<void> {
   // 同步事件 Webhook 通知器:每次投递现读 config(改设置即时生效),串行队列保序,
   // 失败只 warn —— 通知是旁路,绝不允许拖垮同步。
   const webhook = createWebhookNotifier({ configPath, logger });
+  // 节假日日历:每次判定现读 config(改设置免重启),缓存落 configDir 下独立文件
+  // (不写 config.json —— 那个文件被 fs.watch 盯着,年度数据进它会让每次刷新触发重载)
+  const holidays = createHolidayStore({
+    configDir,
+    autoFetch: () => loadConfig(configPath).holidayAutoFetch !== false,
+    sourceTemplate: () => effectiveHolidaySource(loadConfig(configPath)),
+    overrides: () => loadConfig(configPath).calendarOverrides ?? {},
+    logger,
+  });
+  // 启动后台拉一次 + 每 24h 一次(12 月起会顺带预备下一年)。失败只留 debug 线索,
+  // 离线时判定自动退化为「按星期几」,绝不因此挡住同步。
+  void holidays.refresh();
+  const holidayRefresh = setInterval(() => void holidays.refresh(), 24 * 60 * 60_000);
+  holidayRefresh.unref?.();
   const manager = new SyncSessionManager(
     {
       identity,
@@ -441,6 +457,9 @@ export async function run(args: ParsedArgs): Promise<void> {
       // 恢复事件最早也发生在首个心跳 tick,远晚于此处)。离线翻转不回调 —— mDNS
       // 由 isOnline 门控暂停,无需动作。
       onNetworkRecovered: () => discovery.kick(),
+      // 节假日日历:时段规则里的「工作日/休息日」据此判定。判定路径只读内存/盘上缓存,
+      // 永不触网(拉取是下面的后台动作),所以无网/拉取失败都只是数据不新鲜,不影响放行。
+      holidays,
     },
     config.sharedFolders,
   );
@@ -643,7 +662,18 @@ export async function run(args: ParsedArgs): Promise<void> {
             batteryPauseThreshold: config.batteryPauseThreshold,
             // 分享链接开关(默认关;开才允许建免登录下载链接)
             shareEnabled: config.shareEnabled === true,
+            // 时段与日历:全局闸门、临时放行到期、节假日源与手动覆盖(设置弹窗预填)
+            syncSchedule: config.syncSchedule,
+            scheduleOverrideUntil: manager.scheduleOverrideUntilAt(),
+            holidayAutoFetch: config.holidayAutoFetch !== false,
+            holidaySourceUrl: effectiveHolidaySource(config),
+            holidaySourceDefault: DEFAULT_HOLIDAY_SOURCE,
+            calendarOverrides: config.calendarOverrides,
           },
+          // 每目录此刻的时段结论(判定只在后端一份,前端只渲染;徽标与横幅共用)
+          scheduleStates: manager.scheduleStates(),
+          scheduleBanner: manager.scheduleBannerState(),
+          calendarStatus: holidays.status(),
           // 电源守卫当前挂起原因(顶栏徽标;未挂起为 null)
           powerGuard: manager.getPowerGuardReason(),
           // 是否在网(无可用非回环接口 = 离线;无网时重连退避拉长、mDNS 暂停)
@@ -754,9 +784,19 @@ export async function run(args: ParsedArgs): Promise<void> {
       manager.setFolderFilePaused(folderId, path, paused);
     },
     setFolderSchedule: (folderId, schedule) => {
-      // 校验(非法格式 400)+ 落盘 + 立即对账都在 manager 内完成
-      manager.setFolderSchedule(folderId, schedule);
+      // 清洗(坏片段丢弃并回退「不设限」)+ 落盘 + 立即对账都在 manager 内完成
+      manager.setFolderSchedule(folderId, schedule as Schedule | null);
     },
+    // 临时放行:落盘到期时刻 + 立即解禁;返回值供前端显示倒计时
+    setScheduleOverride: (minutes) => manager.setScheduleOverride(minutes),
+    // 手动日历覆盖:写 config 后让 manager 重算(边界/挂起状态立即跟上)
+    setCalendarOverride: (date, type) => manager.setCalendarOverride(date, type),
+    getCalendar: (year) => ({
+      year,
+      days: holidays.yearDays(year) ?? {},
+      overrides: loadConfig(configPath).calendarOverrides ?? {},
+      fetched: holidays.status().fetched && holidays.status().year === year,
+    }),
     setFolderGitSync: (folderId, mode) => {
       // 校验(非法模式 400)+ 落盘 + 内存生效都在 manager 内完成
       manager.setFolderGitSync(folderId, mode);
@@ -1176,8 +1216,8 @@ export async function run(args: ParsedArgs): Promise<void> {
   const server = startPeerServer(
     identity,
     {
-      onPeerConnected(socket, remoteDeviceId, key, listenPort) {
-        manager.onInboundPeer(socket, remoteDeviceId, key, listenPort);
+      onPeerConnected(socket, remoteDeviceId, key, listenPort, caps) {
+        manager.onInboundPeer(socket, remoteDeviceId, key, listenPort, caps);
       },
       onError(error) {
         logger.error(error.message);
@@ -1282,9 +1322,10 @@ export async function run(args: ParsedArgs): Promise<void> {
           }
         }
       }
-      // 更新内存中的配置
-      config.peers = newConfig.peers;
-      config.sharedFolders = newConfig.sharedFolders;
+      // 更新内存中的配置:整体就地覆盖,而不是逐字段挑着拷 —— 新增的时段/日历字段
+      // 也必须跟着热重载生效(loadConfig 每次返回含全部键的规范化对象,被删掉的设置会以
+      // undefined 覆盖掉旧值,不会残留)。config 是 const,故用 Object.assign 而非重新赋值。
+      Object.assign(config, newConfig);
     } catch (error) {
       logger.error(`config reload failed: ${error instanceof Error ? error.message : String(error)}`);
     }
@@ -1299,6 +1340,7 @@ export async function run(args: ParsedArgs): Promise<void> {
 const shutdown = (): void => {
     clearInterval(scanTimer);
     powerGuard.stop();
+    clearInterval(holidayRefresh);
     updateChecker?.stop();
     configWatcher?.close();
     // 重连定时器、peer socket、目录索引库的清理在 manager 内完成

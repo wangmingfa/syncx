@@ -2,7 +2,9 @@ import { existsSync, mkdirSync, statSync } from 'node:fs';
 import { resolve, isAbsolute, sep, dirname, join } from 'node:path';
 import { homedir } from 'node:os';
 import { randomBytes } from 'node:crypto';
-import { loadConfig, saveConfig, mutateConfig, normalizePeerUrl, DEFAULT_CONFIG, folderIdFor, folderIndexKey, generateFolderInstanceId, purgeFolderIndex, isValidSchedule, isGitSyncMode, isConflictPolicy, type Config, type FolderIdentity, type GitCommitPendingRecord, type SharedFolderConfig, type DeviceConfig, type GitSyncMode, type ConflictPolicy } from './config.js';
+import { loadConfig, saveConfig, mutateConfig, normalizePeerUrl, DEFAULT_CONFIG, folderIdFor, folderIndexKey, generateFolderInstanceId, purgeFolderIndex, isGitSyncMode, isConflictPolicy, type Config, type FolderIdentity, type GitCommitPendingRecord, type SharedFolderConfig, type DeviceConfig, type GitSyncMode, type ConflictPolicy } from './config.js';
+import { normalizeSchedule, SCHEDULE_MAX_RULES, SCHEDULE_MAX_WINDOWS, type Schedule } from './schedule.js';
+import { DEFAULT_HOLIDAY_SOURCE, isRealDateKey, type CalendarOverrides, type DayType } from './holidays.js';
 import { readFolderIdentity } from './folder-identity.js';
 import { deriveE2EKey } from './e2e.js';
 
@@ -329,15 +331,12 @@ export function setGlobalPaused(configPath: string, paused: boolean): void {
 }
 
 /** 设置某目录的同步时段(目录设置弹窗;按 folderId 定位,id 缺省回退 path)。空串 = 清除(全天同步)。 */
-export function setFolderSchedule(configPath: string, folderId: string, schedule: string): void {
-  const s = schedule.trim();
-  if (s !== '' && !isValidSchedule(s)) {
-    throw new Error(`同步时段格式应为 HH:MM-HH:MM(如 22:00-08:00):「${schedule}」`);
-  }
+export function setFolderSchedule(configPath: string, folderId: string, schedule: Schedule | null): void {
+  const normalized = normalizeSchedule(schedule);
   mutateConfig(configPath, (config) => {
     const existing = config.sharedFolders.find((f) => folderIdFor(f) === folderId);
     if (!existing) throw new Error(`未找到共享目录:「${folderId}」`);
-    existing.schedule = s === '' ? undefined : s;
+    existing.schedule = normalized;
   });
 }
 
@@ -548,6 +547,15 @@ export interface GlobalSettingsPatch {
   batteryPauseThreshold?: number | null;
   /** 分享链接总开关;仅 true 落盘(null/false = 关闭,关闭即在外的全部链接立即失效)。 */
   shareEnabled?: boolean | null;
+  /**
+   * 全局同步时段(硬闸门,与目录时段取交集);null/空数组 = 清除(全天)。
+   * 传什么形态都先经 normalizeSchedule 清洗,旧 `"HH:MM-HH:MM"` 字符串也收。
+   */
+  syncSchedule?: Schedule | string | null;
+  /** 节假日自动拉取开关;false = 纯手动日历;null/true = 开(缺省即开,故 null 落 undefined)。 */
+  holidayAutoFetch?: boolean | null;
+  /** 节假日源地址模板(`{year}` 占位);null/空 = 回默认源。 */
+  holidaySourceUrl?: string | null;
 }
 
 /** 校验并收敛一个设置值:null → undefined(清除);负数/非整数拒绝(设置页的输入必须可解释)。 */
@@ -608,7 +616,68 @@ export function setGlobalSettings(configPath: string, patch: GlobalSettingsPatch
       config.shareEnabled = patch.shareEnabled === true ? true : undefined;
       if (config.shareEnabled !== true) config.shares = undefined;
     }
+    if ('syncSchedule' in patch) {
+      config.syncSchedule = normalizeSchedule(patch.syncSchedule === null ? undefined : patch.syncSchedule);
+    }
+    if ('holidayAutoFetch' in patch) {
+      config.holidayAutoFetch = patch.holidayAutoFetch === false ? false : undefined;
+    }
+    if ('holidaySourceUrl' in patch) {
+      const v = typeof patch.holidaySourceUrl === 'string' ? patch.holidaySourceUrl.trim() : '';
+      if (v !== '' && !v.includes('{year}')) {
+        throw new Error('节假日源地址必须含 {year} 占位(如 https://…/{year}.json)');
+      }
+      if (v !== '' && !/^https:\/\//i.test(v)) {
+        throw new Error('节假日源地址必须是 https://');
+      }
+      if (v.length > 300) throw new Error('节假日源地址过长(最多 300 字符)');
+      config.holidaySourceUrl = v === '' ? undefined : v;
+    }
   });
+}
+
+/**
+ * 临时放行时段约束:写入「到期时刻」而非「剩余时长」,所以重启后仍按同一时刻收住。
+ * 它只解时段(全局 + 目录),不解手动暂停与电源守卫 —— 后两者是用户明确的「不要同步」
+ * 与安全纪律。minutes ≤ 0 = 取消放行。
+ */
+export function setScheduleOverride(configPath: string, minutes: number): number | undefined {
+  if (!Number.isFinite(minutes)) throw new Error('临时放行时长必须是分钟数');
+  if (minutes <= 0) {
+    mutateConfig(configPath, (config) => {
+      config.scheduleOverrideUntil = undefined;
+    });
+    return undefined;
+  }
+  // 上限 24 小时:「临时」就是临时,长期约束请直接改全局时段
+  const capped = Math.min(Math.floor(minutes), 24 * 60);
+  const until = Date.now() + capped * 60_000;
+  mutateConfig(configPath, (config) => {
+    config.scheduleOverrideUntil = until;
+  });
+  return until;
+}
+
+/**
+ * 手动覆盖某一天的日历身份(公司放假/补班与法定不一致时用);type = null 撤销覆盖。
+ * 覆盖优先级高于自动拉取到的数据。
+ */
+export function setCalendarOverride(configPath: string, date: string, type: DayType | null): void {
+  if (!isRealDateKey(date)) throw new Error(`日期格式应为真实存在的 YYYY-MM-DD:「${date}」`);
+  if (type !== null && type !== 'workday' && type !== 'holiday') {
+    throw new Error(`日历身份只能是 workday / holiday / null:「${String(type)}」`);
+  }
+  mutateConfig(configPath, (config) => {
+    const next: CalendarOverrides = { ...(config.calendarOverrides ?? {}) };
+    if (type === null) delete next[date];
+    else next[date] = type;
+    config.calendarOverrides = Object.keys(next).length > 0 ? next : undefined;
+  });
+}
+
+/** 当前生效的节假日源地址(未配置回默认,供设置页展示「恢复默认」)。 */
+export function effectiveHolidaySource(config: Config): string {
+  return config.holidaySourceUrl ?? DEFAULT_HOLIDAY_SOURCE;
 }
 
 /** 按路径移除一个共享目录。 */

@@ -1,6 +1,7 @@
 import type { IncomingMessage, ServerResponse } from 'node:http';
 import type { SyncHistoryFilter } from '../history.js';
 import type { IgnoreVerdict } from '../ignore.js';
+import type { Schedule } from '../schedule.js';
 
 export interface ControlServerDeps {
   token: string;
@@ -62,8 +63,8 @@ export interface ControlServerDeps {
   setFolderPaused?: (folderId: string, paused: boolean) => void;
   /** 单文件暂停:冻结/解冻目录内的某一个路径(双向:本机不外推、对端不落地)。 */
   setFolderFilePaused?: (folderId: string, path: string, paused: boolean) => void;
-  /** 设置某目录的同步时段(HH:MM-HH:MM,支持跨午夜;空串 = 清除,全天同步)。 */
-  setFolderSchedule?: (folderId: string, schedule: string) => void;
+  /** 设置某目录的同步时段(规则数组,见 schedule.ts;null/空 = 清除,全天同步)。 */
+  setFolderSchedule?: (folderId: string, schedule: unknown) => void;
   /** 设置某目录的 git 提交同步模式(off / send / receive / full)。 */
   setFolderGitSync?: (folderId: string, mode: 'off' | 'send' | 'receive' | 'full') => void;
   /** 设置某目录的冲突自动处理策略(keep-both / newest-wins / local-wins)。 */
@@ -104,7 +105,19 @@ export interface ControlServerDeps {
     batteryPauseThreshold?: number | null;
     /** 分享链接总开关:null/false = 关闭(在外的链接立即失效并清空记录)。 */
     shareEnabled?: boolean | null;
+    /** 全局同步时段(硬闸门);null/空数组 = 清除(全天)。旧字符串形态也收,后端统一清洗。 */
+    syncSchedule?: Schedule | string | null;
+    /** 节假日自动拉取开关;false = 纯手动日历;null/true = 开。 */
+    holidayAutoFetch?: boolean | null;
+    /** 节假日源地址模板({year} 占位);null/空串 = 回默认源。 */
+    holidaySourceUrl?: string | null;
   }) => void;
+  /** 临时放行时段约束(minutes ≤ 0 = 取消);返回到期时刻(ms)。 */
+  setScheduleOverride?: (minutes: number) => number | undefined;
+  /** 手动覆盖某天的日历身份(workday/holiday/null 撤销)。 */
+  setCalendarOverride?: (date: string, type: 'workday' | 'holiday' | null) => void;
+  /** 读取某年日历(自动拉取数据 + 手动覆盖),供日历面板显示。 */
+  getCalendar?: (year: number) => { year: number; days: Record<string, 'workday' | 'holiday'>; overrides: Record<string, 'workday' | 'holiday'>; fetched: boolean };
   /** 测试 Webhook:真实投递一条测试事件并等回执。 */
   testWebhook?: () => Promise<{ ok: boolean; error?: string }>;
   /** 「目录不可信」时重新采集身份指纹(仅更新 folderIdentity,不动索引)。 */

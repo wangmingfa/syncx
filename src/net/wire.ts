@@ -157,6 +157,90 @@ export function decryptMessage(key: Buffer, raw: string): WireMessage {
   return decodeWireMessage(plain.toString('utf8'));
 }
 
+/* ==================== 二进制信封(能力协商后走这条,见 handshake.ts PEER_CAPS) ==================== */
+
+/**
+ * 二进制帧的动机:文本信封把消息 JSON 化后再 base64,块数据本身还要先 base64 一层
+ * —— 1 MB 块上线约 **1.78 MB**(两次 4/3),而且收两侧各要多付一次 base64 与
+ * JSON.stringify/parse 的 CPU。二进制信封把这些套娃去掉:元数据仍是小 JSON 头,
+ * 块字节/索引 JSON 作为**裸 body**,整体一次 AES-GCM,帧本身是 ws 二进制帧。
+ * 同样的 1 MB 块 ≈ 1.00 MB 上线。
+ *
+ * 帧布局(整段明文字节被加密,iv/tag 附在前面):
+ *   iv(12) | tag(16) | ciphertext( = [版本 1B][kind 1B][头长 u32 BE][头 JSON][body...] )
+ *
+ * 只有 `block-response` 与 `index` 走这里 —— 它们是字节量大头;块请求与控制面消息
+ * 只有几十字节,继续走文本 JSON,少一处格式分支。对端不支持(CAP_BINARY1 缺失)时
+ * 同一批消息退回上面的文本函数,旧版本对端行为完全不变。
+ */
+export const BINARY_FRAME_VERSION = 1;
+export type BinaryFrameKind = 'block-response' | 'index';
+
+const BINARY_KIND_TO_BYTE: Record<BinaryFrameKind, number> = { 'block-response': 1, index: 2 };
+const BINARY_BYTE_TO_KIND: Record<number, BinaryFrameKind> = { 1: 'block-response', 2: 'index' };
+/** iv + tag + 版本/kind/头长前缀:一帧二进制消息固定多出的字节数(导出供测试钉体积)。 */
+export const BINARY_FRAME_OVERHEAD = 12 + 16 + 6;
+/** 头部 JSON 上限:元数据远小于此,超限即视为坏帧(不让畸形长度支配内存) */
+const BINARY_HEADER_MAX = 1024 * 1024;
+
+export interface BinaryFrame {
+  kind: BinaryFrameKind;
+  /** 元数据(不含二进制体):块响应带 path/hash/…,索引带 folder/full/relayed */
+  header: Record<string, unknown>;
+  /** 裸字节体:块内容或索引 JSON */
+  body: Buffer;
+}
+
+/** 加密并封成一帧二进制数据(直接交给 ws 以二进制帧发出)。 */
+export function encodeBinaryFrame(
+  key: Buffer,
+  kind: BinaryFrameKind,
+  header: Record<string, unknown>,
+  body: Buffer,
+): Buffer {
+  const headerBuf = Buffer.from(JSON.stringify(header), 'utf8');
+  const prefix = Buffer.alloc(6);
+  prefix[0] = BINARY_FRAME_VERSION;
+  prefix[1] = BINARY_KIND_TO_BYTE[kind];
+  prefix.writeUInt32BE(headerBuf.length, 2);
+  const iv = randomBytes(12);
+  const cipher = createCipheriv('aes-256-gcm', key, iv);
+  const enc = Buffer.concat([
+    cipher.update(Buffer.concat([prefix, headerBuf, body])),
+    cipher.final(),
+  ]);
+  return Buffer.concat([iv, cipher.getAuthTag(), enc]);
+}
+
+/**
+ * 解一帧二进制数据。任何认证/长度/格式问题一律返回 undefined —— 与文本路径的
+ * `catch { return; }` 同一策略:坏帧丢弃,不掀翻连接(对端不可信,宽进严出)。
+ */
+export function decodeBinaryFrame(key: Buffer, frame: Buffer): BinaryFrame | undefined {
+  if (frame.length < BINARY_FRAME_OVERHEAD) return undefined;
+  let plain: Buffer;
+  try {
+    const decipher = createDecipheriv('aes-256-gcm', key, frame.subarray(0, 12));
+    decipher.setAuthTag(frame.subarray(12, 28));
+    plain = Buffer.concat([decipher.update(frame.subarray(28)), decipher.final()]);
+  } catch {
+    return undefined; // 篡改或密钥不符
+  }
+  if (plain.length < 6 || plain[0] !== BINARY_FRAME_VERSION) return undefined;
+  const kind = BINARY_BYTE_TO_KIND[plain[1] as number];
+  if (kind === undefined) return undefined;
+  const headerLen = plain.readUInt32BE(2);
+  if (headerLen === 0 || headerLen > BINARY_HEADER_MAX || 6 + headerLen > plain.length) return undefined;
+  let header: unknown;
+  try {
+    header = JSON.parse(plain.subarray(6, 6 + headerLen).toString('utf8'));
+  } catch {
+    return undefined;
+  }
+  if (typeof header !== 'object' || header === null) return undefined;
+  return { kind, header: header as Record<string, unknown>, body: plain.subarray(6 + headerLen) };
+}
+
 /**
  * 「发送侧腾出了空间」的轮询间隔(毫秒)。为什么需要轮询:ws 没有公开「写缓冲
  * 排空了一点」的信号(底层 socket 的 drain 事件不对外暴露),而队列入空之后
@@ -175,19 +259,26 @@ function bufferedBytes(socket: WebSocket): number {
 /**
  * Send-side transport bound to one shared folder: every message carries
  * the folder path so a single socket can multiplex several folders.
+ *
+ * `opts.canSendBinary` 是对端能力的**发送时刻**判定(不是建连时快照):能力来自 kx
+ * 协商,由上层在会话上记下,每次发出前现读 —— 谓词返回 false(旧版对端 / 未宣告
+ * CAP_BINARY1)时,块与索引退回文本信封,与升级前逐字节一致。
  */
 export function makePeerTransport(
   socket: WebSocket,
   key: Buffer,
   folderPath: string,
   rateLimiter?: RateLimiter,
+  opts: { canSendBinary?: () => boolean } = {},
 ): PeerTransport {
   const limiter = rateLimiter ?? new RateLimiter(0);
+  const binaryOn = (): boolean => opts.canSendBinary?.() === true;
   // 限速发送队列(数组):令牌等待天然串行 —— 每条消息都在轮到自己时重新评估
   // 等待,不会基于同一令牌快照同时醒来造成约 2 倍速率的突发发送。
   // 「优先同步」的块响应插到队首(见 enqueue 的 priority),让被大队列卡住的
   // 小文件越过普通消息先走;限速语义不变(插队不省令牌,只换个位置等)。
-  const outbox: Array<{ data: string; bytes: number; priority: boolean }> = [];
+  // data 两种形态:文本信封是 string(ws 文本帧),二进制信封是 Buffer(ws 二进制帧)。
+  const outbox: Array<{ data: string | Buffer; bytes: number; priority: boolean }> = [];
   let draining = false;
   // outbox 里「已加密、排队待发」的信封字节总和。它 + socket 的写缓冲 = 本端在途量,
   // 供块侧的窗口判定用(见 peer.ts 的 SEND_WINDOW_BYTES):整文件爆发索块时,这个
@@ -250,8 +341,10 @@ export function makePeerTransport(
   }
 
   /** 按限速发送一条消息:入队(priority = true 插队到队首)并由 drain 循环串行发出。 */
-  function sendRateLimited(data: string, priority = false): void {
-    const bytes = Buffer.byteLength(data); // 只在入队时量一次:每条都是 MB 级字符串,别在出队时再扫一遍
+  function sendRateLimited(data: string | Buffer, priority = false): void {
+    // 只在入队时量一次字节:每条都是 MB 级,别在出队时再扫一遍。
+    // Buffer 直接取长度;string 要按 utf8 字节量(不是字符数)。
+    const bytes = typeof data === 'string' ? Buffer.byteLength(data) : data.length;
     if (priority) {
       outbox.unshift({ data, bytes, priority: true });
     } else {
@@ -264,13 +357,23 @@ export function makePeerTransport(
 
   return {
     sendEntries(entries: IndexEntry[], mode: IndexMode, opts?: { relayed?: boolean }): void {
+      const payload = encodeIndex(entries); // 条目清单的 JSON 字节
+      const full = mode === 'full';
+      const relayed = opts?.relayed === true;
+      if (binaryOn()) {
+        // 索引 JSON 直接当 body:省掉「payload 先 base64、整条信封再 base64」的两次 4/3
+        sendRateLimited(
+          encodeBinaryFrame(key, 'index', { folder: folderPath, full, relayed }, payload),
+        );
+        return;
+      }
       sendRateLimited(
         encryptMessage(key, {
           type: 'index',
           folder: folderPath,
-          payload: encodeIndex(entries).toString('base64'),
-          full: mode === 'full',
-          relayed: opts?.relayed === true,
+          payload: payload.toString('base64'),
+          full,
+          relayed,
         }),
       );
     },
@@ -286,6 +389,26 @@ export function makePeerTransport(
     sendBlockResponse(response: BlockResponse, opts?: { priority?: boolean }): void {
       // 响应上线前不带 priority:它只是本端排队决策(源块请求的标记),对端无需感知
       const { priority: _drop, ...payload } = response as BlockResponse & { priority?: boolean };
+      if (binaryOn()) {
+        // 块字节原样作 body —— 文本路径要为它先 base64、整条再 base64(≈1.78 倍)
+        sendRateLimited(
+          encodeBinaryFrame(
+            key,
+            'block-response',
+            {
+              folder: folderPath,
+              deviceId: payload.deviceId,
+              path: payload.path,
+              blockIndex: payload.blockIndex,
+              hash: payload.hash,
+              cdc: payload.cdc === true,
+            },
+            response.data,
+          ),
+          opts?.priority === true,
+        );
+        return;
+      }
       sendRateLimited(
         encryptMessage(key, {
           type: 'block-response',
@@ -297,6 +420,18 @@ export function makePeerTransport(
     },
     pendingOutboundBytes(): number {
       return outboxBytes + bufferedBytes(socket);
+    },
+    estimatedWireBytes(plainBytes: number): number {
+      // +16:GCM tag —— e2e 通道的块在上线前就先被加密成 明文+tag,口径正好覆盖
+      const cipher = plainBytes + 16;
+      if (binaryOn()) {
+        // 二进制信封:密文长度 == 明文字节数,另加 iv(12)+tag(16)+帧前缀(6) 与几十字节
+        // 元数据头(留 256B 余量)≈ 实际上线字节
+        return cipher + BINARY_FRAME_OVERHEAD + 256;
+      }
+      // 文本信封:块数据 base64(×4/3) → 整条消息 JSON + 加密 → 再 base64(×4/3)
+      // ≈ 16/9 倍。这套换算只有 transport 说得准,故归它负责(见 peer.ts 的注释)
+      return Math.ceil((cipher * 16) / 9) + 512;
     },
     onOutboundSpace(cb): () => void {
       spaceWatchers.add(cb);
@@ -333,8 +468,33 @@ export function attachPeerMessages(
   onControl?: (message: ControlMessage) => void,
   takePending?: () => Buffer[],
 ): void {
-  const dispatch = (data: Buffer): void => {
+  const dispatch = (data: Buffer, isBinary?: boolean): void => {
     const raw = data instanceof ArrayBuffer ? Buffer.from(data) : Buffer.from(data as Buffer);
+    // 二进制信封:帧类型由 ws 直接告知(isBinary),不需嗅探首字节。
+    // 只有能力协商通过的对端会发这种帧;坏帧与文本路径同策略静默丢弃(对端不可信)。
+    if (isBinary) {
+      const frame = decodeBinaryFrame(key, raw);
+      if (!frame) return;
+      const folder = typeof frame.header.folder === 'string' ? frame.header.folder : '';
+      const peer = peers.get(folder);
+      if (!peer) return;
+      if (frame.kind === 'index') {
+        void peer.onPeerIndex(decodeIndex(frame.body), {
+          full: frame.header.full === true,
+          relayed: frame.header.relayed === true,
+        });
+      } else {
+        void peer.onBlockResponse({
+          deviceId: String(frame.header.deviceId ?? ''),
+          path: String(frame.header.path ?? ''),
+          blockIndex: Number(frame.header.blockIndex ?? -1),
+          hash: String(frame.header.hash ?? ''),
+          data: frame.body,
+          ...(frame.header.cdc === true ? { cdc: true } : {}),
+        });
+      }
+      return;
+    }
     let message: WireMessage;
     try {
       message = decryptMessage(key, raw.toString('utf8'));

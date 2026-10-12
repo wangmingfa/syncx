@@ -3,7 +3,7 @@ import { useToast } from './useToast';
 import { apiJson, errText } from '../utils/api';
 import { folderKey } from '../utils/format';
 import type { CoreDeps } from './statusContext';
-import type { ConflictPolicy, FolderInfo, GitSyncMode } from '../types';
+import type { ConflictPolicy, FolderInfo, GitSyncMode, Schedule } from '../types';
 
 /** 文件夹相关:添加/移除(防误删确认)/编辑指派设备/ .gitignore 开关/悬停联动/同步记录。 */
 export function useFolders(deps: CoreDeps): {
@@ -51,7 +51,9 @@ export function useFolders(deps: CoreDeps): {
   ignoreFolder: Ref<FolderInfo | null>;
   /** 非空 = 打开该目录的端到端加密设置弹窗。 */
   e2eFolder: Ref<FolderInfo | null>;
-  saveEditDevices: (payload: { path: string; devices: string[]; gitignore: boolean; schedule: string; gitSync: GitSyncMode; conflictPolicy: ConflictPolicy; onDemand: boolean }) => Promise<void>;
+  saveEditDevices: (payload: { path: string; devices: string[]; gitignore: boolean; schedule: Schedule | null; gitSync: GitSyncMode; conflictPolicy: ConflictPolicy; onDemand: boolean }) => Promise<void>;
+  /** 临时放行时段约束(横幅上的「开 N 分钟」);minutes ≤ 0 = 取消。 */
+  setScheduleOverride: (minutes: number) => Promise<void>;
   /** 「优先同步」:把该目录某个在传文件的块请求插到对端发送队列最前(幂等)。 */
   prioritizeFile: (f: FolderInfo, path: string) => Promise<void>;
   toggleFolderPaused: (f: FolderInfo, paused: boolean) => Promise<void>;
@@ -178,14 +180,15 @@ export function useFolders(deps: CoreDeps): {
   }
 
   /** 弹窗「保存」:设备指派、.gitignore 开关、同步时段、git 同步模式与冲突策略一起提交,真正的写操作只有这里。 */
-  async function saveEditDevices(payload: { path: string; devices: string[]; gitignore: boolean; schedule: string; gitSync: GitSyncMode; conflictPolicy: ConflictPolicy; onDemand: boolean }): Promise<void> {
+  async function saveEditDevices(payload: { path: string; devices: string[]; gitignore: boolean; schedule: Schedule | null; gitSync: GitSyncMode; conflictPolicy: ConflictPolicy; onDemand: boolean }): Promise<void> {
     await commitFolderDevices(payload.path, payload.devices);
     // refreshStatus 后按最新 folders 找回该目录,开关/时段/git 模式/冲突策略有变化才额外发请求
     const f = status.value.folders.find((x) => x.path === payload.path);
     if (f && (f.useGitignore !== false) !== payload.gitignore) {
       await toggleFolderGitignore(f, payload.gitignore);
     }
-    if (f && (f.schedule ?? '') !== payload.schedule) {
+    // 规则是结构化数组,按内容比较(JSON 序列化即可:形状由编辑器产出,键序稳定)
+    if (f && JSON.stringify(f.schedule ?? null) !== JSON.stringify(payload.schedule ?? null)) {
       await saveFolderSchedule(f, payload.schedule);
     }
     if (f && (f.gitSync ?? 'off') !== payload.gitSync) {
@@ -281,17 +284,35 @@ export function useFolders(deps: CoreDeps): {
     await refreshStatus();
   }
 
-  /** 提交某目录的同步时段(空串 = 清除,全天同步);失败回读后端真实状态。 */
-  async function saveFolderSchedule(f: FolderInfo, schedule: string): Promise<void> {
+  /** 提交某目录的同步时段(规则数组;null = 清除,全天同步);失败回读后端真实状态。 */
+  async function saveFolderSchedule(f: FolderInfo, schedule: Schedule | null): Promise<void> {
     try {
       await apiJson('/api/folders/schedule', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ folderId: f.id ?? f.path, schedule }),
       });
-      showToast(schedule ? `已设置同步时段 ${schedule},时段外自动暂停` : '已清除同步时段(全天同步)');
+      showToast(schedule ? '已设置同步时段,时段外自动暂停' : '已清除同步时段(全天同步)');
     } catch (e) {
       showToast(errText(e, '设置同步时段失败'), 'alert');
+    }
+    await refreshStatus();
+  }
+
+  /**
+   * 临时放行时段约束(横幅上的「开 N 分钟」):minutes ≤ 0 = 取消。
+   * 只解时段,不解手动暂停与电源守卫。
+   */
+  async function setScheduleOverride(minutes: number): Promise<void> {
+    try {
+      await apiJson('/api/schedule/override', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ minutes }),
+      });
+      showToast(minutes > 0 ? `已临时放行同步 ${minutes} 分钟(仅解时段约束)` : '已取消临时放行');
+    } catch (e) {
+      showToast(errText(e, '临时放行失败'), 'alert');
     }
     await refreshStatus();
   }
@@ -463,6 +484,7 @@ export function useFolders(deps: CoreDeps): {
     editDevicesOpen,
     editFolder,
     saveEditDevices,
+    setScheduleOverride,
     prioritizeFile,
     historyFolder,
     historyGlobal,

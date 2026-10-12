@@ -5,9 +5,8 @@ import { useStatusContext } from '../composables/statusContext';
 import ActionRail from './ActionRail.vue';
 import WeeklyReportModal from './WeeklyReportModal.vue';
 import { folderPathPlaceholder, visibleTransferFiles, XFER_FILE_LIMIT } from '../utils/format';
-import { outsideSchedule } from '../utils/schedule';
 import type { RailAction } from '../utils/action-rail';
-import type { FolderInfo, TransferFile } from '../types';
+import type { FolderInfo, ScheduleState, TransferFile } from '../types';
 
 /**
  * 卡片上的「对比」跳到双栏对比页,而不是开一个弹窗。
@@ -30,6 +29,36 @@ function basename(p: string): string {
 /** 该目录残留冲突副本数(索引 LIKE 计数,徽标只做量级提示;以收件箱实时扫盘为准)。 */
 function conflictCountOf(f: FolderInfo): number {
   return status.value.conflictCounts?.[folderKey(f)] ?? 0;
+}
+
+/**
+ * 该目录此刻的时段结论 —— 判定只在后端一份(全局闸门 ∩ 目录时段 ∩ 临时放行),
+ * 前端只渲染。旧后端未提供时按「窗口内」处理,不凭空挂徽标。
+ */
+function scheduleStateOf(f: FolderInfo): ScheduleState | undefined {
+  return status.value.scheduleStates?.[folderKey(f)];
+}
+
+/** 时段外徽标的说明:被哪一层挡住、什么时候自动恢复。 */
+function scheduleBadgeTip(f: FolderInfo): string {
+  const s = scheduleStateOf(f);
+  if (!s || s.inside) return '';
+  const who = s.blockedBy === 'global' ? '全局同步时段' : '本目录同步时段';
+  const back = s.nextChangeAt ? `${clockOf(s.nextChangeAt)} 自动恢复` : '到点自动恢复';
+  const rule = s.summary && s.summary !== '全天同步' ? `(${s.summary})` : '';
+  return `${who}外${rule},${back};连接与配对照常`;
+}
+
+/** ms → HH:MM(本机时区,与 daemon 判定同口径)。 */
+function clockOf(ms: number): string {
+  const d = new Date(ms);
+  return `${String(d.getHours()).padStart(2, '0')}:${String(d.getMinutes()).padStart(2, '0')}`;
+}
+
+/** 徽标是否该出现:此刻在时段外(被全局或目录规则挡住)。 */
+function outsideNow(f: FolderInfo): boolean {
+  const s = scheduleStateOf(f);
+  return s !== undefined && !s.inside;
 }
 
 /**
@@ -375,7 +404,7 @@ function visibleFiles(f: FolderInfo): TransferFile[] {
            title 说明(「接收」没有专属操作按钮,只能靠徽标自身的 tooltip 解释)。
            「冲突 N」做成按钮:徽标本身就是收件箱入口,点它直接处理。
            「Git 仅发送/仅接收/双向」同理只靠 title 解释 —— 它没有专属按钮,开关在「编辑目录」里。 -->
-      <div v-if="f.receiveOnly || (f.gitSync && f.gitSync !== 'off') || f.paused || outsideSchedule(f) || conflictCountOf(f) > 0" class="card-floats">
+      <div v-if="f.receiveOnly || (f.gitSync && f.gitSync !== 'off') || f.paused || outsideNow(f) || conflictCountOf(f) > 0" class="card-floats">
         <span v-if="f.receiveOnly" class="float-badge receive-badge" title="接收模式:只拉不推,本机改动不会同步出去">接收</span>
         <!-- Git 提交同步:模式文案与编辑弹窗的下拉框逐字一致,方向由文字给出;
              双向额外铺一层淡底,一眼能从「只做一边」的两条里分出来;
@@ -400,7 +429,7 @@ function visibleFiles(f: FolderInfo): TransferFile[] {
           </svg>
         </span>
         <span v-if="f.paused" class="float-badge paused-badge" title="已暂停:不扫描、不广播、不接收;连接与配对照常">已暂停</span>
-        <span v-if="outsideSchedule(f)" class="float-badge paused-badge" :title="`同步时段外(${f.schedule}),到点自动恢复;连接与配对照常`">时段外</span>
+        <span v-if="outsideNow(f)" class="float-badge paused-badge" :title="scheduleBadgeTip(f)">时段外</span>
         <button
           v-if="conflictCountOf(f) > 0"
           type="button"

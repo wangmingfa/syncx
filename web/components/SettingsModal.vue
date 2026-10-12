@@ -1,13 +1,16 @@
 <script setup lang="ts">
-import { ref, watch } from 'vue';
-import { NButton, NCheckbox, NInput, NInputNumber } from 'naive-ui';
+import { computed, ref, watch } from 'vue';
+import { NButton, NCheckbox, NDatePicker, NInput, NInputNumber, NSelect } from 'naive-ui';
 import { useStatusContext } from '../composables/statusContext';
 import { apiPost, errText } from '../utils/api';
 import ModalShell from './ModalShell.vue';
+import ScheduleRuleEditor from './ScheduleRuleEditor.vue';
+import type { Schedule } from '../types';
 
 /**
  * 全局设置弹窗:发送带宽上限(全局兜底)、每路径版本份数、历史记录保留上限、
  * 同步事件 Webhook(完成/冲突/错误外推通知,飞书机器人地址自动适配格式)、
+ * 全局同步时段(硬闸门)、节假日日历(「工作日」判定的数据源)、
  * 电源守卫(计费网络/低电量自动挂起,仅 Windows 探测启用)。
  * 数值项都是「留空 = 回默认」的语义(后端 null 清除配置,走内置默认值);
  * 保存走 POST /api/settings,后端落盘并按需热生效(重建限速通道 / 执行器)。
@@ -37,6 +40,22 @@ const batteryPauseThreshold = ref<number | null>(null);
 // 分享链接总开关(默认关):开=允许在文件管理器为单文件生成免登录限时下载链接
 const shareEnabled = ref(false);
 
+// 全局同步时段(硬闸门):undefined = 全天
+const syncSchedule = ref<Schedule | undefined>(undefined);
+
+// 节假日日历:自动拉取开关 + 源地址;手动覆盖走独立入口即时保存(不进「保存」按钮)
+const holidayAutoFetch = ref(true);
+const holidaySourceUrl = ref('');
+const holidaySourceDefault = ref('');
+/** 手动覆盖面板是低频操作,默认收起,不占常驻空间 */
+const overridesOpen = ref(false);
+const overrideDate = ref<number | null>(null);
+const overrideType = ref<'workday' | 'holiday'>('holiday');
+const CAL_TYPE_OPTIONS = [
+  { label: '休息日(不上班)', value: 'holiday' },
+  { label: '工作日(要上班)', value: 'workday' },
+] as const;
+
 const DEFAULT_VERSIONS = 10;
 const DEFAULT_HISTORY = 2000;
 const DEFAULT_BATTERY_THRESHOLD = 20;
@@ -57,8 +76,58 @@ watch(
     pauseOnLowBattery.value = s?.pauseOnLowBattery === true;
     batteryPauseThreshold.value = s?.batteryPauseThreshold ?? null;
     shareEnabled.value = s?.shareEnabled === true;
+    syncSchedule.value = s?.syncSchedule;
+    holidayAutoFetch.value = s?.holidayAutoFetch !== false;
+    holidaySourceUrl.value = s?.holidaySourceUrl ?? '';
+    holidaySourceDefault.value = s?.holidaySourceDefault ?? '';
+    overridesOpen.value = false;
+    overrideDate.value = null;
   },
 );
+
+/** 手动日历覆盖(日期 → 身份),用于面板里列出已改的天并可撤销。 */
+const calendarOverrides = computed(
+  () => Object.entries(status.value.settings?.calendarOverrides ?? {}).sort((a, b) => (a[0] < b[0] ? -1 : 1)),
+);
+
+/** 一句话讲清日历现在靠不靠得住(判定永远可用,这里只说数据新鲜度)。 */
+const calendarSummary = computed(() => {
+  const c = status.value.calendarStatus;
+  if (!c) return '未知';
+  if (c.fetched) {
+    const when = c.fetchedAt ? new Date(c.fetchedAt).toLocaleDateString() : '';
+    return `${c.year} 年数据已缓存${when ? `(${when} 拉取)` : ''}${c.overrideCount ? `、${c.overrideCount} 天被手动改过` : ''}`;
+  }
+  return holidayAutoFetch.value
+    ? `${c.year} 年数据尚未取到,当前按星期几判定${c.lastError ? `(上次失败:${c.lastError})` : ''}`
+    : `已关闭自动拉取,当前按星期几 + 手动覆盖判定${c.overrideCount ? `(${c.overrideCount} 天已改)` : ''}`;
+});
+
+/** 新增/修改某天覆盖:即时写盘(低频、逐条动作,不搭「保存」按钮的车)。 */
+async function addOverride(): Promise<void> {
+  if (overrideDate.value === null || busy.value) return;
+  const d = new Date(overrideDate.value);
+  const date = `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
+  try {
+    await apiPost('/api/calendar/override', { date, type: overrideType.value });
+    showToast(`已把 ${date} 标为${overrideType.value === 'holiday' ? '休息日' : '工作日'}`);
+    overrideDate.value = null;
+    await refreshStatus();
+  } catch (e) {
+    showToast(errText(e, '日历覆盖失败'), 'alert');
+  }
+}
+
+/** 撤销某天覆盖:交回自动拉取的数据(或按星期几退化)。 */
+async function clearOverride(date: string): Promise<void> {
+  if (busy.value) return;
+  try {
+    await apiPost('/api/calendar/override', { date, type: null });
+    await refreshStatus();
+  } catch (e) {
+    showToast(errText(e, '撤销失败'), 'alert');
+  }
+}
 
 async function onSave(): Promise<void> {
   if (busy.value) return;
@@ -73,6 +142,11 @@ async function onSave(): Promise<void> {
     batteryPauseThreshold: batteryPauseThreshold.value,
     // 开关:关 = 传 null 清除(后端不留 false 值,并连带清空在册分享 —— 关即全断)
     shareEnabled: shareEnabled.value ? true : null,
+    // 全局时段:空数组/undefined = 清除(全天);后端 normalizeSchedule 统一清洗规则
+    syncSchedule: syncSchedule.value?.length ? syncSchedule.value : null,
+    holidayAutoFetch: holidayAutoFetch.value ? null : false,
+    // 源地址:填了须含 {year} 且 https(后端校验并 400);空串 = 回默认源
+    holidaySourceUrl: holidaySourceUrl.value.trim() || null,
   };
   // 密钥三态:填了新值就覆盖;点了「清除」传 null;否则整个键不传 = 保持已存值
   const secret = webhookSecret.value.trim();
@@ -197,6 +271,58 @@ async function onTestWebhook(): Promise<void> {
       阈值留空 = 默认 {{ DEFAULT_BATTERY_THRESHOLD }}%。
     </p>
 
+    <div class="edit-section-label">同步时段(全局)</div>
+    <ScheduleRuleEditor v-model:model-value="syncSchedule" />
+    <p class="confirm-note-extra">
+      这是这台机器的<b>硬闸门</b>:与目录级时段取交集 —— 两边都允许才同步,目录设置只能在全局窗口内再收窄,
+      不能反向放宽(动机是省电与省流量)。留空 = 全天。时段外数据面停摆(不扫描、不广播、不接收),
+      到点自动恢复;连接、配对、目录清单不受影响。
+      时段外的提示与「临时放行」在状态页顶部的横幅上。
+    </p>
+
+    <div class="edit-section-label">节假日日历</div>
+    <n-checkbox v-model:checked="holidayAutoFetch" class="settings-checkbox" :disabled="busy">
+      自动拉取法定节假日(决定「工作日 / 休息日」怎么判)
+    </n-checkbox>
+    <n-input
+      v-model:value="holidaySourceUrl"
+      class="settings-input"
+      :placeholder="holidaySourceDefault || 'https://…/{year}.json'"
+      :disabled="busy || !holidayAutoFetch"
+      clearable
+    />
+    <p class="confirm-note-extra">
+      地址需含 <code>{year}</code> 占位;留空 = 默认源。拉取只在后台发生,判定时只读本地缓存,
+      <b>无网或拉取失败都不会挡住同步</b> —— 那时退化为「按星期几判」,并在下方标注数据缺失。
+      当前状态:{{ calendarSummary }}
+    </p>
+    <button type="button" class="settings-link" @click="overridesOpen = !overridesOpen">
+      {{ overridesOpen ? '收起' : '手动设置哪天是假期 / 补班' }}{{ calendarOverrides.length ? `(${calendarOverrides.length} 天已改)` : '' }}
+    </button>
+    <div v-if="overridesOpen" class="cal-panel">
+      <div class="cal-panel__row">
+        <n-date-picker v-model:value="overrideDate" type="date" size="small" :update-value-on-close="true" style="width: 140px" />
+        <n-select
+          v-model:value="overrideType"
+          size="small"
+          class="cal-type"
+          :options="CAL_TYPE_OPTIONS as unknown as { label: string; value: string }[]"
+        />
+        <n-button size="small" :disabled="busy || overrideDate === null" @click="addOverride">添加</n-button>
+      </div>
+      <ul v-if="calendarOverrides.length" class="cal-overrides">
+        <li v-for="[date, type] in calendarOverrides" :key="date">
+          <span class="cal-overrides__date">{{ date }}</span>
+          <span class="cal-overrides__type">{{ type === 'holiday' ? '休息日' : '工作日' }}</span>
+          <button type="button" class="settings-link" @click="clearOverride(date)">撤销</button>
+        </li>
+      </ul>
+      <p v-else class="confirm-note-extra">还没有手动覆盖的日期。</p>
+      <p class="confirm-note-extra">
+        公司放假与法定不一致时用这里:覆盖优先于自动拉取的数据。撤销后该日交回日历数据(或按星期几)判定。
+      </p>
+    </div>
+
     <div class="edit-section-label">分享链接</div>
     <n-checkbox v-model:checked="shareEnabled" class="settings-checkbox" :disabled="busy">允许生成免登录的限时文件下载链接</n-checkbox>
     <p class="confirm-note-extra">
@@ -210,3 +336,47 @@ async function onTestWebhook(): Promise<void> {
     </template>
   </ModalShell>
 </template>
+
+<style scoped>
+/* 节假日日历面板:仅本组件使用的类,故 scoped(口径同 AGENTS.md「组件自有的样式写在自己文件里」)。
+   .settings-input / .settings-checkbox / .settings-link 是跨弹窗共用的皮肤,仍留在 style.css。 */
+.cal-panel {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  margin-top: 6px;
+  padding: 8px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+}
+.cal-panel__row {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex-wrap: wrap;
+}
+.cal-type {
+  width: 140px;
+  flex: none;
+}
+.cal-overrides {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+  font-size: 12px;
+}
+.cal-overrides li {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+.cal-overrides__date {
+  font-variant-numeric: tabular-nums;
+}
+.cal-overrides__type {
+  opacity: 0.7;
+}
+</style>

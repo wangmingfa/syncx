@@ -1,5 +1,7 @@
 import type { DeviceIdentity } from './identity.js';
 import type { Config, SharedFolderConfig, PendingOffer } from './config.js';
+import type { Schedule } from './schedule.js';
+import type { CalendarOverrides } from './holidays.js';
 import { isGitRepo } from './git-monitor.js';
 
 export interface IndexStats {
@@ -150,6 +152,12 @@ export interface StatusPayload {
   powerGuard?: string | null;
   /** 是否在网(无非回环可用接口 = 离线;旧后端缺省 = true)。顶栏提示用。 */
   networkOnline?: boolean;
+  /** 每个目录此刻的时段结论(key = folderId)。缺省 = 旧后端未提供。 */
+  scheduleStates?: Record<string, ScheduleState>;
+  /** 顶部横幅:此刻是否该提示「因时段而不同步」。 */
+  scheduleBanner?: ScheduleBanner;
+  /** 节假日日历健康状况(设置页与横幅文案都用得上)。 */
+  calendarStatus?: CalendarStatus;
 }
 
 /** 一个采样窗口的流量增量(窗口内发/收的字节数)。 */
@@ -187,6 +195,54 @@ export interface GlobalSettingsStatus {
   batteryPauseThreshold?: number;
   /** 分享链接总开关(默认关;开才允许创建/使用免登录下载链接)。 */
   shareEnabled?: boolean;
+  /** 全局同步时段(硬闸门,与目录时段取交集);缺省 = 全天。 */
+  syncSchedule?: Schedule;
+  /** 临时放行到期时刻(ms);缺省 = 无放行。 */
+  scheduleOverrideUntil?: number;
+  /** 节假日自动拉取是否开启(缺省 = 开)。 */
+  holidayAutoFetch?: boolean;
+  /** 当前生效的节假日源地址(含 {year} 占位)。 */
+  holidaySourceUrl?: string;
+  /** 默认节假日源地址(UI 提供「恢复默认」时用)。 */
+  holidaySourceDefault?: string;
+  /** 手动日历覆盖(日期 → workday/holiday);面板据此标记哪些天被改过。 */
+  calendarOverrides?: CalendarOverrides;
+}
+
+/** 单个目录此刻的时段结论(后端算,前端只渲染 —— 不再各留一份判定实现)。 */
+export interface ScheduleState {
+  /** 此刻是否处于允许同步的时段内(已计入临时放行)。 */
+  inside: boolean;
+  /** 放行中:此刻无视全部时段约束。 */
+  overridden?: boolean;
+  /** 挡住它的是全局闸门还是目录自己的设置。 */
+  blockedBy?: 'global' | 'folder';
+  /** 下一次可能翻转的时刻(ms);undefined = 无约束。 */
+  nextChangeAt?: number;
+  /** 规则的界面摘要(「工作日 09:00–23:00」),后端算好下发。 */
+  summary?: string;
+}
+
+/** 顶部横幅的状态:是否该提示「当前不在同步时段」+ 什么时候自动恢复。 */
+export interface ScheduleBanner {
+  visible: boolean;
+  /** 因时段而被挡住的目录数。 */
+  blockedBySchedule: number;
+  /** 目录总数。 */
+  total: number;
+  nextChangeAt?: number;
+  overrideUntil?: number;
+}
+
+/** 节假日日历的健康状况(判定永远可用,这里只说数据新不新鲜)。 */
+export interface CalendarStatus {
+  year: number;
+  /** 该年是否已有拉取到的数据。 */
+  fetched: boolean;
+  fetchedAt?: number;
+  overrideCount: number;
+  /** 最近一次拉取失败的原因;仅诊断,不影响判定。 */
+  lastError?: string;
 }
 
 /** buildStatus 的扩展口径:新功能统计一律进这里,不再膨胀位置参数。 */
@@ -209,6 +265,12 @@ export interface StatusExtras {
   powerGuard?: string | null;
   /** 是否在网(无非回环可用接口 = 离线;null/缺省 = 在线,旧后端兼容)。 */
   networkOnline?: boolean;
+  /** 每目录此刻的时段结论(key = folderId)。 */
+  scheduleStates?: Record<string, ScheduleState>;
+  /** 顶部横幅状态(是否提示「因时段而不同步」+ 恢复时刻)。 */
+  scheduleBanner?: ScheduleBanner;
+  /** 节假日日历健康状况。 */
+  calendarStatus?: CalendarStatus;
 }
 
 export function buildStatus(
@@ -254,5 +316,8 @@ export function buildStatus(
     discovered: extras.discovered,
     powerGuard: extras.powerGuard ?? null,
     networkOnline: extras.networkOnline ?? true,
+    scheduleStates: extras.scheduleStates,
+    scheduleBanner: extras.scheduleBanner,
+    calendarStatus: extras.calendarStatus,
   };
 }

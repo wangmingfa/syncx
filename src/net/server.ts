@@ -20,8 +20,17 @@ const HANDSHAKE_TIMEOUT_MS = 10_000;
 const MAX_PEER_CONNECTIONS = 64;
 
 export interface PeerHandlers {
-  /** 入站对端连上并完成握手。listenPort 为对端在 kx 中广播的监听端口(旧版可能为 undefined)。 */
-  onPeerConnected(socket: WebSocket, deviceId: string, key: Buffer, listenPort?: number): void;
+  /**
+   * 入站连接并完成握手。listenPort 为对端在 kx 中广播的监听端口(旧版可能为 undefined);
+   * caps 为对端能力标签(见 handshake.ts PEER_CAPS),旧版对端为 undefined。
+   */
+  onPeerConnected(
+    socket: WebSocket,
+    deviceId: string,
+    key: Buffer,
+    listenPort?: number,
+    caps?: string[],
+  ): void;
   onError(error: Error): void;
 }
 
@@ -134,7 +143,14 @@ export function startPeerServer(
 
       socket.off('message', onMessage);
       clearTimeout(handshakeTimeout);
-      handlers.onPeerConnected(socket, peerDeviceId!, key, kx.listenPort);
+      // 对端能力随 kx 一并交出(旧版对端不带 caps → undefined,上层走兼容编码)
+      handlers.onPeerConnected(
+        socket,
+        peerDeviceId!,
+        key,
+        kx.listenPort,
+        Array.isArray(kx.caps) ? kx.caps : undefined,
+      );
     };
     socket.on('message', onMessage);
   });

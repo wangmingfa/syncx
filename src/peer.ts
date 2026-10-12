@@ -41,6 +41,14 @@ export interface PeerTransport {
    */
   sendIndexExchangeReply?(kind: 'index-ack' | 'index-request'): void;
   /**
+   * 一条块响应若带 `plainBytes` 明文,上线会占多少字节 —— 供块前的窗口判定用。
+   *
+   * 只有 transport 知道自己实际用哪种信封(二进制 vs 文本按对端能力现读),所以这个
+   * 换算归它;缺省不实现时调用方退回旧的保守估算。口径同 pendingOutboundBytes:能力
+   * 探测,拿不到就退回旧行为,绝不因「拿不到数据」而永远挂起请求。
+   */
+  estimatedWireBytes?(plainBytes: number): number;
+  /**
    * 本端「已经生成、还没真正离开本机」的字节数:排队中的信封 + 协议栈写缓冲。
    * 供块前的窗口判定用(见 SEND_WINDOW_BYTES)。
    *
@@ -525,9 +533,13 @@ export function createSyncPeer(deps: SyncPeerDeps): SyncPeer {
 
   /**
    * 这条请求的响应上线后大概占多少在途字节 —— **不读盘**的估算:索引里拿得到块长就按
-   * 实际长度(CDC 块的 clens / 定长块的末尾残块),拿不到按该口径的上限;再加密文
-   * tag(16B)、base64(×4/3)与 JSON 信封。宁可高估:高估只是这一轮少供一块,
-   * 低估会让窗口形同虚设。
+   * 实际长度(CDC 块的 clens / 定长块的末尾残块),拿不到按该口径的上限;再加密文 tag
+   * 与信封开销。宁可高估:高估只是这一轮少供一块,低估会让窗口形同虚设。
+   *
+   * 信封开销**问 transport 要**:编码口径由它按对端能力现定(二进制信封 ≈1.0 倍,
+   * 文本信封两层 base64 ≈1.78 倍),peer 侧不重复这套知识 —— 两边各写一遍必然分叉,
+   * 而分叉的方向是低估:窗口按虚高的实际在途计数,放行的在途字节会超过 SEND_WINDOW_BYTES
+   * (二进制化上线前这里就一直在按单层 base64 估,已经把窗口撑大了一档)。
    */
   function expectedWireBytes(request: BlockRequest): number {
     let plain = request.cdc ? CDC_MAX_CHUNK : BLOCK_SIZE;
@@ -540,7 +552,10 @@ export function createSyncPeer(deps: SyncPeerDeps): SyncPeer {
         if (remain > 0 && remain < BLOCK_SIZE) plain = remain;
       }
     }
-    return Math.ceil((plain + 16) / 3) * 4 + 256;
+    // 缺省(测试替身/无缓冲可见性的实现)退回旧的单层 base64 保守口径
+    return transport.estimatedWireBytes
+      ? transport.estimatedWireBytes(plain)
+      : Math.ceil((plain + 16) / 3) * 4 + 256;
   }
 
   /**

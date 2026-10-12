@@ -48,6 +48,17 @@ export function deriveSessionKey(privateKeyPem: string, peerPublicKeyPem: string
   return createHash('sha256').update(shared).digest();
 }
 
+/**
+ * 会话能力标签。协商走 kx(见 KxMessage.caps):握手完成瞬间双方就知道对端能吃什么,
+ * 不必等异步的 hello 版本号。旧版对端不认识该字段 —— decodeKxMessage 是 JSON.parse,
+ * 多出的字段它直接忽略;而 kx 的签名只覆盖 x25519 公钥 DER(见 verifyKxMessage),
+ * 加字段也不影响旧对端验签。中间人若剥离 caps,后果只是退回旧编码慢一点,无安全影响。
+ */
+export const CAP_BINARY1 = 'binary1';
+
+/** 本机支持的全部能力(随版本追加;空数组 = 什么都不宣告)。 */
+export const PEER_CAPS: readonly string[] = [CAP_BINARY1];
+
 /** 握手第二阶段的密钥交换消息:携带 X25519 公钥及其 Ed25519 签名。 */
 export interface KxMessage {
   type: 'kx';
@@ -61,6 +72,11 @@ export interface KxMessage {
    * 反向主动重连对端(无需手动配置对端地址)。旧版对端不发送此字段时为 undefined。
    */
   listenPort?: number;
+  /**
+   * 可选:本机能力标签(见 PEER_CAPS)。缺省 = 旧版对端,按「无能力」处理,
+   * 数据面一律走兼容编码(文本 JSON + 双层 base64)。
+   */
+  caps?: string[];
 }
 
 export function encodeKxMessage(kx: KxMessage): string {
@@ -74,11 +90,13 @@ export function decodeKxMessage(raw: string): KxMessage {
 /**
  * 构造并签名一个 kx 消息:用设备 Ed25519 私钥绑定本次会话的 X25519 公钥,
  * 防止中间人替换密钥。listenPort 可选,携带本机 peer 监听端口用于反向发现。
+ * caps 缺省宣告本机全部能力(见 PEER_CAPS);签名只盖 X25519 DER,新增字段不破旧。
  */
 export function buildKxMessage(
   x25519Pair: X25519KeyPair,
   ed25519PrivateKeyPem: string,
   listenPort?: number,
+  caps: readonly string[] = PEER_CAPS,
 ): KxMessage {
   const der = x25519PublicDer(x25519Pair.publicKeyPem);
   return {
@@ -86,6 +104,7 @@ export function buildKxMessage(
     x25519: der.toString('base64'),
     sig: signChallenge(ed25519PrivateKeyPem, der).toString('base64'),
     ...(typeof listenPort === 'number' ? { listenPort } : {}),
+    ...(caps.length > 0 ? { caps: [...caps] } : {}),
   };
 }
 

@@ -107,6 +107,15 @@ export async function tryDeviceRoutes(
           return true;
         }
       }
+      // 全局时段是规则数组(兼容旧字符串形态);不接受任意对象 —— 否则前端一个笔误
+      // 就会被 normalize 成「清除」,把用户设置的时段静默关掉
+      if ('syncSchedule' in body) {
+        const v = body.syncSchedule;
+        if (v !== null && v !== undefined && typeof v !== 'string' && !Array.isArray(v)) {
+          sendJson(res, 400, { error: 'syncSchedule must be a rule array or legacy "HH:MM-HH:MM" string, or null to clear' });
+          return true;
+        }
+      }
       setGlobalSettings({
         ...(('maxSendKbps' in body) ? { maxSendKbps: body.maxSendKbps === null ? null : Number(body.maxSendKbps) } : {}),
         ...(('versionsPerPath' in body) ? { versionsPerPath: body.versionsPerPath === null ? null : Number(body.versionsPerPath) } : {}),
@@ -117,6 +126,18 @@ export async function tryDeviceRoutes(
         ...(('pauseOnLowBattery' in body) ? { pauseOnLowBattery: body.pauseOnLowBattery === null ? null : Boolean(body.pauseOnLowBattery) } : {}),
         ...(('batteryPauseThreshold' in body) ? { batteryPauseThreshold: body.batteryPauseThreshold === null ? null : Number(body.batteryPauseThreshold) } : {}),
         ...(('shareEnabled' in body) ? { shareEnabled: body.shareEnabled === null ? null : body.shareEnabled === true } : {}),
+        // 时段与日历三项:syncSchedule 是规则数组(或旧的字符串形态),null = 清除;
+        // 逐字段显式转发的写法意味着「新增设置项必须在这里补一行」,否则请求 200 却静默无效
+        ...(('syncSchedule' in body)
+          ? {
+              syncSchedule:
+                body.syncSchedule === null || typeof body.syncSchedule === 'string' || Array.isArray(body.syncSchedule)
+                  ? body.syncSchedule
+                  : undefined,
+            }
+          : {}),
+        ...(('holidayAutoFetch' in body) ? { holidayAutoFetch: body.holidayAutoFetch === null ? null : body.holidayAutoFetch !== false } : {}),
+        ...(('holidaySourceUrl' in body) ? { holidaySourceUrl: body.holidaySourceUrl === null ? null : String(body.holidaySourceUrl) } : {}),
       });
       sendJson(res, 200, { ok: true });
     } catch (e) {

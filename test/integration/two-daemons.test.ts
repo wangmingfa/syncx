@@ -725,6 +725,12 @@ interface StatusResponse {
   syncProgress?: Array<{ folder: string; pending: number; sending: number; receiving: number }>;
   /** 全局暂停同步开关(未暂停时为 false)。 */
   paused?: boolean;
+  /** 目录列表(需要其中的 id / paused 字段验证「手动暂停优先于放行」)。 */
+  folders?: Array<{ id?: string; path: string; paused?: boolean }>;
+  /** 每目录的时段结论(key = folderId)。 */
+  scheduleStates?: Record<string, { inside: boolean; overridden?: boolean; blockedBy?: string }>;
+  /** 顶部横幅状态。 */
+  scheduleBanner?: { visible: boolean; blockedBySchedule: number; total: number; overrideUntil?: number };
 }
 
 /** 携带落盘令牌调用 daemon 控制 API 的 POST 端点(JSON body)。 */
@@ -1041,6 +1047,87 @@ describe('learned peer address bookkeeping (stale replacement + self identity)',
       rmDir(twin.dir);
     },
     60000,
+  );
+});
+
+describe('global schedule gate, banner and temporary override', () => {
+  /** 一个「不含当前时刻」的全局窗口:此刻 2 小时后才开的 30 分钟窗口。 */
+  function windowExcludingNow(): { from: number; to: number } {
+    const now = new Date();
+    const mins = now.getHours() * 60 + now.getMinutes();
+    const start = (mins + 120) % 1440;
+    return { from: start, to: (start + 30) % 1440 };
+  }
+
+  /** 异步轮询状态直到满足条件(waitFor 是同步谓词,这里要发请求)。 */
+  async function waitStatus(
+    setup: DaemonSetup,
+    predicate: (s: StatusResponse) => boolean,
+    timeoutMs = 20000,
+  ): Promise<StatusResponse> {
+    const start = Date.now();
+    for (;;) {
+      const s = await getStatus(setup);
+      if (predicate(s)) return s;
+      if (Date.now() - start > timeoutMs) throw new Error('timed out waiting for status condition');
+      await new Promise((r) => setTimeout(r, 250));
+    }
+  }
+
+  it(
+    'global window gates every folder, the banner explains it, and an override reopens the data plane',
+    async () => {
+      const a = await setupDaemon('a', [{ path: 'doc.txt', content: Buffer.from('schedule gate') }]);
+      const b = await setupDaemon('b', []);
+      startDaemon(b, [`ws://127.0.0.1:${a.peerPort}`], [a.deviceId]);
+      await waitForDaemonReady(b);
+      startDaemon(a, [`ws://127.0.0.1:${b.peerPort}`], [b.deviceId]);
+      await waitForDaemonReady(a);
+      await waitFor(() => existsSync(join(b.share, 'doc.txt')));
+
+      const folderKeyOf = (s: StatusResponse): string => Object.keys(s.scheduleStates ?? {})[0] ?? '';
+
+      // 装上不含此刻的全局窗口 → 目录被判「窗口外」,横幅出现且点名是全局挡的
+      const w = windowExcludingNow();
+      await postControl(a, '/api/settings', { syncSchedule: [{ days: { kind: 'any' }, windows: [w] }] });
+      const blocked = await waitStatus(a, (s) => Object.values(s.scheduleStates ?? {}).every((v) => v.inside === false));
+      expect(blocked.scheduleBanner?.visible).toBe(true);
+      expect(blocked.scheduleBanner?.blockedBySchedule).toBe(1);
+      expect(blocked.scheduleStates?.[folderKeyOf(blocked)]?.blockedBy).toBe('global');
+
+      // 临时放行:同时解开全局与目录两层;横幅保留(带倒计时与取消入口)
+      await postControl(a, '/api/schedule/override', { minutes: 30 });
+      const released = await waitStatus(a, (s) => Object.values(s.scheduleStates ?? {}).every((v) => v.inside === true));
+      expect(released.scheduleStates?.[folderKeyOf(released)]?.overridden).toBe(true);
+      expect((released.scheduleBanner?.overrideUntil ?? 0)).toBeGreaterThan(Date.now());
+      expect(released.scheduleBanner?.visible).toBe(true);
+
+      // 取消放行 → 立刻回到窗口外
+      await postControl(a, '/api/schedule/override', { minutes: 0 });
+      const reblocked = await waitStatus(a, (s) => Object.values(s.scheduleStates ?? {}).every((v) => v.inside === false));
+      expect(reblocked.scheduleBanner?.overrideUntil).toBeUndefined();
+
+      // 手动暂停与时段互不覆盖。先只手动暂停(不放行):目录确实不活动,但横幅不该把
+      // 这件事说成「因时段而停」—— blockedBySchedule 为 0,visible 也就该是 false
+      await postControl(a, '/api/folders/pause', { folderId: reblocked.folders?.[0]?.id ?? '', paused: true });
+      const manual = await waitStatus(a, (s) => s.folders?.[0]?.paused === true);
+      expect(manual.scheduleBanner?.visible).toBe(false);
+      expect(manual.scheduleBanner?.blockedBySchedule).toBe(0);
+
+      // 再放行:时段这一层解开,但目录的手动暂停仍压着 —— 放行不越过用户明确的「不要同步」
+      await postControl(a, '/api/schedule/override', { minutes: 30 });
+      const both = await waitStatus(a, (s) => Object.values(s.scheduleStates ?? {}).some((v) => v.overridden === true));
+      expect(both.folders?.[0]?.paused).toBe(true);
+      // 横幅此刻留着只是因为「放行中」要显示倒计时与取消,而不是因为时段挡住了什么
+      expect(both.scheduleBanner?.visible).toBe(true);
+      expect(both.scheduleBanner?.blockedBySchedule).toBe(0);
+      await postControl(a, '/api/schedule/override', { minutes: 0 });
+
+      await stopChildren();
+      rmDir(a.dir);
+      rmDir(b.dir);
+    },
+    90000,
   );
 });
 

@@ -19,7 +19,9 @@ import { randomBytes } from 'node:crypto';
 import type { Logger } from 'pino';
 import { WebSocket } from 'ws';
 
-import { loadConfig, mutateConfig, folderIdFor, folderIndexKey, folderIndexPath, folderTrashPath, folderVersionsPath, purgeFolderIndex, isWithinSchedule, isUnderDirPrefix, type FolderIdentity, type GitCommitPendingRecord, type SharedFolderConfig, type GitSyncMode, type ConflictPolicy } from './config.js';
+import { loadConfig, mutateConfig, folderIdFor, folderIndexKey, folderIndexPath, folderTrashPath, folderVersionsPath, purgeFolderIndex, isUnderDirPrefix, type FolderIdentity, type GitCommitPendingRecord, type SharedFolderConfig, type GitSyncMode, type ConflictPolicy } from './config.js';
+import { nextScheduleChangeAt, withinSchedule, formatScheduleSummary, type Schedule } from './schedule.js';
+import type { HolidayStore } from './holidays.js';
 import { acceptedDevs, checkFolderIdentity, readFolderIdentity, withAcceptedDev } from './folder-identity.js';
 import { openIndexStore, type IndexStore } from './indexstore.js';
 import { createLocalExecutor, resolveSharePath, type LocalExecutor } from './executor.js';
@@ -59,17 +61,29 @@ import { learnPeerUrl, learnPeerIp, getLanAddresses } from './net/addresses.js';
 import { e2eKeyForPeer, wrapTransportBlind } from './e2e.js';
 import { hostname as osHostname } from 'node:os';
 import { RateLimiter } from './ratelimit.js';
-import { isPeerAllowed, addPeer, removePeer, setFolderPaused, setGlobalPaused, setFolderSchedule as persistFolderSchedule, setFolderGitSync as persistFolderGitSync, setFolderConflictPolicy as persistFolderConflictPolicy, setFolderOnDemand as persistFolderOnDemand, setFolderOnDemandDir as persistFolderOnDemandDir, setFolderPausedFile as persistFolderPausedFile, setFolderE2E as persistFolderE2E, setFolderGitLastCommitHash, setFolderGitRelayPending, setFolderGitBroadcastPending, setGlobalSettings as persistGlobalSettings, type GlobalSettingsPatch, type FolderE2EPatch } from './devices.js';
+import { isPeerAllowed, addPeer, removePeer, setFolderPaused, setGlobalPaused, setFolderSchedule as persistFolderSchedule, setFolderGitSync as persistFolderGitSync, setFolderConflictPolicy as persistFolderConflictPolicy, setFolderOnDemand as persistFolderOnDemand, setFolderOnDemandDir as persistFolderOnDemandDir, setFolderPausedFile as persistFolderPausedFile, setFolderE2E as persistFolderE2E, setFolderGitLastCommitHash, setFolderGitRelayPending, setFolderGitBroadcastPending, setGlobalSettings as persistGlobalSettings, setScheduleOverride as persistScheduleOverride, setCalendarOverride as persistCalendarOverride, type GlobalSettingsPatch, type FolderE2EPatch } from './devices.js';
 import { receiveOffer, makeOfferId, pruneRevokedOffers } from './offers.js';
 import { OfferRetryLedger, type TrackedOffer } from './net/offer-retry.js';
 import type { DeviceIdentity } from './identity.js';
-import type { ProgressCounts, RelayActivity, TransferFile } from './status.js';
+import type { ProgressCounts, RelayActivity, TransferFile, ScheduleState } from './status.js';
 import { isBundledRuntime, packSelfTgz, runSelfUpdate, runtimeVersion, sha256Hex } from './selfupdate.js';
 import { compareVersions } from './upgrade.js';
 import { NETWORK_OFFLINE_BACKOFF_MS, offlineAwareReconnectDelay, reconnectDelayMs } from './args.js';
 import { hasRoutableInterface } from './net/offline-probe.js';
 import { isSelfPeerUrl, localInterfaceAddresses } from './net/peer-address.js';
+import { CAP_BINARY1 } from './handshake.js';
 import { isGitRepo, getLastCommitHash, getCommitInfo, hasUncommittedChanges, autoCommit, type CommitInfo } from './git-monitor.js';
+
+/** scheduleVerdictFor 的结论:此刻该不该同步、被哪一层挡住、下一个边界何时。 */
+export interface ScheduleVerdict {
+  inside: boolean;
+  /** 临时放行生效中(此时不做任何时段判定)。 */
+  overridden?: boolean;
+  /** 挡住它的是全局闸门还是目录自己的设置(供文案点名)。 */
+  blockedBy?: 'global' | 'folder';
+  /** 下一次时段状态可能翻转的时刻(ms);undefined = 无约束。 */
+  nextChangeAt?: number;
+}
 
 /** 对端 git 提交通知的消息形状(入队、结算、中继共用一份)。 */
 type GitCommitNotifyMsg = Extract<ControlMessage, { kind: 'git-commit-notify' }>;
@@ -268,6 +282,12 @@ export interface ActiveSession {
   /** 对端宣告的「仍待确认的、来自本机的目录邀请 id 集合」(folder-sync-list)。
    *  空/缺失时 UI 退回「已停止共享」的旧判断。 */
   remotePendingFolders?: Set<string>;
+  /**
+   * 对端在 kx 中宣告的能力标签(见 handshake.ts PEER_CAPS)。挂**会话**而非 deviceId:
+   * 同一设备可能有两双向连接各自握手,能力按连接各算各的。undefined/缺项 = 旧版对端,
+   * 本会话数据面走文本 JSON 兼容编码。
+   */
+  peerCaps?: string[];
 }
 
 export interface DeviceLinkInfo {
@@ -452,6 +472,11 @@ export interface SessionManagerDeps {
    * 补一轮 mDNS 广播+查询,不等下一个 30s tick。离线翻转不回调(mDNS 是门控暂停)。
    */
   onNetworkRecovered?: () => void;
+  /**
+   * 节假日日历(见 holidays.ts):时段规则里的「工作日/休息日」据此判定。
+   * 不注入 = 按星期几退化。判定路径只在内存里查,永不触网。
+   */
+  holidays?: HolidayStore;
 }
 
 export class SyncSessionManager {
@@ -635,8 +660,22 @@ export class SyncSessionManager {
    * 改值后由 rebuildExecutors 重建全部执行器生效。
    */
   private versionsPerPath?: number;
-  /** 各配置时段目录最近一次观察的「窗口内」状态(folderId → bool),供边界巡检识别翻转。 */
-  private scheduleInside = new Map<string, boolean>();
+  /** 各配置时段目录最近一次观察的「数据面是否应活动」签名,供边界巡检识别翻转。 */
+  private scheduleSignature = '';
+  /**
+   * 全局同步时段(config.syncSchedule 的内存镜像):与目录时段是**交集** —— 全局是这台
+   * 机器的硬闸门(省电/省流量的纪律),目录只能在其内再收窄,不能反向放宽。
+   */
+  private syncSchedule?: Schedule;
+  /** 临时放行的到期时刻(ms);到点由巡检节拍收回。只解时段,不解手动暂停与电源守卫。 */
+  private scheduleOverrideUntil?: number;
+  /** 节假日日历(注入;缺省 = 无日历,「工作日」退化为按星期几判,见 scheduleVerdictFor)。 */
+  private readonly holidays?: HolidayStore;
+  /**
+   * 下一个时段边界的精确定时器:60s 巡检的粒度太粗(边界最多延迟一分钟生效,且放行到期
+   * 会「多开几分钟」),这里按算出的 nextChangeAt 挂一次性 timer 准点醒来。unref,不拖退出。
+   */
+  private scheduleWake?: NodeJS.Timeout;
   /** 同步时段边界巡检定时器(见 checkScheduleTransitions)。 */
   private scheduleTimer?: NodeJS.Timeout;
   /**
@@ -659,6 +698,7 @@ export class SyncSessionManager {
     this.emitWebhook = deps.onWebhookEvent ?? ((): void => {});
     this.probeNetwork = deps.probeNetwork ?? hasRoutableInterface;
     this.onNetworkRecovered = deps.onNetworkRecovered;
+    this.holidays = deps.holidays;
     // drift 哨兵本地巡检的旋钮:构造时读一次,与 peer 侧建管线时读的是同一对环境变量
     const driftKnobs = readDriftKnobs();
     this.driftSampleN = driftKnobs.sampleN;
@@ -668,6 +708,8 @@ export class SyncSessionManager {
     this.globalPaused = bootConfig.paused === true;
     this.maxSendKbps = bootConfig.maxSendKbps;
     this.versionsPerPath = bootConfig.versionsPerPath;
+    this.syncSchedule = bootConfig.syncSchedule;
+    this.scheduleOverrideUntil = bootConfig.scheduleOverrideUntil;
     setHistoryMaxEvents(bootConfig.historyMaxEvents);
     this.folderStates = initialFolders.map((f) => this.createFolderState(f));
     // 启动即探一次:带着关掉的 WiFi 起的 daemon 直接进离线形态(退避拉长/mDNS 停发),
@@ -678,9 +720,12 @@ export class SyncSessionManager {
   }
 
   /**
-   * 启动同步时段边界巡检:每分钟核对一次配置了 schedule 的目录是否跨过窗口边界,
-   * 翻转时统一对账(出窗口摘数据通道、进窗口重挂 + 补扫)。与 paused 的生效路径一致,
-   * 巡检间隔 60s 意味着边界最多延迟一分钟生效 —— 对「时段同步」的粒度足够。
+   * 时段巡检:每分钟核对一次「各目录此刻该不该活动 + 临时放行是否到期」,状态签名变了
+   * 就统一对账(出窗口摘数据通道、进窗口重挂 + 补扫)。
+   *
+   * 固定 60s 节拍之外,还会按算出的**最近边界时刻**挂一次性定时器准点醒来(见
+   * armScheduleWake)—— 边界远于两个节拍时不必挂精确定时器,60s 兜底足矣;但「临时
+   * 放行到期」晚一分钟收就等于多放行一分钟,那条必须准点。
    */
   private startScheduleTicker(): void {
     this.scheduleTimer = setInterval(() => {
@@ -688,31 +733,155 @@ export class SyncSessionManager {
       this.checkScheduleTransitions();
     }, 60_000);
     this.scheduleTimer.unref?.();
+    // 先跑一次登记基线签名:否则启动后第一次巡检会被当成「翻转」,凭空对账 + 补扫
+    this.checkScheduleTransitions();
   }
 
-  /** 核对全部时段目录,发现窗口翻转即对账 + 补扫;首次观察只登记不触发。 */
-  private checkScheduleTransitions(): void {
-    let flipped = false;
-    for (const folder of this.folderStates) {
-      const s = folder.config.schedule;
-      if (!s) continue;
-      const inside = isWithinSchedule(s);
-      const prev = this.scheduleInside.get(folder.id);
-      if (prev === undefined) {
-        // 首次观察只登记:启动 / 新建目录时 reconcile 已按实时时段对过账,无「翻转」可言
-        this.scheduleInside.set(folder.id, inside);
-        continue;
-      }
-      if (prev !== inside) {
-        this.scheduleInside.set(folder.id, inside);
-        flipped = true;
-        this.logger.info(`folder schedule ${inside ? 'window opened' : 'window closed'}: ${folder.id} (${s})`);
-      }
+  /** 当前生效的临时放行到期时刻(ms);未在放行中 = undefined。 */
+  scheduleOverrideUntilAt(now: number = Date.now()): number | undefined {
+    return this.scheduleOverrideActive(now) ? this.scheduleOverrideUntil : undefined;
+  }
+
+  /** 此刻是否处于临时放行中(只豁免时段约束,手动暂停与电源守卫照旧生效)。 */
+  private scheduleOverrideActive(nowMs: number): boolean {
+    return this.scheduleOverrideUntil !== undefined && this.scheduleOverrideUntil > nowMs;
+  }
+
+  /**
+   * 单个目录此刻的时段结论。全局与目录时段取**交集**(全局是硬闸门),任一在窗口外即
+   * 不活动,并给出「被谁挡住」与下一个边界时刻(横幅/徽标据此写「23:00 自动恢复」)。
+   * 临时放行期间一律视为窗口内(同时解开全局与目录两层)。
+   * 「工作日/休息日」按注入的节假日日历判;没有日历数据时退化为按星期几,绝不为
+   * 「拉不到节假日接口」把目录锁死(见 holidays.ts 的三条硬约束)。
+   */
+  scheduleVerdictFor(folder: FolderState, now: Date = new Date()): ScheduleVerdict {
+    if (this.scheduleOverrideActive(now.getTime())) return { inside: true, overridden: true };
+    const holidays = this.holidays;
+    const isWorkday = holidays ? (d: Date): boolean => holidays.isWorkday(d) : undefined;
+    const globalNext = nextScheduleChangeAt(this.syncSchedule, now, isWorkday);
+    const folderNext = nextScheduleChangeAt(folder.config.schedule, now, isWorkday);
+    if (!withinSchedule(this.syncSchedule, now, isWorkday)) {
+      return { inside: false, blockedBy: 'global', nextChangeAt: globalNext ?? folderNext };
     }
+    if (!withinSchedule(folder.config.schedule, now, isWorkday)) {
+      return { inside: false, blockedBy: 'folder', nextChangeAt: folderNext ?? globalNext };
+    }
+    const both = [globalNext, folderNext].filter((x): x is number => x !== undefined);
+    return { inside: true, nextChangeAt: both.length > 0 ? Math.min(...both) : undefined };
+  }
+
+  /** 核对状态签名,变了就对账 + 补扫;同时挂好下一次精确唤醒。 */
+  private checkScheduleTransitions(): void {
+    const now = new Date();
+    let signature = this.scheduleOverrideActive(now.getTime()) ? 'override' : '';
+    let earliest: number | undefined;
+    const consider = (at: number | undefined): void => {
+      if (at !== undefined && (earliest === undefined || at < earliest)) earliest = at;
+    };
+    for (const folder of this.folderStates) {
+      const v = this.scheduleVerdictFor(folder, now);
+      signature += `|${folder.id}:${v.inside ? 1 : 0}`;
+      consider(v.nextChangeAt);
+    }
+    consider(this.scheduleOverrideUntil);
+
+    // 首轮只登记基线(启动时 reconcile 已按实时状态对过账),不触发对账
+    const flipped = this.scheduleSignature !== '' && signature !== this.scheduleSignature;
+    this.scheduleSignature = signature;
+    this.armScheduleWake(earliest);
     if (!flipped) return;
+    this.logger.info(`sync schedule window ${this.scheduleVerdictSummary(now)}`);
     this.applyPausedState();
     // 进入窗口:把停摆期间的本地改动扫出来广播(重挂通道只互发索引,新文件要靠扫描发现)
     void this.runScan();
+  }
+
+  /** 一次性精确唤醒:边界到点立刻重算,不等下一个 60s 节拍;远于两个节拍就不挂。 */
+  private armScheduleWake(at: number | undefined): void {
+    if (this.scheduleWake) {
+      clearTimeout(this.scheduleWake);
+      this.scheduleWake = undefined;
+    }
+    if (at === undefined || this.closed) return;
+    const delay = Math.max(at - Date.now(), 200);
+    if (delay > 2 * 60_000) return;
+    this.scheduleWake = setTimeout(() => {
+      this.scheduleWake = undefined;
+      if (!this.closed) this.checkScheduleTransitions();
+    }, delay);
+    this.scheduleWake.unref?.();
+  }
+
+  /** 日志用的一句话摘要:哪些目录被时段挡住、被谁挡。 */
+  private scheduleVerdictSummary(now: Date): string {
+    if (this.folderStates.length === 0) return '(无共享目录)';
+    return this.folderStates
+      .map((f) => {
+        const v = this.scheduleVerdictFor(f, now);
+        if (v.overridden) return `${f.id}=放行中`;
+        return v.inside ? `${f.id}=窗口内` : `${f.id}=窗口外(${v.blockedBy})`;
+      })
+      .join(' ');
+  }
+
+  /**
+   * 全部目录此刻的时段结论(folderId → state),供状态页下发。
+   * 判定只在后端做一份:前端只渲染这个结果 —— 曾经前后端各写一份 isWithinSchedule,
+   * 规则复杂化后必然漂移。
+   */
+  scheduleStates(now: Date = new Date()): Record<string, ScheduleState> {
+    const out: Record<string, ScheduleState> = {};
+    for (const folder of this.folderStates) {
+      const v = this.scheduleVerdictFor(folder, now);
+      out[folder.id] = {
+        inside: v.inside,
+        ...(v.overridden ? { overridden: true } : {}),
+        ...(v.blockedBy ? { blockedBy: v.blockedBy } : {}),
+        ...(v.nextChangeAt !== undefined ? { nextChangeAt: v.nextChangeAt } : {}),
+        summary: formatScheduleSummary(folder.config.schedule),
+      };
+    }
+    return out;
+  }
+
+  /**
+   * 顶部横幅的状态:什么时候该提示「当前不在同步时段内」。
+   * 刻意只在「没有任何目录在同步、且原因确实是时段」时出现 —— 多目录机器上「部分目录
+   * 在时段外」是常态,常驻横幅就成了噪音。手动暂停/电源守卫各有自己的提示,不混进来。
+   */
+  scheduleBannerState(now: Date = new Date()): {
+    visible: boolean;
+    blockedBySchedule: number;
+    total: number;
+    nextChangeAt?: number;
+    overrideUntil?: number;
+  } {
+    const total = this.folderStates.length;
+    let blockedBySchedule = 0;
+    let next: number | undefined;
+    let anyActive = false;
+    for (const f of this.folderStates) {
+      // 手动暂停 / 全局暂停 / 电源守卫各有各的徽标与文案,不记进时段的账:
+      // 否则「用户自己按了暂停」会被横幅说成「因为时段所以不同步」,归错因
+      if (this.globalPaused || this.powerGuardReason !== null || f.config.paused === true) continue;
+      const v = this.scheduleVerdictFor(f, now);
+      if (v.inside) {
+        anyActive = true;
+        continue;
+      }
+      blockedBySchedule++;
+      if (v.nextChangeAt !== undefined && (next === undefined || v.nextChangeAt < next)) next = v.nextChangeAt;
+    }
+    const overrideUntil = this.scheduleOverrideActive(now.getTime()) ? this.scheduleOverrideUntil : undefined;
+    return {
+      // 放行中必须继续显示:横幅此刻的内容是「剩余时间 + 一键取消」,收起就等于让用户
+      // 对着一个看不见的定时开关。其余情况:确有目录因时段停着、且没有任何目录在同步。
+      visible: overrideUntil !== undefined || (blockedBySchedule > 0 && !anyActive),
+      blockedBySchedule,
+      total,
+      nextChangeAt: next,
+      overrideUntil,
+    };
   }
 
   /**
@@ -1740,10 +1909,10 @@ export class SyncSessionManager {
     // 在途拨号,与正在关闭的进程竞争。
     if (this.closed) return;
     void connectPeer(this.identity, url, this.peerPort)
-      .then(({ socket, remoteDeviceId, key, takePendingFrames }) => {
+      .then(({ socket, remoteDeviceId, key, peerCaps, takePendingFrames }) => {
         opts.onConnected?.(remoteDeviceId);
         if (this.acceptPeer()) {
-          this.startSyncSession(socket, remoteDeviceId, key, url, takePendingFrames);
+          this.startSyncSession(socket, remoteDeviceId, key, url, takePendingFrames, peerCaps);
         }
       })
       .catch((error) => {
@@ -1841,7 +2010,12 @@ export class SyncSessionManager {
     // 限速取目录级配置,未配置落到全局 maxSendKbps 兜底(设置页可调)
     const kbps = folder.config.maxBandwidthKbps ?? this.maxSendKbps;
     const rateLimiter = kbps ? new RateLimiter(kbps) : undefined;
-    const rawTransport = makePeerTransport(session.socket, session.key, folder.id, rateLimiter);
+    // 数据面编码按**对端能力**现读(kx 协商来的 caps,挂在会话上):宣告 CAP_BINARY1 的
+    // 对端走二进制信封(块与索引不再套两层 base64,1 MB 块 ≈1 MB 上线),旧版对端保持
+    // 逐字节不变的文本 JSON。同目录挂多条连接时各自的谓词只认自己那条会话。
+    const rawTransport = makePeerTransport(session.socket, session.key, folder.id, rateLimiter, {
+      canSendBinary: () => session.peerCaps?.includes(CAP_BINARY1) === true,
+    });
     // 端到端加密(不可信对端):把 transport 包成密文视图壳 —— 本目录×该对端的**所有**索引
     // 宣告出口(挂接全量 / 扫描增量 / 中转转发)统一经它换路径换哈希;SyncPeer 拿同一份
     // 密钥,负责忽略盲区回推与「读明文→现场加密→密文供块」(见 e2e.ts)。
@@ -2945,6 +3119,7 @@ export class SyncSessionManager {
     key: Buffer,
     url?: string,
     takePendingFrames?: () => Buffer[],
+    peerCaps?: string[],
   ): void {
     // 同 deviceId 拒绝:两份安装共用了同一把 device.key(整目录拷贝配置是最常见成因),
     // 或本机在拨自己。这样的"对端"无法作为独立设备参与同步(索引永远与自身相等、配对与
@@ -2972,6 +3147,7 @@ export class SyncSessionManager {
       remoteDeviceId,
       peers: new Map<string, SyncPeer>(),
       transports: [],
+      peerCaps,
     };
     this.activeSessions.push(session);
     // 版本握手:双方各发一次 hello,设备卡显示对端版本、主机名与操作系统图标,并据此计算「可否从对方升级」
@@ -3109,7 +3285,13 @@ export class SyncSessionManager {
    * 入站连接入口(peer server 回调):授权恒通过;学习对端可达地址并持久化
    * (反向发现,重启后本机也能主动重连),然后建立同步会话。
    */
-  onInboundPeer(socket: WebSocket, remoteDeviceId: string, key: Buffer, listenPort?: number): void {
+  onInboundPeer(
+    socket: WebSocket,
+    remoteDeviceId: string,
+    key: Buffer,
+    listenPort?: number,
+    caps?: string[],
+  ): void {
     this.logger.debug(`inbound peer connected: ${remoteDeviceId}`);
     if (!this.acceptPeer()) return;
     // 连接方在握手 kx 中广播了监听端口:结合源 IP 拼出反向地址并交给 startSyncSession
@@ -3138,7 +3320,7 @@ export class SyncSessionManager {
         }
       }
     }
-    this.startSyncSession(socket, remoteDeviceId, key, learnedUrl);
+    this.startSyncSession(socket, remoteDeviceId, key, learnedUrl, undefined, caps);
   }
 
   /* ==================== 目录清单宣告与状态查询 ==================== */
@@ -3283,10 +3465,16 @@ export class SyncSessionManager {
 
   /**
    * 某目录此刻是否处于「数据面停摆」:目录自己的 paused、全局 paused 或
-   * 不在配置的同步时段内(见 config.isWithinSchedule),任一命中即停摆。
+   * 不在同步时段内(全局 ∩ 目录,见 scheduleVerdictFor),任一命中即停摆。
    */
   private folderPausedNow(folder: FolderState): boolean {
-    return this.globalPaused || this.powerGuardReason !== null || folder.config.paused === true || !isWithinSchedule(folder.config.schedule);
+    // 时段是「全局 ∩ 目录」的交集判定,临时放行期间一律视为窗口内(见 scheduleVerdictFor)
+    return (
+      this.globalPaused ||
+      this.powerGuardReason !== null ||
+      folder.config.paused === true ||
+      !this.scheduleVerdictFor(folder).inside
+    );
   }
 
   /**
@@ -3388,15 +3576,42 @@ export class SyncSessionManager {
    * 空串 = 清除(全天同步);非法格式由 devices.setFolderSchedule 拒绝(400)。
    * 出窗口立即摘通道,进窗口重挂并补扫 —— 与 paused 的生效路径完全一致。
    */
-  setFolderSchedule(folderId: string, schedule: string): void {
+  setFolderSchedule(folderId: string, schedule: Schedule | null): void {
     persistFolderSchedule(this.configPath, folderId, schedule);
     const folder = this.folderStates.find((f) => f.id === folderId);
     if (folder) {
-      folder.config.schedule = schedule.trim() || undefined;
-      this.scheduleInside.set(folder.id, isWithinSchedule(folder.config.schedule));
+      folder.config.schedule = schedule ?? undefined;
     }
     this.applyPausedState();
-    this.logger.info(`folder schedule updated: ${folderId} -> ${schedule.trim() || '(always)'}`);
+    // 设置变了立刻重算(下一分钟节拍也会兜住,但用户在界面上等的就是这一刻)
+    this.checkScheduleTransitions();
+    this.logger.info(`folder schedule updated: ${folderId} -> ${formatScheduleSummary(folder?.config.schedule)}`);
+  }
+
+  /**
+   * 临时放行时段约束(横幅上的「开 1 小时」):同时解开全局与目录两层,
+   * **不解**手动暂停与电源守卫。落的是到期时刻,所以重启后仍按同一时刻收回。
+   * minutes ≤ 0 = 取消放行。
+   */
+  setScheduleOverride(minutes: number): number | undefined {
+    const until = persistScheduleOverride(this.configPath, minutes);
+    this.scheduleOverrideUntil = until;
+    this.applyPausedState();
+    this.checkScheduleTransitions();
+    this.logger.info(
+      until === undefined
+        ? 'schedule override cleared; sync windows enforced again'
+        : `schedule override active until ${new Date(until).toLocaleString()} (${Math.round((until - Date.now()) / 60_000)} min)`,
+    );
+    return until;
+  }
+
+  /** 手动覆盖某天的日历身份(workday/holiday/null 撤销);覆盖优先于自动拉取的数据。 */
+  setCalendarOverride(date: string, type: 'workday' | 'holiday' | null): void {
+    persistCalendarOverride(this.configPath, date, type);
+    // 覆盖只影响「工作日」判定,重算一次即可让边界/挂起状态立即跟上
+    this.checkScheduleTransitions();
+    this.notifyStatus();
   }
 
   /**
@@ -3652,9 +3867,13 @@ export class SyncSessionManager {
     const next = loadConfig(this.configPath);
     this.maxSendKbps = next.maxSendKbps;
     this.versionsPerPath = next.versionsPerPath;
+    this.syncSchedule = next.syncSchedule;
+    this.scheduleOverrideUntil = next.scheduleOverrideUntil;
     setHistoryMaxEvents(next.historyMaxEvents);
     if (prevMaxSendKbps !== this.maxSendKbps) this.rebuildRateLimitedTransports();
     if (prevVersionsPerPath !== this.versionsPerPath) this.rebuildExecutors();
+    // 全局时段改了要立刻重算:改了设置的人期待的是「现在就生效」,不是下一分钟
+    this.checkScheduleTransitions();
     this.notifyStatus();
     this.logger.info(`global settings updated: ${JSON.stringify(patch)}`);
   }
@@ -3705,6 +3924,8 @@ export class SyncSessionManager {
       const prevVersionsPerPath = this.versionsPerPath;
       this.maxSendKbps = newConfig.maxSendKbps;
       this.versionsPerPath = newConfig.versionsPerPath;
+      this.syncSchedule = newConfig.syncSchedule;
+      this.scheduleOverrideUntil = newConfig.scheduleOverrideUntil;
       setHistoryMaxEvents(newConfig.historyMaxEvents);
       if (prevMaxSendKbps !== this.maxSendKbps) this.rebuildRateLimitedTransports();
       if (prevVersionsPerPath !== this.versionsPerPath) this.rebuildExecutors();
@@ -3717,7 +3938,6 @@ export class SyncSessionManager {
       for (const folder of this.folderStates) {
         if (!newFolderById.has(folder.id)) {
           this.logger.info(`config updated: removing shared folder ${folder.path}`);
-          this.scheduleInside.delete(folder.id);
           for (const session of this.activeSessions) {
             session.peers.delete(folder.id);
             session.transports = session.transports.filter((t) => t.folder.id !== folder.id);
@@ -3867,6 +4087,10 @@ export class SyncSessionManager {
     if (this.scheduleTimer) {
       clearInterval(this.scheduleTimer);
       this.scheduleTimer = undefined;
+    }
+    if (this.scheduleWake) {
+      clearTimeout(this.scheduleWake);
+      this.scheduleWake = undefined;
     }
     for (const timer of this.reconnectTimers.values()) clearTimeout(timer);
     this.reconnectTimers.clear();

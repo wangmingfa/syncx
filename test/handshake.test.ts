@@ -10,6 +10,7 @@ import {
   buildKxMessage,
   verifyKxMessage,
   decodeKxMessage,
+  CAP_BINARY1,
 } from '../src/handshake.js';
 import { connectPeer } from '../src/net/client.js';
 import { mkdtempSync } from 'node:fs';
@@ -142,6 +143,34 @@ describe('session key exchange', () => {
 
     const decoded = decodeKxMessage(JSON.stringify(kx));
     expect(decoded.listenPort).toBeUndefined();
+  });
+
+  it('announces capability labels without breaking the signature binding', () => {
+    const identity = makeKeypair();
+    const session = generateX25519KeyPair();
+
+    const kx = buildKxMessage(session, identity.privateKey, 22000);
+    // 缺省宣告本机全部能力(现在只有 binary1)
+    expect(kx.caps).toEqual([CAP_BINARY1]);
+
+    const decoded = decodeKxMessage(JSON.stringify(kx));
+    expect(decoded.caps).toEqual([CAP_BINARY1]);
+    // 关键:签名只盖 X25519 DER,多出的 caps 不影响旧对端验签
+    expect(verifyKxMessage(decoded, identity.publicKey)).toBe(session.publicKeyPem);
+  });
+
+  it('still verifies a legacy kx that carries no caps field (old peer → no capability)', () => {
+    const identity = makeKeypair();
+    const session = generateX25519KeyPair();
+
+    const kx = buildKxMessage(session, identity.privateKey, 22000, []);
+    expect(kx.caps).toBeUndefined(); // 空数组 = 干脆不发这个字段
+
+    // 手工拼一条旧版形态的 kx(只有 type/x25519/sig/listenPort)
+    const legacy = { type: 'kx', x25519: kx.x25519, sig: kx.sig, listenPort: 22000 };
+    const decoded = decodeKxMessage(JSON.stringify(legacy));
+    expect(decoded.caps).toBeUndefined();
+    expect(verifyKxMessage(decoded, identity.publicKey)).toBe(session.publicKeyPem);
   });
 });
 

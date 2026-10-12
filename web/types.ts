@@ -34,8 +34,11 @@ export interface FolderInfo {
   receiveOnly?: boolean;
   /** 该目录是否暂停同步:数据面停摆(不扫描/不广播/不接收),连接与配对照常。 */
   paused?: boolean;
-  /** 同步时段(HH:MM-HH:MM,支持跨午夜):仅该时段内同步;空/缺省 = 全天。 */
-  schedule?: string;
+  /** 同步时段:规则列表(见 src/schedule.ts),规则间满足任一即可;空/缺省 = 全天。
+   *  与全局时段取**交集**(全局是硬闸门,目录只能在其内再收窄)。 */
+  schedule?: Schedule;
+  /** 该目录此刻的时段结论(后端算好下发;前端只渲染,不再自己判定)。 */
+  scheduleState?: ScheduleState;
   /** git 提交同步模式;缺省 = 'off'(未启用)。仅当目录本身是 git 仓库时才有实际作用。 */
   gitSync?: GitSyncMode;
   /** 该目录当前是否为 git 仓库(daemon 每轮状态实时探测,与同步闸门同口径);
@@ -101,6 +104,54 @@ export interface FolderErrorItem {
   kind?: string;
 }
 
+/** 日期条件(与 src/schedule.ts 的 DayPredicate 一致)。 */
+export type DayPredicate =
+  | { kind: 'any' }
+  | { kind: 'workday' }
+  | { kind: 'offday' }
+  | { kind: 'dow'; days: number[] };
+
+/** 时间窗口,单位「当天第几分钟」;from > to 表示跨午夜,from === to 视为不设限。 */
+export interface ScheduleWindow {
+  from: number;
+  to: number;
+}
+
+/** 一条规则 = 日期条件 且 若干窗口;规则之间「满足任一即可」。 */
+export interface ScheduleRule {
+  days: DayPredicate;
+  windows: ScheduleWindow[];
+}
+
+export type Schedule = ScheduleRule[];
+
+/** 单个目录此刻的时段结论(后端算好下发)。 */
+export interface ScheduleState {
+  inside: boolean;
+  overridden?: boolean;
+  blockedBy?: 'global' | 'folder';
+  nextChangeAt?: number;
+  summary?: string;
+}
+
+/** 顶部横幅状态:是否该提示「当前不在同步时段」+ 何时恢复。 */
+export interface ScheduleBanner {
+  visible: boolean;
+  blockedBySchedule: number;
+  total: number;
+  nextChangeAt?: number;
+  overrideUntil?: number;
+}
+
+/** 节假日日历健康状况。 */
+export interface CalendarStatus {
+  year: number;
+  fetched: boolean;
+  fetchedAt?: number;
+  overrideCount: number;
+  lastError?: string;
+}
+
 export interface StatusData {
   deviceId: string;
   /** 本机运行版本;dev 态为 'dev'。 */
@@ -136,6 +187,14 @@ export interface StatusData {
   settings?: GlobalSettingsData;
   /** 电源守卫挂起原因(计费网络/低电量;非空时所有目录数据面被自动挂起;旧后端缺省 = null)。 */
   powerGuard?: string | null;
+  /** 是否在网(无非回环可用接口 = 离线;无网时重连退避拉长、mDNS 暂停;旧后端缺省 = 在线)。 */
+  networkOnline?: boolean;
+  /** 每目录此刻的时段结论(key = folderId ?? path;旧后端缺省)。 */
+  scheduleStates?: Record<string, ScheduleState>;
+  /** 顶部横幅:此刻是否该提示「因时段而不同步」。 */
+  scheduleBanner?: ScheduleBanner;
+  /** 节假日日历健康状况(设置页与横幅文案用)。 */
+  calendarStatus?: CalendarStatus;
   /** 局域网内 mDNS 发现、但尚未配对的设备(设备栏「附近发现的设备」;旧后端缺省)。 */
   discovered?: DiscoveredDevice[];
 }
@@ -224,6 +283,18 @@ export interface GlobalSettingsData {
   batteryPauseThreshold?: number;
   /** 分享链接总开关(默认关;开才允许创建免登录限时下载链接)。 */
   shareEnabled?: boolean;
+  /** 全局同步时段(硬闸门,与目录时段取交集);undefined = 全天。 */
+  syncSchedule?: Schedule;
+  /** 临时放行到期时刻(ms);undefined = 未放行。 */
+  scheduleOverrideUntil?: number;
+  /** 节假日自动拉取是否开启(undefined = 开)。 */
+  holidayAutoFetch?: boolean;
+  /** 当前生效的节假日源地址(含 {year} 占位)。 */
+  holidaySourceUrl?: string;
+  /** 默认节假日源地址(「恢复默认」用)。 */
+  holidaySourceDefault?: string;
+  /** 手动日历覆盖(日期 → workday/holiday)。 */
+  calendarOverrides?: Record<string, 'workday' | 'holiday'>;
 }
 
 /** GET /api/report/weekly 的响应(与后端 report.ts WeeklyReport 同形)。 */

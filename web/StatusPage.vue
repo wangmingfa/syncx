@@ -41,6 +41,7 @@ import ToastView from './components/ToastView.vue';
 import SettingsModal from './components/SettingsModal.vue';
 import ElevateGateModal from './components/ElevateGateModal.vue';
 import StatusTopbar from './components/StatusTopbar.vue';
+import ScheduleBanner from './components/ScheduleBanner.vue';
 import StatusPills from './components/StatusPills.vue';
 import OffersPanel from './components/OffersPanel.vue';
 import FolderList from './components/FolderList.vue';
@@ -215,6 +216,9 @@ provide(StatusContextKey, {
       :busy="busy"
       @upgrade="askSelfUpdate"
     />
+
+    <!-- 同步时段横幅:此刻因时段而不演示同步时出现(含恢复时刻与临时放行入口) -->
+    <ScheduleBanner />
 
     <!-- 概览胶囊 -->
     <StatusPills :status="status" />

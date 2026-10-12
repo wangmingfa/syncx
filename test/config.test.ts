@@ -3,7 +3,7 @@ import { existsSync, mkdtempSync, readFileSync, utimesSync, writeFileSync } from
 import { rmDir } from './helpers.js';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { loadConfig, mutateConfig, saveConfig, isValidSchedule, isWithinSchedule, type Config } from '../src/config.js';
+import { loadConfig, mutateConfig, saveConfig, type Config } from '../src/config.js';
 
 function tempDir(): string {
   return mkdtempSync(join(tmpdir(), 'syncx-config-'));
@@ -184,54 +184,43 @@ describe('mutateConfig (config lock + atomic save)', () => {
   });
 });
 
-describe('sync schedule', () => {
-  // 固定时刻用本地时间构造,与 isWithinSchedule 的 getHours/getMinutes 口径一致
-  function at(hour: number, minute: number): Date {
-    return new Date(2026, 0, 15, hour, minute);
+describe('sync schedule 的配置层(迁移与清洗)', () => {
+  // 时段判定本身搬到 test/schedule.test.ts(模型从字符串换成规则数组);
+  // 这里只钉「配置读写」这一层:旧形态迁移、坏值清洗、全局字段回退。
+  function writeConfig(body: unknown): string {
+    const path = join(tempDir(), 'config.json');
+    writeFileSync(path, JSON.stringify(body));
+    return path;
   }
 
-  it('validates schedule string shapes (HH:MM-HH:MM, tolerates spaces)', () => {
-    expect(isValidSchedule('22:00-08:00')).toBe(true);
-    expect(isValidSchedule(' 9:05-18:30 ')).toBe(true);
-    expect(isValidSchedule('0:00-23:59')).toBe(true);
-    // 形态正确即合法;from===to 交给 isWithinSchedule 按「全天」处理
-    expect(isValidSchedule('12:00-12:00')).toBe(true);
-    expect(isValidSchedule('')).toBe(false);
-    expect(isValidSchedule('22:00')).toBe(false);
-    expect(isValidSchedule('24:00-08:00')).toBe(false);
-    expect(isValidSchedule('12:60-13:00')).toBe(false);
-    expect(isValidSchedule('abc')).toBe(false);
-    expect(isValidSchedule('22:00-08:00-06:00')).toBe(false);
+  it('migrates the legacy "HH:MM-HH:MM" string into one unrestricted rule', () => {
+    const cfg = loadConfig(writeConfig({ sharedFolders: [{ path: '/a', devices: [], schedule: '22:00-08:00' }] }));
+    expect(cfg.sharedFolders[0]!.schedule).toEqual([{ days: { kind: 'any' }, windows: [{ from: 1320, to: 480 }] }]);
   });
 
-  it('treats empty or invalid schedules as all-day (fail-open)', () => {
-    expect(isWithinSchedule(undefined, at(12, 0))).toBe(true);
-    expect(isWithinSchedule('', at(12, 0))).toBe(true);
-    expect(isWithinSchedule('   ', at(12, 0))).toBe(true);
-    // 时段是节流手段而非安全边界:解析失败绝不锁死目录
-    expect(isWithinSchedule('25:00-08:00', at(12, 0))).toBe(true);
-    expect(isWithinSchedule('nonsense', at(12, 0))).toBe(true);
-    // from === to:区间为零,等价于全天
-    expect(isWithinSchedule('12:00-12:00', at(3, 0))).toBe(true);
+  it('drops garbage schedule values to "no constraint" instead of locking the folder', () => {
+    const cfg = loadConfig(
+      writeConfig({
+        sharedFolders: [{ path: '/a', devices: [], schedule: 'nonsense' }],
+        syncSchedule: [{ days: { kind: 'nope' }, windows: [{ from: 'abc', to: 10 }] }],
+      }),
+    );
+    expect(cfg.sharedFolders[0]!.schedule).toBeUndefined();
+    expect(cfg.syncSchedule).toBeUndefined();
   });
 
-  it('gates a same-day window with inclusive from and exclusive to', () => {
-    const s = '09:00-18:00';
-    expect(isWithinSchedule(s, at(9, 0))).toBe(true);
-    expect(isWithinSchedule(s, at(12, 30))).toBe(true);
-    expect(isWithinSchedule(s, at(17, 59))).toBe(true);
-    expect(isWithinSchedule(s, at(8, 59))).toBe(false);
-    expect(isWithinSchedule(s, at(18, 0))).toBe(false);
-  });
-
-  it('gates a cross-midnight window (22:00-08:00 spans two days)', () => {
-    const s = '22:00-08:00';
-    expect(isWithinSchedule(s, at(22, 0))).toBe(true);
-    expect(isWithinSchedule(s, at(23, 30))).toBe(true);
-    expect(isWithinSchedule(s, at(0, 0))).toBe(true);
-    expect(isWithinSchedule(s, at(7, 59))).toBe(true);
-    expect(isWithinSchedule(s, at(8, 0))).toBe(false);
-    expect(isWithinSchedule(s, at(12, 0))).toBe(false);
-    expect(isWithinSchedule(s, at(21, 59))).toBe(false);
+  it('keeps a well-formed global schedule and clamps nonsense override entries', () => {
+    const cfg = loadConfig(
+      writeConfig({
+        syncSchedule: [{ days: { kind: 'workday' }, windows: [{ from: '09:00', to: '18:00' }] }],
+        scheduleOverrideUntil: -5,
+        calendarOverrides: { '2026-10-01': 'holiday', 'bad-key': 'workday', '2026-10-02': 'someday' },
+        holidayAutoFetch: false,
+      }),
+    );
+    expect(cfg.syncSchedule).toEqual([{ days: { kind: 'workday' }, windows: [{ from: 540, to: 1080 }] }]);
+    expect(cfg.scheduleOverrideUntil).toBeUndefined();
+    expect(cfg.calendarOverrides).toEqual({ '2026-10-01': 'holiday' });
+    expect(cfg.holidayAutoFetch).toBe(false);
   });
 });

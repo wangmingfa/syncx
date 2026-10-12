@@ -2,6 +2,9 @@ import { existsSync, readdirSync, readFileSync, writeFileSync, renameSync, openS
 import { basename, join } from 'node:path';
 import { createHash, randomBytes } from 'node:crypto';
 import type { E2EKeyRecord } from './e2e.js';
+import { normalizeSchedule, type Schedule } from './schedule.js';
+import type { CalendarOverrides, DayType } from './holidays.js';
+import { isRealDateKey } from './holidays.js';
 
 /**
  * 共享根的目录身份指纹:根目录的 `dev` + `ino`,以十进制字符串存放。
@@ -97,12 +100,15 @@ export interface SharedFolderConfig {
    */
   paused?: boolean;
   /**
-   * 同步时段(目录设置弹窗),形如 `HH:MM-HH:MM`,支持跨午夜(如 `22:00-08:00`)。
-   * 仅在该时段内同步:时段外数据面停摆(与 paused 同语义:不扫描、不广播、
-   * 不挂传输通道),控制面照常;跨过窗口边界时由 daemon 的分钟级巡检自动摘/挂。
-   * 空/缺省 = 全天同步;格式非法按全天处理(绝不因配置笔误把目录锁死)。
+   * 同步时段(目录设置弹窗):若干条规则,规则间「满足任一即可」,每条 = 日期条件 且
+   * 时间窗口(见 schedule.ts)。仅在该时段内同步:时段外数据面停摆(与 paused 同语义:
+   * 不扫描、不广播、不挂传输通道),控制面照常;跨过窗口边界由分钟级巡检自动摘/挂。
+   * 空/缺省 = 全天同步;解析不出来的片段按全天处理(绝不因配置笔误把目录锁死)。
+   * 与**全局时段是交集**:全局是这台机器的硬闸门,目录只能在其内再收窄。
+   *
+   * 旧版本这里是 `"HH:MM-HH:MM"` 字符串,loadConfig 自动迁移成一条「不限日期」的规则。
    */
-  schedule?: string;
+  schedule?: Schedule;
   /**
    * Git 提交同步模式:当共享目录是 git 仓库时,检测本地提交并通知其他设备自动提交。
    * 接收侧在**本次提交的内容本地落齐后**才执行提交(控制面通知可能早于数据面块
@@ -462,6 +468,30 @@ export interface Config {
   pauseOnLowBattery?: boolean;
   /** 低电量挂起阈值(%),1–99;缺省 20。 */
   batteryPauseThreshold?: number;
+  /**
+   * 全局同步时段:这台机器的硬闸门。与目录级时段是**交集** —— 两者都允许才同步,
+   * 目录设置只能在全局窗口内再收窄,不能反向放宽(动机是省电/省流量:全局纪律不该
+   * 被某个目录的设置突破)。空/缺省 = 全天。
+   */
+  syncSchedule?: Schedule;
+  /**
+   * 临时放行(到期时刻 = 毫秒时间戳,落盘所以重启不失控):到期前**无视全部时段约束**
+   * (全局与目录一起解开)。它不解除手动暂停、也不解电源守卫 —— 那两个是用户明确的
+   * 「就是不要同步」与安全纪律,优先级高于时段便利性。
+   */
+  scheduleOverrideUntil?: number;
+  /**
+   * 节假日日历总开关:缺省/true = 允许后台拉取(判定路径永远只读缓存,不碰网络);
+   * false = 纯手动日历(只用 calendarOverrides)。
+   */
+  holidayAutoFetch?: boolean;
+  /** 节假日源地址模板,`{year}` 占位;缺省用 holidays.ts 的 DEFAULT_HOLIDAY_SOURCE。 */
+  holidaySourceUrl?: string;
+  /**
+   * 手动覆盖的日期 → 身份(公司放假与法定不一致时用)。优先级**高于**拉取到的数据,
+   * 所以「10-10 我们公司上班」写 workday 即可盖掉任何自动结果。键为 `YYYY-MM-DD`。
+   */
+  calendarOverrides?: CalendarOverrides;
 }
 
 export const DEFAULT_CONFIG: Config = {
@@ -510,37 +540,10 @@ export function normalizePeerList(peers: unknown): string[] {
   return out;
 }
 
-/** 同步时段的合法形态:`HH:MM-HH:MM`(小时/分钟允许一位数,如 `8:00-22:30`)。 */
-const SCHEDULE_RE = /^(\d{1,2}):(\d{2})-(\d{1,2}):(\d{2})$/;
-
-/** 校验同步时段字符串形态(供设置入口拒绝笔误,避免存进去才发现不生效)。 */
-export function isValidSchedule(schedule: string): boolean {
-  const m = SCHEDULE_RE.exec(schedule.trim());
-  if (!m) return false;
-  return Number(m[1]) <= 23 && Number(m[3]) <= 23 && Number(m[2]) <= 59 && Number(m[4]) <= 59;
-}
-
 /**
- * 某时刻是否处于同步时段内。规则:
- *  - 空/缺省 = 全天同步(返回 true);
- *  - 格式非法 = 全天同步 —— 时段是节流手段而非安全边界,解析失败按「不设限」处理,
- *    绝不因配置笔误把目录永久锁死;
- *  - `from === to` 视为零长度窗口,同样按全天处理(用户想要「只在某刻同步」没有意义);
- *  - 支持跨午夜(`22:00-08:00`):`from > to` 时落在两段任一即在窗口内。
- * 时段按 daemon 本机时区的墙上时间解释(用户填的就是自己看到的钟表时间)。
+ * 同步时段的判定与归一化一律在 schedule.ts(全局与目录共用一份,前端不再各留一份拷贝)。
+ * 这里只负责在 loadConfig 时把目录/全局字段清洗成 Schedule 规则,旧字符串自动迁移。
  */
-export function isWithinSchedule(schedule: string | undefined, now: Date = new Date()): boolean {
-  const s = schedule?.trim();
-  if (!s) return true;
-  const m = SCHEDULE_RE.exec(s);
-  if (!m || !isValidSchedule(s)) return true;
-  const from = Number(m[1]) * 60 + Number(m[2]);
-  const to = Number(m[3]) * 60 + Number(m[4]);
-  if (from === to) return true;
-  const cur = now.getHours() * 60 + now.getMinutes();
-  if (from < to) return cur >= from && cur < to;
-  return cur >= from || cur < to;
-}
 
 export function loadConfig(configPath: string): Config {
   if (!existsSync(configPath)) {
@@ -549,7 +552,11 @@ export function loadConfig(configPath: string): Config {
   const raw = readFileSync(configPath, 'utf8');
   const parsed = JSON.parse(raw) as Config;
   return {
-    sharedFolders: parsed.sharedFolders ?? [],
+    // 目录时段:旧字符串形态在加载时迁移成规则(与 peers 同一套「加载即自愈」手法)
+    sharedFolders: (parsed.sharedFolders ?? []).map((f) => ({
+      ...f,
+      schedule: normalizeSchedule(f.schedule as unknown),
+    })),
     // 加载时规范化 + 去重:旧版本遗留的 ::ffff: 形式条目自愈合并,不必手动清理 config.json
     peers: normalizePeerList(parsed.peers),
     knownDevices: parsed.knownDevices ?? [],
@@ -569,7 +576,35 @@ export function loadConfig(configPath: string): Config {
     pauseOnMeteredNetwork: parsed.pauseOnMeteredNetwork === true ? true : undefined,
     pauseOnLowBattery: parsed.pauseOnLowBattery === true ? true : undefined,
     batteryPauseThreshold: sanitizePercent(parsed.batteryPauseThreshold),
+    // 时段与日历:一律「坏值回退到不设限」,绝不让解析失败把目录锁死(见 schedule.ts 哲学)
+    syncSchedule: normalizeSchedule(parsed.syncSchedule),
+    scheduleOverrideUntil:
+      typeof parsed.scheduleOverrideUntil === 'number' && Number.isFinite(parsed.scheduleOverrideUntil) && parsed.scheduleOverrideUntil > 0
+        ? Math.floor(parsed.scheduleOverrideUntil)
+        : undefined,
+    // 自动拉取默认开:只有显式写 false 才关
+    holidayAutoFetch: parsed.holidayAutoFetch === false ? false : undefined,
+    holidaySourceUrl:
+      typeof parsed.holidaySourceUrl === 'string' && parsed.holidaySourceUrl.includes('{year}') && parsed.holidaySourceUrl.length <= 300
+        ? parsed.holidaySourceUrl.trim()
+        : undefined,
+    calendarOverrides: sanitizeCalendarOverrides(parsed.calendarOverrides),
   };
+}
+
+/** 清洗手动日历覆盖:只留合法日期与合法身份,条数截断到 400(够写很多年,又防手滑灌爆)。 */
+function sanitizeCalendarOverrides(raw: unknown): CalendarOverrides | undefined {
+  if (!raw || typeof raw !== 'object' || Array.isArray(raw)) return undefined;
+  const out: CalendarOverrides = {};
+  let n = 0;
+  for (const [k, v] of Object.entries(raw as Record<string, unknown>)) {
+    if (n >= 400) break;
+    if (!isRealDateKey(k)) continue;
+    if (v !== 'workday' && v !== 'holiday') continue;
+    out[k] = v as DayType;
+    n++;
+  }
+  return n > 0 ? out : undefined;
 }
 
 /**

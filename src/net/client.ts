@@ -15,6 +15,11 @@ export interface ConnectedPeer {
   /** AES-256-GCM 会话密钥(协商完成后可用)。 */
   key: Buffer;
   /**
+   * 对端在 kx 中宣告的能力标签(见 handshake.ts 的 PEER_CAPS)。
+   * undefined = 旧版对端不认识该字段:数据面一律走兼容编码。
+   */
+  peerCaps?: string[];
+  /**
    * 取走握手完成后、消息分发器挂上之前「抢先到达」的帧,并停止缓冲。
    *
    * 背景(偶发丢邀请的根因):服务端在 kx 应答的**同一 tick** 里还会连发
@@ -91,11 +96,13 @@ export function connectPeer(
         // 等待服务端的 kx 消息
         const onKx = (kxData: Buffer): void => {
           let peerX25519Pem: string;
+          let peerCaps: string[] | undefined;
           try {
-            peerX25519Pem = verifyKxMessage(
-              decodeKxMessage(kxData.toString('utf8')),
-              remotePublicKeyPem!,
-            );
+            const kxMsg = decodeKxMessage(kxData.toString('utf8'));
+            peerX25519Pem = verifyKxMessage(kxMsg, remotePublicKeyPem!);
+            // 对端能力(见 handshake.ts 的 PEER_CAPS):旧版对端不发 → undefined,
+            // 上层据此决定数据面走二进制信封还是兼容的文本 JSON + 双层 base64
+            peerCaps = Array.isArray(kxMsg.caps) ? kxMsg.caps : undefined;
           } catch (error) {
             settle();
             reject(error);
@@ -114,6 +121,7 @@ export function connectPeer(
             socket,
             remoteDeviceId,
             key: deriveSessionKey(sessionPair.privateKeyPem, peerX25519Pem),
+            peerCaps,
             takePendingFrames: () => {
               socket.off('message', bufferMessage);
               return pending.splice(0, pending.length);

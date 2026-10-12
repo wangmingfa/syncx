@@ -217,6 +217,8 @@ export function wrapTransportBlind(t: PeerTransport, key: Buffer, root: string):
     // 用展开保持**可选性** —— 内层不提供时这一项必须继续缺席,而不是谎报 0
     // (0 = 「永远有位置」,窗口就此失效)。
     ...(t.pendingOutboundBytes ? { pendingOutboundBytes: () => t.pendingOutboundBytes!() } : {}),
+    // 信封字节估算同理转交内层:编码口径(二进制/文本)由真实 transport 说了算
+    ...(t.estimatedWireBytes ? { estimatedWireBytes: (n: number) => t.estimatedWireBytes!(n) } : {}),
     ...(t.onOutboundSpace
       ? { onOutboundSpace: (cb: () => void) => t.onOutboundSpace!(cb) }
       : {}),

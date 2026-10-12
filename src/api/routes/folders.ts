@@ -56,7 +56,7 @@ export async function tryFolderRoutes(
   res: ServerResponse,
   deps: ControlServerDeps,
 ): Promise<boolean> {
-  const { addFolder, removeFolder, setFolderDevices, setFolderUseGitignore, setFolderPaused, setFolderFilePaused, setFolderSchedule, setFolderGitSync, setFolderConflictPolicy, setFolderE2E, setFolderOnDemand, setFolderOnDemandDir, prioritizeTransfer, materializeFile, getFolderIgnoreInfo, setFolderIgnoreLines, testFolderIgnore, reAdoptFolderIdentity, getFolderHistory, getGlobalHistory, getWeeklyReport, clearFolderHistory, listFolderConflicts, resolveFolderConflict, conflictFilePair, applyConflictMerge, cleanIdenticalConflicts, diffFolder, compareFolder, readFilePair, applyFileSync, listFolderVersions, restoreFolderVersion, deleteFolderVersion, getFolderVersionContent, rollbackFolder } = deps;
+  const { addFolder, removeFolder, setFolderDevices, setFolderUseGitignore, setFolderPaused, setFolderFilePaused, setFolderSchedule, setFolderGitSync, setFolderConflictPolicy, setFolderE2E, setFolderOnDemand, setFolderOnDemandDir, prioritizeTransfer, materializeFile, getFolderIgnoreInfo, setFolderIgnoreLines, testFolderIgnore, reAdoptFolderIdentity, getFolderHistory, getGlobalHistory, getWeeklyReport, clearFolderHistory, listFolderConflicts, resolveFolderConflict, conflictFilePair, applyConflictMerge, cleanIdenticalConflicts, diffFolder, compareFolder, readFilePair, applyFileSync, listFolderVersions, restoreFolderVersion, deleteFolderVersion, getFolderVersionContent, rollbackFolder, setScheduleOverride, setCalendarOverride, getCalendar } = deps;
   const path = req.url ? pathname(req.url) : '/';
 
   // Form POST /folders : add or (via _method=DELETE) remove a folder
@@ -156,7 +156,9 @@ export async function tryFolderRoutes(
   }
 
   // POST /api/folders/schedule { folderId, schedule } : 设置某目录的同步时段。
-  // schedule 形如 HH:MM-HH:MM(支持跨午夜);空串 = 清除(全天同步);非法格式 400。
+  // schedule 是规则数组(见 schedule.ts),兼容旧的 `HH:MM-HH:MM` 字符串;
+  // null/空 = 清除(全天同步)。结构不合法的片段由后端 normalizeSchedule 丢弃并回退
+  // 「不设限」—— 时段是节流手段,坏数据绝不把目录锁死。
   if (req.method === 'POST' && path === '/api/folders/schedule' && setFolderSchedule) {
     try {
       const raw = await readBody(req);
@@ -167,14 +169,72 @@ export async function tryFolderRoutes(
         sendJson(res, 400, { error: 'folderId is required' });
         return true;
       }
-      if (typeof schedule !== 'string') {
-        sendJson(res, 400, { error: 'schedule must be a string (HH:MM-HH:MM, or empty to clear)' });
+      if (schedule !== null && schedule !== undefined && typeof schedule !== 'string' && !Array.isArray(schedule)) {
+        sendJson(res, 400, { error: 'schedule must be a rule array (or legacy "HH:MM-HH:MM" string), null to clear' });
         return true;
       }
-      setFolderSchedule(folderId, schedule);
+      setFolderSchedule(folderId, schedule ?? null);
       sendJson(res, 200, { ok: true });
     } catch (e) {
       sendJson(res, 400, { error: e instanceof Error ? e.message : '设置同步时段失败' });
+    }
+    return true;
+  }
+
+  // POST /api/schedule/override { minutes } : 临时放行时段约束(全域生效,minutes ≤ 0 = 取消)。
+  // 只解时段,不解手动暂停与电源守卫;到期时刻落盘,重启不失控。
+  if (req.method === 'POST' && path === '/api/schedule/override' && setScheduleOverride) {
+    try {
+      const raw = await readBody(req);
+      const body = raw === '' ? {} : (JSON.parse(raw) as { minutes?: unknown });
+      const minutes = body.minutes;
+      if (typeof minutes !== 'number' || !Number.isFinite(minutes)) {
+        sendJson(res, 400, { error: 'minutes must be a number (<= 0 to cancel)' });
+        return true;
+      }
+      const until = setScheduleOverride(minutes);
+      sendJson(res, 200, { ok: true, until });
+    } catch (e) {
+      sendJson(res, 400, { error: e instanceof Error ? e.message : '临时放行失败' });
+    }
+    return true;
+  }
+
+  // POST /api/calendar/override { date, type } : 手动覆盖某天的日历身份(公司假 / 补班)。
+  // type = 'workday' | 'holiday' | null(撤销覆盖);覆盖优先于自动拉取的数据。
+  if (req.method === 'POST' && path === '/api/calendar/override' && setCalendarOverride) {
+    try {
+      const raw = await readBody(req);
+      const body = raw === '' ? {} : (JSON.parse(raw) as { date?: unknown; type?: unknown });
+      if (typeof body.date !== 'string') {
+        sendJson(res, 400, { error: 'date must be a string (YYYY-MM-DD)' });
+        return true;
+      }
+      if (body.type !== null && body.type !== 'workday' && body.type !== 'holiday') {
+        sendJson(res, 400, { error: "type must be 'workday' | 'holiday' | null" });
+        return true;
+      }
+      setCalendarOverride(body.date, body.type as 'workday' | 'holiday' | null);
+      sendJson(res, 200, { ok: true });
+    } catch (e) {
+      sendJson(res, 400, { error: e instanceof Error ? e.message : '日历覆盖失败' });
+    }
+    return true;
+  }
+
+  // GET /api/calendar?year=YYYY : 某年日历(自动拉取数据 + 手动覆盖),供日历面板渲染。
+  if (req.method === 'GET' && path === '/api/calendar' && getCalendar) {
+    try {
+      const url = new URL(req.url ?? '/', 'http://localhost');
+      const rawYear = url.searchParams.get('year');
+      const year = rawYear === null || rawYear === '' ? new Date().getFullYear() : Number(rawYear);
+      if (!Number.isInteger(year) || year < 1970 || year > 2100) {
+        sendJson(res, 400, { error: 'year must be an integer between 1970 and 2100' });
+        return true;
+      }
+      sendJson(res, 200, getCalendar(year));
+    } catch (e) {
+      sendJson(res, 400, { error: e instanceof Error ? e.message : '读取日历失败' });
     }
     return true;
   }

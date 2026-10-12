@@ -93,6 +93,8 @@ export interface StatusContext extends FolderDiffApi {
   prioritizeFile: (f: FolderInfo, path: string) => Promise<void>;
   /** 全局暂停/恢复同步:所有目录一起停摆,各目录自己的暂停状态独立保留。 */
   toggleGlobalPaused: (paused: boolean) => Promise<void>;
+  /** 临时放行时段约束(横幅上的「开 N 分钟」);minutes ≤ 0 = 取消放行。 */
+  setScheduleOverride: (minutes: number) => Promise<void>;
 
   // 邀请
   offerPaths: Record<string, string>;
