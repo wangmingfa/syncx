@@ -1418,10 +1418,12 @@ html[data-theme='dark'] .chip-menu__item--danger {
    `web/components/ModalCloseButton.vue`。这里**只留调用方自己的覆盖**:它们靠 `.modal.x`
    双类(0,2,0)压过外壳的单类(0,1,0),与文件顺序无关。 */
 
-/* 全局设置弹窗加宽(默认 520 → 620)。写成 `.modal.x` 双类是为了把特异度提到 (0,2,0),
-   压过外壳的 `.modal` 而**不依赖文件顺序** —— 与下面 .history-modal 那两条同一写法。 */
+/* 全局设置弹窗加宽(默认 520 → 720,用户要求 +100:多出的宽度用来做两列布局,
+   把短设置段左右排布以压缩弹窗高度,见 SettingsModal.vue 的 .settings-pair)。
+   写成 `.modal.x` 双类是为了把特异度提到 (0,2,0),压过外壳的 `.modal` 而**不依赖
+   文件顺序** —— 与下面 .history-modal 那两条同一写法。 */
 .modal.settings-modal {
-  max-width: 620px;
+  max-width: 720px;
 }
 
 /* 共享目录设置弹窗加宽(默认 520 → 720,用户要求 +200:六个设置段各带说明文字,

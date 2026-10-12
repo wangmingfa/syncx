@@ -178,157 +178,182 @@ async function onTestWebhook(): Promise<void> {
 </script>
 
 <template>
+  <!-- 布局:弹窗加宽到 720 后,八个设置段重组为「三组两列 + 两个通栏」以压缩高度。
+       配对原则是按段高就近平衡:三个数值项 + 分享链接都是「单控件 + 说明」的短段,
+       两两成对;电源守卫与节假日日历同为「开关 + 输入 + 说明」的感知类设置,配成一对;
+       Webhook(成对输入)与同步时段(排程编辑器)控件宽,保持通栏。
+       分享链接从弹窗末尾上移与历史记录配对,同步时段保持通栏、位置仅在 Webhook 之后。 -->
   <ModalShell :open="open" title="全局设置" description="对所有共享目录生效;目录级设置优先于这里的默认值" class="settings-modal" @close="emit('close')">
-    <div class="edit-section-label">发送带宽上限</div>
-    <n-input-number
-      v-model:value="maxSendKbps"
-      class="settings-input"
-      :min="0"
-      :step="512"
-      placeholder="不限速"
-      :disabled="busy"
-    >
-      <template #suffix>KB/s</template>
-    </n-input-number>
-    <p class="confirm-note-extra">
-      每个对端的发送速率上限(目录单独配置「maxBandwidthKbps」时不走这里)。
-      大文件同步占满 LAN 带宽时用它兜底;留空 = 不限速。
-    </p>
-
-    <div class="edit-section-label">每路径版本份数</div>
-    <n-input-number
-      v-model:value="versionsPerPath"
-      class="settings-input"
-      :min="1"
-      :step="1"
-      :placeholder="`默认 ${DEFAULT_VERSIONS}`"
-      :disabled="busy"
-    >
-      <template #suffix>份</template>
-    </n-input-number>
-    <p class="confirm-note-extra">
-      本机文件被对端覆盖前,旧内容会自动留档;同一路径超过这个份数时删最旧的。
-      留空 = 默认 {{ DEFAULT_VERSIONS }} 份。
-    </p>
-
-    <div class="edit-section-label">历史记录保留上限</div>
-    <n-input-number
-      v-model:value="historyMaxEvents"
-      class="settings-input"
-      :min="1"
-      :step="500"
-      :placeholder="`默认 ${DEFAULT_HISTORY}`"
-      :disabled="busy"
-    >
-      <template #suffix>条 / 目录</template>
-    </n-input-number>
-    <p class="confirm-note-extra">每个目录最多保留多少条同步记录,超出后丢弃最旧的。留空 = 默认 {{ DEFAULT_HISTORY }} 条。</p>
-
-    <div class="edit-section-label">同步事件 Webhook</div>
-    <n-input
-      v-model:value="webhookUrl"
-      class="settings-input"
-      placeholder="https://… 留空 = 关闭通知"
-      :disabled="busy"
-      clearable
-    />
-    <n-input
-      v-model:value="webhookSecret"
-      class="settings-input"
-      :placeholder="secretAlreadySet && !secretCleared ? '已设置(留空保持不变)' : '可选:签名密钥'"
-      type="password"
-      show-password-on="click"
-      :disabled="busy"
-    />
-    <p class="confirm-note-extra">
-      同步完成、出现冲突、目录持续出错时向该地址推送一条通知;飞书机器人地址自动按其格式发送,其余地址为 JSON。
-      目录出错只在错误内容变化时推送一次,不会每轮重复打扰。
-      <template v-if="secretAlreadySet && !secretCleared">
-        密钥已保存,不回显;输入新值可覆盖,或
-        <button type="button" class="settings-link" @click="secretCleared = true; webhookSecret = ''">清除已存密钥</button>。
-      </template>
-      <template v-else-if="secretCleared">密钥将被清除。</template>
-    </p>
-    <n-button size="small" :loading="testingWebhook" :disabled="busy" @click="onTestWebhook">发送测试消息</n-button>
-
-    <div class="edit-section-label">计费网络 / 电池感知(仅 Windows)</div>
-    <n-checkbox v-model:checked="pauseOnMeteredNetwork" class="settings-checkbox" :disabled="busy">检测到计费网络时自动挂起同步</n-checkbox>
-    <n-checkbox v-model:checked="pauseOnLowBattery" :disabled="busy" class="settings-checkbox">用电池且电量过低时自动挂起同步</n-checkbox>
-    <n-input-number
-      v-model:value="batteryPauseThreshold"
-      class="settings-input"
-      :min="1"
-      :max="99"
-      :step="5"
-      :placeholder="`默认 ${DEFAULT_BATTERY_THRESHOLD}`"
-      :disabled="busy || !pauseOnLowBattery"
-    >
-      <template #suffix>%</template>
-    </n-input-number>
-    <p class="confirm-note-extra">
-      daemon 每分钟探测一次联网成本与电池状态,命中条件时所有目录的数据面自动挂起(连接与配对照常),
-      条件解除自动恢复;与手动暂停互不覆盖。挂起期间目录栏会显示原因徽标。非 Windows 机器不启用探测。
-      阈值留空 = 默认 {{ DEFAULT_BATTERY_THRESHOLD }}%。
-    </p>
-
-    <div class="edit-section-label">同步时段(全局)</div>
-    <ScheduleRuleEditor v-model:model-value="syncSchedule" />
-    <p class="confirm-note-extra">
-      这是这台机器的<b>硬闸门</b>:与目录级时段取交集 —— 两边都允许才同步,目录设置只能在全局窗口内再收窄,
-      不能反向放宽(动机是省电与省流量)。留空 = 全天。时段外数据面停摆(不扫描、不广播、不接收),
-      到点自动恢复;连接、配对、目录清单不受影响。
-      时段外的提示与「临时放行」在状态页顶部的横幅上。
-    </p>
-
-    <div class="edit-section-label">节假日日历</div>
-    <n-checkbox v-model:checked="holidayAutoFetch" class="settings-checkbox" :disabled="busy">
-      自动拉取法定节假日(决定「工作日 / 休息日」怎么判)
-    </n-checkbox>
-    <n-input
-      v-model:value="holidaySourceUrl"
-      class="settings-input"
-      :placeholder="holidaySourceDefault || 'https://…/{year}.json'"
-      :disabled="busy || !holidayAutoFetch"
-      clearable
-    />
-    <p class="confirm-note-extra">
-      地址需含 <code>{year}</code> 占位;留空 = 默认源。拉取只在后台发生,判定时只读本地缓存,
-      <b>无网或拉取失败都不会挡住同步</b> —— 那时退化为「按星期几判」,并在下方标注数据缺失。
-      当前状态:{{ calendarSummary }}
-    </p>
-    <button type="button" class="settings-link" @click="overridesOpen = !overridesOpen">
-      {{ overridesOpen ? '收起' : '手动设置哪天是假期 / 补班' }}{{ calendarOverrides.length ? `(${calendarOverrides.length} 天已改)` : '' }}
-    </button>
-    <div v-if="overridesOpen" class="cal-panel">
-      <div class="cal-panel__row">
-        <n-date-picker v-model:value="overrideDate" type="date" size="small" :update-value-on-close="true" style="width: 140px" />
-        <n-select
-          v-model:value="overrideType"
-          size="small"
-          class="cal-type"
-          :options="CAL_TYPE_OPTIONS as unknown as { label: string; value: string }[]"
-        />
-        <n-button size="small" :disabled="busy || overrideDate === null" @click="addOverride">添加</n-button>
-      </div>
-      <ul v-if="calendarOverrides.length" class="cal-overrides">
-        <li v-for="[date, type] in calendarOverrides" :key="date">
-          <span class="cal-overrides__date">{{ date }}</span>
-          <span class="cal-overrides__type">{{ type === 'holiday' ? '休息日' : '工作日' }}</span>
-          <button type="button" class="settings-link" @click="clearOverride(date)">撤销</button>
-        </li>
-      </ul>
-      <p v-else class="confirm-note-extra">还没有手动覆盖的日期。</p>
-      <p class="confirm-note-extra">
-        公司放假与法定不一致时用这里:覆盖优先于自动拉取的数据。撤销后该日交回日历数据(或按星期几)判定。
-      </p>
+    <div class="settings-pair">
+      <section class="settings-sec">
+        <div class="edit-section-label">发送带宽上限</div>
+        <n-input-number
+          v-model:value="maxSendKbps"
+          class="settings-input"
+          :min="0"
+          :step="512"
+          placeholder="不限速"
+          :disabled="busy"
+        >
+          <template #suffix>KB/s</template>
+        </n-input-number>
+        <p class="confirm-note-extra">
+          每个对端的发送速率上限(目录单独配置「maxBandwidthKbps」时不走这里)。
+          大文件同步占满 LAN 带宽时用它兜底;留空 = 不限速。
+        </p>
+      </section>
+      <section class="settings-sec">
+        <div class="edit-section-label">每路径版本份数</div>
+        <n-input-number
+          v-model:value="versionsPerPath"
+          class="settings-input"
+          :min="1"
+          :step="1"
+          :placeholder="`默认 ${DEFAULT_VERSIONS}`"
+          :disabled="busy"
+        >
+          <template #suffix>份</template>
+        </n-input-number>
+        <p class="confirm-note-extra">
+          本机文件被对端覆盖前,旧内容会自动留档;同一路径超过这个份数时删最旧的。
+          留空 = 默认 {{ DEFAULT_VERSIONS }} 份。
+        </p>
+      </section>
     </div>
 
-    <div class="edit-section-label">分享链接</div>
-    <n-checkbox v-model:checked="shareEnabled" class="settings-checkbox" :disabled="busy">允许生成免登录的限时文件下载链接</n-checkbox>
-    <p class="confirm-note-extra">
-      开启后可在文件管理器为单个文件生成分享链接:对方无需账户即可下载,限时(最长 30 天)、只读、不能浏览目录里的其他文件,
-      随时可撤销。默认关闭;关闭开关会让全部在外的链接立即失效。每次匿名下载都会记入 daemon 日志。
-    </p>
+    <div class="settings-pair">
+      <section class="settings-sec">
+        <div class="edit-section-label">历史记录保留上限</div>
+        <n-input-number
+          v-model:value="historyMaxEvents"
+          class="settings-input"
+          :min="1"
+          :step="500"
+          :placeholder="`默认 ${DEFAULT_HISTORY}`"
+          :disabled="busy"
+        >
+          <template #suffix>条 / 目录</template>
+        </n-input-number>
+        <p class="confirm-note-extra">每个目录最多保留多少条同步记录,超出后丢弃最旧的。留空 = 默认 {{ DEFAULT_HISTORY }} 条。</p>
+      </section>
+      <section class="settings-sec">
+        <div class="edit-section-label">分享链接</div>
+        <n-checkbox v-model:checked="shareEnabled" class="settings-checkbox" :disabled="busy">允许生成免登录的限时文件下载链接</n-checkbox>
+        <p class="confirm-note-extra">
+          开启后可在文件管理器为单个文件生成分享链接:对方无需账户即可下载,限时(最长 30 天)、只读、
+          不能浏览目录里的其他文件,随时可撤销。默认关闭;关闭开关会让全部在外的链接立即失效。
+          每次匿名下载都会记入 daemon 日志。
+        </p>
+      </section>
+    </div>
+
+    <section class="settings-sec">
+      <div class="edit-section-label">同步事件 Webhook</div>
+      <n-input
+        v-model:value="webhookUrl"
+        class="settings-input"
+        placeholder="https://… 留空 = 关闭通知"
+        :disabled="busy"
+        clearable
+      />
+      <n-input
+        v-model:value="webhookSecret"
+        class="settings-input"
+        :placeholder="secretAlreadySet && !secretCleared ? '已设置(留空保持不变)' : '可选:签名密钥'"
+        type="password"
+        show-password-on="click"
+        :disabled="busy"
+      />
+      <p class="confirm-note-extra">
+        同步完成、出现冲突、目录持续出错时向该地址推送一条通知;飞书机器人地址自动按其格式发送,其余地址为 JSON。
+        目录出错只在错误内容变化时推送一次,不会每轮重复打扰。
+        <template v-if="secretAlreadySet && !secretCleared">
+          密钥已保存,不回显;输入新值可覆盖,或
+          <button type="button" class="settings-link" @click="secretCleared = true; webhookSecret = ''">清除已存密钥</button>。
+        </template>
+        <template v-else-if="secretCleared">密钥将被清除。</template>
+      </p>
+      <n-button size="small" :loading="testingWebhook" :disabled="busy" @click="onTestWebhook">发送测试消息</n-button>
+    </section>
+
+    <section class="settings-sec">
+      <div class="edit-section-label">同步时段(全局)</div>
+      <ScheduleRuleEditor v-model:model-value="syncSchedule" />
+      <p class="confirm-note-extra">
+        这是这台机器的<b>硬闸门</b>:与目录级时段取交集 —— 两边都允许才同步,目录设置只能在全局窗口内再收窄,
+        不能反向放宽(动机是省电与省流量)。留空 = 全天。时段外数据面停摆(不扫描、不广播、不接收),
+        到点自动恢复;连接、配对、目录清单不受影响。
+        时段外的提示与「临时放行」在状态页顶部的横幅上。
+      </p>
+    </section>
+
+    <div class="settings-pair">
+      <section class="settings-sec">
+        <div class="edit-section-label">计费网络 / 电池感知(仅 Windows)</div>
+        <n-checkbox v-model:checked="pauseOnMeteredNetwork" class="settings-checkbox" :disabled="busy">检测到计费网络时自动挂起同步</n-checkbox>
+        <n-checkbox v-model:checked="pauseOnLowBattery" :disabled="busy" class="settings-checkbox">用电池且电量过低时自动挂起同步</n-checkbox>
+        <n-input-number
+          v-model:value="batteryPauseThreshold"
+          class="settings-input"
+          :min="1"
+          :max="99"
+          :step="5"
+          :placeholder="`默认 ${DEFAULT_BATTERY_THRESHOLD}`"
+          :disabled="busy || !pauseOnLowBattery"
+        >
+          <template #suffix>%</template>
+        </n-input-number>
+        <p class="confirm-note-extra">
+          daemon 每分钟探测一次联网成本与电池状态,命中条件时所有目录的数据面自动挂起(连接与配对照常),
+          条件解除自动恢复;与手动暂停互不覆盖。挂起期间目录栏会显示原因徽标。非 Windows 机器不启用探测。
+          阈值留空 = 默认 {{ DEFAULT_BATTERY_THRESHOLD }}%。
+        </p>
+      </section>
+      <section class="settings-sec">
+        <div class="edit-section-label">节假日日历</div>
+        <n-checkbox v-model:checked="holidayAutoFetch" class="settings-checkbox" :disabled="busy">
+          自动拉取法定节假日(决定「工作日 / 休息日」怎么判)
+        </n-checkbox>
+        <n-input
+          v-model:value="holidaySourceUrl"
+          class="settings-input"
+          :placeholder="holidaySourceDefault || 'https://…/{year}.json'"
+          :disabled="busy || !holidayAutoFetch"
+          clearable
+        />
+        <p class="confirm-note-extra">
+          地址需含 <code>{year}</code> 占位;留空 = 默认源。拉取只在后台发生,判定时只读本地缓存,
+          <b>无网或拉取失败都不会挡住同步</b> —— 那时退化为「按星期几判」,并在下方标注数据缺失。
+          当前状态:{{ calendarSummary }}
+        </p>
+        <button type="button" class="settings-link" @click="overridesOpen = !overridesOpen">
+          {{ overridesOpen ? '收起' : '手动设置哪天是假期 / 补班' }}{{ calendarOverrides.length ? `(${calendarOverrides.length} 天已改)` : '' }}
+        </button>
+        <div v-if="overridesOpen" class="cal-panel">
+          <div class="cal-panel__row">
+            <n-date-picker v-model:value="overrideDate" type="date" size="small" :update-value-on-close="true" style="width: 140px" />
+            <n-select
+              v-model:value="overrideType"
+              size="small"
+              class="cal-type"
+              :options="CAL_TYPE_OPTIONS as unknown as { label: string; value: string }[]"
+            />
+            <n-button size="small" :disabled="busy || overrideDate === null" @click="addOverride">添加</n-button>
+          </div>
+          <ul v-if="calendarOverrides.length" class="cal-overrides">
+            <li v-for="[date, type] in calendarOverrides" :key="date">
+              <span class="cal-overrides__date">{{ date }}</span>
+              <span class="cal-overrides__type">{{ type === 'holiday' ? '休息日' : '工作日' }}</span>
+              <button type="button" class="settings-link" @click="clearOverride(date)">撤销</button>
+            </li>
+          </ul>
+          <p v-else class="confirm-note-extra">还没有手动覆盖的日期。</p>
+          <p class="confirm-note-extra">
+            公司放假与法定不一致时用这里:覆盖优先于自动拉取的数据。撤销后该日交回日历数据(或按星期几)判定。
+          </p>
+        </div>
+      </section>
+    </div>
 
     <template #footer>
       <n-button class="modal-cancel" :disabled="busy" @click="emit('close')">取消</n-button>
@@ -338,6 +363,24 @@ async function onTestWebhook(): Promise<void> {
 </template>
 
 <style scoped>
+/* 两列布局:弹窗加宽到 720 后,把短设置段左右排布以压缩弹窗高度。
+   .settings-pair / .settings-sec 仅本组件使用,故 scoped(口径同 AGENTS.md「组件自有的
+   样式写在自己文件里」);.settings-input / .settings-checkbox / .settings-link 是跨弹窗
+   共用的皮肤,仍留在 style.css。
+   段间距沿用 .edit-section-label 自带的 18px 上边距:grid item 的 margin 不塌缩,
+   格内间距由它提供;容器落在 .modal-body 块流里,通栏段的 18px 照常塌缩传出 ——
+   两列与通栏的纵向节奏一致,不需要额外 gap。 */
+.settings-pair {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  column-gap: 28px;
+}
+/* 窄屏(口径同 style.css 既有 600px 断点):两列说明文字挤成瘦长条,退回单列 */
+@media (max-width: 600px) {
+  .settings-pair {
+    grid-template-columns: 1fr;
+  }
+}
 /* 节假日日历面板:仅本组件使用的类,故 scoped(口径同 AGENTS.md「组件自有的样式写在自己文件里」)。
    .settings-input / .settings-checkbox / .settings-link 是跨弹窗共用的皮肤,仍留在 style.css。 */
 .cal-panel {
