@@ -218,7 +218,7 @@ const headActions = computed<RailAction[]>(() => {
   if (identityBrokenFolders.value.length > 0) {
     actions.push({
       key: 'readopt-all',
-      icon: 'restore',
+      icon: 'shield',
       active: true,
       disabled: b,
       tooltip: `批量重新采集身份:${identityBrokenFolders.value.length} 个目录不可信,一键全部恢复`,

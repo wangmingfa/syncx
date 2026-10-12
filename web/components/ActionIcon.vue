@@ -81,6 +81,13 @@ defineProps<{ name: ActionIconName }>();
     </template>
 
     <!-- 回收站(浏览/还原删除副本):垃圾桶 + 上箭,与「移除」的空桶区分 -->
+    <!-- 盾牌+对勾:身份/防护语义(批量重新采集身份)。刻意不与回收站系(restore
+         是"垃圾桶+箭头")同形 —— 那正是当初误用 restore 被指出的混淆。 -->
+    <template v-else-if="name === 'shield'">
+      <path d="M12 3l7 3v5c0 4.4-2.9 7.9-7 9.4C7.9 18.9 5 15.4 5 11V6l7-3z" />
+      <path d="M9 11.5l2 2 4-4" />
+    </template>
+
     <template v-else-if="name === 'restore'">
       <path d="M4.5 7h15" />
       <path d="M9.5 7V4.5h5V7" />

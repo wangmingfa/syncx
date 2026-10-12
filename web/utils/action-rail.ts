@@ -19,6 +19,7 @@ export type ActionIconName =
   | 'browse'
   | 'ignore'
   | 'lock'
+  | 'shield'
   | 'more';
 
 /**
