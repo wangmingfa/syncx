@@ -3,6 +3,13 @@ import { run } from './cli.js';
 import { parseArgs, type ParsedArgs } from './args.js';
 import { helpText, packageVersion, wantsHelp, wantsVersion } from './usage.js';
 
+// 任务管理器里的进程名:不设的话内核记账名来自解释器链(env→node),守护进程和随便
+// 一个 node 进程在 top/ps 里无从区分。仅 Unix:Linux 下 libuv 设 title 会调
+// prctl(PR_SET_NAME) 连内核名一起改;macOS 改 argv(ps/pgrep 可见,活动监视器的
+// 「进程名称」列仍显示 node——改它得给解释器二进制改名,不值)。Windows 上设 title
+// 会改终端窗口标题,不做。
+if (process.platform !== 'win32') process.title = 'syncx';
+
 // 自修复执行位:跨平台升级(尤其 Windows → Linux)后,换入的 bundle 在 Unix 上可能落到 0644
 // (Windows 无 POSIX exec 位,tar 头记录 ~0644)。本段在 bundle 自身启动早期补 0755,
 // 使后续 `syncx` CLI 直接执行可用。逻辑位于新 bundle 的启动代码,故只要对端版本含本修,
