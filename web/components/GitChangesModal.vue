@@ -234,14 +234,23 @@ const diffPanes = computed<{ left: DiffPaneData; right: DiffPaneData } | null>((
             <span class="git-changes__legend-item is-deleted">删 {{ counts.deleted }}</span>
             <span v-if="counts.renamed" class="git-changes__legend-item is-renamed">移 {{ counts.renamed }}</span>
             <span class="git-changes__legend-note">
-              共 {{ entries.length }} 条{{ truncated ? '（超出上限已截断）' : '' }} · 未提交的改动不会随 Git 提交同步广播 · 双击文件查看与 HEAD 的对比
+              共 {{ entries.length }} 条{{ truncated ? '（超出上限已截断）' : '' }} · 未提交的改动不会随 Git 提交同步广播
             </span>
             <n-button size="tiny" quaternary class="git-changes__refresh" @click="refresh">刷新</n-button>
             <n-button v-if="dirKeys.length > 0" size="tiny" quaternary @click="expandAll">全部展开</n-button>
             <n-button v-if="dirKeys.length > 0" size="tiny" quaternary @click="collapseAll">全部折叠</n-button>
           </div>
           <ul class="git-changes__tree">
-            <li v-for="row in rows" :key="row.key" class="git-changes__row" :style="{ paddingLeft: `${row.depth * 14}px` }">
+            <!-- 双击挂在整行:高亮范围(hover)与可双击范围必须是同一块,否则用户
+                 点到文件名右侧的空白处没反应,看起来就是"时好时坏" -->
+            <li
+              v-for="row in rows"
+              :key="row.key"
+              class="git-changes__row"
+              :class="{ 'is-file': !row.node.dir }"
+              :style="{ paddingLeft: `${row.depth * 14}px` }"
+              @dblclick="!row.node.dir && openDiff(row.node.entry!)"
+            >
               <template v-if="row.node.dir">
                 <button type="button" class="git-changes__dir" @click="toggleDir(row.key)">
                   <span class="git-changes__chev" :class="{ 'is-open': !isCollapsed(row.key) }" aria-hidden="true">
@@ -255,7 +264,6 @@ const diffPanes = computed<{ left: DiffPaneData; right: DiffPaneData } | null>((
                   class="git-changes__file"
                   :title="fileTitle(row.node.entry!)"
                   tabindex="0"
-                  @dblclick="openDiff(row.node.entry!)"
                   @keydown.enter="openDiff(row.node.entry!)"
                 >
                   <span class="git-changes__status" :class="statusMeta[row.node.entry!.status].cls">{{ statusMeta[row.node.entry!.status].label }}</span>
@@ -340,6 +348,11 @@ const diffPanes = computed<{ left: DiffPaneData; right: DiffPaneData } | null>((
   outline: 1px solid color-mix(in srgb, var(--online) 35%, transparent);
 }
 
+/* 文件行整行手型:与整行双击同一范围;目录行仍是普通箭头(单击折叠) */
+.git-changes__row.is-file {
+  cursor: pointer;
+}
+
 .git-changes__dir {
   /* 与 .conflict-float 同理:button 清掉浏览器默认外观,对齐行内排版 */
   appearance: none;
@@ -374,7 +387,6 @@ const diffPanes = computed<{ left: DiffPaneData; right: DiffPaneData } | null>((
   gap: 6px;
   padding: 2px 4px;
   border-radius: 6px;
-  cursor: pointer; /* 双击才是对比(图例有提示);单击不承诺任何动作 */
   font-size: 12.5px;
 }
 
