@@ -645,6 +645,7 @@ export async function run(args: ParsedArgs): Promise<void> {
         // + 本机主机名/局域网地址(顶栏 chip;地址每次现取,网卡热插拔也能跟上)
         {
           conflictCounts: manager.folderConflictCounts(),
+          gitChangeCounts: manager.folderGitChangeCounts(),
           traffic: manager.getTrafficStats(),
           hostname: osHostname(),
           localAddresses: getLanAddresses().map((a) => a.address),
@@ -874,6 +875,9 @@ export async function run(args: ParsedArgs): Promise<void> {
     },
     // 冲突「查看对比」:两个本机侧(原文件 vs 副本)交给 manager 复用同一套读取/降级逻辑
     conflictFilePair: (folderId, copyPath) => manager.readConflictPair(folderId, copyPath),
+    // 「Git 改动」弹窗:工作区未提交变更清单(现查 git status)+ 单文件 HEAD vs 当前
+    listGitChanges: (folderId) => manager.listGitChanges(folderId),
+    readGitDiff: (folderId, path) => manager.readGitDiff(folderId, path),
     // 逐块合并写回:内容进原文件(当前内容留档),副本不动;随后触发扫描广播收敛对端
     applyConflictMerge: (folderId, copyPath, content) => {
       const folder = findConfigFolder(configPath, folderId);

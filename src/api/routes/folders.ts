@@ -56,7 +56,7 @@ export async function tryFolderRoutes(
   res: ServerResponse,
   deps: ControlServerDeps,
 ): Promise<boolean> {
-  const { addFolder, removeFolder, setFolderDevices, setFolderUseGitignore, setFolderPaused, setFolderFilePaused, setFolderSchedule, setFolderGitSync, setFolderConflictPolicy, setFolderE2E, setFolderOnDemand, setFolderOnDemandDir, prioritizeTransfer, materializeFile, getFolderIgnoreInfo, setFolderIgnoreLines, testFolderIgnore, reAdoptFolderIdentity, getFolderHistory, getGlobalHistory, getWeeklyReport, clearFolderHistory, listFolderConflicts, resolveFolderConflict, conflictFilePair, applyConflictMerge, cleanIdenticalConflicts, diffFolder, compareFolder, readFilePair, applyFileSync, listFolderVersions, restoreFolderVersion, deleteFolderVersion, getFolderVersionContent, rollbackFolder, setScheduleOverride, setCalendarOverride, getCalendar } = deps;
+  const { addFolder, removeFolder, setFolderDevices, setFolderUseGitignore, setFolderPaused, setFolderFilePaused, setFolderSchedule, setFolderGitSync, setFolderConflictPolicy, setFolderE2E, setFolderOnDemand, setFolderOnDemandDir, prioritizeTransfer, materializeFile, getFolderIgnoreInfo, setFolderIgnoreLines, testFolderIgnore, reAdoptFolderIdentity, getFolderHistory, getGlobalHistory, getWeeklyReport, clearFolderHistory, listFolderConflicts, resolveFolderConflict, conflictFilePair, applyConflictMerge, cleanIdenticalConflicts, diffFolder, compareFolder, readFilePair, applyFileSync, listFolderVersions, restoreFolderVersion, deleteFolderVersion, getFolderVersionContent, rollbackFolder, setScheduleOverride, setCalendarOverride, getCalendar, listGitChanges, readGitDiff } = deps;
   const path = req.url ? pathname(req.url) : '/';
 
   // Form POST /folders : add or (via _method=DELETE) remove a folder
@@ -998,6 +998,43 @@ export async function tryFolderRoutes(
       sendJson(res, 200, cleanIdenticalConflicts(folderId));
     } catch (e) {
       sendJson(res, 400, { error: e instanceof Error ? e.message : '清理失败' });
+    }
+    return true;
+  }
+
+  // GET /api/folders/git-changes?folderId=xxx : 工作区未提交变更清单(「Git 改动」弹窗)。
+  // 现查 git status:徽标计数有一轮扫描的滞后,弹窗打开那一刻必须给准的。
+  if (req.method === 'GET' && req.url && path === '/api/folders/git-changes' && listGitChanges) {
+    const url = new URL(req.url, 'http://localhost');
+    const folderId = url.searchParams.get('folderId');
+    if (!folderId) {
+      sendJson(res, 400, { error: 'folderId is required' });
+      return true;
+    }
+    try {
+      const result = listGitChanges(folderId);
+      // null = 不是 git 仓库:如实告诉前端(徽标不出现是配置问题,弹窗要能解释)
+      sendJson(res, 200, result ?? { gitRepo: false });
+    } catch (e) {
+      sendJson(res, 400, { error: e instanceof Error ? e.message : '读取改动清单失败' });
+    }
+    return true;
+  }
+
+  // GET /api/folders/git-diff?folderId=xxx&path=yyy : 工作区某文件 HEAD 版 vs 盘上当前
+  // (「Git 改动」弹窗里双击文件的对比)。只读。
+  if (req.method === 'GET' && req.url && path === '/api/folders/git-diff' && readGitDiff) {
+    const url = new URL(req.url, 'http://localhost');
+    const folderId = url.searchParams.get('folderId');
+    const filePath = url.searchParams.get('path');
+    if (!folderId || !filePath) {
+      sendJson(res, 400, { error: 'folderId and path are required' });
+      return true;
+    }
+    try {
+      sendJson(res, 200, readGitDiff(folderId, filePath));
+    } catch (e) {
+      sendJson(res, 400, { error: e instanceof Error ? e.message : '读取变更对比失败' });
     }
     return true;
   }

@@ -1897,6 +1897,19 @@ li.history-row.row-conflict {
   background: rgb(192 57 43 / 0.08);
 }
 
+/* 卡顶悬浮「改动 N」徽标:工作区未提交变更(git),紫调区别于冲突红/gitSync 绿。
+   与 .conflict-float 同理:button 清掉浏览器默认外观,字体与内衬跟 .float-badge 对齐。 */
+.git-change-float {
+  font-family: inherit;
+  cursor: pointer;
+  color: #7a4fd0;
+  border-color: rgb(134 82 200 / 0.6);
+}
+
+.git-change-float:hover {
+  background: rgb(134 82 200 / 0.08);
+}
+
 /* 冲突行是「四段式」:时间/徽标/路径块/操作。路径块自己纵向排两行 */
 .conflict-list .history-row {
   grid-template-columns: auto auto minmax(0, 1fr) auto;

@@ -176,6 +176,8 @@ export interface StatusData {
   relayActivity?: RelayActivity[];
   /** 每目录残留冲突副本数(键 = 目录 id ?? path);缺省/空 = 都没有冲突。 */
   conflictCounts?: Record<string, number>;
+  /** 每目录工作区未提交变更条数(键 = 目录 id ?? path;目录卡「Git 改动 N」徽标);缺省 = 旧后端。 */
+  gitChangeCounts?: Record<string, number>;
   /** 传输统计:累计字节 + 最近 24h 逐 5 分钟采样(daemon 重启清零);旧后端缺省。 */
   traffic?: TrafficData;
   /** daemon 所在机器的操作系统主机名(顶栏本机 chip);旧后端缺省。 */
@@ -384,6 +386,33 @@ export interface SyncHistoryData {
   oldestTs: number | null;
   /** 后端保留上限(= HISTORY_MAX_EVENTS),提示文案用它,不硬编码。 */
   maxRetention: number;
+}
+
+/** 工作区一条未提交变更(与 src/git-monitor.ts 的 GitChangeEntry 同形)。 */
+export interface GitChangeEntry {
+  /** 相对仓库根的路径(POSIX 分隔)。 */
+  path: string;
+  status: 'modified' | 'added' | 'deleted' | 'renamed';
+  /** renamed 的原路径。 */
+  origPath?: string;
+  /** 已进暂存区。 */
+  staged?: boolean;
+}
+
+/** GET /api/folders/git-changes 的响应;非 git 仓库时只有 gitRepo: false。 */
+export interface GitChangesData {
+  entries: GitChangeEntry[];
+  /** 条目数超上限被截断时为 true。 */
+  truncated: boolean;
+  /** false = 目录不是 git 仓库(弹窗给出解释而不是空列表)。 */
+  gitRepo?: boolean;
+}
+
+/** GET /api/folders/git-diff 的响应:HEAD 版 vs 工作区当前,复用通用差异弹窗的侧形状。 */
+export interface GitDiffData {
+  path: string;
+  head: FileSideData;
+  worktree: FileSideData;
 }
 
 /** 内容对比:单侧状态(版本向量保持 wire 形态)。 */

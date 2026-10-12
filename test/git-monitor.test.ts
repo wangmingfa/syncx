@@ -8,8 +8,10 @@ import {
   autoCommit,
   getCommitInfo,
   getLastCommitHash,
+  getUncommittedChanges,
   hasUncommittedChanges,
   isGitRepo,
+  readFileAtHead,
 } from '../src/git-monitor.js';
 
 /** 探测本机是否有可用的 git:没有则整组用例优雅 skip(与 symlink 探测同一套路)。 */
@@ -328,3 +330,59 @@ function rmFile(path: string): void {
     }
   }
 }
+
+describe('uncommitted changes inventory', () => {
+  it('classifies modified / added / deleted / untracked entries and excludes scratch files', () => {
+    const repo = tempGitRepo();
+    writeFileSync(join(repo, 'a.txt'), 'one');
+    writeFileSync(join(repo, 'b.txt'), 'two');
+    commitAll(repo, 'init');
+    // 改动 + 新增(未跟踪)+ 删除 + syncx 在途中间态
+    writeFileSync(join(repo, 'a.txt'), 'one changed');
+    unlinkSync(join(repo, 'b.txt'));
+    writeFileSync(join(repo, 'new.txt'), 'fresh');
+    writeFileSync(join(repo, 'a.txt.syncx-tmp'), 'in-flight');
+    const out = getUncommittedChanges(repo);
+    expect(out).not.toBeNull();
+    expect(out!.truncated).toBe(false);
+    const byPath = new Map(out!.entries.map((e) => [e.path, e]));
+    expect(byPath.get('a.txt')?.status).toBe('modified');
+    expect(byPath.get('b.txt')?.status).toBe('deleted');
+    expect(byPath.get('new.txt')?.status).toBe('added');
+    // 在途中间态是 syncx 自己的残骸,不进清单
+    expect(byPath.has('a.txt.syncx-tmp')).toBe(false);
+    rmDir(repo);
+  });
+
+  it('returns null outside a repo and reports rename with origPath', () => {
+    const plain = mkdtempSync(join(tmpdir(), 'syncx-nogit-'));
+    expect(getUncommittedChanges(plain)).toBeNull();
+    rmDir(plain);
+
+    const repo = tempGitRepo();
+    writeFileSync(join(repo, 'old.txt'), 'v');
+    commitAll(repo, 'init');
+    mkdirSync(join(repo, 'sub'), { recursive: true });
+    writeFileSync(join(repo, 'sub', 'old.txt'), 'v');
+    unlinkSync(join(repo, 'old.txt'));
+    // rename 只有在暂存之后才会被 git status 识别为 R(纯工作区的「删+增」是两条)
+    git(repo, ['add', '-A']);
+    const out = getUncommittedChanges(repo)!;
+    const renamed = out.entries.find((e) => e.status === 'renamed');
+    expect(renamed?.origPath).toBe('old.txt');
+    expect(renamed?.path).toBe('sub/old.txt');
+    rmDir(repo);
+  });
+
+  it('reads the HEAD version of a file for the diff baseline', () => {
+    const repo = tempGitRepo();
+    writeFileSync(join(repo, 'a.txt'), 'committed');
+    commitAll(repo, 'init');
+    writeFileSync(join(repo, 'a.txt'), 'dirty');
+    writeFileSync(join(repo, 'untracked.txt'), 'never committed');
+
+    expect(readFileAtHead(repo, 'a.txt')?.toString('utf8')).toBe('committed');
+    expect(readFileAtHead(repo, 'untracked.txt')).toBeNull();
+    rmDir(repo);
+  });
+});

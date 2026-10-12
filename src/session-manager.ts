@@ -72,7 +72,7 @@ import { NETWORK_OFFLINE_BACKOFF_MS, offlineAwareReconnectDelay, reconnectDelayM
 import { hasRoutableInterface } from './net/offline-probe.js';
 import { isSelfPeerUrl, localInterfaceAddresses } from './net/peer-address.js';
 import { CAP_BINARY1 } from './handshake.js';
-import { isGitRepo, getLastCommitHash, getCommitInfo, hasUncommittedChanges, autoCommit, type CommitInfo } from './git-monitor.js';
+import { isGitRepo, getLastCommitHash, getCommitInfo, hasUncommittedChanges, autoCommit, getUncommittedChanges, readFileAtHead, type CommitInfo, type GitChangeEntry } from './git-monitor.js';
 
 /** scheduleVerdictFor 的结论:此刻该不该同步、被哪一层挡住、下一个边界何时。 */
 export interface ScheduleVerdict {
@@ -221,6 +221,11 @@ export interface FolderState {
    * 该计数由每轮扫描顺带盘点(scanFolder.conflictCount)。
    */
   conflictCount: number;
+  /**
+   * 工作区未提交变更条数(目录卡「Git 改动 N」徽标)。每轮扫描顺带盘点一次
+   * (git status 只读、通常 <100ms);与 conflictCount 同一份推送节奏。
+   */
+  gitChangeCount: number;
   /**
    * Git 提交同步:上次观测到的 HEAD 提交哈希。null 表示尚未初始化或非 git 仓库。
    * 每次扫描时比对当前 HEAD,不同则说明有新提交,触发广播。自动提交后也更新此字段,
@@ -1012,7 +1017,7 @@ export class SyncSessionManager {
     // 索引为空 → 首扫是建基线(存量文件不算新增);索引有存量 → 首扫 diff 是
     // daemon 离线期间的真实改动,要写同步记录
     const baselinePending = usable.length === 0;
-    return { id, indexKey, path: f.path, index, executor, localIndex, ignoreLines, transports: [], peers: new Map(), transportDevice: new Map(), receiveLedger: new Map(), driftState: { lastAt: 0, round: 0 }, localAuditState: { lastAt: 0, round: 0 }, config: f, baselinePending, conflictCount: 0, lastCommitHash: f.gitLastCommitHash ?? null, processedRemoteCommits: new Set(), gitBroadcast: readGitPending(id, f.gitBroadcastPending), pendingGitNotify: null, gitDrainWarned: false, gitRelay: readGitPending(id, f.gitRelayPending), diskBlocked: false };
+    return { id, indexKey, path: f.path, index, executor, localIndex, ignoreLines, transports: [], peers: new Map(), transportDevice: new Map(), receiveLedger: new Map(), driftState: { lastAt: 0, round: 0 }, localAuditState: { lastAt: 0, round: 0 }, config: f, baselinePending, conflictCount: 0, gitChangeCount: 0, lastCommitHash: f.gitLastCommitHash ?? null, processedRemoteCommits: new Set(), gitBroadcast: readGitPending(id, f.gitBroadcastPending), pendingGitNotify: null, gitDrainWarned: false, gitRelay: readGitPending(id, f.gitRelayPending), diskBlocked: false };
   }
 
   /**
@@ -1372,6 +1377,11 @@ export class SyncSessionManager {
       }
       // 徽标计数源:副本已硬忽略不进索引,取扫描顺带盘点的结果(零额外 IO)
       folder.conflictCount = diff.conflictCount;
+      // Git 改动徽标:工作区未提交变更条数(只对 git 仓库盘点;详情弹窗按需现查,
+      // 这里只维持徽标的量级)。暂停/身份闸门挡住的目录不刷新,徽标保持旧值。
+      folder.gitChangeCount = isGitRepo(folder.path)
+        ? (getUncommittedChanges(folder.path)?.entries.length ?? 0)
+        : 0;
       // 结构性守卫:目录身份无法校验时(平台不提供 inode / 配置里尚未采集指纹),把
       // 「一个文件都没看到、却要删东西」当作目录不可信的形态,拒绝执行这批删除。
       // 只有这个极端情形被挡 —— 而那正是「盘未挂载 / 目录被换掉」的样子;正常的单文件
@@ -3496,6 +3506,61 @@ export class SyncSessionManager {
   /** 传输统计累计 + 采样序列(buildStatus extras.traffic;重启清零)。 */
   getTrafficStats(): TrafficStats {
     return this.traffic.snapshot();
+  }
+
+  /**
+   * 每目录工作区未提交变更数(目录卡「Git 改动 N」徽标)。
+   * 计数来自每轮扫描顺带的盘点(folder.gitChangeCount,status 高频推送,
+   * 不能在这里现跑 git)。键为 wire 目录 id,与前端 folderKey 对齐。
+   */
+  folderGitChangeCounts(): Record<string, number> {
+    const out: Record<string, number> = {};
+    for (const folder of this.folderStates) {
+      if (folder.gitChangeCount > 0) out[folder.id] = folder.gitChangeCount;
+    }
+    return out;
+  }
+
+  /**
+   * 工作区未提交变更清单(「Git 改动」弹窗数据源):现查 git status,保证
+   * 打开弹窗那一刻的清单是准的(徽标计数有最多一轮扫描的滞后)。
+   * 返回 null = 目录不是 git 仓库。
+   */
+  listGitChanges(folderId: string): { entries: GitChangeEntry[]; truncated: boolean } | null {
+    const folder = this.folderStates.find((f) => f.id === folderId);
+    if (!folder) throw new Error('共享目录不存在(可能刚被移除)');
+    return getUncommittedChanges(folder.path);
+  }
+
+  /**
+   * 工作区某文件的「改动前 → 现在」两侧状态(双击文件看变更对比)。
+   * head 侧来自 git show HEAD(新文件不在 HEAD → exists:false),worktree 侧
+   * 复用对比弹窗的读盘口径(缺失/过大/二进制/图片都如实标记)。
+   * 只读,不碰索引、不碰暂存区。
+   */
+  readGitDiff(folderId: string, relPath: string): { path: string; head: FileSideState; worktree: FileSideState } {
+    const folder = this.folderStates.find((f) => f.id === folderId);
+    if (!folder) throw new Error('共享目录不存在(可能刚被移除)');
+    // 仓库相对路径的安全闸:拒绝绝对路径、目录穿越与盘符样式的输入,
+    // `git show` 不经 resolveSharePath,这里必须自己把好这道门。
+    if (
+      relPath === '' ||
+      relPath.startsWith('/') ||
+      relPath.includes('\\') ||
+      relPath.split('/').includes('..')
+    ) {
+      throw new Error('非法的文件路径');
+    }
+    const bytes = readFileAtHead(folder.path, relPath);
+    let head: FileSideState;
+    if (bytes === null) {
+      head = { exists: false };
+    } else if (bytes.length > compareContentLimit(relPath)) {
+      head = { exists: true, size: bytes.length, tooLarge: true };
+    } else {
+      head = { exists: true, size: bytes.length, ...this.describeBytes(relPath, bytes) };
+    }
+    return { path: relPath, head, worktree: this.readLocalFileForCompare(folder, relPath) };
   }
 
   /* ==================== 暂停同步 ==================== */

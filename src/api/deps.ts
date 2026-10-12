@@ -147,6 +147,10 @@ export interface ControlServerDeps {
   resolveFolderConflict?: (folderId: string, copyPath: string, choice: 'keep-local' | 'discard') => void;
   /** 冲突「查看对比」:原文件 vs 冲突副本两个本机侧,返回与 /api/folders/file 同形状的数据。 */
   conflictFilePair?: (folderId: string, copyPath: string) => unknown;
+  /** 工作区未提交变更清单(目录卡「Git 改动」弹窗):现查 git status。非 git 仓库返回 null。 */
+  listGitChanges?: (folderId: string) => unknown;
+  /** 工作区某文件的改动对比:HEAD 版 vs 盘上当前,复用通用差异弹窗的侧形状。 */
+  readGitDiff?: (folderId: string, path: string) => unknown;
   /** 把逐块合并后的内容写回原文件(当前内容先留档;副本不动,由用户显式清理)。 */
   applyConflictMerge?: (folderId: string, copyPath: string, content: string) => void;
   /** 一键清理:把所有「与原文件无差异」的冲突副本移入回收站,返回 { removed } 条数。 */

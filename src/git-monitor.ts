@@ -186,6 +186,91 @@ export function hasUncommittedChanges(folderPath: string): boolean {
   }
 }
 
+/** 工作区一条未提交变更(目录卡「Git 改动」徽标与详情弹窗的条目)。 */
+export interface GitChangeEntry {
+  /** 相对仓库根的路径(POSIX 分隔)。 */
+  path: string;
+  /** 变更类别:modified(内容改动)/ added(新增或未跟踪)/ deleted(已删除)/ renamed(重命名)。 */
+  status: 'modified' | 'added' | 'deleted' | 'renamed';
+  /** renamed 的原路径。 */
+  origPath?: string;
+  /** 已 staged(git status 第一列非空/非 ?)。用于弹窗里区分「已暂存 / 未暂存」。 */
+  staged?: boolean;
+}
+
+/** 条目数封顶:弹窗树分批渲染受不了几十万条,node_modules 误跟踪时先保命。 */
+export const GIT_CHANGES_MAX = 2000;
+
+/**
+ * 盘点工作区的未提交变更(含未跟踪文件;syncx 在途中间态照旧排除)。
+ * 返回 null = 不是 git 仓库 / git 不可用,调用方据此不显示徽标。
+ *
+ * 用 `-z`(NUL 分隔)解析:路径里的空格/引号/Unicode 不会被引号转义坑到;
+ * rename 条目跟两个记录(新路径 + 原路径),porcelain 的既有约定。
+ */
+export function getUncommittedChanges(folderPath: string): { entries: GitChangeEntry[]; truncated: boolean } | null {
+  if (!isGitRepo(folderPath)) return null;
+  try {
+    const out = execFileSync('git', ['status', '--porcelain', '-z', '--', ...SCRATCH_PATHSPECS], {
+      cwd: folderPath,
+      encoding: 'utf8',
+      stdio: ['ignore', 'pipe', 'ignore'],
+      windowsHide: true,
+      timeout: 10_000,
+      maxBuffer: 4 * 1024 * 1024,
+    });
+    const records = out.split('\0').filter((s) => s !== '');
+    const entries: GitChangeEntry[] = [];
+    for (let i = 0; i < records.length; i++) {
+      const rec = records[i]!;
+      // 每条记录:XY<空格>path(X=暂存区列,Y=工作区列,?? = 未跟踪)
+      const xy = rec.slice(0, 2);
+      const path = rec.slice(3);
+      if (path === '') continue;
+      let origPath: string | undefined;
+      if (xy.includes('R') || xy.includes('C')) {
+        origPath = records[++i];
+      }
+      // 归类优先级:删除 > 重命名/复制 > 新增 > 修改 —— 一个「先删再加回来」的
+      // 条目按删除理解更贴近用户直觉;?? 恒为 added。
+      const status: GitChangeEntry['status'] = xy.includes('D')
+        ? 'deleted'
+        : origPath !== undefined
+          ? 'renamed'
+          : xy.includes('A') || xy === '??'
+            ? 'added'
+            : 'modified';
+      entries.push({ path, status, origPath, staged: xy[0] !== ' ' && xy[0] !== '?' });
+      if (entries.length >= GIT_CHANGES_MAX) {
+        return { entries, truncated: true };
+      }
+    }
+    return { entries, truncated: false };
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * 读取某文件在 HEAD 提交里的字节(工作区改动的「改前」一侧)。
+ * 文件不在 HEAD(新文件)或仓库无提交时返回 null。
+ * relPath 必须是仓库相对路径且不含目录穿越 —— 由调用方(路由层)保证。
+ */
+export function readFileAtHead(folderPath: string, relPath: string): Buffer | null {
+  try {
+    return execFileSync('git', ['show', `HEAD:${relPath}`], {
+      cwd: folderPath,
+      encoding: 'buffer',
+      stdio: ['ignore', 'pipe', 'ignore'],
+      windowsHide: true,
+      timeout: 10_000,
+      maxBuffer: 32 * 1024 * 1024,
+    });
+  } catch {
+    return null;
+  }
+}
+
 export interface AutoCommitResult {
   success: boolean;
   /** 新提交的哈希(成功时) */

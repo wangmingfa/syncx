@@ -886,3 +886,49 @@ describe('git sync honors the folder identity gate', () => {
     (manager as unknown as { close(): void }).close();
   });
 });
+
+describe('git changes inventory (manager API)', () => {
+  /** 「Git 改动」徽标与弹窗的数据源:清单现查、单文件 HEAD↔工作区对比、路径穿越拒绝。 */
+  it.skipIf(!HAS_GIT)('lists uncommitted changes and diffs a file against HEAD', async () => {
+    const { share, manager, folder } = boot('full');
+    const internals = manager as unknown as {
+      listGitChanges(id: string): { entries: Array<{ path: string; status: string }>; truncated: boolean } | null;
+      readGitDiff(id: string, p: string): { head: { exists: boolean; text?: string }; worktree: { exists: boolean; text?: string } };
+    };
+
+    writeFileSync(join(share, 'a.txt'), 'v1');
+    git(share, ['add', '-A']);
+    git(share, ['commit', '-qm', 'feat: 初始']);
+    writeFileSync(join(share, 'a.txt'), 'v2');
+    writeFileSync(join(share, 'b.txt'), 'brand new');
+
+    // 清单:改一条 + 未跟踪一条
+    const list = internals.listGitChanges('main');
+    expect(list).not.toBeNull();
+    expect(list!.entries.map((e) => [e.path, e.status]).sort())
+      .toEqual([['a.txt', 'modified'], ['b.txt', 'added']]);
+    expect(list!.truncated).toBe(false);
+
+    // 单文件对比:HEAD 侧是提交版,工作区侧是改后内容
+    const pair = internals.readGitDiff('main', 'a.txt');
+    expect(pair.head.exists).toBe(true);
+    expect(pair.head.text).toBe('v1');
+    expect(pair.worktree.exists).toBe(true);
+    expect(pair.worktree.text).toBe('v2');
+
+    // 新文件不在 HEAD:head 侧如实报缺失,工作区侧照常可看
+    const fresh = internals.readGitDiff('main', 'b.txt');
+    expect(fresh.head.exists).toBe(false);
+    expect(fresh.worktree.text).toBe('brand new');
+
+    // 路径穿越 / 绝对路径:数据源不经 resolveSharePath,必须在这里挡下
+    expect(() => internals.readGitDiff('main', '../x')).toThrow();
+    expect(() => internals.readGitDiff('main', '/etc/passwd')).toThrow();
+
+    // 徽标计数:扫描一轮后刷新到当前条数
+    await manager.runScan();
+    expect(folder.gitChangeCount).toBe(2);
+
+    (manager as unknown as { close(): void }).close();
+  });
+});

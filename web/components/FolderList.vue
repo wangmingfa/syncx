@@ -4,6 +4,7 @@ import { NButton, NInput, NCheckbox, NCheckboxGroup, NTooltip } from 'naive-ui';
 import { useStatusContext } from '../composables/statusContext';
 import ActionRail from './ActionRail.vue';
 import WeeklyReportModal from './WeeklyReportModal.vue';
+import GitChangesModal from './GitChangesModal.vue';
 import { folderPathPlaceholder, visibleTransferFiles, XFER_FILE_LIMIT } from '../utils/format';
 import type { RailAction } from '../utils/action-rail';
 import type { FolderInfo, ScheduleState, TransferFile } from '../types';
@@ -29,6 +30,18 @@ function basename(p: string): string {
 /** 该目录残留冲突副本数(索引 LIKE 计数,徽标只做量级提示;以收件箱实时扫盘为准)。 */
 function conflictCountOf(f: FolderInfo): number {
   return status.value.conflictCounts?.[folderKey(f)] ?? 0;
+}
+
+/** 该目录工作区未提交变更数(daemon 每轮扫描顺带盘点;详情以弹窗现查为准)。 */
+function gitChangeCountOf(f: FolderInfo): number {
+  return status.value.gitChangeCounts?.[folderKey(f)] ?? 0;
+}
+
+/** 「Git 改动」弹窗开关:点徽标打开,挂在组件根部(与周报弹窗同款)。 */
+const gitChangesFolder = ref<{ id?: string; path: string } | null>(null);
+
+function openGitChanges(f: FolderInfo): void {
+  gitChangesFolder.value = { id: f.id, path: f.path };
 }
 
 /**
@@ -420,7 +433,7 @@ function visibleFiles(f: FolderInfo): TransferFile[] {
            title 说明(「接收」没有专属操作按钮,只能靠徽标自身的 tooltip 解释)。
            「冲突 N」做成按钮:徽标本身就是收件箱入口,点它直接处理。
            「Git 仅发送/仅接收/双向」同理只靠 title 解释 —— 它没有专属按钮,开关在「编辑目录」里。 -->
-      <div v-if="f.receiveOnly || (f.gitSync && f.gitSync !== 'off') || f.paused || outsideNow(f) || conflictCountOf(f) > 0" class="card-floats">
+      <div v-if="f.receiveOnly || (f.gitSync && f.gitSync !== 'off') || f.paused || outsideNow(f) || conflictCountOf(f) > 0 || gitChangeCountOf(f) > 0" class="card-floats">
         <span v-if="f.receiveOnly" class="float-badge receive-badge" title="接收模式:只拉不推,本机改动不会同步出去">接收</span>
         <!-- Git 提交同步:模式文案与编辑弹窗的下拉框逐字一致,方向由文字给出;
              双向额外铺一层淡底,一眼能从「只做一边」的两条里分出来;
@@ -453,6 +466,14 @@ function visibleFiles(f: FolderInfo): TransferFile[] {
           :title="`${conflictCountOf(f)} 个冲突副本待处理:两边都改过同一文件,点开逐条选保留哪版`"
           @click="openConflicts(f)"
         >冲突 {{ conflictCountOf(f) }}</button>
+        <!-- Git 工作区改动:徽标是入口,点开树形清单,双击文件看与 HEAD 的对比 -->
+        <button
+          v-if="gitChangeCountOf(f) > 0"
+          type="button"
+          class="float-badge git-change-float"
+          :title="`${gitChangeCountOf(f)} 个文件有未提交改动:点击查看树形清单,双击文件可看与 HEAD 提交的对比`"
+          @click="openGitChanges(f)"
+        >改动 {{ gitChangeCountOf(f) }}</button>
       </div>
 
       <div class="item-top">
@@ -621,4 +642,5 @@ function visibleFiles(f: FolderInfo): TransferFile[] {
 
   <!-- 同步周报:入口在栏头动作;弹窗本体就近挂在组件尾(ModalShell 自带遮罩定位) -->
   <WeeklyReportModal :open="reportOpen" @close="reportOpen = false" />
+  <GitChangesModal :folder="gitChangesFolder" @close="gitChangesFolder = null" />
 </template>
