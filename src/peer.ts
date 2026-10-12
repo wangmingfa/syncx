@@ -1,4 +1,5 @@
 import type { IndexEntry } from './index.js';
+import { compareFileState } from './index.js';
 import { indexFingerprint } from './index-fingerprint.js';
 import { buildPlan, buildDeltaPlan } from './plan.js';
 import type { BlockRequest, BlockResponse } from './messages.js';
@@ -1222,11 +1223,30 @@ export function createSyncPeer(deps: SyncPeerDeps): SyncPeer {
           case 'delete': {
             const localEntry = localIndex.get(action.path);
             const remoteEntry = remote.get(action.path);
-            if (localEntry?.deleted) {
-              // 本地墓碑:接收模式下不外推(避免把完整端误删),双向模式才传播给对端
-              if (!receiveOnly) sends.push(localEntry);
-            } else if (remoteEntry?.deleted) {
-              // 对端墓碑:本地删除。接收模式下同样执行——对端即权威源,删除也跟随
+            // 判定「哪一侧的墓碑更新」,而不是「本地是不是墓碑」。
+            // delete 动作由 planPath 在 local-newer(本地是较新墓碑)或 remote-newer
+            // (对端是较新墓碑)时产出。旧代码按 localEntry?.deleted 分支:当**两侧都是
+            // 墓碑但版本不同**(同一设备先后删除、计数器不同)时,localEntry?.deleted 恒为
+            // 真,于是永远回推本地那条墓碑、从不采纳对端更新的墓碑——两端各推各的旧版本,
+            // 版本永不收敛,索引交换陷入 ~600 轮/秒的回声死循环(2026-10-12 MoonUI 高
+            // CPU/网络事故根因)。修复分两支:
+            //  - local-newer 且对端也是墓碑:不外推。文件在两端都已删除,版本差异无害;
+            //    旧版对端收到较新墓碑会回推它自己的旧墓碑(回声),不推即断链,单端升级
+            //    即可止住循环。对端是活条目时旧版也能正确采纳(走 remote-newer 分支),
+            //    不会回声,故照常外推。
+            //  - remote-newer 且对端是墓碑:采纳对端较新的墓碑(版本收敛)。
+            const relation = compareFileState(localEntry, remoteEntry);
+            if (relation === 'local-newer') {
+              // 本地墓碑较新。仅当对端是活条目(或缺条目)时外推,让对端删除文件;
+              // 若对端**也是墓碑**(两侧都删、版本不同),则**不外推**——旧版对端收到
+              // 较新墓碑后,其 delete 分支按 localEntry?.deleted 判定会回推它自己的旧
+              // 墓碑,两端各推各的旧版本,版本永不收敛,陷入 ~600 轮/秒的回声死循环
+              // (2026-10-12 MoonUI 高 CPU/网络事故根因)。两侧都删时文件在两端都已消失,
+              // 版本差异无害,不推即收敛;对端是活条目时旧版也能正确采纳(走 remote-newer
+              // 分支),不会回声,故照常外推。
+              if (!receiveOnly && localEntry && !remoteEntry?.deleted) sends.push(localEntry);
+            } else if (relation === 'remote-newer' && remoteEntry) {
+              // 对端墓碑较新:本地删除。接收模式下同样执行——对端即权威源,删除也跟随
               await executor?.applyDelete(action.path, remoteEntry);
               localIndex.set(action.path, remoteEntry);
               // 该路径已在对端消失,中止本机在途接收,避免迟到块响应把它复活

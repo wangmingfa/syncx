@@ -310,6 +310,93 @@ describe('sync peer session', () => {
     rmDir(dir);
   });
 
+  it('adopts the newer remote tombstone when both sides are deleted at different versions', async () => {
+    // 回归:两侧都是墓碑但版本不同(同一设备先后删除、计数器不同)。
+    // 修复前 delete 分支按 localEntry?.deleted 判定,本地有墓碑就恒回推本地那条
+    // (更旧的),从不采纳对端更新的墓碑 → 两端各推各的旧版本,版本永不收敛,
+    // 索引交换陷入死循环(2026-10-12 MoonUI 高 CPU/网络事故根因)。
+    // 修复后按版本主导方分支:对端墓碑较新(remote-newer)→ 本地采纳,一轮即收敛。
+    const { transport, sentEntries } = fakeTransport();
+    const localIndex = new Map([
+      // 本地墓碑 [dev-a:2](较旧)
+      ['gone.txt', entry('gone.txt', [['dev-a', 2]], [], 0, true)],
+    ]);
+    const applyDelete = vi.fn(async () => {});
+    const peer = createSyncPeer({
+      transport,
+      localIndex,
+      executor: { applyDelete } as unknown as LocalExecutor,
+      readLocalBlock: () => Buffer.from(''),
+      deviceId: 'DEV-A',
+    });
+
+    // 对端发来同一设备的较新墓碑 [dev-a:4]
+    await peer.onPeerIndex([entry('gone.txt', [['dev-a', 4]], [], 0, true)]);
+
+    // 本地应采纳对端较新的墓碑(版本收敛到 4),而不是停留在旧的 2
+    expect(localIndex.get('gone.txt')?.version.get('dev-a')).toBe(4);
+    expect(localIndex.get('gone.txt')?.deleted).toBe(true);
+    // 且不应回推本地那条更旧的墓碑(回推正是死循环的燃料)
+    expect(sentEntries).toHaveLength(0);
+    // 本地删除动作应被执行(对端即权威源)
+    expect(applyDelete).toHaveBeenCalledTimes(1);
+  });
+
+  it('does not echo its newer tombstone when the peer also has a (older) tombstone', async () => {
+    // 回归:两侧都是墓碑、本地较新(local-newer)。这是 MoonUI 死循环的**回声源**:
+    // 旧代码按 localEntry?.deleted 判定,本地有墓碑就回推本地那条较新墓碑;旧版对端
+    // 收到后其 delete 分支又回推它自己的旧墓碑,两端各推各的,版本永不收敛,~600 轮/秒
+    // 空转(2026-10-12 高 CPU/网络事故根因)。修复:两侧都删时文件在两端都已消失,
+    // 版本差异无害,本地**不外推**即断链——单端升级即可止住循环,无需对端同步升级。
+    const { transport, sentEntries } = fakeTransport();
+    const localIndex = new Map([
+      // 本地墓碑 [dev-a:4](较新)
+      ['gone.txt', entry('gone.txt', [['dev-a', 4]], [], 0, true)],
+    ]);
+    const applyDelete = vi.fn(async () => {});
+    const peer = createSyncPeer({
+      transport,
+      localIndex,
+      executor: { applyDelete } as unknown as LocalExecutor,
+      readLocalBlock: () => Buffer.from(''),
+      deviceId: 'DEV-A',
+    });
+
+    // 对端发来同一设备的较旧墓碑 [dev-a:2]
+    await peer.onPeerIndex([entry('gone.txt', [['dev-a', 2]], [], 0, true)]);
+
+    // 本地保持较新的墓碑(不降级),且**不回推**——回推正是死循环的燃料
+    expect(localIndex.get('gone.txt')?.version.get('dev-a')).toBe(4);
+    expect(localIndex.get('gone.txt')?.deleted).toBe(true);
+    expect(sentEntries).toHaveLength(0);
+    // 两侧都删,本地无需执行删除动作
+    expect(applyDelete).not.toHaveBeenCalled();
+  });
+
+  it('still echoes its newer tombstone when the peer has a live (non-deleted) entry', async () => {
+    // 对照:本地删了、对端还留着活文件(local-newer,对端非墓碑)——这是正常的
+    // 「本地删除应传播给对端」场景,必须照常外推,不能因上面的「两侧都删不外推」
+    // 修复而误伤。
+    const { transport, sentEntries } = fakeTransport();
+    const localIndex = new Map([
+      ['gone.txt', entry('gone.txt', [['dev-a', 4]], [], 0, true)],
+    ]);
+    const peer = createSyncPeer({
+      transport,
+      localIndex,
+      executor: null as never,
+      readLocalBlock: () => Buffer.from(''),
+      deviceId: 'DEV-A',
+    });
+
+    // 对端发来活条目(非墓碑),同一设备较旧版本(本地 [dev-a:4] 主导 [dev-a:1] → local-newer)
+    await peer.onPeerIndex([entry('gone.txt', [['dev-a', 1]], ['b1'], 100, false)]);
+
+    // 本地较新的墓碑应外推,让对端删除该文件
+    expect(sentEntries).toHaveLength(1);
+    expect(sentEntries[0].deleted).toBe(true);
+  });
+
   it('ignores out-of-range, non-integer, and oversized block responses', async () => {
     const dir = mkdtempSync(join(tmpdir(), 'syncx-peer-'));
     const root = join(dir, 'share');
