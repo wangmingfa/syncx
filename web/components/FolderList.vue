@@ -90,6 +90,22 @@ function gitBadgeOf(f: FolderInfo): { label: string; tip: string; warn: boolean 
 }
 
 /**
+ * 指纹对照的展示行(「目录不可信」横幅内的高亮对照):旧值 → 新值一眼可辨,
+ * 「未变」的一侧收成灰字,目录读不到(missing)时显「读不到」。
+ */
+function identityChangeRows(f: FolderInfo): Array<{ label: string; from?: string; to?: string; same: boolean }> {
+  const c = folderErrorOf(f)?.identityChange;
+  if (!c) return [];
+  const row = (label: string, key: 'dev' | 'ino') => ({
+    label,
+    from: c.recorded?.[key],
+    to: c.current?.[key],
+    same: !!c.recorded && !!c.current && c.recorded[key] === c.current[key],
+  });
+  return [row('设备号', 'dev'), row('inode', 'ino')];
+}
+
+/**
  * 「目录不可信」→ 重新采集身份的二次确认。文案按 kind 分级:
  * remounted(仅设备号变、inode 未变)大概率是重挂,语气给到"可以放心确认";
  * changed(inode 也变了)可能是换盘/重建,把风险说满,让用户先看内容再决定。
@@ -489,6 +505,26 @@ function visibleFiles(f: FolderInfo): TransferFile[] {
         </svg>
         <div class="folder-error__body">
           <div class="folder-error__msg break">{{ folderErrorOf(f)!.message }}</div>
+          <!-- 指纹对照:结构化字段渲染(旧值划掉、新值加粗),比正文里一串数字好找 -->
+          <div v-if="identityChangeRows(f).length" class="folder-error__change">
+            <span v-for="row in identityChangeRows(f)" :key="row.label" class="folder-error__change-row">
+              <span class="folder-error__change-label">{{ row.label }}</span>
+              <template v-if="row.same">
+                <span class="folder-error__change-same">{{ row.to }}</span>
+                <span class="folder-error__change-note">未变</span>
+              </template>
+              <template v-else-if="row.to === undefined">
+                <span class="folder-error__change-old">{{ row.from }}</span>
+                <span class="folder-error__change-arrow">→</span>
+                <span class="folder-error__change-note">读不到</span>
+              </template>
+              <template v-else>
+                <span class="folder-error__change-old">{{ row.from }}</span>
+                <span class="folder-error__change-arrow">→</span>
+                <span class="folder-error__change-new">{{ row.to }}</span>
+              </template>
+            </span>
+          </div>
           <div class="folder-error__time">
             {{ fmtTime(folderErrorOf(f)!.ts) }} ·
             {{ folderErrorOf(f)!.kind === 'identity-missing' ? '接回正确的盘后下一轮扫描自动恢复' : folderErrorOf(f)!.kind?.startsWith('identity') ? '需人工确认,不会自动恢复' : folderErrorOf(f)!.kind === 'disk-space' ? '释放磁盘空间后自动恢复接收' : '下一轮扫描成功后自动清除' }}

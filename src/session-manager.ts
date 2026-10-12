@@ -22,7 +22,7 @@ import { WebSocket } from 'ws';
 import { loadConfig, mutateConfig, folderIdFor, folderIndexKey, folderIndexPath, folderTrashPath, folderVersionsPath, purgeFolderIndex, isUnderDirPrefix, type FolderIdentity, type GitCommitPendingRecord, type SharedFolderConfig, type GitSyncMode, type ConflictPolicy } from './config.js';
 import { nextScheduleChangeAt, withinSchedule, formatScheduleSummary, type Schedule } from './schedule.js';
 import type { HolidayStore } from './holidays.js';
-import { acceptedDevs, checkFolderIdentity, readFolderIdentity, withAcceptedDev } from './folder-identity.js';
+import { acceptedDevs, checkFolderIdentity, describeIdentityChange, readFolderIdentity, withAcceptedDev, type IdentityChange } from './folder-identity.js';
 import { openIndexStore, type IndexStore } from './indexstore.js';
 import { createLocalExecutor, resolveSharePath, type LocalExecutor } from './executor.js';
 import {
@@ -514,7 +514,7 @@ export class SyncSessionManager {
   // --- 目录级同步错误采集(Web UI 目录卡上的错误提示) ---
   // 记录每个目录最近一次同步失败的错误信息(内存态,不落盘);同一目录再次出错覆盖,
   // 一轮完整扫描无新错误则清除(问题自愈后提示自动消失)。
-  private readonly folderErrorsState = new Map<string, { message: string; ts: number; kind?: string }>();
+  private readonly folderErrorsState = new Map<string, { message: string; ts: number; kind?: string; identityChange?: IdentityChange }>();
   // --- 传输流量统计(流量面板:累计字节 + 5min 窗口采样环,内存态、重启清零)---
   private readonly traffic = new TrafficLedger();
   // 待清理索引库:removeFolder 时登记「目录实例 key」,等配置热重载关闭该目录的
@@ -1049,25 +1049,39 @@ export class SyncSessionManager {
   }
 
   /** 目录级错误列表(倒序),供 status 下发到目录卡。 */
-  getFolderErrors(): Array<{ folder: string; message: string; ts: number; kind?: string }> {
+  getFolderErrors(): Array<{ folder: string; message: string; ts: number; kind?: string; identityChange?: IdentityChange }> {
     return [...this.folderErrorsState.entries()]
-      .map(([folder, e]) => ({ folder, message: e.message, ts: e.ts, ...(e.kind ? { kind: e.kind } : {}) }))
+      .map(([folder, e]) => ({
+        folder,
+        message: e.message,
+        ts: e.ts,
+        ...(e.kind ? { kind: e.kind } : {}),
+        ...(e.identityChange ? { identityChange: e.identityChange } : {}),
+      }))
       .sort((a, b) => b.ts - a.ts);
   }
 
-  recordFolderError(folderId: string, error: unknown, detail?: string, kind?: string): void {
+  recordFolderError(folderId: string, error: unknown, detail?: string, kind?: string, identityChange?: IdentityChange): void {
     const message = error instanceof Error ? error.message : String(error);
     const full = detail ? `${detail}: ${message}` : message;
     const prev = this.folderErrorsState.get(folderId);
-    this.folderErrorsState.set(folderId, { message: full, ts: Date.now(), ...(kind ? { kind } : {}) });
-    this.logger.warn(`folder ${folderId} sync error: ${full}`);
+    this.folderErrorsState.set(folderId, {
+      message: full,
+      ts: Date.now(),
+      ...(kind ? { kind } : {}),
+      ...(identityChange ? { identityChange } : {}),
+    });
+    // 指纹对照不进 message(UI 用结构化字段渲染高亮),日志里由这里补一句,
+    // 排查换盘问题时日志是唯一线索源
+    const changeNote = identityChange ? ` (${describeIdentityChange(identityChange)})` : '';
+    this.logger.warn(`folder ${folderId} sync error: ${full}${changeNote}`);
     // 目录卡上的错误横幅属「要看就得看到」的信息,不能等兜底 tick
     this.notifyStatus();
     // webhook 只在「新错误」时外推:同一目录同文案的错误每轮扫描都在重记,
     // 不去重就是推送风暴(disk-space 一类由守卫自己走状态迁移,同样受此去重保护)
     if (this.lastWebhookError.get(folderId) !== full) {
       this.lastWebhookError.set(folderId, full);
-      this.emitWebhook({ kind: 'error', ts: Date.now(), folderId, message: full });
+      this.emitWebhook({ kind: 'error', ts: Date.now(), folderId, message: `${full}${changeNote}` });
     }
   }
 
@@ -1307,6 +1321,14 @@ export class SyncSessionManager {
         // st_dev 跟着变而 inode 始终不变(见 docs/adr/0009 附录)。
         this.adoptKnownDev(folder);
       } else if (verdict === 'missing' || verdict === 'changed' || verdict === 'remounted') {
+        // 指纹对照走结构化字段(卡片渲染成高亮的「旧值 → 新值」),正文保持原有措辞。
+        // missing 时目录读不到、没有「变后」值,只带记录侧。
+        const identityChange: IdentityChange | undefined =
+          verdict === 'missing'
+            ? folder.config.folderIdentity
+              ? { recorded: folder.config.folderIdentity }
+              : undefined
+            : { recorded: folder.config.folderIdentity!, current: readFolderIdentity(folder.path) ?? undefined };
         const reason =
           verdict === 'missing'
             ? '目录不存在或不可读(盘未挂载?)'
@@ -1325,6 +1347,7 @@ export class SyncSessionManager {
             ),
             '目录不可信',
             verdict === 'missing' ? 'identity-missing' : verdict === 'remounted' ? 'identity-remounted' : 'identity-changed',
+            identityChange,
           );
         }
         continue;

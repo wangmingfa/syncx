@@ -70,6 +70,29 @@ export function acceptedDevs(recorded: FolderIdentity): string[] {
   return list.includes(recorded.dev) ? list : [...list, recorded.dev];
 }
 
+/**
+ * 身份校验失败时附带的「记录指纹 vs 当前指纹」对照。missing 时目录读不到,
+ * 只有 recorded(卡片据此显示「当前读不到」);changed/remounted 两者俱全。
+ * 结构化字段给 UI 渲染高亮对照行;纯文本场景(日志/webhook)用 describeIdentityChange。
+ */
+export interface IdentityChange {
+  recorded?: FolderIdentity;
+  current?: FolderIdentity;
+}
+
+/** 把指纹对照写成一句人话(日志 / webhook 里与 message 并排出现)。 */
+export function describeIdentityChange(change: IdentityChange): string {
+  const { recorded, current } = change;
+  if (!recorded && !current) return '';
+  const fmt = (v?: FolderIdentity) => (v ? `设备号 ${v.dev} / inode ${v.ino}` : '读不到');
+  if (recorded && current) {
+    const devPart = recorded.dev === current.dev ? `设备号 ${current.dev} 未变` : `设备号 ${recorded.dev} → ${current.dev}`;
+    const inoPart = recorded.ino === current.ino ? `inode ${current.ino} 未变` : `inode ${recorded.ino} → ${current.ino}`;
+    return `${devPart},${inoPart}`;
+  }
+  return `记录指纹:${fmt(recorded)};当前:${fmt(current)}`;
+}
+
 /** `devs` 集合的容量上限:A/B 摆动只需两个,留足余量也别让配置无限膨胀。 */
 const MAX_ACCEPTED_DEVS = 8;
 

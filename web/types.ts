@@ -102,6 +102,8 @@ export interface FolderErrorItem {
   ts: number;
   /** 错误分类:identity-changed / identity-remounted / identity-missing = 目录身份校验失败。 */
   kind?: string;
+  /** 身份校验失败时的指纹对照(记录值 vs 当前值),渲染高亮对照行;missing 时只有 recorded。 */
+  identityChange?: { recorded?: { dev: string; ino: string }; current?: { dev: string; ino: string } };
 }
 
 /** 日期条件(与 src/schedule.ts 的 DayPredicate 一致)。 */

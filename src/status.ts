@@ -83,6 +83,11 @@ export interface FolderErrorStatus {
    * identity-missing = 目录身份校验失败(前两者可「重新采集身份」);缺省 = 普通错误。
    */
   kind?: string;
+  /**
+   * 身份校验失败时的指纹对照(记录值 vs 当前值),UI 据此渲染高亮的「旧值 → 新值」
+   * 对照行;missing 时只有 recorded(目录读不到,没有当前值)。缺省 = 非身份错误。
+   */
+  identityChange?: { recorded?: { dev: string; ino: string }; current?: { dev: string; ino: string } };
 }
 
 /** 一次中转活动(ADR-0014):本机作为枢纽,把来源设备收到的目录索引条目转发给目标设备。
