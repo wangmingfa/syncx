@@ -253,21 +253,43 @@ export function getUncommittedChanges(folderPath: string): { entries: GitChangeE
 
 /**
  * 读取某文件在 HEAD 提交里的字节(工作区改动的「改前」一侧)。
- * 文件不在 HEAD(新文件)或仓库无提交时返回 null。
  * relPath 必须是仓库相对路径且不含目录穿越 —— 由调用方(路由层)保证。
+ *
+ * 三种结果必须分清,不能糊成「取不到」:
+ * - bytes:  HEAD 里有这个文件,拿到内容。
+ * - absent: 文件确实不在 HEAD(新文件 / 空仓库无提交)。git 会明确说
+ *           "not in 'HEAD'",据此判定。
+ * - error:  读取失败(对象损坏 / 超时 / 权限等)。典型是 .git 对象 zlib 头损坏,
+ *           git 报 "inflate: data stream error"。这种**不能**谎报成「没有这个文件」,
+ *           否则会把人支去查一个不存在的问题(文件明明在盘上)。
  */
-export function readFileAtHead(folderPath: string, relPath: string): Buffer | null {
+export type HeadReadResult =
+  | { kind: 'bytes'; bytes: Buffer }
+  | { kind: 'absent' }
+  | { kind: 'error'; error: string };
+
+export function readFileAtHead(folderPath: string, relPath: string): HeadReadResult {
   try {
-    return execFileSync('git', ['show', `HEAD:${relPath}`], {
-      cwd: folderPath,
-      encoding: 'buffer',
-      stdio: ['ignore', 'pipe', 'ignore'],
-      windowsHide: true,
-      timeout: 10_000,
-      maxBuffer: 32 * 1024 * 1024,
-    });
-  } catch {
-    return null;
+    return {
+      kind: 'bytes',
+      bytes: execFileSync('git', ['show', `HEAD:${relPath}`], {
+        cwd: folderPath,
+        encoding: 'buffer',
+        stdio: ['ignore', 'pipe', 'pipe'],
+        windowsHide: true,
+        timeout: 10_000,
+        maxBuffer: 32 * 1024 * 1024,
+      }),
+    };
+  } catch (e) {
+    const stderr =
+      e instanceof Error && (e as { stderr?: Buffer | string }).stderr
+        ? (e as { stderr?: Buffer | string }).stderr!.toString()
+        : '';
+    if (/not in 'HEAD'/.test(stderr)) return { kind: 'absent' };
+    // 取第一行:多行 inflate 错误里第一行已能说明「读取失败」,整段塞进弹窗太长。
+    const firstLine = stderr.trim().split('\n')[0];
+    return { kind: 'error', error: firstLine || 'git 读取失败' };
   }
 }
 

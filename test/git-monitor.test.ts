@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import { execFileSync } from 'node:child_process';
-import { existsSync, mkdirSync, mkdtempSync, unlinkSync, writeFileSync } from 'node:fs';
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, unlinkSync, writeFileSync } from 'node:fs';
 import { rmDir } from './helpers.js';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -381,8 +381,29 @@ describe('uncommitted changes inventory', () => {
     writeFileSync(join(repo, 'a.txt'), 'dirty');
     writeFileSync(join(repo, 'untracked.txt'), 'never committed');
 
-    expect(readFileAtHead(repo, 'a.txt')?.toString('utf8')).toBe('committed');
-    expect(readFileAtHead(repo, 'untracked.txt')).toBeNull();
+    const tracked = readFileAtHead(repo, 'a.txt');
+    expect(tracked.kind).toBe('bytes');
+    if (tracked.kind === 'bytes') expect(tracked.bytes.toString('utf8')).toBe('committed');
+    // 新文件不在 HEAD:判 absent,而不是 error(不能谎报「读取失败」)。
+    expect(readFileAtHead(repo, 'untracked.txt').kind).toBe('absent');
+    rmDir(repo);
+  });
+
+  it('reports a corrupt HEAD object as an error, not as absent', () => {
+    const repo = tempGitRepo();
+    writeFileSync(join(repo, 'a.txt'), 'committed');
+    commitAll(repo, 'init');
+    // 破坏 a.txt 在 HEAD 里的 loose blob,模拟 .git 对象 zlib 头损坏。
+    // git 把 loose object 设成只读(0444),写之前先解除,否则 EACCES。
+    const blob = git(repo, ['rev-parse', 'HEAD:a.txt']).trim();
+    const objPath = join(repo, '.git', 'objects', blob.slice(0, 2), blob.slice(2));
+    chmodSync(objPath, 0o644);
+    writeFileSync(objPath, 'GARBAGE_NOT_ZLIB');
+
+    const res = readFileAtHead(repo, 'a.txt');
+    // 关键:损坏必须判 error(文件在盘上),不能判 absent(那会谎报「HEAD 没有这个文件」)。
+    expect(res.kind).toBe('error');
+    if (res.kind === 'error') expect(res.error.length).toBeGreaterThan(0);
     rmDir(repo);
   });
 });

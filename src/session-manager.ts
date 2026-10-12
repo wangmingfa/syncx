@@ -3551,14 +3551,18 @@ export class SyncSessionManager {
     ) {
       throw new Error('非法的文件路径');
     }
-    const bytes = readFileAtHead(folder.path, relPath);
+    const headRead = readFileAtHead(folder.path, relPath);
     let head: FileSideState;
-    if (bytes === null) {
+    if (headRead.kind === 'absent') {
+      // 新文件 / 空仓库:HEAD 里确实没有,如实说「没有这个文件」。
       head = { exists: false };
-    } else if (bytes.length > compareContentLimit(relPath)) {
-      head = { exists: true, size: bytes.length, tooLarge: true };
+    } else if (headRead.kind === 'error') {
+      // 读取失败(对象损坏 / 超时等):文件在盘上,不能谎报缺失,带上原因。
+      head = { exists: false, error: headRead.error };
+    } else if (headRead.bytes.length > compareContentLimit(relPath)) {
+      head = { exists: true, size: headRead.bytes.length, tooLarge: true };
     } else {
-      head = { exists: true, size: bytes.length, ...this.describeBytes(relPath, bytes) };
+      head = { exists: true, size: headRead.bytes.length, ...this.describeBytes(relPath, headRead.bytes) };
     }
     return { path: relPath, head, worktree: this.readLocalFileForCompare(folder, relPath) };
   }
