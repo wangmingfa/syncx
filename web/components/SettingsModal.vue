@@ -3,6 +3,7 @@ import { computed, ref, watch } from 'vue';
 import { NButton, NCheckbox, NDatePicker, NInput, NInputNumber, NSelect } from 'naive-ui';
 import { useStatusContext } from '../composables/statusContext';
 import { apiPost, errText } from '../utils/api';
+import CalendarModal from './CalendarModal.vue';
 import ModalShell from './ModalShell.vue';
 import ScheduleRuleEditor from './ScheduleRuleEditor.vue';
 import type { Schedule } from '../types';
@@ -51,6 +52,8 @@ const holidaySourceDefault = ref('');
 const overridesOpen = ref(false);
 const overrideDate = ref<number | null>(null);
 const overrideType = ref<'workday' | 'holiday'>('holiday');
+/** 全年日历预览弹窗:只读标注,编辑仍走下面的手动覆盖面板 */
+const calViewOpen = ref(false);
 const CAL_TYPE_OPTIONS = [
   { label: '休息日(不上班)', value: 'holiday' },
   { label: '工作日(要上班)', value: 'workday' },
@@ -310,7 +313,11 @@ async function onTestWebhook(): Promise<void> {
         </p>
       </section>
       <section class="settings-sec">
-        <div class="edit-section-label">节假日日历</div>
+        <!-- 标签行右侧的「查看日历」入口:打开全年月历预览(只读),编辑仍走本段的手动覆盖面板 -->
+        <div class="edit-section-label cal-label-row">
+          <span>节假日日历</span>
+          <button type="button" class="settings-link" @click="calViewOpen = true">查看日历</button>
+        </div>
         <n-checkbox v-model:checked="holidayAutoFetch" class="settings-checkbox" :disabled="busy">
           自动拉取法定节假日(决定「工作日 / 休息日」怎么判)
         </n-checkbox>
@@ -352,6 +359,9 @@ async function onTestWebhook(): Promise<void> {
             公司放假与法定不一致时用这里:覆盖优先于自动拉取的数据。撤销后该日交回日历数据(或按星期几)判定。
           </p>
         </div>
+        <!-- 全年日历预览:嵌套渲染即叠加(ModalShell 无 Teleport,遮罩 fixed 定位脱离格子布局,
+             DOM 顺序在本弹窗内容之后,自然盖在上面 —— 先例见 HistoryModal 的二次确认弹窗) -->
+        <CalendarModal :open="calViewOpen" @close="calViewOpen = false" />
       </section>
     </div>
 
@@ -380,6 +390,17 @@ async function onTestWebhook(): Promise<void> {
   .settings-pair {
     grid-template-columns: 1fr;
   }
+}
+/* 「节假日日历」标签行:右侧挂「查看日历」入口(打开全年月历预览弹窗 CalendarModal)。
+   仅本组件使用,故 scoped;.settings-link 是跨弹窗共用皮肤,仍在 style.css ——
+   这里只调它在标签行内的位置与字号(font: inherit 会继承标签行的 600 字重)。 */
+.cal-label-row {
+  display: flex;
+  align-items: center;
+}
+.cal-label-row .settings-link {
+  margin-left: auto;
+  font-size: 12px;
 }
 /* 节假日日历面板:仅本组件使用的类,故 scoped(口径同 AGENTS.md「组件自有的样式写在自己文件里」)。
    .settings-input / .settings-checkbox / .settings-link 是跨弹窗共用的皮肤,仍留在 style.css。 */
