@@ -2219,7 +2219,9 @@ html[data-theme='dark'] .conflict-state-diff {
   padding: 10px 12px;
   border: 1px solid var(--border, #e3e6ea);
   border-radius: 8px;
-  background: var(--surface-2, #f7f8fa);
+  /* 用真实主题变量 --bg-soft(浅 #eaeef3 / 深 #161b24):原先的 --surface-2 两个主题
+     都没定义,永远落到浅色 fallback,深色模式下变成白底浅字,文字看不清。 */
+  background: var(--bg-soft);
   font-size: 13px;
   line-height: 1.5;
   color: var(--text, #1f2329);
