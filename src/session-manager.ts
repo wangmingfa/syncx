@@ -3629,6 +3629,33 @@ export class SyncSessionManager {
   }
 
   /**
+   * 批量重新采集身份:把**此刻**校验为 changed / remounted 的目录全部按
+   * reAdoptFolderIdentity 的单条逻辑走一遍(多个目录逐个确认太繁琐)。
+   *
+   * 只碰正在报「目录不可信」的目录 —— 身份正常的目录一个字节都不动;
+   * missing(目录读不到)不在此列:空挂载点不能被批量确认成合法身份,
+   * 那种目录只能等接回正确的盘自动恢复。逐条收集结果,单条失败不连累其余。
+   */
+  reAdoptAllIdentities(): { adopted: string[]; skipped: Array<{ id: string; reason: string }> } {
+    const adopted: string[] = [];
+    const skipped: Array<{ id: string; reason: string }> = [];
+    for (const folder of this.folderStates) {
+      const verdict = checkFolderIdentity(folder.path, folder.config.folderIdentity);
+      if (verdict !== 'changed' && verdict !== 'remounted') continue;
+      try {
+        this.reAdoptFolderIdentity(folder.id);
+        adopted.push(folder.id);
+      } catch (e) {
+        skipped.push({ id: folder.id, reason: e instanceof Error ? e.message : String(e) });
+      }
+    }
+    if (adopted.length > 0) {
+      this.logger.info(`folder identity re-adopted (batch): ${adopted.length} 个目录`);
+    }
+    return { adopted, skipped };
+  }
+
+  /**
    * 静默采回一个**已在可接受集合里**的设备号(扫描门禁的 'remounted-known' 分支)。
    *
    * 与 reAdoptFolderIdentity 的差别只有一条,而且是关键的那条:这里**不扩大集合**。

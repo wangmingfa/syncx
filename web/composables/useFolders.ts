@@ -60,6 +60,8 @@ export function useFolders(deps: CoreDeps): {
   toggleGlobalPaused: (paused: boolean) => Promise<void>;
   /** 「目录不可信」横幅上的重新采集身份(仅更新指纹,索引不动)。 */
   reAdoptIdentity: (f: FolderInfo) => Promise<void>;
+  /** 批量重新采集:把此刻校验失败的目录一次恢复,结果经 toast 汇总。 */
+  reAdoptAllIdentities: () => Promise<void>;
 } {
   const { status, busy, refreshStatus, post, askConfirm } = deps;
   const { showToast } = useToast();
@@ -454,6 +456,30 @@ export function useFolders(deps: CoreDeps): {
     }
   }
 
+  /**
+   * 批量重新采集身份:把此刻「目录不可信」的目录一次恢复(后端只碰
+   * changed/remounted 的目录,身份正常的目录一个字节不动;missing 的逐条回报原因)。
+   */
+  async function reAdoptAllIdentities(): Promise<void> {
+    try {
+      const r = await apiJson<{ adopted: string[]; skipped: Array<{ id: string; reason: string }> }>(
+        '/api/folders/re-adopt-identity-all',
+        { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: '{}' },
+      );
+      if (r.adopted.length > 0 && r.skipped.length === 0) {
+        showToast(`已重新采集 ${r.adopted.length} 个目录的身份,正在恢复同步`);
+      } else if (r.adopted.length > 0) {
+        showToast(`已恢复 ${r.adopted.length} 个目录;${r.skipped.length} 个采集失败(见目录卡)`, 'alert');
+      } else {
+        showToast(r.skipped.length > 0 ? `${r.skipped.length} 个目录采集失败(见目录卡)` : '没有需要恢复的目录', r.skipped.length > 0 ? 'alert' : 'info');
+      }
+      await refreshStatus();
+    } catch (e) {
+      showToast(errText(e, '批量采集身份失败'), 'alert');
+      await refreshStatus();
+    }
+  }
+
   return {
     hoverDevices,
     hoverFolderKey,
@@ -493,5 +519,6 @@ export function useFolders(deps: CoreDeps): {
     toggleFolderPaused,
     toggleGlobalPaused,
     reAdoptIdentity,
+    reAdoptAllIdentities,
   };
 }

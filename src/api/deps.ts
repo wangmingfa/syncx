@@ -147,6 +147,8 @@ export interface ControlServerDeps {
   resolveFolderConflict?: (folderId: string, copyPath: string, choice: 'keep-local' | 'discard') => void;
   /** 冲突「查看对比」:原文件 vs 冲突副本两个本机侧,返回与 /api/folders/file 同形状的数据。 */
   conflictFilePair?: (folderId: string, copyPath: string) => unknown;
+  /** 批量重新采集身份:此刻校验失败的目录(changed/remounted)全部更新指纹,逐条收集结果。 */
+  reAdoptAllIdentities?: () => { adopted: string[]; skipped: Array<{ id: string; reason: string }> };
   /** 工作区未提交变更清单(目录卡「Git 改动」弹窗):现查 git status。非 git 仓库返回 null。 */
   listGitChanges?: (folderId: string) => unknown;
   /** 工作区某文件的改动对比:HEAD 版 vs 盘上当前,复用通用差异弹窗的侧形状。 */

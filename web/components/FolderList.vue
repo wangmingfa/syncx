@@ -165,6 +165,7 @@ const {
   openFiles,
   openTrash,
   openDiff,
+  reAdoptAllIdentities,
   toggleFolderPaused,
   toggleGlobalPaused,
   reAdoptIdentity,
@@ -213,6 +214,17 @@ const headActions = computed<RailAction[]>(() => {
     { key: 'global-history', icon: 'history', tooltip: '全局同步记录:跨目录的归并时间线', onClick: () => openGlobalHistory() },
     { key: 'report', icon: 'report', tooltip: '同步周报:近 7 天变更趋势 / 目录贡献 / 冲突汇总', onClick: () => (reportOpen.value = true) },
   ];
+  // 有目录身份校验失败时才出现的批量恢复:多个目录逐个点「重新采集身份」太繁琐
+  if (identityBrokenFolders.value.length > 0) {
+    actions.push({
+      key: 'readopt-all',
+      icon: 'restore',
+      active: true,
+      disabled: b,
+      tooltip: `批量重新采集身份:${identityBrokenFolders.value.length} 个目录不可信,一键全部恢复`,
+      onClick: () => askReAdoptAll(),
+    });
+  }
   if (status.value.folders.length > 0) {
     actions.push({
       key: 'global-pause',
@@ -225,6 +237,27 @@ const headActions = computed<RailAction[]>(() => {
   }
   return actions;
 });
+
+/** 此刻身份校验失败的目录(changed / remounted;missing 接回盘自愈,不进批量确认)。 */
+const identityBrokenFolders = computed<FolderInfo[]>(() =>
+  status.value.folders.filter((f) => {
+    const kind = folderErrorOf(f)?.kind;
+    return kind === 'identity-changed' || kind === 'identity-remounted';
+  }),
+);
+
+/** 批量恢复的二次确认:一次确认更新全部失败目录的指纹,风险说满。 */
+function askReAdoptAll(): void {
+  const list = identityBrokenFolders.value;
+  askConfirm({
+    title: '批量重新采集目录身份',
+    message: `${list.length} 个目录「不可信」:确认后把这些目录的指纹全部更新为当前值(仅指纹,索引不动),随后自动恢复同步。`,
+    detail: list.map((f) => f.path).join('\n'),
+    confirmText: '全部重新采集',
+    note: '若有目录可能被换盘/重建,请先逐个核对内容再确认;「目录读不到」的目录不在此列,接回正确的盘后自动恢复。',
+    action: () => reAdoptAllIdentities(),
+  });
+}
 
 /**
  * 目录卡的六个动作,收成数据交给 ActionRail。

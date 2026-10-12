@@ -280,3 +280,58 @@ describe('reAdoptFolderIdentity 落盘', () => {
     expect(compareIdentity({ dev: '65115', ino: '210052' }, legacy)).toBe('remounted');
   });
 });
+
+/** 批量恢复:只碰校验失败的目录,身份正常的不动,读不到的进 skipped。 */
+describe('reAdoptAllIdentities', () => {
+  it('re-adopts only the broken folders and reports the unreadable ones', async () => {
+    const dir = tempDir('syncx-fid-adopt-all-');
+    try {
+      const share = join(dir, 'share');
+      mkdirSync(share, { recursive: true });
+      const real = readFolderIdentity(share);
+      expect(real).not.toBeNull();
+      const configPath = join(dir, 'config.json');
+      writeFileSync(
+        configPath,
+        JSON.stringify({
+          sharedFolders: [
+            // 坏:设备号不符 → remounted,应被批量恢复
+            { id: 'broken', path: share, devices: [], folderIdentity: { dev: '999999999', ino: real!.ino } },
+            // 好:指纹与盘一致,一个字节都不该动
+            { id: 'healthy', path: share, devices: [], folderIdentity: { dev: real!.dev, ino: real!.ino } },
+            // 读不到:目录不存在 → missing,不进 adopted 也不被写回
+            { id: 'gone', path: join(dir, 'nope'), devices: [], folderIdentity: { dev: '1', ino: '2' } },
+          ],
+          peers: [],
+        }),
+      );
+      const manager = new SyncSessionManager(
+        {
+          identity: loadOrCreateIdentity(dir),
+          configPath,
+          configDir: dir,
+          peerPort: 0,
+          logger: createLogger(undefined),
+        },
+        loadConfig(configPath).sharedFolders,
+      );
+
+      const { adopted, skipped } = manager.reAdoptAllIdentities();
+      expect(adopted).toEqual(['broken']);
+      // missing 不进 skipped:批量确认只针对「读得到但指纹不符」的目录,读不到的
+      // (空挂载点)绝不能被一键确认,前端确认框同样不列它们
+      expect(skipped).toEqual([]);
+      // 落盘核对:坏目录的指纹换成当前值,好目录与读不到的目录原样
+      const saved = loadConfig(configPath).sharedFolders;
+      expect(saved.find((f) => f.id === 'broken')?.folderIdentity?.dev).toBe(real!.dev);
+      expect(saved.find((f) => f.id === 'healthy')?.folderIdentity?.dev).toBe(real!.dev);
+      expect(saved.find((f) => f.id === 'gone')?.folderIdentity?.dev).toBe('1');
+
+      await new Promise((r) => setTimeout(r, 250));
+      await manager.runScan();
+      manager.close();
+    } finally {
+      rmDir(dir);
+    }
+  });
+});

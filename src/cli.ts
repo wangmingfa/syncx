@@ -875,6 +875,8 @@ export async function run(args: ParsedArgs): Promise<void> {
     },
     // 冲突「查看对比」:两个本机侧(原文件 vs 副本)交给 manager 复用同一套读取/降级逻辑
     conflictFilePair: (folderId, copyPath) => manager.readConflictPair(folderId, copyPath),
+    // 批量重新采集身份:一次把所有「目录不可信」的目录恢复(逐条收集结果,单条失败不连累)
+    reAdoptAllIdentities: () => manager.reAdoptAllIdentities(),
     // 「Git 改动」弹窗:工作区未提交变更清单(现查 git status)+ 单文件 HEAD vs 当前
     listGitChanges: (folderId) => manager.listGitChanges(folderId),
     readGitDiff: (folderId, path) => manager.readGitDiff(folderId, path),

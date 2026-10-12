@@ -56,7 +56,7 @@ export async function tryFolderRoutes(
   res: ServerResponse,
   deps: ControlServerDeps,
 ): Promise<boolean> {
-  const { addFolder, removeFolder, setFolderDevices, setFolderUseGitignore, setFolderPaused, setFolderFilePaused, setFolderSchedule, setFolderGitSync, setFolderConflictPolicy, setFolderE2E, setFolderOnDemand, setFolderOnDemandDir, prioritizeTransfer, materializeFile, getFolderIgnoreInfo, setFolderIgnoreLines, testFolderIgnore, reAdoptFolderIdentity, getFolderHistory, getGlobalHistory, getWeeklyReport, clearFolderHistory, listFolderConflicts, resolveFolderConflict, conflictFilePair, applyConflictMerge, cleanIdenticalConflicts, diffFolder, compareFolder, readFilePair, applyFileSync, listFolderVersions, restoreFolderVersion, deleteFolderVersion, getFolderVersionContent, rollbackFolder, setScheduleOverride, setCalendarOverride, getCalendar, listGitChanges, readGitDiff } = deps;
+  const { addFolder, removeFolder, setFolderDevices, setFolderUseGitignore, setFolderPaused, setFolderFilePaused, setFolderSchedule, setFolderGitSync, setFolderConflictPolicy, setFolderE2E, setFolderOnDemand, setFolderOnDemandDir, prioritizeTransfer, materializeFile, getFolderIgnoreInfo, setFolderIgnoreLines, testFolderIgnore, reAdoptFolderIdentity, reAdoptAllIdentities, getFolderHistory, getGlobalHistory, getWeeklyReport, clearFolderHistory, listFolderConflicts, resolveFolderConflict, conflictFilePair, applyConflictMerge, cleanIdenticalConflicts, diffFolder, compareFolder, readFilePair, applyFileSync, listFolderVersions, restoreFolderVersion, deleteFolderVersion, getFolderVersionContent, rollbackFolder, setScheduleOverride, setCalendarOverride, getCalendar, listGitChanges, readGitDiff } = deps;
   const path = req.url ? pathname(req.url) : '/';
 
   // Form POST /folders : add or (via _method=DELETE) remove a folder
@@ -874,6 +874,17 @@ export async function tryFolderRoutes(
       sendJson(res, 200, { ok: true });
     } catch (e) {
       sendJson(res, 400, { error: e instanceof Error ? e.message : '同步失败' });
+    }
+    return true;
+  }
+
+  // POST /api/folders/re-adopt-identity-all : 批量重新采集 —— 此刻校验失败
+  // (changed/remounted)的目录全部更新指纹。missing 目录后端逐条拒绝并回报原因。
+  if (req.method === 'POST' && path === '/api/folders/re-adopt-identity-all' && reAdoptAllIdentities) {
+    try {
+      sendJson(res, 200, reAdoptAllIdentities());
+    } catch (e) {
+      sendJson(res, 400, { error: e instanceof Error ? e.message : '批量采集身份失败' });
     }
     return true;
   }
