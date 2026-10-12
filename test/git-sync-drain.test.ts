@@ -5,6 +5,7 @@ import { join } from 'node:path';
 import { afterEach, beforeAll, describe, expect, it } from 'vitest';
 
 import { loadOrCreateIdentity } from '../src/identity.js';
+import { readFolderIdentity } from '../src/folder-identity.js';
 import type { SharedFolderConfig } from '../src/config.js';
 import { createLogger } from '../src/logger.js';
 import type { ControlMessage } from '../src/net/wire.js';
@@ -821,6 +822,66 @@ describe('incoming git commit notify is receipted to the hop it arrived on', () 
     internals.onControl(notify('8'.repeat(40)), 'PEER000001');
     expect(sent.filter((s) => s.msg.kind === 'git-commit-ack')).toHaveLength(1);
     expect(manager.folderStates[0]?.pendingGitNotify).toBeNull();
+
+    (manager as unknown as { close(): void }).close();
+  });
+});
+
+describe('git sync honors the folder identity gate', () => {
+  /**
+   * 盘被换/目录重挂载时,HEAD 读数来自「可能被换掉的盘」:广播等于替错误内容
+   * 背书,自动提交更会把新盘内容收进仓库。身份校验失败期间两处都必须按兵不动,
+   * 重新采集身份后自动接续 —— 基线不动,恢复后的第一轮 diff 会如实反映停摆期间的提交。
+   */
+  it.skipIf(!HAS_GIT)('holds broadcast and auto-commit while identity fails, resumes after re-adoption', async () => {
+    const { dir, share, manager, folder } = boot('full', ['PEER000001']);
+    const internals = manager as unknown as Internals;
+    const sent = spyControls(manager);
+
+    await internals.checkGitCommits(); // 建基线
+
+    // 指纹换成不匹配的记录值:身份闸门生效(changed)
+    const real = readFolderIdentity(share);
+    if (!real) throw new Error('读不到目录真实指纹');
+    patchDiskFolder(dir, { folderIdentity: { dev: '999999', ino: '999999' } });
+    manager.reloadConfig();
+
+    // ① 本地新提交不广播、基线不推进
+    writeFileSync(join(share, 'a.txt'), 'local change');
+    git(share, ['add', '-A']);
+    git(share, ['commit', '-qm', 'feat: 本机提交']);
+    const head = git(share, ['rev-parse', 'HEAD']);
+    await internals.checkGitCommits();
+    expect(sent).toEqual([]);
+    expect(folder.lastCommitHash).not.toBe(head);
+
+    // ② 挂起的对端提交通知不结算(不自动提交,通知继续挂着)
+    writeFileSync(join(share, 'b.txt'), 'from peer');
+    internals.onGitCommitNotify(notify('6'.repeat(40)));
+    folder.receiveLedger.clear();
+    internals.flushPendingGitNotify();
+    expect(commitCount(share)).toBe(2); // 初始 + 本机那笔,镜像提交没发生
+    expect(folder.pendingGitNotify).not.toBeNull();
+
+    // ③ 重新采集身份(记录值恢复与盘一致):广播与结算自动接续。
+    // 先清掉挂起的通知单看「广播接续」:镜像提交会把基线推过 head,混在一起就
+    // 观察不到本地那笔的广播了。
+    folder.pendingGitNotify = null;
+    patchDiskFolder(dir, { folderIdentity: real });
+    manager.reloadConfig();
+    await internals.checkGitCommits();
+    // 停摆期间的本地提交被广播(基线推进)
+    expect(folder.lastCommitHash).toBe(head);
+    const broadcast = sent.find((s) => s.msg.kind === 'git-commit-notify');
+    expect(broadcast?.msg).toMatchObject({ kind: 'git-commit-notify', commitHash: head });
+
+    // 再看「结算接续」:新的对端提交通知照常自动提交
+    writeFileSync(join(share, 'c.txt'), 'from peer 2');
+    internals.onGitCommitNotify(notify('5'.repeat(40), 'feat: 恢复后的提交'));
+    folder.receiveLedger.clear();
+    internals.flushPendingGitNotify();
+    expect(commitCount(share)).toBe(3); // 初始 + 本机那笔 + 恢复后的镜像提交
+    expect(folder.pendingGitNotify).toBeNull();
 
     (manager as unknown as { close(): void }).close();
   });

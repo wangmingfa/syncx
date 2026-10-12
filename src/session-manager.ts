@@ -1470,6 +1470,18 @@ export class SyncSessionManager {
   /* ==================== Git 提交同步 ==================== */
 
   /**
+   * 目录身份闸门对 git 同步的延伸:指纹校验失败(missing/changed/remounted)时,
+   * git 的 HEAD 读数来自「可能被换掉的盘」—— 拿去广播等于替错误内容背书,自动
+   * 提交更会把新盘的内容收进仓库。跳过本轮,横幅确认身份后自动接续:基线不动,
+   * 恢复后的第一轮 diff 会如实反映停摆期间的全部提交。
+   * 与扫描门禁(scanOnce)同一判据;remounted-known / unknown 放行。
+   */
+  private gitBlockedByIdentity(folder: FolderState): boolean {
+    const verdict = checkFolderIdentity(folder.path, folder.config.folderIdentity);
+    return verdict === 'missing' || verdict === 'changed' || verdict === 'remounted';
+  }
+
+  /**
    * 检查各目录的 git HEAD 变化:若检测到新提交,广播给其他共享设备。
    * 在每轮扫描末尾调用,复用 5 秒定时间隔,不额外起定时器;上一轮未拿到回执的
    * 出站广播与中继由 flushPendingGitNotify 开头补投,同一节拍。
@@ -1481,6 +1493,7 @@ export class SyncSessionManager {
     this.flushPendingGitNotify();
     for (const folder of this.folderStates) {
       if (this.folderPausedNow(folder)) continue;
+      if (this.gitBlockedByIdentity(folder)) continue;
       const mode = folder.config.gitSync;
       // 只处理启用了发送的模式('send' 或 'full')
       if (!mode || mode === 'off' || mode === 'receive') continue;
@@ -1546,6 +1559,7 @@ export class SyncSessionManager {
         continue;
       }
       if (this.folderPausedNow(folder)) continue;
+      if (this.gitBlockedByIdentity(folder)) continue;
       // 只认「还活着」的在途接收:本管线自己的陈旧认领(块重试耗尽的滞留)不算,
       // 它已由保鲜期判死,继续等只会把结算挂死(见 peer.ts 的认领保鲜期)
       const now = Date.now();
