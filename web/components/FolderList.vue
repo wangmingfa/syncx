@@ -592,7 +592,16 @@ function visibleFiles(f: FolderInfo): TransferFile[] {
           class="folder-error__adopt"
           :disabled="busy"
           @click="askReAdopt(f)"
-        >重新采集身份</n-button>
+        >
+          <!-- 盾牌与栏头「批量重新采集身份」同款:一眼对上"这俩是一件事" -->
+          <template #icon>
+            <svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+              <path d="M12 3l7 3v5c0 4.4-2.9 7.9-7 9.4C7.9 18.9 5 15.4 5 11V6l7-3z" />
+              <path d="M9 11.5l2 2 4-4" />
+            </svg>
+          </template>
+          重新采集身份
+        </n-button>
       </div>
 
       <!-- 按目录指派可同步的设备:卡片上只读展示,点「编辑」弹窗修改后显式保存 -->
