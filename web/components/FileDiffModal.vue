@@ -375,6 +375,9 @@ watch(
     pendingAction.value = null;
     hoverIndex.value = null;
     viewMode.value = 'preview';
+    // 双击文件行打开本弹窗时,浏览器会顺手选中那一行文字;不清掉,选区会残留到
+    // 新渲染的对比文本上,整屏看起来像被全选。打开时清一次选区。
+    if (props.open) window.getSelection()?.removeAllRanges();
     void nextTick(() => {
       hunkCursor.value = 0;
       for (const el of [paneLeftEl.value, paneRightEl.value]) {
