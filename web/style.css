@@ -1520,6 +1520,12 @@ html[data-theme='dark'] .chip-menu__item--danger {
   max-width: 740px;
 }
 
+/* 「Git 改动」弹窗加宽一档(640 → 740):树形清单要放路径 + 状态标 + 原路径,
+   默认宽度下长路径行挤得快折行。双类同上,压过外壳的 `.modal-wide` 不靠顺序。 */
+.modal-wide.git-changes-modal {
+  max-width: 740px;
+}
+
 .modal-wide.history-modal.is-global {
   max-width: 840px;
 }

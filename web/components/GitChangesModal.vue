@@ -213,9 +213,10 @@ const diffPanes = computed<{ left: DiffPaneData; right: DiffPaneData } | null>((
   <ModalShell
     :open="!!folder"
     :title="`Git 改动（${folder?.path ?? ''}）`"
-    :description="notARepo ? '' : '工作区未提交的变更：双击文件可查看与 HEAD 提交的对比'"
+    :description="notARepo ? '' : '双击文件查看与 HEAD 的对比'"
     descriptionMono
     wide
+    class="git-changes-modal"
     @close="emit('close')"
   >
     <div class="git-changes">
@@ -329,6 +330,14 @@ const diffPanes = computed<{ left: DiffPaneData; right: DiffPaneData } | null>((
 
 .git-changes__row {
   padding-block: 1px;
+  border-radius: 6px;
+}
+
+/* hover 整行生效(含目录缩进):行是可双击的单元,高亮不该只覆盖文件名那截 */
+.git-changes__row:hover,
+.git-changes__row:focus-within {
+  background: var(--bg-soft);
+  outline: 1px solid color-mix(in srgb, var(--online) 35%, transparent);
 }
 
 .git-changes__dir {
@@ -367,13 +376,6 @@ const diffPanes = computed<{ left: DiffPaneData; right: DiffPaneData } | null>((
   border-radius: 6px;
   cursor: pointer; /* 双击才是对比(图例有提示);单击不承诺任何动作 */
   font-size: 12.5px;
-}
-
-/* hover 要一眼可见:淡底 + 细描边(单靠 var(--card-hi) 在白卡上几乎看不出来) */
-.git-changes__file:hover,
-.git-changes__file:focus-visible {
-  background: var(--bg-soft);
-  outline: 1px solid color-mix(in srgb, var(--online) 35%, transparent);
 }
 
 .git-changes__status {
