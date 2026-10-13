@@ -1316,6 +1316,9 @@ html[data-theme='dark'] .chip-menu__item--danger {
 /* ---------- 待确认面板(对方推送的配对 / 目录共享邀请) ---------- */
 
 .offers {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
   margin-bottom: 14px;
 }
 
@@ -1323,12 +1326,174 @@ html[data-theme='dark'] .chip-menu__item--danger {
   color: var(--accent);
 }
 
-.offer-card {
-  /* 用左缘强调色突出「需要你操作」,与只读状态卡区分 */
-  border-left: 3px solid var(--accent-2);
+/* 胶囊列表容器(TransitionGroup tag="div"):flex 列 + 12px 间距,
+   与 .offers 的间距口径一致。胶囊进出时其余项经 .offer-move 补位。 */
+.offer-list {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
 }
 
-/* 已忽略分组:默认收起为一行小按钮,展开后才显示灰显卡片 */
+/* 胶囊进入/离开动画:淡入淡出 + 轻微纵向位移(从上方滑入、向下方滑出),
+   配合 .offer-move 让列表补位平滑。时长 0.22s,缓动与全站 0.15s 交互略长一档,
+   进出更从容。leave-active 保持占位(不 display:none),让补位动画有空间。 */
+.offer-enter-active,
+.offer-leave-active {
+  transition: opacity 0.22s ease, transform 0.22s ease;
+}
+.offer-enter-from {
+  opacity: 0;
+  transform: translateY(-8px);
+}
+.offer-leave-to {
+  opacity: 0;
+  transform: translateY(8px);
+}
+/* 列表项位置变化(某条被移除后其余上移)的补位过渡 */
+.offer-move {
+  transition: transform 0.22s ease;
+}
+
+/* 灵动岛胶囊:一行 = 圆形图标 + 标题/来源 + 圆形确认/忽略按钮。
+   默认收起成一条紧凑胶囊(高度 ~56px),多条邀请纵向堆叠不再占满整屏;
+   目录邀请点「确认」需要填路径时才就地展开内联表单(见 .offer-form)。
+   圆角取 16px:收起时接近胶囊,展开成表单后仍是圆角矩形,不跳变。 */
+.offer-pill {
+  background: var(--card);
+  border: 1px solid var(--border);
+  border-radius: 16px;
+  padding: 10px 12px;
+  box-shadow: var(--shadow);
+  transition: border-color 0.15s ease, box-shadow 0.15s ease;
+}
+.offer-pill.is-expanded {
+  border-color: var(--accent);
+  box-shadow: 0 0 0 1px rgb(74 127 192 / 0.3), var(--shadow);
+}
+
+/* 胶囊主行:图标 + 文本 + 操作,水平居中排布 */
+.offer-pill__row {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+}
+
+/* 圆形图标:目录=文件夹、配对=链接。底色用 accent-soft,与只读状态卡的方形头像区分 */
+.offer-icon {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 40px;
+  height: 40px;
+  flex: none;
+  border-radius: 50%;
+  background: var(--accent-soft);
+  color: var(--accent);
+}
+
+/* 文本区:标题 + 来源,占满中间,长内容收缩换行不撑破 */
+.offer-text {
+  display: flex;
+  flex-direction: column;
+  flex: 1 1 auto;
+  min-width: 0;
+  gap: 1px;
+}
+.offer-title {
+  font-size: 14px;
+  font-weight: 500;
+  color: var(--text);
+  word-break: break-all;
+}
+.offer-sub {
+  font-size: 12px;
+  color: var(--muted);
+  word-break: break-all;
+}
+
+/* 操作区:圆形按钮组,贴右缘,绝不收缩 */
+.offer-actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex: none;
+}
+
+/* 圆形操作按钮:确认(绿)/ 忽略(红)/ 恢复(中性)。底色用低透明度同色系,
+   图标用实色 —— 与参考的「深绿底绿勾 / 深红底红叉」一致,且随主题变量自适应。 */
+.offer-btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 36px;
+  height: 36px;
+  flex: none;
+  border: none;
+  border-radius: 50%;
+  cursor: pointer;
+  transition: transform 0.12s ease, filter 0.12s ease;
+}
+.offer-btn:hover:not(:disabled) {
+  transform: scale(1.06);
+  filter: brightness(1.05);
+}
+.offer-btn:active:not(:disabled) {
+  transform: scale(0.96);
+}
+.offer-btn:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+.offer-btn--accept {
+  background: rgb(47 165 111 / 0.16);
+  color: var(--online);
+}
+.offer-btn--decline {
+  background: rgb(217 107 107 / 0.16);
+  color: var(--offline);
+}
+.offer-btn--restore {
+  background: var(--bg-soft);
+  color: var(--muted-strong);
+}
+/* 「填写路径」文字按钮:覆盖圆形按钮的固定 36px 与 50% 圆角,改成自适应宽度的胶囊。
+   用文字而非勾号是刻意的 —— 勾号语义是「点即完成」,但目录邀请点它只是展开表单,
+   文字能明确告诉用户还有后续步骤。配色沿用确认(绿)系,与「确定」按钮呼应。 */
+.offer-btn--fill {
+  width: auto;
+  height: 32px;
+  padding: 0 14px;
+  border-radius: 999px;
+  font-size: 13px;
+  font-weight: 500;
+  background: rgb(47 165 111 / 0.16);
+  color: var(--online);
+}
+
+/* 展开的内联表单:路径 + 接收模式 + 取消/确定。与主行之间一道分隔线,
+   左侧缩进到图标右缘,视觉上「从图标后面展开」。 */
+.offer-form {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  margin-top: 10px;
+  padding-top: 10px;
+  border-top: 1px solid var(--border);
+}
+.offer-form__actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 8px;
+  margin-top: 2px;
+}
+
+/* 复用本机已有目录时的提示:路径用正文色 + 可断行,便于核对 */
+.offer-form .offer-reuse-hint .mono {
+  color: var(--text);
+  word-break: break-all;
+}
+
+/* 已忽略分组:默认收起为一行小按钮,展开后才显示灰显胶囊 */
 .declined-toggle {
   margin: 2px 0;
 }
@@ -1336,32 +1501,9 @@ html[data-theme='dark'] .chip-menu__item--danger {
   color: var(--muted);
 }
 
-/* 已忽略的待确认项:灰显 + 左缘中性色,与待操作卡片区分 */
-.offer-card.is-declined {
+/* 已忽略的待确认项:整体灰显,与待操作胶囊区分 */
+.offer-pill.is-declined {
   opacity: 0.6;
-  border-left-color: var(--border-strong);
-}
-.declined-flag {
-  font-size: 11px;
-  padding: 1px 7px;
-  border-radius: 999px;
-  border: 1px dashed var(--border-strong);
-  color: var(--muted);
-  white-space: nowrap;
-}
-
-.offer-path {
-  margin-top: 10px;
-}
-
-/* 复用本机已有目录时的提示:路径用正文色 + 可断行,便于核对 */
-.offer-path .offer-reuse-hint .mono {
-  color: var(--text);
-  word-break: break-all;
-}
-
-.offer-card .item-sub {
-  margin-top: 2px;
 }
 
 .break {
@@ -1407,6 +1549,12 @@ html[data-theme='dark'] .chip-menu__item--danger {
      在手机上按 10px 间距排要 218px,收窄到 6px 省 20px,降低整组掉行概率 */
   .item-top .item-actions {
     gap: 6px;
+  }
+
+  /* 灵动岛胶囊:窄屏下图标与按钮组各占固定宽,文本区(min-width:0)收缩换行,
+     整行仍放得下,无需重排 */
+  .offer-pill__row {
+    gap: 8px;
   }
 }
 
