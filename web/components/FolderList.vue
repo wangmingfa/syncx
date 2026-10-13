@@ -548,6 +548,22 @@ function visibleFiles(f: FolderInfo): TransferFile[] {
           </template>
           复制目录 ID
         </n-tooltip>
+        <!-- 复制路径:标题行的路径在 hover 时会被 ActionRail 展开的浮层盖住,没法直接选中复制,
+             所以在这里(浮层覆盖区之外)给一个同款复制按钮,点一下即复制完整路径 -->
+        <n-tooltip trigger="hover" :style="{ maxWidth: '280px' }">
+          <template #trigger>
+            <span class="icon-btn">
+              <n-button size="small" quaternary circle @click="copy(f.path)">
+                <template #icon>
+                  <svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+                    <path d="M3 7a2 2 0 0 1 2-2h4l2 2h8a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z" />
+                  </svg>
+                </template>
+              </n-button>
+            </span>
+          </template>
+          复制目录路径
+        </n-tooltip>
       </div>
 
       <!-- 同步错误横幅:该目录最近一次同步失败的原因(扫描干净后自动消失) -->
