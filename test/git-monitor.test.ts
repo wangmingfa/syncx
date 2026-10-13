@@ -11,6 +11,7 @@ import {
   getUncommittedChanges,
   hasUncommittedChanges,
   isGitRepo,
+  listRecentCommits,
   readFileAtHead,
 } from '../src/git-monitor.js';
 
@@ -349,6 +350,8 @@ describe('uncommitted changes inventory', () => {
     expect(byPath.get('a.txt')?.status).toBe('modified');
     expect(byPath.get('b.txt')?.status).toBe('deleted');
     expect(byPath.get('new.txt')?.status).toBe('added');
+    // 普通文件不带折叠目录标记(拼写钉死:dir 只在整棵未跟踪目录的折叠条上出现)
+    expect(byPath.get('new.txt')?.dir).toBeUndefined();
     // 在途中间态是 syncx 自己的残骸,不进清单
     expect(byPath.has('a.txt.syncx-tmp')).toBe(false);
     rmDir(repo);
@@ -371,6 +374,26 @@ describe('uncommitted changes inventory', () => {
     const renamed = out.entries.find((e) => e.status === 'renamed');
     expect(renamed?.origPath).toBe('old.txt');
     expect(renamed?.path).toBe('sub/old.txt');
+    rmDir(repo);
+  });
+
+  it('collapses a fully-untracked directory into one dir-marked entry without trailing slash', () => {
+    const repo = tempGitRepo();
+    mkdirSync(join(repo, 'backends'), { recursive: true });
+    writeFileSync(join(repo, 'backends', 'tracked.rs'), '// t');
+    commitAll(repo, 'init');
+    // 整个 native-common/ 都未跟踪:git 折叠成 `?? backends/native-common/` 一条,
+    // 端到端必须去尾斜杠并带 dir 标记 —— 尾斜杠原样透传会让前端按 '/' 切段时
+    // 切出一个空名字的行(真机「增」徽标孤行的根因)。
+    mkdirSync(join(repo, 'backends', 'native-common'), { recursive: true });
+    writeFileSync(join(repo, 'backends', 'native-common', 'main.rs'), 'fn main() {}');
+    const out = getUncommittedChanges(repo)!;
+    expect(out.entries).toHaveLength(1);
+    const entry = out.entries[0]!;
+    expect(entry.path).toBe('backends/native-common');
+    expect(entry.path.endsWith('/')).toBe(false);
+    expect(entry.dir).toBe(true);
+    expect(entry.status).toBe('added');
     rmDir(repo);
   });
 
@@ -405,5 +428,86 @@ describe('uncommitted changes inventory', () => {
     expect(res.kind).toBe('error');
     if (res.kind === 'error') expect(res.error.length).toBeGreaterThan(0);
     rmDir(repo);
+  });
+});
+
+describe('recent commit list', () => {
+  it.skipIf(!HAS_GIT)('returns null outside a repo and an empty list for a repo without commits', () => {
+    const plain = mkdtempSync(join(tmpdir(), 'syncx-norepo-'));
+    try {
+      expect(listRecentCommits(plain)).toBe(null);
+    } finally {
+      rmDir(plain);
+    }
+
+    const empty = tempGitRepo();
+    try {
+      // 空仓库让 git log 以 128 退出:这条路径必须由 getLastCommitHash 兜住,
+      // 返回 [] 而不是把「还没有提交」当读取失败抛出去
+      expect(listRecentCommits(empty)).toEqual([]);
+    } finally {
+      rmDir(empty);
+    }
+  });
+
+  it.skipIf(!HAS_GIT)('lists at most 20 commits, newest first, matching git log itself', () => {
+    const repo = tempGitRepo();
+    try {
+      for (let i = 0; i < 25; i += 1) {
+        writeFileSync(join(repo, `f${i}.txt`), String(i));
+        commitAll(repo, `提交 ${i}`);
+      }
+      git(repo, ['tag', 'v1']);
+
+      const list = listRecentCommits(repo)!;
+      expect(list).toHaveLength(20);
+
+      // 用 git 自己的输出当尺子:顺序与条数都不对着实现里的常量验
+      const expected = git(repo, ['log', '-n', '20', '--format=%s']).trim().split(/\r?\n/);
+      expect(list.map((c) => c.subject)).toEqual(expected);
+      expect(list[0]!.subject).toBe('提交 24');
+      expect(list[19]!.subject).toBe('提交 5');
+
+      // 短哈希与完整哈希对得上,作者取仓库级配置,日期是可解析的 ISO
+      const fullHead = git(repo, ['rev-parse', 'HEAD']).trim();
+      expect(fullHead.startsWith(list[0]!.hash)).toBe(true);
+      expect(list[0]!.author).toBe('syncx-test');
+      expect(Number.isNaN(new Date(list[0]!.date).getTime())).toBe(false);
+
+      // 最新一条挂 tag 引用;更旧的一条无引用(空串,而不是缺字段)
+      expect(list[0]!.refs).toContain('tag: v1');
+      expect(list[19]!.refs).toBe('');
+    } finally {
+      rmDir(repo);
+    }
+  });
+
+  it.skipIf(!HAS_GIT)('honors a custom limit and keeps multi-line bodies verbatim', () => {
+    const repo = tempGitRepo();
+    try {
+      writeFileSync(join(repo, 'a.txt'), 'A');
+      commitAll(repo, '只有主题的一笔');
+      writeFileSync(join(repo, 'b.txt'), 'B');
+      git(repo, ['add', '-A']);
+      execFileSync('git', ['commit', '-qm', '标题行', '-m', '正文第一段', '-m', '正文第二段'], {
+        cwd: repo,
+        stdio: 'ignore',
+      });
+
+      const limited = listRecentCommits(repo, 1)!;
+      expect(limited).toHaveLength(1);
+      const head = limited[0]!;
+      expect(head.subject).toBe('标题行');
+      // 正文原样往返:两个 -m 段之间是 git 自己插的空行,首尾不夹多余换行
+      expect(head.body).toBe('正文第一段\n\n正文第二段');
+
+      // 没有正文的提交给空串(前端据此决定是否给出「展开」)
+      const all = listRecentCommits(repo)!;
+      expect(all).toHaveLength(2);
+      expect(all[1]!.subject).toBe('只有主题的一笔');
+      expect(all[1]!.body).toBe('');
+    } finally {
+      rmDir(repo);
+    }
   });
 });

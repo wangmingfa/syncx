@@ -394,7 +394,7 @@ describe('sync peer session', () => {
 
     // 本地较新的墓碑应外推,让对端删除该文件
     expect(sentEntries).toHaveLength(1);
-    expect(sentEntries[0].deleted).toBe(true);
+    expect(sentEntries[0]?.deleted).toBe(true);
   });
 
   it('ignores out-of-range, non-integer, and oversized block responses', async () => {

@@ -72,7 +72,8 @@ import { NETWORK_OFFLINE_BACKOFF_MS, offlineAwareReconnectDelay, reconnectDelayM
 import { hasRoutableInterface } from './net/offline-probe.js';
 import { isSelfPeerUrl, localInterfaceAddresses } from './net/peer-address.js';
 import { CAP_BINARY1 } from './handshake.js';
-import { isGitRepo, getLastCommitHash, getCommitInfo, hasUncommittedChanges, autoCommit, getUncommittedChanges, readFileAtHead, type CommitInfo, type GitChangeEntry } from './git-monitor.js';
+import { isGitRepo, getLastCommitHash, getCommitInfo, hasUncommittedChanges, autoCommit, getUncommittedChanges, readFileAtHead, listRecentCommits, type CommitInfo, type GitChangeEntry, type GitCommitEntry } from './git-monitor.js';
+import { scanEmptyDirs, removeEmptyDirs, type EmptyDirScanResult, type EmptyDirDeleteResult } from './empty-dirs.js';
 
 /** scheduleVerdictFor 的结论:此刻该不该同步、被哪一层挡住、下一个边界何时。 */
 export interface ScheduleVerdict {
@@ -3565,6 +3566,51 @@ export class SyncSessionManager {
       head = { exists: true, size: headRead.bytes.length, ...this.describeBytes(relPath, headRead.bytes) };
     }
     return { path: relPath, head, worktree: this.readLocalFileForCompare(folder, relPath) };
+  }
+
+  /**
+   * 最近提交历史(「Git 提交历史」弹窗数据源)。返回 null = 目录不是 git 仓库。
+   */
+  listGitLog(folderId: string): GitCommitEntry[] | null {
+    const folder = this.folderStates.find((f) => f.id === folderId);
+    if (!folder) throw new Error('共享目录不存在(可能刚被移除)');
+    return listRecentCommits(folder.path);
+  }
+
+  /* ==================== 空文件夹检查 ==================== */
+
+  /** 空目录工具用的忽略规则:现读磁盘的 .gitignore(按配置)+ .syncxignore,与扫描同源。 */
+  private emptyDirRulesFor(folder: FolderState): ReturnType<typeof parseIgnoreRules> {
+    return parseIgnoreRules(readFolderIgnoreLines(folder.path, folder.config.useGitignore !== false));
+  }
+
+  /** 其它共享根的归一化路径集合(嵌套屏障;语义与扫描器的 nestedRoots 一致)。 */
+  private nestedRootsFor(folderId: string): string[] {
+    return this.folderStates.filter((f) => f.id !== folderId).map((f) => resolve(f.path));
+  }
+
+  /**
+   * 盘点某共享目录里的空文件夹。只读,不触发扫描、不碰索引。
+   */
+  listEmptyDirs(folderId: string): EmptyDirScanResult {
+    const folder = this.folderStates.find((f) => f.id === folderId);
+    if (!folder) throw new Error('共享目录不存在(可能刚被移除)');
+    return scanEmptyDirs(folder.path, this.emptyDirRulesFor(folder), this.nestedRootsFor(folderId));
+  }
+
+  /**
+   * 删除勾选的空文件夹。逐条独立处理、结果带原因;只 rmdir 绝不删文件。
+   *
+   * 刻意**不触发 runScan**:目录不是同步实体,扫描器只对文件产生条目/墓碑,
+   * 删掉空目录没有任何东西需要广播给对端(两侧本来就没有它的痕迹)。
+   */
+  deleteEmptyDirs(folderId: string, paths: string[]): EmptyDirDeleteResult[] {
+    const folder = this.folderStates.find((f) => f.id === folderId);
+    if (!folder) throw new Error('共享目录不存在(可能刚被移除)');
+    const results = removeEmptyDirs(folder.path, paths, this.emptyDirRulesFor(folder), this.nestedRootsFor(folderId));
+    const removed = results.filter((r) => r.ok).length;
+    if (removed > 0) this.logger.info(`empty dirs removed: ${folderId} (${removed}/${results.length})`);
+    return results;
   }
 
   /* ==================== 暂停同步 ==================== */

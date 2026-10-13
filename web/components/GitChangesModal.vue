@@ -99,8 +99,14 @@ const statusMeta: Record<GitChangeEntry['status'], { label: string; cls: string 
 
 /** 文件行的 tooltip:重命名给出 旧 → 新,普通文件给路径;尾注「已进暂存区」。 */
 function fileTitle(e: GitChangeEntry): string {
+  if (e.dir) return `${e.path}/ · 未跟踪目录（git 把整棵目录折叠为一条，没有可对比的单文件）`;
   const path = e.origPath ? `${e.origPath} → ${e.path}` : e.path;
   return `${path} · 双击查看与 HEAD 提交的对比${e.staged ? '(已进暂存区)' : ''}`;
+}
+
+/** 该行能否双击进对比:目录不能;git 折叠出的未跟踪目录条也没有单文件可对比。 */
+function diffable(node: TreeNode): boolean {
+  return !node.dir && node.entry !== undefined && node.entry.dir !== true;
 }
 
 function toggleDir(key: string): void {
@@ -247,9 +253,9 @@ const diffPanes = computed<{ left: DiffPaneData; right: DiffPaneData } | null>((
               v-for="row in rows"
               :key="row.key"
               class="git-changes__row"
-              :class="{ 'is-file': !row.node.dir }"
+              :class="{ 'is-file': diffable(row.node) }"
               :style="{ paddingLeft: `${row.depth * 14}px` }"
-              @dblclick="!row.node.dir && openDiff(row.node.entry!)"
+              @dblclick="diffable(row.node) && openDiff(row.node.entry!)"
             >
               <template v-if="row.node.dir">
                 <button type="button" class="git-changes__dir" @click="toggleDir(row.key)">
@@ -263,11 +269,11 @@ const diffPanes = computed<{ left: DiffPaneData; right: DiffPaneData } | null>((
                 <span
                   class="git-changes__file"
                   :title="fileTitle(row.node.entry!)"
-                  tabindex="0"
-                  @keydown.enter="openDiff(row.node.entry!)"
+                  :tabindex="diffable(row.node) ? 0 : undefined"
+                  @keydown.enter="diffable(row.node) && openDiff(row.node.entry!)"
                 >
                   <span class="git-changes__status" :class="statusMeta[row.node.entry!.status].cls">{{ statusMeta[row.node.entry!.status].label }}</span>
-                  <span class="git-changes__name">{{ row.node.name }}</span>
+                  <span class="git-changes__name">{{ row.node.name }}{{ row.node.entry!.dir ? '/' : '' }}</span>
                   <span v-if="row.node.entry!.origPath" class="git-changes__orig">← {{ row.node.entry!.origPath }}</span>
                   <span v-if="row.node.entry!.staged" class="git-changes__staged">已暂存</span>
                 </span>

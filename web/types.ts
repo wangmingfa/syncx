@@ -390,8 +390,10 @@ export interface SyncHistoryData {
 
 /** 工作区一条未提交变更(与 src/git-monitor.ts 的 GitChangeEntry 同形)。 */
 export interface GitChangeEntry {
-  /** 相对仓库根的路径(POSIX 分隔)。 */
+  /** 相对仓库根的路径(POSIX 分隔);git 折叠的未跟踪目录已去尾斜杠,见 dir。 */
   path: string;
+  /** true = git 把整棵未跟踪目录折叠成的这一条记录:没有单文件可对比,不做双击。 */
+  dir?: boolean;
   status: 'modified' | 'added' | 'deleted' | 'renamed';
   /** renamed 的原路径。 */
   origPath?: string;
@@ -413,6 +415,49 @@ export interface GitDiffData {
   path: string;
   head: FileSideData;
   worktree: FileSideData;
+}
+
+/** 提交历史一条记录(与 src/git-monitor.ts 的 GitCommitEntry 同形)。 */
+export interface GitCommitEntry {
+  /** 短哈希。 */
+  hash: string;
+  /** 提交消息首行。 */
+  subject: string;
+  /** 提交消息正文(不含首行);空串 = 没有正文。 */
+  body: string;
+  author: string;
+  /** 作者时间,ISO 8601 原样(前端本地化展示)。 */
+  date: string;
+  /** 引用装饰原样串(如 `HEAD -> main, tag: v1.0`);无引用为空串。 */
+  refs: string;
+}
+
+/** GET /api/folders/git-log 的响应;非 git 仓库时 gitRepo: false。 */
+export interface GitLogData {
+  commits: GitCommitEntry[];
+  /** false = 目录不是 git 仓库(弹窗给出解释而不是空列表)。 */
+  gitRepo?: boolean;
+}
+
+/** GET /api/folders/empty-dirs 的响应:盘点到空文件夹清单。 */
+export interface EmptyDirsData {
+  /** 空目录(相对共享根的 POSIX 路径),字典序。 */
+  dirs: string[];
+  /** 超出上限被截断时为 true。 */
+  truncated: boolean;
+}
+
+/** 删除单条空文件夹的结果。 */
+export interface EmptyDirDeleteResult {
+  path: string;
+  ok: boolean;
+  /** ok=false 的原因(直接展示给用户)。 */
+  reason?: string;
+}
+
+/** POST /api/folders/empty-dirs/delete 的响应:逐条结果。 */
+export interface EmptyDirsDeleteData {
+  results: EmptyDirDeleteResult[];
 }
 
 /** 内容对比:单侧状态(版本向量保持 wire 形态)。 */

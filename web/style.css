@@ -4195,6 +4195,15 @@ html[data-skin='glass'] .modal {
   box-shadow: 0 24px 60px -24px rgb(22 32 52 / 0.4), var(--glass-edge);
 }
 
+/* 「Git 提交历史」/「空文件夹」弹窗的工具栏 sticky 在正文滚动视口顶端,必须用
+   **弹窗表面**同款底色盖住滚过来的列表条目。默认档 var(--card) 是实色,玻璃档却
+   只有 0.4 白 —— 不换的话条目会从工具栏里透出来。--glass-raised 自带明暗两档,
+   一条规则够。 */
+html[data-skin='glass'] .git-log__bar,
+html[data-skin='glass'] .empty-dirs__bar {
+  background: var(--glass-raised);
+}
+
 /* 吐司同理浮在整页之上,底色走抬起面;弹窗内的「内嵌子面」反过来要收掉
    自带的那层半透明白 —— .empty 的 rgb(255 255 255 / .5) 是纸面皮肤时代的写死值,
    压在抬起面上会再叠一层雾,深色档下更会变成一块白板浮在暗弹窗里。

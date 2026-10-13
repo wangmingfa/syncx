@@ -2,6 +2,7 @@ import type { IncomingMessage, ServerResponse } from 'node:http';
 import type { ControlServerDeps } from '../deps.js';
 import type { SyncAction, SyncDirection, SyncHistoryFilter } from '../../history.js';
 import { getHistoryMaxEvents } from '../../history.js';
+import { EMPTY_DIRS_MAX } from '../../empty-dirs.js';
 import { pathname, readBody, redirect, sendJson } from '../helpers.js';
 
 /** fallback 版本页的 HTML 转义(与 ui-fallback 的 escapeHtml 同款)。 */
@@ -56,7 +57,7 @@ export async function tryFolderRoutes(
   res: ServerResponse,
   deps: ControlServerDeps,
 ): Promise<boolean> {
-  const { addFolder, removeFolder, setFolderDevices, setFolderUseGitignore, setFolderPaused, setFolderFilePaused, setFolderSchedule, setFolderGitSync, setFolderConflictPolicy, setFolderE2E, setFolderOnDemand, setFolderOnDemandDir, prioritizeTransfer, materializeFile, getFolderIgnoreInfo, setFolderIgnoreLines, testFolderIgnore, reAdoptFolderIdentity, reAdoptAllIdentities, getFolderHistory, getGlobalHistory, getWeeklyReport, clearFolderHistory, listFolderConflicts, resolveFolderConflict, conflictFilePair, applyConflictMerge, cleanIdenticalConflicts, diffFolder, compareFolder, readFilePair, applyFileSync, listFolderVersions, restoreFolderVersion, deleteFolderVersion, getFolderVersionContent, rollbackFolder, setScheduleOverride, setCalendarOverride, getCalendar, listGitChanges, readGitDiff } = deps;
+  const { addFolder, removeFolder, setFolderDevices, setFolderUseGitignore, setFolderPaused, setFolderFilePaused, setFolderSchedule, setFolderGitSync, setFolderConflictPolicy, setFolderE2E, setFolderOnDemand, setFolderOnDemandDir, prioritizeTransfer, materializeFile, getFolderIgnoreInfo, setFolderIgnoreLines, testFolderIgnore, reAdoptFolderIdentity, reAdoptAllIdentities, getFolderHistory, getGlobalHistory, getWeeklyReport, clearFolderHistory, listFolderConflicts, resolveFolderConflict, conflictFilePair, applyConflictMerge, cleanIdenticalConflicts, diffFolder, compareFolder, readFilePair, applyFileSync, listFolderVersions, restoreFolderVersion, deleteFolderVersion, getFolderVersionContent, rollbackFolder, setScheduleOverride, setCalendarOverride, getCalendar, listGitChanges, readGitDiff, listGitLog, listEmptyDirs, deleteEmptyDirs } = deps;
   const path = req.url ? pathname(req.url) : '/';
 
   // Form POST /folders : add or (via _method=DELETE) remove a folder
@@ -1046,6 +1047,68 @@ export async function tryFolderRoutes(
       sendJson(res, 200, readGitDiff(folderId, filePath));
     } catch (e) {
       sendJson(res, 400, { error: e instanceof Error ? e.message : '读取变更对比失败' });
+    }
+    return true;
+  }
+
+  // GET /api/folders/git-log?folderId=xxx : 最近 20 条提交(「Git 提交历史」弹窗)。只读。
+  if (req.method === 'GET' && req.url && path === '/api/folders/git-log' && listGitLog) {
+    const url = new URL(req.url, 'http://localhost');
+    const folderId = url.searchParams.get('folderId');
+    if (!folderId) {
+      sendJson(res, 400, { error: 'folderId is required' });
+      return true;
+    }
+    try {
+      const commits = listGitLog(folderId);
+      // null = 不是 git 仓库:与 git-changes 同一约定,如实告诉前端
+      sendJson(res, 200, commits === null ? { commits: [], gitRepo: false } : { commits, gitRepo: true });
+    } catch (e) {
+      sendJson(res, 400, { error: e instanceof Error ? e.message : '读取提交历史失败' });
+    }
+    return true;
+  }
+
+  // GET /api/folders/empty-dirs?folderId=xxx : 盘点空文件夹(「空文件夹」弹窗)。只读。
+  if (req.method === 'GET' && req.url && path === '/api/folders/empty-dirs' && listEmptyDirs) {
+    const url = new URL(req.url, 'http://localhost');
+    const folderId = url.searchParams.get('folderId');
+    if (!folderId) {
+      sendJson(res, 400, { error: 'folderId is required' });
+      return true;
+    }
+    try {
+      sendJson(res, 200, listEmptyDirs(folderId));
+    } catch (e) {
+      sendJson(res, 400, { error: e instanceof Error ? e.message : '盘点空文件夹失败' });
+    }
+    return true;
+  }
+
+  // POST /api/folders/empty-dirs/delete { folderId, paths } : 删除勾选的空文件夹。
+  // 逐条结果(ok/reason);只 rmdir、绝不删文件,不触发扫描(目录不是同步实体)。
+  if (req.method === 'POST' && path === '/api/folders/empty-dirs/delete' && deleteEmptyDirs) {
+    try {
+      const raw = await readBody(req);
+      const body = raw === '' ? {} : JSON.parse(raw);
+      const folderId = (body as { folderId?: unknown }).folderId;
+      const paths = (body as { paths?: unknown }).paths;
+      if (typeof folderId !== 'string' || folderId === '') {
+        sendJson(res, 400, { error: 'folderId is required' });
+        return true;
+      }
+      if (!Array.isArray(paths) || paths.length === 0 || paths.some((p) => typeof p !== 'string' || p === '')) {
+        sendJson(res, 400, { error: 'paths must be a non-empty string array' });
+        return true;
+      }
+      // 封顶与扫描上限同源:盘点最多列 EMPTY_DIRS_MAX 条,删除请求不会更多
+      if (paths.length > EMPTY_DIRS_MAX) {
+        sendJson(res, 400, { error: `too many paths (max ${EMPTY_DIRS_MAX})` });
+        return true;
+      }
+      sendJson(res, 200, { results: deleteEmptyDirs(folderId, paths as string[]) });
+    } catch (e) {
+      sendJson(res, 400, { error: e instanceof Error ? e.message : '删除空文件夹失败' });
     }
     return true;
   }

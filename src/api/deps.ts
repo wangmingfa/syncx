@@ -153,6 +153,12 @@ export interface ControlServerDeps {
   listGitChanges?: (folderId: string) => unknown;
   /** 工作区某文件的改动对比:HEAD 版 vs 盘上当前,复用通用差异弹窗的侧形状。 */
   readGitDiff?: (folderId: string, path: string) => unknown;
+  /** 最近提交历史(「Git 提交历史」弹窗):现跑 git log,非 git 仓库返回 null。 */
+  listGitLog?: (folderId: string) => unknown;
+  /** 盘点共享目录里的空文件夹(「空文件夹」弹窗):只读扫盘,忽略规则决定报告范围。 */
+  listEmptyDirs?: (folderId: string) => unknown;
+  /** 删除勾选的空文件夹(逐条结果);只 rmdir,绝不删文件,不触发扫描。 */
+  deleteEmptyDirs?: (folderId: string, paths: string[]) => unknown;
   /** 把逐块合并后的内容写回原文件(当前内容先留档;副本不动,由用户显式清理)。 */
   applyConflictMerge?: (folderId: string, copyPath: string, content: string) => void;
   /** 一键清理:把所有「与原文件无差异」的冲突副本移入回收站,返回 { removed } 条数。 */

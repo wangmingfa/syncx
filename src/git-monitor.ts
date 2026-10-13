@@ -5,6 +5,7 @@
  *  - 检测共享目录是否为 git 仓库
  *  - 读取 HEAD 提交哈希(用于检测新提交)
  *  - 收集提交信息(消息、变更文件列表、diff stat)
+ *  - 读取最近提交列表(提交历史弹窗)
  *  - 执行自动提交(git add -A && git commit;syncx 的在途中间态两头都排除);调用方应先用
  *    hasUncommittedChanges 判定有无待提交内容,无变更不必提交
  *
@@ -151,6 +152,89 @@ export function getCommitInfo(folderPath: string, fromHash: string, toHash: stri
   }
 }
 
+/** 提交历史弹窗的一行。 */
+export interface GitCommitEntry {
+  /** 短哈希(7 位左右,展示与复制用)。 */
+  hash: string;
+  /** 提交消息首行(subject)。 */
+  subject: string;
+  /** 提交消息正文(不含首行);空串 = 这笔没有正文,前端据此决定是否给出「展开」。 */
+  body: string;
+  /** 作者名。 */
+  author: string;
+  /** 作者时间,ISO 8601(git 的 %aI,带时区偏移;前端自己本地化展示)。 */
+  date: string;
+  /** 引用装饰原样串(git 的 %D,如 `HEAD -> main, tag: v1.0`);无引用为空串。 */
+  refs: string;
+}
+
+/** 弹窗默认展示的提交条数:20 条足够扫一眼最近动向,再多用户也不会读。 */
+export const GIT_LOG_LIMIT = 20;
+
+/**
+ * 读取最近 N 条提交(默认 20)。返回 null = 不是 git 仓库,调用方据此隐藏入口。
+ *
+ * 为什么不用行解析:提交**正文是多行的**,`--format` 逐行读会在正文第二行处错位
+ * (getCommitInfo 靠 ---SYNCX-END--- 哨兵绕开这个,是因为正文里理论上可能出现哨兵字符串;
+ * 这里用 git 自己保证的手段)。改为 `-z`(记录以 NUL 分隔)+ `%x1f` 字段分隔:
+ * 提交对象里不可能出现 NUL(对象格式以 NUL 结尾语义存在),`%x1f` 是用户几乎不可能
+ * 敲进消息的 ASCII 单元分隔符;且**正文放在最后一个字段**,即使消息里真混入 `%x1f`,
+ * 也只是把多余分隔符并回正文(slice(5).join),不会挪动其它字段。
+ *
+ * 实测(--no-show-signature / -z / --format 组合,git 2.x):
+ *  - 记录以 NUL 结尾,记录之间无附加换行;空仓库 git log 以 128 退出(stderr 为
+ *    "does not have any commits yet" 一类),据此回 [] 而不是抛错 —— 空仓库是常态不是故障。
+ *  - `%b` 尾部自带换行(如正文两段为 "a\n\nb\n"),读回后 trim。
+ *  - 用户配置 log.decorate=full 会把 %D 渲染成 `HEAD -> refs/heads/main`:只是文案更啰嗦,
+ *    不破坏解析;`--no-color` 与 `--no-show-signature` 抵御 color.ui=always / log.showSignature
+ *    两个会往输出里插入 ANSI 转义或验签信息(混进字段里就是脏数据)的配置。
+ */
+export function listRecentCommits(folderPath: string, limit = GIT_LOG_LIMIT): GitCommitEntry[] | null {
+  if (!isGitRepo(folderPath)) return null;
+
+  const format = '%h%x1f%an%x1f%aI%x1f%D%x1f%s%x1f%b';
+  let out: string;
+  try {
+    out = execFileSync('git', ['log', '-n', String(limit), '-z', '--no-color', '--no-show-signature', `--format=${format}`], {
+      cwd: folderPath,
+      encoding: 'utf8',
+      stdio: ['ignore', 'pipe', 'pipe'],
+      windowsHide: true,
+      timeout: 10_000,
+      maxBuffer: 4 * 1024 * 1024,
+    });
+  } catch (e) {
+    // 空仓库(还没有任何提交)时 git log 退出码 128:是「没有提交」而非「读取失败」,
+    // 回空列表让弹窗显示空态。用 rev-parse 复核而不是解析 stderr 文案:
+    // stderr 文案随 git 版本/语言(locale)变化,不可靠。
+    if (getLastCommitHash(folderPath) === null) return [];
+    const stderr =
+      e instanceof Error && (e as { stderr?: Buffer | string }).stderr
+        ? (e as { stderr?: Buffer | string }).stderr!.toString()
+        : '';
+    throw new Error(stderr.trim().split('\n')[0] || (e instanceof Error ? e.message : 'git log 读取失败'));
+  }
+
+  return out
+    .split('\0')
+    .filter((rec) => rec !== '')
+    .map((rec) => {
+      const f = rec.split('\x1f');
+      return {
+        hash: f[0] ?? '',
+        author: f[1] ?? '',
+        date: f[2] ?? '',
+        refs: f[3] ?? '',
+        subject: f[4] ?? '',
+        // 正文是最后一个字段:消息里混入 \x1f 时并回正文而不是丢内容
+        body: f
+          .slice(5)
+          .join('\x1f')
+          .trim(),
+      };
+    });
+}
+
 /**
  * 把 syncx 的在途中间态从 git 的视野里排除:`<目标>.syncx-tmp`(在途内容)与
  * `<目标>.syncx-partial`(它的块位图 sidecar)。
@@ -188,8 +272,14 @@ export function hasUncommittedChanges(folderPath: string): boolean {
 
 /** 工作区一条未提交变更(目录卡「Git 改动」徽标与详情弹窗的条目)。 */
 export interface GitChangeEntry {
-  /** 相对仓库根的路径(POSIX 分隔)。 */
+  /** 相对仓库根的路径(POSIX 分隔);git 折叠的未跟踪目录已去尾斜杠,见 dir。 */
   path: string;
+  /**
+   * true = git 把「整棵未跟踪目录」折叠成的这一条记录(默认 -unormal,如
+   * `?? backends/native-common/`)。目录没有 HEAD 版本、也没有单文件可对比,
+   * 前端据此不做双击对比;路径已在解析时去掉尾斜杠。
+   */
+  dir?: boolean;
   /** 变更类别:modified(内容改动)/ added(新增或未跟踪)/ deleted(已删除)/ renamed(重命名)。 */
   status: 'modified' | 'added' | 'deleted' | 'renamed';
   /** renamed 的原路径。 */
@@ -207,6 +297,7 @@ export const GIT_CHANGES_MAX = 2000;
  *
  * 用 `-z`(NUL 分隔)解析:路径里的空格/引号/Unicode 不会被引号转义坑到;
  * rename 条目跟两个记录(新路径 + 原路径),porcelain 的既有约定。
+ * git 把「整棵未跟踪目录」折叠成一条尾部带 '/' 的记录,这里统一去斜杠并打 dir 标记。
  */
 export function getUncommittedChanges(folderPath: string): { entries: GitChangeEntry[]; truncated: boolean } | null {
   if (!isGitRepo(folderPath)) return null;
@@ -225,8 +316,11 @@ export function getUncommittedChanges(folderPath: string): { entries: GitChangeE
       const rec = records[i]!;
       // 每条记录:XY<空格>path(X=暂存区列,Y=工作区列,?? = 未跟踪)
       const xy = rec.slice(0, 2);
-      const path = rec.slice(3);
+      let path = rec.slice(3);
       if (path === '') continue;
+      // 尾斜杠必须在这里去掉:留着的话前端按 '/' 切段建树会切出一个空名字的行。
+      const dir = path.endsWith('/');
+      if (dir) path = path.slice(0, -1);
       let origPath: string | undefined;
       if (xy.includes('R') || xy.includes('C')) {
         origPath = records[++i];
@@ -240,7 +334,9 @@ export function getUncommittedChanges(folderPath: string): { entries: GitChangeE
           : xy.includes('A') || xy === '??'
             ? 'added'
             : 'modified';
-      entries.push({ path, status, origPath, staged: xy[0] !== ' ' && xy[0] !== '?' });
+      const entry: GitChangeEntry = { path, status, origPath, staged: xy[0] !== ' ' && xy[0] !== '?' };
+      if (dir) entry.dir = true;
+      entries.push(entry);
       if (entries.length >= GIT_CHANGES_MAX) {
         return { entries, truncated: true };
       }

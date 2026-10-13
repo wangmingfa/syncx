@@ -3,6 +3,7 @@ import { request } from 'node:http';
 import { once } from 'node:events';
 import type { AddressInfo } from 'node:net';
 import { createControlServer } from '../src/api.js';
+import { EMPTY_DIRS_MAX } from '../src/empty-dirs.js';
 
 function fetchJson(
   port: number,
@@ -387,6 +388,153 @@ describe('control api folder gitignore toggle', () => {
 
     expect(noAuth.status).toBe(401);
     expect(noPath.status).toBe(400);
+
+    server.close();
+  });
+});
+
+describe('control api git log and empty dirs', () => {
+  it('GET /api/folders/git-log reports commits, and null as gitRepo false', async () => {
+    const commits = [
+      {
+        hash: 'aaaaaaa',
+        subject: '标题',
+        body: '正文',
+        author: 'wm',
+        date: '2026-10-13T10:00:00+08:00',
+        refs: 'HEAD -> main',
+      },
+    ];
+    const seen: string[] = [];
+    let isRepo = true;
+    const server = createControlServer({
+      token: 'secret',
+      getStatus: () => ({}),
+      listGitLog: (folderId) => {
+        seen.push(folderId);
+        return isRepo ? commits : null;
+      },
+    });
+    server.listen(0, '127.0.0.1');
+    await once(server, 'listening');
+    const port = (server.address() as AddressInfo).port;
+
+    const repo = await fetchJson(port, '/api/folders/git-log?folderId=f1', 'secret');
+    expect(repo.status).toBe(200);
+    expect(repo.body).toEqual({ commits, gitRepo: true });
+
+    // null = 不是 git 仓库:200 + gitRepo:false,而不是错误(前端据此给解释文案)
+    isRepo = false;
+    const none = await fetchJson(port, '/api/folders/git-log?folderId=f2', 'secret');
+    expect(none.status).toBe(200);
+    expect(none.body).toEqual({ commits: [], gitRepo: false });
+
+    const missing = await fetchJson(port, '/api/folders/git-log', 'secret');
+    expect(missing.status).toBe(400);
+    expect(seen).toEqual(['f1', 'f2']);
+
+    server.close();
+  });
+
+  it('GET /api/folders/git-log maps a git failure to 400 with the reason', async () => {
+    const server = createControlServer({
+      token: 'secret',
+      getStatus: () => ({}),
+      listGitLog: () => {
+        throw new Error('git log failed');
+      },
+    });
+    server.listen(0, '127.0.0.1');
+    await once(server, 'listening');
+    const port = (server.address() as AddressInfo).port;
+
+    const res = await fetchJson(port, '/api/folders/git-log?folderId=f1', 'secret');
+    expect(res.status).toBe(400);
+    expect(res.body).toMatchObject({ error: 'git log failed' });
+
+    server.close();
+  });
+
+  it('GET /api/folders/empty-dirs passes the scan result through and needs folderId', async () => {
+    const server = createControlServer({
+      token: 'secret',
+      getStatus: () => ({}),
+      listEmptyDirs: (folderId) => ({ dirs: [`${folderId}/a`, `${folderId}/a/b`], truncated: false }),
+    });
+    server.listen(0, '127.0.0.1');
+    await once(server, 'listening');
+    const port = (server.address() as AddressInfo).port;
+
+    const res = await fetchJson(port, '/api/folders/empty-dirs?folderId=f1', 'secret');
+    expect(res.status).toBe(200);
+    expect(res.body).toEqual({ dirs: ['f1/a', 'f1/a/b'], truncated: false });
+
+    const missing = await fetchJson(port, '/api/folders/empty-dirs', 'secret');
+    expect(missing.status).toBe(400);
+
+    server.close();
+  });
+
+  it('POST /api/folders/empty-dirs/delete forwards paths and returns per-path results', async () => {
+    const calls: Array<{ folderId: string; paths: string[] }> = [];
+    const server = createControlServer({
+      token: 'secret',
+      getStatus: () => ({}),
+      deleteEmptyDirs: (folderId, paths) => {
+        calls.push({ folderId, paths });
+        return paths.map((p) =>
+          p === 'bad' ? { path: p, ok: false, reason: '目录内现在有文件,跳过' } : { path: p, ok: true },
+        );
+      },
+    });
+    server.listen(0, '127.0.0.1');
+    await once(server, 'listening');
+    const port = (server.address() as AddressInfo).port;
+
+    const res = await fetchJson(port, '/api/folders/empty-dirs/delete', 'secret', {
+      method: 'POST',
+      body: { folderId: 'f1', paths: ['a', 'bad'] },
+    });
+    expect(res.status).toBe(200);
+    expect(res.body).toEqual({
+      results: [
+        { path: 'a', ok: true },
+        { path: 'bad', ok: false, reason: '目录内现在有文件,跳过' },
+      ],
+    });
+    expect(calls).toEqual([{ folderId: 'f1', paths: ['a', 'bad'] }]);
+
+    server.close();
+  });
+
+  it('rejects malformed empty-dirs delete requests', async () => {
+    const server = createControlServer({
+      token: 'secret',
+      getStatus: () => ({}),
+      deleteEmptyDirs: () => [],
+    });
+    server.listen(0, '127.0.0.1');
+    await once(server, 'listening');
+    const port = (server.address() as AddressInfo).port;
+
+    const noAuth = await fetchJson(port, '/api/folders/empty-dirs/delete', undefined, {
+      method: 'POST',
+      body: { folderId: 'f1', paths: ['a'] },
+    });
+    expect(noAuth.status).toBe(401);
+
+    const cases = [
+      { folderId: 'f1' }, // 缺 paths
+      { folderId: 'f1', paths: [] }, // 空数组
+      { folderId: 'f1', paths: 'a' }, // 不是数组
+      { folderId: 'f1', paths: [1] }, // 元素不是字符串
+      { paths: ['a'] }, // 缺 folderId
+      { folderId: 'f1', paths: Array.from({ length: EMPTY_DIRS_MAX + 1 }, (_, i) => `d${i}`) }, // 超上限
+    ];
+    for (const body of cases) {
+      const res = await fetchJson(port, '/api/folders/empty-dirs/delete', 'secret', { method: 'POST', body });
+      expect(res.status, JSON.stringify(body).slice(0, 80)).toBe(400);
+    }
 
     server.close();
   });

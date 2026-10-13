@@ -880,6 +880,11 @@ export async function run(args: ParsedArgs): Promise<void> {
     // 「Git 改动」弹窗:工作区未提交变更清单(现查 git status)+ 单文件 HEAD vs 当前
     listGitChanges: (folderId) => manager.listGitChanges(folderId),
     readGitDiff: (folderId, path) => manager.readGitDiff(folderId, path),
+    // 「Git 提交历史」弹窗:最近 20 条提交(现跑 git log)
+    listGitLog: (folderId) => manager.listGitLog(folderId),
+    // 「空文件夹」弹窗:盘点 + 确认后删除(只 rmdir、不触发扫描 —— 目录不是同步实体)
+    listEmptyDirs: (folderId) => manager.listEmptyDirs(folderId),
+    deleteEmptyDirs: (folderId, paths) => manager.deleteEmptyDirs(folderId, paths),
     // 逐块合并写回:内容进原文件(当前内容留档),副本不动;随后触发扫描广播收敛对端
     applyConflictMerge: (folderId, copyPath, content) => {
       const folder = findConfigFolder(configPath, folderId);

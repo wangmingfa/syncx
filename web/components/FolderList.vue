@@ -5,6 +5,8 @@ import { useStatusContext } from '../composables/statusContext';
 import ActionRail from './ActionRail.vue';
 import WeeklyReportModal from './WeeklyReportModal.vue';
 import GitChangesModal from './GitChangesModal.vue';
+import GitLogModal from './GitLogModal.vue';
+import EmptyDirsModal from './EmptyDirsModal.vue';
 import { folderPathPlaceholder, visibleTransferFiles, XFER_FILE_LIMIT } from '../utils/format';
 import type { RailAction } from '../utils/action-rail';
 import type { FolderInfo, ScheduleState, TransferFile } from '../types';
@@ -42,6 +44,23 @@ const gitChangesFolder = ref<{ id?: string; path: string } | null>(null);
 
 function openGitChanges(f: FolderInfo): void {
   gitChangesFolder.value = { id: f.id, path: f.path };
+}
+
+/**
+ * 「Git 提交历史」弹窗开关(动作条;只有目录是 git 仓库时才出现 ——
+ * 非仓库里这个入口只会换来一句「没有提交历史」的道歉)。
+ */
+const gitLogFolder = ref<{ id?: string; path: string } | null>(null);
+
+function openGitLog(f: FolderInfo): void {
+  gitLogFolder.value = { id: f.id, path: f.path };
+}
+
+/** 「空文件夹」弹窗开关(动作条;所有目录都有:空不空由打开时的盘上盘点决定)。 */
+const emptyDirsFolder = ref<{ id?: string; path: string } | null>(null);
+
+function openEmptyDirs(f: FolderInfo): void {
+  emptyDirsFolder.value = { id: f.id, path: f.path };
 }
 
 /**
@@ -293,6 +312,13 @@ function folderActions(f: FolderInfo): RailAction[] {
       onClick: () => openTrash(f),
     },
     {
+      key: 'empty-dirs',
+      icon: 'folder-clean',
+      disabled: b,
+      tooltip: '空文件夹:盘点本机不含任何文件的文件夹,可勾选清理(只删空目录,不删文件)',
+      onClick: () => openEmptyDirs(f),
+    },
+    {
       key: 'compare',
       icon: 'compare',
       disabled: b || noPeer,
@@ -307,6 +333,16 @@ function folderActions(f: FolderInfo): RailAction[] {
       onClick: () => openDiff(f),
     },
     { key: 'history', icon: 'history', disabled: b, tooltip: '查看该目录的同步记录', onClick: () => openHistory(f) },
+    // 非仓库不出现(gitRepo 由 daemon 每轮探测):点了也只有一句「不是仓库」的道歉
+    ...(f.gitRepo === true
+      ? [{
+          key: 'git-log',
+          icon: 'commit',
+          disabled: b,
+          tooltip: '提交历史:查看该仓库最近的 20 个提交,可展开提交正文',
+          onClick: () => openGitLog(f),
+        } satisfies RailAction]
+      : []),
     {
       key: 'versions',
       icon: 'versions',
@@ -701,4 +737,6 @@ function visibleFiles(f: FolderInfo): TransferFile[] {
   <!-- 同步周报:入口在栏头动作;弹窗本体就近挂在组件尾(ModalShell 自带遮罩定位) -->
   <WeeklyReportModal :open="reportOpen" @close="reportOpen = false" />
   <GitChangesModal :folder="gitChangesFolder" @close="gitChangesFolder = null" />
+  <GitLogModal :folder="gitLogFolder" @close="gitLogFolder = null" />
+  <EmptyDirsModal :folder="emptyDirsFolder" @close="emptyDirsFolder = null" />
 </template>

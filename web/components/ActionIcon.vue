@@ -56,6 +56,19 @@ defineProps<{ name: ActionIconName }>();
       <path d="M12 7.5V12l3 2" />
     </template>
 
+    <!-- Git 提交历史:标准 git-commit 图形(竖线 + 中点圆),与时钟区分明确 -->
+    <template v-else-if="name === 'commit'">
+      <line x1="12" y1="3" x2="12" y2="8.6" />
+      <circle cx="12" cy="12" r="3.4" />
+      <line x1="12" y1="15.4" x2="12" y2="21" />
+    </template>
+
+    <!-- 空文件夹检查:虚线(幽灵)文件夹 —— 实线文件夹已被「浏览文件」占用,
+         虚线在这里读作「空的/不存在的实体」;不画翻盖线,和浏览图标再拉开一档 -->
+    <template v-else-if="name === 'folder-clean'">
+      <path d="M3.5 6.5A1.5 1.5 0 0 1 5 5h4l2 2.5h8A1.5 1.5 0 0 1 20.5 9v8A1.5 1.5 0 0 1 19 18.5H5A1.5 1.5 0 0 1 3.5 17Z" stroke-dasharray="3 2.4" />
+    </template>
+
     <!-- 同步周报:柱状图 -->
     <template v-else-if="name === 'report'">
       <line x1="4" y1="19.5" x2="20" y2="19.5" />
