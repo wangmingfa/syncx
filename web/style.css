@@ -39,6 +39,16 @@
   padding: 0;
 }
 
+html {
+  /* 稳定滚动条槽位:待确认胶囊的 FLIP 补位动画会把文档滚动高度瞬态顶高约一个
+     胶囊高度(补位胶囊的反向 transform 压回原位 + 离开胶囊自己的 8px 位移),
+     内容高度贴近视口时滚动条随「出现/消失」来回抢占布局宽度,页面容器收窄又
+     撑开 —— 表现为所有胶囊水平抖一下。槽位常驻后瞬态溢出只发生在槽里,
+     布局宽度恒定,水平抖动消失。
+     overlay 滚动条(macOS 默认)宽度为 0,此属性等于空操作,无副作用。 */
+  scrollbar-gutter: stable;
+}
+
 body {
   background: var(--bg);
   color: var(--text);
@@ -1326,20 +1336,38 @@ html[data-theme='dark'] .chip-menu__item--danger {
   color: var(--accent);
 }
 
-/* 胶囊列表容器(TransitionGroup tag="div"):flex 列 + 12px 间距,
-   与 .offers 的间距口径一致。胶囊进出时其余项经 .offer-move 补位。 */
+/* 胶囊列表容器(TransitionGroup tag="div"):块级流 + 兄弟 margin 间距。
+   不用 flex+gap 是刻意的:离开动画让胶囊 position:absolute 脱流后,flex 容器里
+   abs 子项的静态位置是「容器内容起点」(CSS Flexbox §4.1),胶囊会跳到列表顶部
+   再淡出;块级流里 auto 偏移锚在原槽位,原地淡出。容器 position:relative 是
+   离开胶囊的 abs 定位基准(width:100% 参照它,容器无 padding 所以零偏移)。 */
 .offer-list {
-  display: flex;
-  flex-direction: column;
-  gap: 12px;
+  display: block;
+  position: relative;
+}
+.offer-list .offer-pill + .offer-pill {
+  margin-top: 12px;
 }
 
 /* 胶囊进入/离开动画:淡入淡出 + 轻微纵向位移(从上方滑入、向下方滑出),
    配合 .offer-move 让列表补位平滑。时长 0.22s,缓动与全站 0.15s 交互略长一档,
-   进出更从容。leave-active 保持占位(不 display:none),让补位动画有空间。 */
-.offer-enter-active,
-.offer-leave-active {
+   进出更从容。leave-active 保持占位(不 display:none),让补位动画有空间。
+   写成 .offer-list 双类(0,2,0)是必须的:.offer-pill 基础规则自带 transition
+   (border-color/box-shadow,为展开描边过渡),同为 (0,1,0) 且排在后面会反过来
+   覆盖这里的 opacity/transform 过渡 —— 胶囊瞬间跳到终态,进出与补位动画全部失效。
+   提特异度压过它,与文件顺序无关(口径同 AGENTS.md「不得依赖文件顺序」)。 */
+.offer-list .offer-enter-active,
+.offer-list .offer-leave-active {
   transition: opacity 0.22s ease, transform 0.22s ease;
+}
+/* 离开即脱流:淡出期间不再占位,其余胶囊的位移在补位那一刻就发生,
+   .offer-move 的 FLIP 过渡才有「前后位置差」可动画 —— 否则胶囊淡出期间
+   一直占位,补位等到节点移除才瞬间发生,看起来就是直接顶上去。
+   width:100% 防 abs 收缩成 fit-content 淡出时内容挤压;left:0 贴容器左缘。 */
+.offer-list .offer-leave-active {
+  position: absolute;
+  left: 0;
+  width: 100%;
 }
 .offer-enter-from {
   opacity: 0;
@@ -1349,8 +1377,8 @@ html[data-theme='dark'] .chip-menu__item--danger {
   opacity: 0;
   transform: translateY(8px);
 }
-/* 列表项位置变化(某条被移除后其余上移)的补位过渡 */
-.offer-move {
+/* 列表项位置变化(某条被移除后其余上移)的补位过渡,双类提特异度同理 */
+.offer-list .offer-move {
   transition: transform 0.22s ease;
 }
 
