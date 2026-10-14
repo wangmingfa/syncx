@@ -255,10 +255,18 @@ export interface FolderState {
    * 内容经数据面落盘,收到不立即提交(半成品提交会永久定格),由结算步骤等接收
    * 台账排空后执行。新通知覆盖旧通知:提交信息取最新一笔,积压内容一次
    * git add -A 全量扫进(与逐笔通知的净效果一致 —— 本设计不搬运 git 历史)。
+   * `viaDeviceId` 记送达它的那一跳(会话)设备 id —— 中继链上通知来源未必与本机
+   * 直连;结算闸门按它对账「承载它的会话是否还在」(见 flushPendingGitNotify)。
    */
-  pendingGitNotify: { msg: GitCommitNotifyMsg } | null;
+  pendingGitNotify: { msg: GitCommitNotifyMsg; viaDeviceId?: string } | null;
   /** 挂起等待在途接收期间已打过一条 deferred 日志;抑制每轮扫描重复刷屏,仅日志用。 */
   gitDrainWarned: boolean;
+  /**
+   * 「初始索引交换未落定 / 通知来源会话不在」开始挡道的时刻(首次观察到时置位,
+   * 放行、清队列或暂停时清空)。只给这两类挡法封顶用:它们没有认领保鲜期那样的
+   * 自愈时钟,到点强制放行(见 flushPendingGitNotify)。
+   */
+  gitDrainSince?: number;
   /**
    * Git 提交同步:本机镜像提交完成后向其余对端**中继**原始通知,链式拓扑
    * (A—B—C,C 只与 B 配对)的末端因此也能把收到的内容落成提交。
@@ -1549,6 +1557,13 @@ export class SyncSessionManager {
    * 只有 60 秒收不到任何块的死认领才放行,照旧提交并告警 —— 保留活性优先于
    * 等待一个可能永不到来的终局。
    *
+   * 「台账为空」还有一类假排空:刚重连/刚解停时**初始索引交换还没落定**,对端的
+   * 索引未到、接收规划尚未产出,认领必然为空。旧判据把它当排空,重连后 2 秒就把
+   * 半套文件定格成一笔提交(2026-10-14 实测:提交 09:00:02,内容 09:00:05 才落盘)。
+   * 现在加上两条挡法:①该目录任一已挂 peer 的入向交换未落定(见
+   * peer.initialCatchUpBlockedSince);②通知来源那一跳的会话已不在(内容可能停在
+   * 半途,认领已随拆除释放)。两条都从首次挡道起以 60s 封顶,超时强制放行并告警。
+   *
    * 工作树干净(内容早已落地并随上一笔结算提交过,或对端提交无净变更)时跳过
    * 提交,但仍把基线推到当前 HEAD:不提交就没有新哈希,基线不推进下一轮又会被
    * 「新提交检测」当成有一笔要广播的提交,白耗一次重试。
@@ -1559,6 +1574,8 @@ export class SyncSessionManager {
    */
   private flushPendingGitNotify(): void {
     const CLAIM_IDLE_MAX_MS = 60_000;
+    // 「交换未落定 / 来源会话不在」这两类挡法的封顶 —— 它们没有认领那样的自愈时钟
+    const INITIAL_CATCH_UP_MAX_MS = 60_000;
     this.retryGitCommitRelays();
     this.retryGitCommitBroadcasts();
     for (const folder of this.folderStates) {
@@ -1567,27 +1584,62 @@ export class SyncSessionManager {
       const mode = folder.config.gitSync;
       if (!mode || mode === 'off' || mode === 'send') {
         folder.pendingGitNotify = null;
+        folder.gitDrainWarned = false;
+        folder.gitDrainSince = undefined;
         continue;
       }
-      if (this.folderPausedNow(folder)) continue;
-      if (this.gitBlockedByIdentity(folder)) continue;
+      // 暂停与身份拦阻是结算的中场休息、不是挡法本身:挂起计时清零,恢复后重新起算 ——
+      // 否则一次隔夜的定时暂停就能把下面「交换未落定」的 60s 封顶用光,解停后对端
+      // 的索引还没换完,半套文件就被强提交了。
+      if (this.folderPausedNow(folder) || this.gitBlockedByIdentity(folder)) {
+        folder.gitDrainWarned = false;
+        folder.gitDrainSince = undefined;
+        continue;
+      }
       // 只认「还活着」的在途接收:本管线自己的陈旧认领(块重试耗尽的滞留)不算,
       // 它已由保鲜期判死,继续等只会把结算挂死(见 peer.ts 的认领保鲜期)
       const now = Date.now();
       const inFlight = [...folder.receiveLedger.values()].filter(
         (c) => now - c.ts < CLAIM_IDLE_MAX_MS,
       ).length;
+      // 初始索引交换未落定的对端(**入向**腿,见 peer.initialCatchUpBlockedSince):
+      // 对端索引还没到,接收规划都还没产出,此刻台账为空不代表没有入向内容。
+      let catchUpPeers = 0;
+      for (const p of folder.peers.values()) {
+        if (p.initialCatchUpBlockedSince() !== undefined) catchUpPeers++;
+      }
+      // 通知来的那一跳会话已经不在了:内容可能停在半途且没人观察(peer 拆除即释放
+      // 该管线的全部认领),等它重连把内容续上,或封顶。
+      const sourceAway = pending.viaDeviceId !== undefined && !folder.peers.has(pending.viaDeviceId);
+      const catchUpBlocked = catchUpPeers > 0 || sourceAway;
+      const reasons: string[] = [];
       if (inFlight > 0) {
+        reasons.push(`waiting for ${inFlight} in-flight receive(s), idle cap ${CLAIM_IDLE_MAX_MS / 1000}s`);
+      }
+      if (catchUpPeers > 0) reasons.push(`initial index exchange pending with ${catchUpPeers} peer(s)`);
+      if (sourceAway) reasons.push(`notify source ${pending.viaDeviceId} is offline`);
+      if (reasons.length > 0) {
+        // 封顶记账从「交换/来源」首次挡道的观察起算;认领的挡法有保鲜期自愈、
+        // 健康慢传输会被逐块刷新,不参与这个时钟(否则慢链路上跑十分钟的文件
+        // 会把 60s 用光,收齐那一刻反手被强提交)。
+        if (catchUpBlocked && folder.gitDrainSince === undefined) folder.gitDrainSince = now;
         if (!folder.gitDrainWarned) {
           folder.gitDrainWarned = true;
-          this.logger.info(
-            `git auto-commit deferred: ${folder.id} (waiting for ${inFlight} in-flight receive(s), idle cap ${CLAIM_IDLE_MAX_MS / 1000}s)`,
-          );
+          this.logger.info(`git auto-commit deferred: ${folder.id} (${reasons.join('; ')})`);
         }
-        continue;
+        // 到点强制放行:交换/来源不像认领那样有自愈时钟,没有封顶可能无限期悬着。
+        const blockedSince = folder.gitDrainSince ?? now;
+        if (catchUpBlocked && inFlight === 0 && now - blockedSince >= INITIAL_CATCH_UP_MAX_MS) {
+          this.logger.warn(
+            `git auto-commit flushing while catch-up unresolved: ${folder.id} (${reasons.join('; ')}) (partial content may be committed)`,
+          );
+        } else {
+          continue;
+        }
       }
       folder.pendingGitNotify = null;
       folder.gitDrainWarned = false;
+      folder.gitDrainSince = undefined;
       const stalled = folder.receiveLedger.size;
       if (stalled > 0) {
         this.logger.warn(
@@ -1839,8 +1891,11 @@ export class SyncSessionManager {
    * git add -A 定格的是半套文件,且基线一推进就永远不会再有通知来纠正。
    * 实际提交由 flushPendingGitNotify 在扫描末尾等接收台账排空后执行,
    * 提交成功后这条通知还会被中继给本机该目录的其余对端(见 relayGitCommitNotify)。
+   *
+   * `hopDeviceId` 是送达这条通知的那一跳(会话)设备 id,随队入账;结算闸门用它
+   * 对账「承载它的会话是否还在」——中继场景下消息署名的来源设备未必与本机直连。
    */
-  private onGitCommitNotify(msg: Extract<ControlMessage, { kind: 'git-commit-notify' }>): void {
+  private onGitCommitNotify(msg: Extract<ControlMessage, { kind: 'git-commit-notify' }>, hopDeviceId?: string): void {
     const { fromDeviceId, folderId, commitHash } = msg;
 
     const folder = this.folderStates.find((f) => f.id === folderId);
@@ -1866,7 +1921,7 @@ export class SyncSessionManager {
       return;
     }
 
-    folder.pendingGitNotify = { msg };
+    folder.pendingGitNotify = { msg, viaDeviceId: hopDeviceId };
     this.logger.info(
       `git-commit-notify queued: ${folderId} (from ${fromDeviceId}) "${msg.commitMessage.split('\n')[0]}"`,
     );
@@ -2392,7 +2447,7 @@ export class SyncSessionManager {
           commitHash: message.commitHash,
         });
         // 对端检测到新提交,通知本机也执行自动提交
-        this.onGitCommitNotify(message);
+        this.onGitCommitNotify(message, hopDeviceId);
         break;
       }
       case 'git-commit-ack':

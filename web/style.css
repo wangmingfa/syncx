@@ -4195,13 +4195,38 @@ html[data-skin='glass'] .modal {
   box-shadow: 0 24px 60px -24px rgb(22 32 52 / 0.4), var(--glass-edge);
 }
 
-/* 「Git 提交历史」/「空文件夹」弹窗的工具栏 sticky 在正文滚动视口顶端,必须用
-   **弹窗表面**同款底色盖住滚过来的列表条目。默认档 var(--card) 是实色,玻璃档却
-   只有 0.4 白 —— 不换的话条目会从工具栏里透出来。--glass-raised 自带明暗两档,
-   一条规则够。 */
+/* 「Git 提交历史」「空文件夹」的工具条与「Git 改动」的图例都 sticky 在正文滚动
+   视口顶端,底色必须是**弹窗表面本身**,否则玻璃档会亮出一条带:
+   - 不能直接再用 --glass-raised(旧实现):那是「抬起面」,压在同样是抬起面的弹窗
+     表面上 = 二次叠白。无头截图逐像素采样:浅色玻璃条带 rgb(253,253,253) vs 表面
+     rgb(238,239,240),实机截图同样 +21(rgb 251 vs 230)—— 即「这里背景色不对劲」;
+   - 改为把弹窗表面的合成链预乘成**不透明**色:--bg 打底,叠三层遮罩,再叠抬起白。
+     浏览器自己的合成结果就是表面色,且不透明 —— 滚过来的列表条目被完全盖住。
+   层数 3 是校准值:表面色随弹窗背后内容浮动,两头均有实测 —— 裸底色页 238(本仓库
+   无头环境)、文件夹视图页 230(实机截图);两层合成 238 贴前者、四层 230 贴后者,
+   三层取中(≈233),两端残差都 ≤5。遮罩色必须与玻璃档 .modal-overlay 的一致
+   (浅色 rgb(20 28 42 / 0.28)、深色 rgb(4 8 14 / 0.45)),改那边要同步改这里。 */
 html[data-skin='glass'] .git-log__bar,
-html[data-skin='glass'] .empty-dirs__bar {
-  background: var(--glass-raised);
+html[data-skin='glass'] .empty-dirs__bar,
+html[data-skin='glass'] .git-changes__legend {
+  background-color: var(--bg);
+  background-image:
+    linear-gradient(var(--glass-raised), var(--glass-raised)),
+    linear-gradient(rgb(20 28 42 / 0.28), rgb(20 28 42 / 0.28)),
+    linear-gradient(rgb(20 28 42 / 0.28), rgb(20 28 42 / 0.28)),
+    linear-gradient(rgb(20 28 42 / 0.28), rgb(20 28 42 / 0.28));
+}
+
+/* 深色档同一套预乘:--bg / --glass-raised 是 token,自动解析成深档值,这里只需把
+   三层遮罩换成深色遮罩(与深色 .modal-overlay 同值)重给 background-image。 */
+html[data-skin='glass'][data-theme='dark'] .git-log__bar,
+html[data-skin='glass'][data-theme='dark'] .empty-dirs__bar,
+html[data-skin='glass'][data-theme='dark'] .git-changes__legend {
+  background-image:
+    linear-gradient(var(--glass-raised), var(--glass-raised)),
+    linear-gradient(rgb(4 8 14 / 0.45), rgb(4 8 14 / 0.45)),
+    linear-gradient(rgb(4 8 14 / 0.45), rgb(4 8 14 / 0.45)),
+    linear-gradient(rgb(4 8 14 / 0.45), rgb(4 8 14 / 0.45));
 }
 
 /* 吐司同理浮在整页之上,底色走抬起面;弹窗内的「内嵌子面」反过来要收掉
@@ -4330,5 +4355,19 @@ html[data-skin='glass'][data-theme='dark'] .modal-overlay {
     --card: #1a2029;
     --card-hi: #232b38;
     --bg-soft: #161b24;
+  }
+
+  /* 工具条/图例的预乘色按「打了 backdrop-filter 的表面」校准;这里表面已塌回实色
+     --card,直接钉成同色(同上,靠后写压过上面同特异度的预乘规则)。 */
+  html[data-skin='glass'] .git-log__bar,
+  html[data-skin='glass'] .empty-dirs__bar,
+  html[data-skin='glass'] .git-changes__legend {
+    background: #f7f9fc;
+  }
+
+  html[data-skin='glass'][data-theme='dark'] .git-log__bar,
+  html[data-skin='glass'][data-theme='dark'] .empty-dirs__bar,
+  html[data-skin='glass'][data-theme='dark'] .git-changes__legend {
+    background: #1a2029;
   }
 }

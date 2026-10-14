@@ -171,8 +171,8 @@ const description = computed(() =>
   padding: 2px 2px 8px;
   /* 滚动只发生在外壳的 .modal-body(本弹窗不再自带滚动容器,见 ModalShell 头注释):
      工具栏钉在滚动视口顶端、不参与滚动;背景默认档取实色 --card,把穿过底下的列表
-     条目盖住(玻璃档 --card 只有 0.4 白,由 style.css 皮肤段换刷成弹窗同款的
-     --glass-raised)。 */
+     条目盖住(玻璃档 --card 只有 0.4 白,由 style.css 皮肤段换成与弹窗表面同色的
+     不透明预乘合成,原理与校准见那边规则上方的注释)。 */
   position: sticky;
   top: 0;
   z-index: 1;

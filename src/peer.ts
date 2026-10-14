@@ -292,6 +292,20 @@ export interface SyncPeer {
    */
   beginInitialIndexExchange(): void;
   /**
+   * 入向追平是否仍未落定:会话建立后,对端对本目录的**入向内容流**尚未确立的
+   * 期间返回 attach 时刻;落定后(或对端是只出不进的 e2e 盲区通道)返回 undefined。
+   *
+   * 落定信号:①应用了对端索引(onPeerIndex,全量/增量皆可);②本机指纹比对一致
+   * 回了 index-ack(onIndexFingerprint);③收到对端 index-ack(onIndexAck)。注意
+   * **不能**复用 initialExchangeSettled:那是出向腿(本机发出全量即落定),而入向
+   * 内容要等对端收到本机索引、规划完才会上路。
+   *
+   * git 自动提交的结算闸门用它区分「接收台账为空」的两种含义:未落定 → 对端的新
+   * 内容可能还在路上,提交要等;已落定 → 空台账就是真的没有在途接收(2026-10-14
+   * 重连窗口把半套文件提交定格的事故根因之一,见 flushPendingGitNotify)。
+   */
+  initialCatchUpBlockedSince(): number | undefined;
+  /**
    * 收到对端的索引指纹:与本机索引指纹比对,一致回 index-ack,不一致回
    * index-request。两侧各自独立跑一遍,谁也不等谁。
    */
@@ -472,6 +486,16 @@ export function createSyncPeer(deps: SyncPeerDeps): SyncPeer {
   let initialExchangeSettled = false;
   let initialFallbackTimer: ReturnType<typeof setTimeout> | undefined;
   let initialExchangeDisposed = false;
+  // ---- 入向追平(初始索引交换的**入向**腿,见 SyncPeer.initialCatchUpBlockedSince) ----
+  // 与上面出向的 initialExchangeSettled 是两回事:内容从对端来,得等对端收到本机
+  // 索引、规划完才上路;在那之前「接收台账为空」什么都不证明。e2e 盲区通道只出不进,
+  // 入向定义上为空(它连指纹交换都不走),出生即落定。
+  const attachedAt = Date.now();
+  let inboundCatchUpResolved = e2eKey !== undefined;
+  /** 入向追平落定:此后「没有认领」= 真的没有在途接收。重复调用幂等。 */
+  function settleInboundCatchUp(): void {
+    inboundCatchUpResolved = true;
+  }
 
   /** 发一份「当时」的全量索引:兜底与 index-request 共用,保证拿到的快照不过期。 */
   function sendFullIndexSnapshot(): void {
@@ -1448,6 +1472,10 @@ export function createSyncPeer(deps: SyncPeerDeps): SyncPeer {
         transport.sendEntries(outbound, 'delta');
       }
 
+      // 对端索引已应用完(含本轮全部接收认领的建立):入向追平就此落定 —— 此后
+      // 「台账为空」才真正等于「没有在途接收」(见 initialCatchUpBlockedSince)。
+      settleInboundCatchUp();
+
       // 抽样审计放在最后:它要读盘(成本上限 = 抽样数 × 一块),不能压在本轮的回推之后。
       // 此刻本轮的动作已全部应用完,`pending` 反映的是「还有文件没收齐」——正在收就不审。
       runDriftAudit(remote);
@@ -1608,18 +1636,26 @@ export function createSyncPeer(deps: SyncPeerDeps): SyncPeer {
       initialFallbackTimer.unref?.();
     },
 
+    initialCatchUpBlockedSince(): number | undefined {
+      return inboundCatchUpResolved ? undefined : attachedAt;
+    },
+
     onIndexFingerprint(fingerprint: string): void {
       // 与本机索引比指纹:一致 → 索引相等,buildPlan 必为空,回 ack 让对端免发;
       // 不一致才回 request 索要全量。忽略规则两侧不同时条目集合本就不同 → 必走
       // request,失败方向是「多发一次全量」,安全。
       const mine = indexFingerprint([...localIndex.values()]);
       settleInitialExchange();
+      // 一致 = 对端索引与本机相同,入向没有内容会来:入向腿一并落定。
+      if (mine === fingerprint) settleInboundCatchUp();
       transport.sendIndexExchangeReply?.(mine === fingerprint ? 'index-ack' : 'index-request');
     },
 
     onIndexAck(): void {
       // 对端确认「你的指纹 = 我的索引」:它不会再发全量,本机这份也省掉。
       settleInitialExchange();
+      // 索引相同 ⇒ 入向定义上为空:入向腿落定。
+      settleInboundCatchUp();
       onInitialIndexOutcome?.('skipped');
     },
 

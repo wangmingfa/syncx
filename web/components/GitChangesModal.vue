@@ -300,10 +300,11 @@ const diffPanes = computed<{ left: DiffPaneData; right: DiffPaneData } | null>((
 
 <style scoped>
 /* 本组件自有的清单/树样式;骨架与徽标族在 style.css */
+/* 加载中/空结果时正文没有内容,垫一个最小高度,免弹窗塌成只剩标题一条。
+   滚动不归它管:正文滚动统一由外壳的 .modal-body 提供(见 ModalShell 头注释),
+   弹窗再套一层内滚动容器会让图例没有可钉的视口,滚动条也会从弹窗内壁缩进来。 */
 .git-changes {
   min-height: 120px;
-  max-height: 60vh;
-  overflow-y: auto;
 }
 
 .git-changes__error {
@@ -319,6 +320,14 @@ const diffPanes = computed<{ left: DiffPaneData; right: DiffPaneData } | null>((
   flex-wrap: wrap;
   padding: 2px 2px 8px;
   font-size: 11.5px;
+  /* 与「Git 提交历史」的工具条同款:钉在正文滚动视口顶端,不随清单滚走。
+     背景默认档取实色 --card,把穿过底下的条目盖住;玻璃档 --card 只有 0.4 白,
+     由 style.css 皮肤段换成与弹窗表面同色的不透明预乘合成(原理与校准见那边
+     规则上方的注释)。 */
+  position: sticky;
+  top: 0;
+  z-index: 1;
+  background: var(--card);
 }
 
 .git-changes__legend-item {

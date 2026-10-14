@@ -9,6 +9,7 @@ import { readFolderIdentity } from '../src/folder-identity.js';
 import type { SharedFolderConfig } from '../src/config.js';
 import { createLogger } from '../src/logger.js';
 import type { ControlMessage } from '../src/net/wire.js';
+import type { SyncPeer } from '../src/peer.js';
 import { SyncSessionManager } from '../src/session-manager.js';
 import { rmDir } from './helpers.js';
 
@@ -69,7 +70,7 @@ type NotifyMsg = Extract<ControlMessage, { kind: 'git-commit-notify' }>;
 
 /** 测试视角的内部接口:TS 的 private 只在编译期生效,测试按结构类型触达。 */
 interface Internals {
-  onGitCommitNotify(msg: NotifyMsg): void;
+  onGitCommitNotify(msg: NotifyMsg, hopDeviceId?: string): void;
   onControl(msg: ControlMessage, hopDeviceId: string): void;
   flushPendingGitNotify(): void;
   checkGitCommits(): Promise<void>;
@@ -314,6 +315,98 @@ describe('git auto-commit deferred until receive ledger drains', () => {
     folder.pendingGitNotify = null;
     internals.onGitCommitNotify(notify(hash));
     expect(folder.pendingGitNotify).toBeNull();
+
+    (manager as unknown as { close(): void }).close();
+  });
+});
+
+/**
+ * 结算闸门补的第二道挡法:重连/解停后的头几秒,对端索引还没到、接收规划尚未
+ * 产出,台账必然为空 —— 旧判据把这当成排空,半套文件会被定格成一笔提交
+ * (2026-10-14 实测:提交 09:00:02,内容 09:00:05 才落盘)。现在要求:任一已挂
+ * peer 的入向交换未落定(peer.initialCatchUpBlockedSince)、或通知来源那一跳的
+ * 会话不在,都要等;两条都从首次挡道起 60s 封顶,超时强提交 + 告警。
+ */
+
+/** 只答得了结算闸门那一问的假 peer;别拿它碰真同步路径(其余方法缺席)。 */
+function stubPeer(blockedSince: number | undefined): SyncPeer {
+  return { initialCatchUpBlockedSince: () => blockedSince } as unknown as SyncPeer;
+}
+
+describe('git auto-commit waits for the initial index exchange to settle', () => {
+  it.skipIf(!HAS_GIT)('defers on an empty ledger while the source peer catches up, settles on the applied index', () => {
+    const { share, manager, folder } = boot('full');
+    const internals = manager as unknown as Internals;
+
+    writeFileSync(join(share, 'a.txt'), 'from peer');
+    folder.peers.set('PEER000001', stubPeer(Date.now()));
+    internals.onGitCommitNotify(notify('7'.repeat(40)), 'PEER000001');
+    internals.flushPendingGitNotify();
+    // 台账为空 ≠ 排空:入向交换未落定,内容可能还在路上 → 等
+    expect(commitCount(share)).toBe(1);
+    expect(folder.pendingGitNotify).not.toBeNull();
+    expect(folder.gitDrainSince).toBeDefined();
+
+    // 对端索引到达并应用(入向落定):正常结算;此后台账为空才是真排空
+    folder.peers.set('PEER000001', stubPeer(undefined));
+    internals.flushPendingGitNotify();
+    expect(commitCount(share)).toBe(2);
+    expect(folder.pendingGitNotify).toBeNull();
+    expect(folder.gitDrainSince).toBeUndefined();
+
+    (manager as unknown as { close(): void }).close();
+  });
+
+  it.skipIf(!HAS_GIT)('defers while the notify\'s deliverer has no session, settles after it reconnects', () => {
+    const { share, manager, folder } = boot('full');
+    const internals = manager as unknown as Internals;
+
+    writeFileSync(join(share, 'a.txt'), 'from peer');
+    internals.onGitCommitNotify(notify('4'.repeat(40)), 'PEER000001');
+    internals.flushPendingGitNotify();
+    // 送达通知的会话已不在:内容可能停在半途(拆除时认领已被释放)→ 等重连
+    expect(commitCount(share)).toBe(1);
+    expect(folder.pendingGitNotify).not.toBeNull();
+
+    folder.peers.set('PEER000001', stubPeer(undefined));
+    internals.flushPendingGitNotify();
+    expect(commitCount(share)).toBe(2);
+    expect(folder.pendingGitNotify).toBeNull();
+
+    (manager as unknown as { close(): void }).close();
+  });
+
+  it.skipIf(!HAS_GIT)('force-commits once the catch-up has blocked for the cap', () => {
+    const { share, manager, folder } = boot('full');
+    const internals = manager as unknown as Internals;
+
+    writeFileSync(join(share, 'a.txt'), 'from peer');
+    folder.peers.set('PEER000001', stubPeer(Date.now()));
+    internals.onGitCommitNotify(notify('3'.repeat(40)), 'PEER000001');
+    internals.flushPendingGitNotify();
+    expect(commitCount(share)).toBe(1);
+
+    // 首次被挡已满 60s(测试直接拨钟,不真等):封顶放行,partial 由告警留痕
+    folder.gitDrainSince = Date.now() - 61_000;
+    internals.flushPendingGitNotify();
+    expect(commitCount(share)).toBe(2);
+    expect(folder.pendingGitNotify).toBeNull();
+
+    (manager as unknown as { close(): void }).close();
+  });
+
+  it.skipIf(!HAS_GIT)('a fresh receive claim still defers even when the catch-up clock reads old', () => {
+    const { share, manager, folder } = boot('full');
+    const internals = manager as unknown as Internals;
+
+    writeFileSync(join(share, 'a.txt'), 'from peer');
+    folder.receiveLedger.set('a.txt', { claimId: 999, key: 'fake', ts: Date.now() });
+    folder.gitDrainSince = Date.now() - 61_000;
+    internals.onGitCommitNotify(notify('2'.repeat(40)));
+    internals.flushPendingGitNotify();
+    // 封顶只针对「交换/来源」:认领的挡法有保鲜期自愈,不参与该时钟
+    expect(commitCount(share)).toBe(1);
+    expect(folder.pendingGitNotify).not.toBeNull();
 
     (manager as unknown as { close(): void }).close();
   });
