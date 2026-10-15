@@ -6,12 +6,18 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import {
   autoCommit,
+  countUnpushedCommits,
   getCommitInfo,
+  getCommitParents,
   getLastCommitHash,
   getUncommittedChanges,
+  gitPush,
   hasUncommittedChanges,
   isGitRepo,
+  listCommitFiles,
   listRecentCommits,
+  listUnpushedCommits,
+  readFileAt,
   readFileAtHead,
 } from '../src/git-monitor.js';
 
@@ -506,6 +512,312 @@ describe('recent commit list', () => {
       expect(all).toHaveLength(2);
       expect(all[1]!.subject).toBe('只有主题的一笔');
       expect(all[1]!.body).toBe('');
+    } finally {
+      rmDir(repo);
+    }
+  });
+});
+
+describe('unpushed commits (count / list / push)', () => {
+  /** 建一对「工作仓库 + 本地 bare 远程」:push 全程离线,不碰网络也不碰用户凭据。 */
+  function tempRepoWithRemote(): { repo: string; remote: string } {
+    const remote = mkdtempSync(join(tmpdir(), 'syncx-remote-'));
+    execFileSync('git', ['init', '-q', '--bare', remote], { stdio: 'ignore' });
+    const repo = tempGitRepo();
+    git(repo, ['remote', 'add', 'origin', remote]);
+    return { repo, remote };
+  }
+
+  it('returns null outside a repo', () => {
+    const plain = mkdtempSync(join(tmpdir(), 'syncx-norepo-'));
+    try {
+      expect(countUnpushedCommits(plain)).toBe(null);
+      expect(listUnpushedCommits(plain)).toBe(null);
+    } finally {
+      rmDir(plain);
+    }
+  });
+
+  it.skipIf(!HAS_GIT)('returns null for a repo with a remote but no upstream', () => {
+    const { repo, remote } = tempRepoWithRemote();
+    try {
+      writeFileSync(join(repo, 'a.txt'), 'A');
+      commitAll(repo, '第一笔');
+      // 有远程、有提交,但当前分支没有上游:计数与列表口径 = null(不猜、不 fetch)
+      expect(countUnpushedCommits(repo)).toBe(null);
+      expect(listUnpushedCommits(repo)).toBe(null);
+    } finally {
+      rmDir(repo);
+      rmDir(remote);
+    }
+  });
+
+  it.skipIf(!HAS_GIT)('returns null for a plain folder nested inside a repo (no upward walk)', () => {
+    const { repo, remote } = tempRepoWithRemote();
+    try {
+      writeFileSync(join(repo, 'a.txt'), 'A');
+      commitAll(repo, '第一笔');
+      git(repo, ['push', '-u', '-q', 'origin', 'HEAD']);
+      writeFileSync(join(repo, 'b.txt'), 'B');
+      commitAll(repo, '第二笔');
+      expect(countUnpushedCommits(repo)).toBe(1);
+
+      // 嵌套的 plain 目录自己没有 .git,git 从它出发会向上回溯到外层仓库 ——
+      // 计数/列表都必须先过 isGitRepo 闸回 null,而不是把外层仓库的提交算到它头上。
+      const nested = join(repo, 'sub');
+      mkdirSync(nested);
+      expect(isGitRepo(nested)).toBe(false);
+      expect(countUnpushedCommits(nested)).toBe(null);
+      expect(listUnpushedCommits(nested)).toBe(null);
+    } finally {
+      rmDir(repo);
+      rmDir(remote);
+    }
+  });
+
+  it.skipIf(!HAS_GIT)('lists unpushed commits newest-first, synced range is an empty list', () => {
+    const { repo, remote } = tempRepoWithRemote();
+    try {
+      writeFileSync(join(repo, 'a.txt'), 'A');
+      const first = commitAll(repo, '第一笔');
+      git(repo, ['push', '-u', '-q', 'origin', 'HEAD']);
+
+      // 上游已同步:空范围回 [],不是错误(与「没有需要推送」的正常状态对应)
+      expect(listUnpushedCommits(repo)).toEqual([]);
+
+      writeFileSync(join(repo, 'b.txt'), 'B');
+      const second = commitAll(repo, '第二笔');
+      writeFileSync(join(repo, 'c.txt'), 'C');
+      const third = commitAll(repo, '第三笔');
+
+      // 新→旧;总数与 rev-list --count 互验(两把独立的尺子)
+      const commits = listUnpushedCommits(repo)!;
+      expect(commits.map((c) => c.subject)).toEqual(['第三笔', '第二笔']);
+      expect(countUnpushedCommits(repo)).toBe(commits.length);
+      // 短哈希是全哈希的前缀(解析字段没挪位)
+      expect(third.startsWith(commits[0]!.hash)).toBe(true);
+      expect(second.startsWith(commits[1]!.hash)).toBe(true);
+      // 作者与 ISO 时间字段齐全(与 listRecentCommits 共用解析)
+      expect(commits[0]!.author).toBe('syncx-test');
+      expect(commits[0]!.date).toMatch(/^\d{4}-\d{2}-\d{2}T/);
+      // 负控:列表读取没有碰远程 —— 远程仍停在第一笔
+      expect(git(remote, ['rev-parse', 'HEAD']).trim()).toBe(first);
+    } finally {
+      rmDir(repo);
+      rmDir(remote);
+    }
+  });
+
+  it.skipIf(!HAS_GIT)('caps the list at limit while the count stays exact', () => {
+    const { repo, remote } = tempRepoWithRemote();
+    try {
+      writeFileSync(join(repo, 'a.txt'), 'A');
+      commitAll(repo, '第零笔');
+      git(repo, ['push', '-u', '-q', 'origin', 'HEAD']);
+      for (let i = 1; i <= 6; i++) {
+        writeFileSync(join(repo, `f${i}.txt`), String(i));
+        commitAll(repo, `第${i}笔`);
+      }
+
+      // 6 笔未推送、limit 2:列表截到 2 条(新→旧),count 仍为 6(截断互验)
+      const list = listUnpushedCommits(repo, 2)!;
+      expect(list).toHaveLength(2);
+      expect(list.map((c) => c.subject)).toEqual(['第6笔', '第5笔']);
+      expect(countUnpushedCommits(repo)).toBe(6);
+      // 默认上限下不截断:6 条全量
+      expect(listUnpushedCommits(repo)).toHaveLength(6);
+    } finally {
+      rmDir(repo);
+      rmDir(remote);
+    }
+  });
+
+  it.skipIf(!HAS_GIT)('counts 0 <-> 1 across push and new commit, matching the remote state', async () => {
+    const { repo, remote } = tempRepoWithRemote();
+    try {
+      writeFileSync(join(repo, 'a.txt'), 'A');
+      commitAll(repo, '第一笔');
+      git(repo, ['push', '-u', '-q', 'origin', 'HEAD']);
+
+      // 建好上游、且远程已同步:0。负控:远程此刻确有这笔(HEAD 可解析)
+      const synced = git(remote, ['rev-parse', 'HEAD']).trim();
+      expect(synced).toBe(git(repo, ['rev-parse', 'HEAD']).trim());
+      expect(countUnpushedCommits(repo)).toBe(0);
+
+      // 新提交一笔但还没 push:本地 HEAD 往前走,远程没动 —— 计数 1
+      writeFileSync(join(repo, 'b.txt'), 'B');
+      commitAll(repo, '第二笔');
+      expect(git(remote, ['rev-parse', 'HEAD']).trim()).toBe(synced);
+      expect(countUnpushedCommits(repo)).toBe(1);
+
+      // push 之后归零,且远程 HEAD 与本地一致(计数与盘上事实同源)
+      const r = await gitPush(repo);
+      expect(r).toEqual({ ok: true });
+      expect(git(remote, ['rev-parse', 'HEAD']).trim()).toBe(git(repo, ['rev-parse', 'HEAD']).trim());
+      expect(countUnpushedCommits(repo)).toBe(0);
+      expect(listUnpushedCommits(repo)).toEqual([]);
+    } finally {
+      rmDir(repo);
+      rmDir(remote);
+    }
+  });
+
+  it.skipIf(!HAS_GIT)('reports failure with a git stderr line for no-upstream and non-repo', async () => {
+    const { repo, remote } = tempRepoWithRemote();
+    try {
+      writeFileSync(join(repo, 'a.txt'), 'A');
+      commitAll(repo, '第一笔');
+
+      // 无上游:不许 -u 兜底,原样失败(与目录卡口径一致),错误取 stderr 首行
+      const noUpstream = await gitPush(repo);
+      expect(noUpstream.ok).toBe(false);
+      if (!noUpstream.ok) expect(noUpstream.error.length).toBeGreaterThan(0);
+
+      const plain = mkdtempSync(join(tmpdir(), 'syncx-norepo-'));
+      try {
+        const notRepo = await gitPush(plain);
+        expect(notRepo.ok).toBe(false);
+        if (!notRepo.ok) expect(notRepo.error.length).toBeGreaterThan(0);
+      } finally {
+        rmDir(plain);
+      }
+    } finally {
+      rmDir(repo);
+      rmDir(remote);
+    }
+  });
+});
+
+describe('commit file list', () => {
+  it.skipIf(!HAS_GIT)('lists modified / added / deleted files of a commit', () => {
+    const repo = tempGitRepo();
+    try {
+      writeFileSync(join(repo, 'a.txt'), 'v1');
+      writeFileSync(join(repo, 'b.txt'), 'v1');
+      const root = commitAll(repo, 'base');
+      writeFileSync(join(repo, 'a.txt'), 'v2');
+      unlinkSync(join(repo, 'b.txt'));
+      writeFileSync(join(repo, 'c.txt'), 'new');
+      const second = commitAll(repo, '第二笔');
+
+      const files = listCommitFiles(repo, second);
+      expect(files.map((f) => [f.status, f.path]).sort())
+        .toEqual([['A', 'c.txt'], ['D', 'b.txt'], ['M', 'a.txt']]);
+
+      // 根提交:没有更早的版本可比,全部文件都是 A
+      const rootFiles = listCommitFiles(repo, root);
+      expect(rootFiles.map((f) => f.status[0])).toEqual(['A', 'A']);
+    } finally {
+      rmDir(repo);
+    }
+  });
+
+  it.skipIf(!HAS_GIT)('pairs old and new paths for a rename (z-format R record)', () => {
+    const repo = tempGitRepo();
+    try {
+      writeFileSync(join(repo, '旧文件.txt'), '内容');
+      commitAll(repo, 'init');
+      git(repo, ['mv', '旧文件.txt', '改名后.txt']);
+      const hash = commitAll(repo, '改名');
+
+      const files = listCommitFiles(repo, hash);
+      expect(files).toHaveLength(1);
+      expect(files[0]!.status[0]).toBe('R');
+      expect(files[0]!.path).toBe('改名后.txt');
+      expect(files[0]!.origPath).toBe('旧文件.txt');
+    } finally {
+      rmDir(repo);
+    }
+  });
+
+  it.skipIf(!HAS_GIT)('returns an empty list for a clean merge commit', () => {
+    const repo = tempGitRepo();
+    try {
+      writeFileSync(join(repo, 'base.txt'), 'base');
+      commitAll(repo, 'base');
+      const branch = git(repo, ['symbolic-ref', '--short', 'HEAD']).trim();
+      git(repo, ['checkout', '-qb', 'feat']);
+      writeFileSync(join(repo, 'feat.txt'), 'feat');
+      const featHash = commitAll(repo, 'feat');
+      git(repo, ['checkout', '-q', branch]);
+      writeFileSync(join(repo, 'main.txt'), 'main');
+      commitAll(repo, 'main');
+      git(repo, ['merge', '-q', '--no-ff', 'feat', '-m', 'merge']);
+      const mergeHash = getLastCommitHash(repo)!;
+
+      // 合并提交各取了一侧的内容:相对**所有**父提交都没有独立变更 → git 输出为空。
+      // 空清单是「干净合并」这一事实,不是读取失败。
+      expect(listCommitFiles(repo, mergeHash)).toEqual([]);
+      const parents = getCommitParents(repo, mergeHash);
+      expect(parents).toHaveLength(2);
+      expect(parents).toContain(featHash);
+    } finally {
+      rmDir(repo);
+    }
+  });
+
+  it.skipIf(!HAS_GIT)('throws for a malformed hash and for an unknown one', () => {
+    const repo = tempGitRepo();
+    try {
+      // 选项样式的输入在形状闸就被拒,到不了 git(git 会把它当选项解析)
+      expect(() => listCommitFiles(repo, '--upload-pack=x')).toThrow('非法的提交哈希');
+      expect(() => listCommitFiles(repo, '')).toThrow('非法的提交哈希');
+      expect(() => listCommitFiles(repo, 'zzzzzzz')).toThrow('非法的提交哈希');
+      expect(() => getCommitParents(repo, '--exec')).toThrow('非法的提交哈希');
+
+      // 形状合法但不存在的哈希:git 失败,抛出(带 stderr 首行)
+      expect(() => listCommitFiles(repo, 'a'.repeat(40))).toThrow();
+      expect(() => getCommitParents(repo, 'a'.repeat(40))).toThrow();
+    } finally {
+      rmDir(repo);
+    }
+  });
+});
+
+describe('read file at an arbitrary rev', () => {
+  it.skipIf(!HAS_GIT)('reads content at a given commit and reports absence in both message forms', () => {
+    const repo = tempGitRepo();
+    try {
+      writeFileSync(join(repo, 'a.txt'), 'v1');
+      const first = commitAll(repo, '第一笔');
+      writeFileSync(join(repo, 'a.txt'), 'v2');
+      writeFileSync(join(repo, 'later.txt'), '后来才有');
+      const second = commitAll(repo, '第二笔');
+
+      // 指定提交版本(不只是 HEAD):第一笔里 a.txt 还是 v1
+      const atFirst = readFileAt(repo, first, 'a.txt');
+      expect(atFirst.kind).toBe('bytes');
+      if (atFirst.kind === 'bytes') expect(atFirst.bytes.toString('utf8')).toBe('v1');
+
+      // 缺路径形态一:「后来才有」的文件不在第一笔里
+      expect(readFileAt(repo, first, 'later.txt').kind).toBe('absent');
+      // 缺路径形态二:git 对「盘上存在但该 rev 没有」的路径(目录)换一套说法
+      expect(readFileAt(repo, first, '.').kind).toBe('absent');
+
+      // readFileAtHead 是 HEAD 的薄壳:行为与 readFileAt(repo, 'HEAD', …) 一致
+      const head = readFileAtHead(repo, 'a.txt');
+      expect(head.kind).toBe('bytes');
+      if (head.kind === 'bytes') expect(head.bytes.toString('utf8')).toBe('v2');
+
+      // 未知 rev + 盘上存在的路径:git 换用「exists on disk, but not in」措辞,
+      // 落在 absent 判定里 —— 这套口径只服务「提交已验证存在后的路径读取」
+      // (manager 先经 rev-list 验提交再读文件),rev 不存在的形态到不了 UI。
+      expect(readFileAt(repo, 'a'.repeat(40), 'a.txt').kind).toBe('absent');
+    } finally {
+      rmDir(repo);
+    }
+  });
+
+  it.skipIf(!HAS_GIT)('maps commit parents: root → [], normal → [parent]', () => {
+    const repo = tempGitRepo();
+    try {
+      writeFileSync(join(repo, 'a.txt'), '1');
+      const root = commitAll(repo, '根');
+      writeFileSync(join(repo, 'a.txt'), '2');
+      const second = commitAll(repo, '第二笔');
+
+      expect(getCommitParents(repo, root)).toEqual([]);
+      expect(getCommitParents(repo, second)).toEqual([root]);
     } finally {
       rmDir(repo);
     }

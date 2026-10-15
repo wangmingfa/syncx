@@ -6,6 +6,7 @@ import ActionRail from './ActionRail.vue';
 import WeeklyReportModal from './WeeklyReportModal.vue';
 import GitChangesModal from './GitChangesModal.vue';
 import GitLogModal from './GitLogModal.vue';
+import GitPushModal from './GitPushModal.vue';
 import EmptyDirsModal from './EmptyDirsModal.vue';
 import { folderPathPlaceholder, visibleTransferFiles, XFER_FILE_LIMIT } from '../utils/format';
 import type { RailAction } from '../utils/action-rail';
@@ -39,6 +40,11 @@ function gitChangeCountOf(f: FolderInfo): number {
   return status.value.gitChangeCounts?.[folderKey(f)] ?? 0;
 }
 
+/** 该目录尚未推送到上游的提交数(daemon 每轮扫描顺带盘点;未设置上游时后端不入表 → 0)。 */
+function gitUnpushedCountOf(f: FolderInfo): number {
+  return status.value.gitUnpushedCounts?.[folderKey(f)] ?? 0;
+}
+
 /** 「Git 改动」弹窗开关:点徽标打开,挂在组件根部(与周报弹窗同款)。 */
 const gitChangesFolder = ref<{ id?: string; path: string } | null>(null);
 
@@ -61,6 +67,16 @@ const emptyDirsFolder = ref<{ id?: string; path: string } | null>(null);
 
 function openEmptyDirs(f: FolderInfo): void {
   emptyDirsFolder.value = { id: f.id, path: f.path };
+}
+
+/**
+ * 「Git 推送」弹窗开关(栏头「一键推送」= 'all',卡片动作条「推送」与
+ * 「未推送 N」徽标 = 该目录)。打开时现查未推送提交,推送也在这个弹窗里按目录顺序进行。
+ */
+const gitPushScope = ref<'all' | { id?: string; path: string } | null>(null);
+
+function openGitPush(f: FolderInfo): void {
+  gitPushScope.value = { id: f.id, path: f.path };
 }
 
 /**
@@ -233,6 +249,18 @@ const headActions = computed<RailAction[]>(() => {
     { key: 'global-history', icon: 'history', tooltip: '全局同步记录:跨目录的归并时间线', onClick: () => openGlobalHistory() },
     { key: 'report', icon: 'report', tooltip: '同步周报:近 7 天变更趋势 / 目录贡献 / 冲突汇总', onClick: () => (reportOpen.value = true) },
   ];
+  // 「一键推送」:只在有 git 仓库目录时出现 —— 其余目录连仓库都不是,点了也推不出任何东西。
+  // 点击只打开推送弹窗(列出各目录未推送提交,确认后逐个推),不在按钮上直接开推 ——
+  // 推什么、推几个要先看得见;busy 期间与其他动作一起禁用,打开弹窗本身不占 busy。
+  if (status.value.folders.some((f) => f.gitRepo === true)) {
+    actions.push({
+      key: 'git-push-all',
+      icon: 'push',
+      disabled: b,
+      tooltip: 'Git 推送:查看各目录尚未推送到上游的提交,确认后逐目录推送',
+      onClick: () => (gitPushScope.value = 'all'),
+    });
+  }
   // 有目录身份校验失败时才出现的批量恢复:多个目录逐个点「重新采集身份」太繁琐
   if (identityBrokenFolders.value.length > 0) {
     actions.push({
@@ -341,6 +369,17 @@ function folderActions(f: FolderInfo): RailAction[] {
           disabled: b,
           tooltip: '提交历史:查看该仓库最近的 20 个提交,可展开提交正文',
           onClick: () => openGitLog(f),
+        } satisfies RailAction]
+      : []),
+    // 推送:仓库且有未推送提交才出现(计数由 daemon 每轮扫描顺带盘点,与徽标同源);
+    // 没东西可推时不出现 —— 点开只会是一句「没有需要推送的提交」
+    ...(f.gitRepo === true && gitUnpushedCountOf(f) > 0
+      ? [{
+          key: 'git-push',
+          icon: 'push',
+          disabled: b,
+          tooltip: `Git 推送:本目录有 ${gitUnpushedCountOf(f)} 个提交未推送到上游,点开查看并推送`,
+          onClick: () => openGitPush(f),
         } satisfies RailAction]
       : []),
     {
@@ -502,7 +541,7 @@ function visibleFiles(f: FolderInfo): TransferFile[] {
            title 说明(「接收」没有专属操作按钮,只能靠徽标自身的 tooltip 解释)。
            「冲突 N」做成按钮:徽标本身就是收件箱入口,点它直接处理。
            「Git 仅发送/仅接收/双向」同理只靠 title 解释 —— 它没有专属按钮,开关在「编辑目录」里。 -->
-      <div v-if="f.receiveOnly || (f.gitSync && f.gitSync !== 'off') || f.paused || outsideNow(f) || conflictCountOf(f) > 0 || gitChangeCountOf(f) > 0" class="card-floats">
+      <div v-if="f.receiveOnly || (f.gitSync && f.gitSync !== 'off') || f.paused || outsideNow(f) || conflictCountOf(f) > 0 || gitChangeCountOf(f) > 0 || gitUnpushedCountOf(f) > 0" class="card-floats">
         <span v-if="f.receiveOnly" class="float-badge receive-badge" title="接收模式:只拉不推,本机改动不会同步出去">接收</span>
         <!-- Git 提交同步:模式文案与编辑弹窗的下拉框逐字一致,方向由文字给出;
              双向额外铺一层淡底,一眼能从「只做一边」的两条里分出来;
@@ -543,6 +582,16 @@ function visibleFiles(f: FolderInfo): TransferFile[] {
           :title="`${gitChangeCountOf(f)} 个文件有未提交改动:点击查看树形清单,双击文件可看与 HEAD 提交的对比`"
           @click="openGitChanges(f)"
         >改动 {{ gitChangeCountOf(f) }}</button>
+        <!-- Git 未推送:与「改动 N」相邻但不同色(青绿 vs 紫)—— 两个都是「本机的 git 状态
+             还没有外发」,一个未提交、一个未推送。徽标是入口(与「改动 N」同款):
+             点开「Git 推送」弹窗,查看该目录的未推送提交并推送;栏头「一键推送」是批量同款 -->
+        <button
+          v-if="gitUnpushedCountOf(f) > 0"
+          type="button"
+          class="float-badge git-unpushed-float"
+          :title="`${gitUnpushedCountOf(f)} 个提交未推送到远程:点击查看清单并推送;栏头「一键推送」可一并处理所有目录`"
+          @click="openGitPush(f)"
+        >未推送 {{ gitUnpushedCountOf(f) }}</button>
       </div>
 
       <div class="item-top">
@@ -738,5 +787,6 @@ function visibleFiles(f: FolderInfo): TransferFile[] {
   <WeeklyReportModal :open="reportOpen" @close="reportOpen = false" />
   <GitChangesModal :folder="gitChangesFolder" @close="gitChangesFolder = null" />
   <GitLogModal :folder="gitLogFolder" @close="gitLogFolder = null" />
+  <GitPushModal :scope="gitPushScope" @close="gitPushScope = null" />
   <EmptyDirsModal :folder="emptyDirsFolder" @close="emptyDirsFolder = null" />
 </template>

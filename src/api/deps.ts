@@ -155,6 +155,21 @@ export interface ControlServerDeps {
   readGitDiff?: (folderId: string, path: string) => unknown;
   /** 最近提交历史(「Git 提交历史」弹窗):现跑 git log,非 git 仓库返回 null。 */
   listGitLog?: (folderId: string) => unknown;
+  /** 某笔提交动了哪些文件(提交展开的文件清单)。非 git 仓库返回 null。 */
+  listGitCommitFiles?: (folderId: string, hash: string) => unknown;
+  /** 某笔提交里某文件的「上一版 → 该提交」对比(提交展开双击文件)。 */
+  readGitCommitDiff?: (folderId: string, hash: string, path: string, origPath?: string) => unknown;
+  /**
+   * 「推送弹窗」数据源:现查各目录尚未推送到上游的提交(folderId 给了只查那一个)。
+   * 只返回「此刻确实有未推送提交」的目录(非仓库/无上游/0 条不进列表;列表最多 50 条)。
+   */
+  listUnpushedByFolder?: (folderId?: string) => unknown;
+  /**
+   * 推送单个目录:执行 `git push`(推当前分支到它配置的上游),返回 { ok, error? }
+   * (ok=false 时 error 为 git 失败首行)。网络操作、每次调用单目录持重入闸;
+   * 已有推送进行中 / 目录不是仓库 / 目录不存在时抛错,路由转 400。
+   */
+  pushGitFolder?: (folderId: string) => Promise<{ ok: boolean; error?: string }>;
   /** 盘点共享目录里的空文件夹(「空文件夹」弹窗):只读扫盘,忽略规则决定报告范围。 */
   listEmptyDirs?: (folderId: string) => unknown;
   /** 删除勾选的空文件夹(逐条结果);只 rmdir,绝不删文件,不触发扫描。 */

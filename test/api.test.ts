@@ -455,6 +455,95 @@ describe('control api git log and empty dirs', () => {
     server.close();
   });
 
+  it('GET /api/folders/git-unpushed passes the listing through, folderId optional, needs auth', async () => {
+    const folders = [
+      {
+        folderId: 'f1',
+        path: '/a',
+        total: 2,
+        commits: [{ hash: 'abc1234', subject: '一笔', body: '', author: 'x', date: '2026-01-01T00:00:00+00:00', refs: '' }],
+        truncated: false,
+      },
+    ];
+    const seen: Array<string | undefined> = [];
+    const server = createControlServer({
+      token: 'secret',
+      getStatus: () => ({}),
+      listUnpushedByFolder: (folderId) => {
+        seen.push(folderId);
+        return folders;
+      },
+    });
+    server.listen(0, '127.0.0.1');
+    await once(server, 'listening');
+    const port = (server.address() as AddressInfo).port;
+
+    const all = await fetchJson(port, '/api/folders/git-unpushed', 'secret');
+    expect(all.status).toBe(200);
+    expect(all.body).toEqual({ folders });
+
+    const single = await fetchJson(port, '/api/folders/git-unpushed?folderId=f1', 'secret');
+    expect(single.status).toBe(200);
+    // folderId 缺省 = undefined(全量),给了 = 原样透传
+    expect(seen).toEqual([undefined, 'f1']);
+
+    const noAuth = await fetchJson(port, '/api/folders/git-unpushed');
+    expect(noAuth.status).toBe(401);
+
+    server.close();
+  });
+
+  it('POST /api/folders/git-push passes the single-folder result through and validates folderId', async () => {
+    const seen: string[] = [];
+    const server = createControlServer({
+      token: 'secret',
+      getStatus: () => ({}),
+      pushGitFolder: async (folderId) => {
+        seen.push(folderId);
+        return folderId === 'f2' ? { ok: false, error: 'has no upstream branch' } : { ok: true };
+      },
+    });
+    server.listen(0, '127.0.0.1');
+    await once(server, 'listening');
+    const port = (server.address() as AddressInfo).port;
+
+    const ok = await fetchJson(port, '/api/folders/git-push', 'secret', { method: 'POST', body: { folderId: 'f1' } });
+    expect(ok.status).toBe(200);
+    expect(ok.body).toEqual({ ok: true });
+
+    const fail = await fetchJson(port, '/api/folders/git-push', 'secret', { method: 'POST', body: { folderId: 'f2' } });
+    expect(fail.status).toBe(200);
+    expect(fail.body).toEqual({ ok: false, error: 'has no upstream branch' });
+
+    const missing = await fetchJson(port, '/api/folders/git-push', 'secret', { method: 'POST', body: {} });
+    expect(missing.status).toBe(400);
+    expect(seen).toEqual(['f1', 'f2']);
+
+    const noAuth = await fetchJson(port, '/api/folders/git-push', undefined, { method: 'POST', body: { folderId: 'f1' } });
+    expect(noAuth.status).toBe(401);
+
+    server.close();
+  });
+
+  it('POST /api/folders/git-push maps an in-flight rejection to 400', async () => {
+    const server = createControlServer({
+      token: 'secret',
+      getStatus: () => ({}),
+      pushGitFolder: async () => {
+        throw new Error('已有推送正在进行,请稍候');
+      },
+    });
+    server.listen(0, '127.0.0.1');
+    await once(server, 'listening');
+    const port = (server.address() as AddressInfo).port;
+
+    const res = await fetchJson(port, '/api/folders/git-push', 'secret', { method: 'POST', body: { folderId: 'f1' } });
+    expect(res.status).toBe(400);
+    expect(res.body).toMatchObject({ error: '已有推送正在进行,请稍候' });
+
+    server.close();
+  });
+
   it('GET /api/folders/empty-dirs passes the scan result through and needs folderId', async () => {
     const server = createControlServer({
       token: 'secret',
@@ -1783,6 +1872,101 @@ describe('control api 双栏对比', () => {
     // SPA fallback 只放行 /compare 这一棵子树:拼错的 API 路径不能被掩盖成一张空页面
     const unknown = await fetchRaw(port, '/nope', 'secret');
     expect(unknown.status).toBe(404);
+    server.close();
+  });
+});
+
+describe('control api git commit files and diff', () => {
+  const files = [
+    { status: 'M', path: 'a.txt' },
+    { status: 'R100', path: 'b.txt', origPath: 'a.txt' },
+  ];
+
+  it('GET /api/folders/git-commit-files passes files through, null as gitRepo false, needs params', async () => {
+    const seen: Array<[string, string]> = [];
+    let isRepo = true;
+    const server = createControlServer({
+      token: 'secret',
+      getStatus: () => ({}),
+      listGitCommitFiles: (folderId, hash) => {
+        seen.push([folderId, hash]);
+        return isRepo ? files : null;
+      },
+    });
+    server.listen(0, '127.0.0.1');
+    await once(server, 'listening');
+    const port = (server.address() as AddressInfo).port;
+
+    const repo = await fetchJson(port, '/api/folders/git-commit-files?folderId=f1&hash=abc1234', 'secret');
+    expect(repo.status).toBe(200);
+    expect(repo.body).toEqual({ files, gitRepo: true });
+
+    // null = 不是 git 仓库:200 + gitRepo:false(前端据此给解释而不是空清单)
+    isRepo = false;
+    const none = await fetchJson(port, '/api/folders/git-commit-files?folderId=f2&hash=abc1234', 'secret');
+    expect(none.status).toBe(200);
+    expect(none.body).toEqual({ files: [], gitRepo: false });
+
+    const noHash = await fetchJson(port, '/api/folders/git-commit-files?folderId=f1', 'secret');
+    expect(noHash.status).toBe(400);
+    expect(seen).toEqual([['f1', 'abc1234'], ['f2', 'abc1234']]);
+
+    const noAuth = await fetchJson(port, '/api/folders/git-commit-files?folderId=f1&hash=abc1234');
+    expect(noAuth.status).toBe(401);
+
+    server.close();
+  });
+
+  it('GET /api/folders/git-commit-diff passes the pair through, origPath optional', async () => {
+    const pair = { path: 'b.txt', parent: { exists: true, text: 'old' }, commit: { exists: true, text: 'new' } };
+    const seen: Array<[string, string, string, string | undefined]> = [];
+    const server = createControlServer({
+      token: 'secret',
+      getStatus: () => ({}),
+      readGitCommitDiff: (folderId, hash, p, origPath) => {
+        seen.push([folderId, hash, p, origPath]);
+        return pair;
+      },
+    });
+    server.listen(0, '127.0.0.1');
+    await once(server, 'listening');
+    const port = (server.address() as AddressInfo).port;
+
+    const res = await fetchJson(port, '/api/folders/git-commit-diff?folderId=f1&hash=abc1234&path=b.txt', 'secret');
+    expect(res.status).toBe(200);
+    expect(res.body).toEqual(pair);
+    expect(seen[0]).toEqual(['f1', 'abc1234', 'b.txt', undefined]);
+
+    // 改名文件:origPath 原样透传(父提交里读旧路径)
+    await fetchJson(port, '/api/folders/git-commit-diff?folderId=f1&hash=abc1234&path=b.txt&origPath=a.txt', 'secret');
+    expect(seen[1]).toEqual(['f1', 'abc1234', 'b.txt', 'a.txt']);
+
+    const missing = await fetchJson(port, '/api/folders/git-commit-diff?folderId=f1&hash=abc1234', 'secret');
+    expect(missing.status).toBe(400);
+
+    server.close();
+  });
+
+  it('GET /api/folders/git-commit-diff maps a data-source failure to 400 with the reason', async () => {
+    const server = createControlServer({
+      token: 'secret',
+      getStatus: () => ({}),
+      readGitCommitDiff: () => {
+        throw new Error('提交不存在(可能已被重写或回收)');
+      },
+    });
+    server.listen(0, '127.0.0.1');
+    await once(server, 'listening');
+    const port = (server.address() as AddressInfo).port;
+
+    const res = await fetchJson(
+      port,
+      '/api/folders/git-commit-diff?folderId=f1&hash=abc1234&path=a.txt',
+      'secret',
+    );
+    expect(res.status).toBe(400);
+    expect(res.body).toMatchObject({ error: '提交不存在(可能已被重写或回收)' });
+
     server.close();
   });
 });

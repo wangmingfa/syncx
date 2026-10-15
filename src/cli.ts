@@ -646,6 +646,7 @@ export async function run(args: ParsedArgs): Promise<void> {
         {
           conflictCounts: manager.folderConflictCounts(),
           gitChangeCounts: manager.folderGitChangeCounts(),
+          gitUnpushedCounts: manager.folderGitUnpushedCounts(),
           traffic: manager.getTrafficStats(),
           hostname: osHostname(),
           localAddresses: getLanAddresses().map((a) => a.address),
@@ -882,6 +883,12 @@ export async function run(args: ParsedArgs): Promise<void> {
     readGitDiff: (folderId, path) => manager.readGitDiff(folderId, path),
     // 「Git 提交历史」弹窗:最近 20 条提交(现跑 git log)
     listGitLog: (folderId) => manager.listGitLog(folderId),
+    // 提交展开:某笔提交的文件清单 + 单文件「上一版(父提交) → 该提交」对比(现跑 git)
+    listGitCommitFiles: (folderId, hash) => manager.listGitCommitFiles(folderId, hash),
+    readGitCommitDiff: (folderId, hash, path, origPath) => manager.readGitCommitDiff(folderId, hash, path, origPath),
+    // 「Git 推送」弹窗:未推送提交清单(现查 git)+ 单目录推送(git push,网络操作单目录持闸)
+    listUnpushedByFolder: (folderId) => manager.listUnpushedByFolder(folderId),
+    pushGitFolder: (folderId) => manager.pushGitFolder(folderId),
     // 「空文件夹」弹窗:盘点 + 确认后删除(只 rmdir、不触发扫描 —— 目录不是同步实体)
     listEmptyDirs: (folderId) => manager.listEmptyDirs(folderId),
     deleteEmptyDirs: (folderId, paths) => manager.deleteEmptyDirs(folderId, paths),

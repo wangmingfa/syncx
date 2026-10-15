@@ -178,6 +178,9 @@ export interface StatusData {
   conflictCounts?: Record<string, number>;
   /** 每目录工作区未提交变更条数(键 = 目录 id ?? path;目录卡「Git 改动 N」徽标);缺省 = 旧后端。 */
   gitChangeCounts?: Record<string, number>;
+  /** 每目录尚未推送到上游的提交数(键 = 目录 id ?? path;目录卡「未推送 N」徽标);
+   *  未设置上游的目录不入表;缺省 = 旧后端。 */
+  gitUnpushedCounts?: Record<string, number>;
   /** 传输统计:累计字节 + 最近 24h 逐 5 分钟采样(daemon 重启清零);旧后端缺省。 */
   traffic?: TrafficData;
   /** daemon 所在机器的操作系统主机名(顶栏本机 chip);旧后端缺省。 */
@@ -437,6 +440,47 @@ export interface GitLogData {
   commits: GitCommitEntry[];
   /** false = 目录不是 git 仓库(弹窗给出解释而不是空列表)。 */
   gitRepo?: boolean;
+}
+
+/** 提交展开里的一行:该笔提交动了哪个文件、怎么动的(与 src/git-monitor.ts 同形)。 */
+export interface GitCommitFileEntry {
+  /** git name-status 状态字母(M/A/D/R/C/T 等),前端翻成 改/增/删/移/复 胶囊。 */
+  status: string;
+  /** 提交后的路径(改名/复制时为新路径)。 */
+  path: string;
+  /** 改名/复制时的原路径(status 为 R/C 开头时存在)。 */
+  origPath?: string;
+}
+
+/** GET /api/folders/git-commit-files 的响应;非 git 仓库时 gitRepo: false。 */
+export interface GitCommitFilesData {
+  files: GitCommitFileEntry[];
+  /** false = 目录不是 git 仓库。 */
+  gitRepo?: boolean;
+}
+
+/** GET /api/folders/git-commit-diff 的响应:父提交版 vs 该提交版,复用通用差异弹窗的侧形状。 */
+export interface GitCommitDiffData {
+  path: string;
+  parent: FileSideData;
+  commit: FileSideData;
+}
+
+/** 「Git 推送」弹窗每目录一行(与 src/session-manager.ts 的 UnpushedFolderEntry 同形)。 */
+export interface GitUnpushedFolder {
+  folderId: string;
+  path: string;
+  /** 未推送提交总数(列表截断时依然准确)。 */
+  total: number;
+  /** 新→旧,最多 50 条。 */
+  commits: GitCommitEntry[];
+  /** 列表被 50 条上限截断(total 超出)。 */
+  truncated: boolean;
+}
+
+/** GET /api/folders/git-unpushed 的响应:只含此刻有未推送提交的目录。 */
+export interface GitUnpushedData {
+  folders: GitUnpushedFolder[];
 }
 
 /** GET /api/folders/empty-dirs 的响应:盘点到空文件夹清单。 */

@@ -57,7 +57,7 @@ export async function tryFolderRoutes(
   res: ServerResponse,
   deps: ControlServerDeps,
 ): Promise<boolean> {
-  const { addFolder, removeFolder, setFolderDevices, setFolderUseGitignore, setFolderPaused, setFolderFilePaused, setFolderSchedule, setFolderGitSync, setFolderConflictPolicy, setFolderE2E, setFolderOnDemand, setFolderOnDemandDir, prioritizeTransfer, materializeFile, getFolderIgnoreInfo, setFolderIgnoreLines, testFolderIgnore, reAdoptFolderIdentity, reAdoptAllIdentities, getFolderHistory, getGlobalHistory, getWeeklyReport, clearFolderHistory, listFolderConflicts, resolveFolderConflict, conflictFilePair, applyConflictMerge, cleanIdenticalConflicts, diffFolder, compareFolder, readFilePair, applyFileSync, listFolderVersions, restoreFolderVersion, deleteFolderVersion, getFolderVersionContent, rollbackFolder, setScheduleOverride, setCalendarOverride, getCalendar, listGitChanges, readGitDiff, listGitLog, listEmptyDirs, deleteEmptyDirs } = deps;
+  const { addFolder, removeFolder, setFolderDevices, setFolderUseGitignore, setFolderPaused, setFolderFilePaused, setFolderSchedule, setFolderGitSync, setFolderConflictPolicy, setFolderE2E, setFolderOnDemand, setFolderOnDemandDir, prioritizeTransfer, materializeFile, getFolderIgnoreInfo, setFolderIgnoreLines, testFolderIgnore, reAdoptFolderIdentity, reAdoptAllIdentities, getFolderHistory, getGlobalHistory, getWeeklyReport, clearFolderHistory, listFolderConflicts, resolveFolderConflict, conflictFilePair, applyConflictMerge, cleanIdenticalConflicts, diffFolder, compareFolder, readFilePair, applyFileSync, listFolderVersions, restoreFolderVersion, deleteFolderVersion, getFolderVersionContent, rollbackFolder, setScheduleOverride, setCalendarOverride, getCalendar, listGitChanges, readGitDiff, listGitLog, listGitCommitFiles, readGitCommitDiff, listUnpushedByFolder, pushGitFolder, listEmptyDirs, deleteEmptyDirs } = deps;
   const path = req.url ? pathname(req.url) : '/';
 
   // Form POST /folders : add or (via _method=DELETE) remove a folder
@@ -1065,6 +1065,80 @@ export async function tryFolderRoutes(
       sendJson(res, 200, commits === null ? { commits: [], gitRepo: false } : { commits, gitRepo: true });
     } catch (e) {
       sendJson(res, 400, { error: e instanceof Error ? e.message : '读取提交历史失败' });
+    }
+    return true;
+  }
+
+  // GET /api/folders/git-commit-files?folderId=xxx&hash=yyy : 某笔提交动了哪些文件
+  // (提交历史/推送弹窗里展开某笔提交)。只读。
+  if (req.method === 'GET' && req.url && path === '/api/folders/git-commit-files' && listGitCommitFiles) {
+    const url = new URL(req.url, 'http://localhost');
+    const folderId = url.searchParams.get('folderId');
+    const hash = url.searchParams.get('hash');
+    if (!folderId || !hash) {
+      sendJson(res, 400, { error: 'folderId and hash are required' });
+      return true;
+    }
+    try {
+      const files = listGitCommitFiles(folderId, hash);
+      // null = 不是 git 仓库:与 git-log 同一约定,如实告诉前端
+      sendJson(res, 200, files === null ? { files: [], gitRepo: false } : { files, gitRepo: true });
+    } catch (e) {
+      sendJson(res, 400, { error: e instanceof Error ? e.message : '读取提交文件清单失败' });
+    }
+    return true;
+  }
+
+  // GET /api/folders/git-commit-diff?folderId&hash&path[&origPath] : 某笔提交里某文件的
+  // 「上一版(父提交) → 该提交」对比(提交展开双击文件)。origPath 是改名文件在父提交里的
+  // 旧路径。只读。
+  if (req.method === 'GET' && req.url && path === '/api/folders/git-commit-diff' && readGitCommitDiff) {
+    const url = new URL(req.url, 'http://localhost');
+    const folderId = url.searchParams.get('folderId');
+    const hash = url.searchParams.get('hash');
+    const filePath = url.searchParams.get('path');
+    const origPath = url.searchParams.get('origPath') ?? undefined;
+    if (!folderId || !hash || !filePath) {
+      sendJson(res, 400, { error: 'folderId, hash and path are required' });
+      return true;
+    }
+    try {
+      sendJson(res, 200, readGitCommitDiff(folderId, hash, filePath, origPath));
+    } catch (e) {
+      sendJson(res, 400, { error: e instanceof Error ? e.message : '读取提交对比失败' });
+    }
+    return true;
+  }
+
+  // GET /api/folders/git-unpushed[?folderId=xxx] : 尚未推送到上游的提交(「Git 推送」弹窗)。
+  // 只读盘上的 git(取本机记录的上游,绝不 fetch);只返回「此刻确实有未推送提交」的目录,
+  // 每目录最多 50 条(截断标记)。folderId 缺省 = 全部共享目录(栏头入口),给了 = 只查该目录。
+  if (req.method === 'GET' && req.url && path === '/api/folders/git-unpushed' && listUnpushedByFolder) {
+    const url = new URL(req.url, 'http://localhost');
+    // 空串视同缺省(全量):单目录调用方一律带非空 id,空串只可能来自手写请求
+    const folderId = url.searchParams.get('folderId') || undefined;
+    try {
+      sendJson(res, 200, { folders: listUnpushedByFolder(folderId) });
+    } catch (e) {
+      sendJson(res, 400, { error: e instanceof Error ? e.message : '读取未推送提交失败' });
+    }
+    return true;
+  }
+
+  // POST /api/folders/git-push : 推送单个目录(「Git 推送」弹窗按目录顺序逐个调用)。
+  // 网络操作:单目录最长 120s;已有推送进行中时抛错 → 400(前端记为该行失败)。
+  if (req.method === 'POST' && path === '/api/folders/git-push' && pushGitFolder) {
+    try {
+      const raw = await readBody(req);
+      const body = raw === '' ? {} : JSON.parse(raw);
+      const folderId = (body as { folderId?: unknown }).folderId;
+      if (typeof folderId !== 'string' || folderId === '') {
+        sendJson(res, 400, { error: 'folderId is required' });
+        return true;
+      }
+      sendJson(res, 200, await pushGitFolder(folderId));
+    } catch (e) {
+      sendJson(res, 400, { error: e instanceof Error ? e.message : '推送失败' });
     }
     return true;
   }

@@ -72,7 +72,7 @@ import { NETWORK_OFFLINE_BACKOFF_MS, offlineAwareReconnectDelay, reconnectDelayM
 import { hasRoutableInterface } from './net/offline-probe.js';
 import { isSelfPeerUrl, localInterfaceAddresses } from './net/peer-address.js';
 import { CAP_BINARY1 } from './handshake.js';
-import { isGitRepo, getLastCommitHash, getCommitInfo, hasUncommittedChanges, autoCommit, getUncommittedChanges, readFileAtHead, listRecentCommits, type CommitInfo, type GitChangeEntry, type GitCommitEntry } from './git-monitor.js';
+import { isGitRepo, getLastCommitHash, getCommitInfo, hasUncommittedChanges, autoCommit, getUncommittedChanges, readFileAtHead, readFileAt, listCommitFiles, getCommitParents, isCommitHash, listRecentCommits, countUnpushedCommits, listUnpushedCommits, GIT_UNPUSHED_LIMIT, gitPush, type CommitInfo, type GitChangeEntry, type GitCommitEntry, type GitCommitFileEntry, type GitPushResult, type HeadReadResult } from './git-monitor.js';
 import { scanEmptyDirs, removeEmptyDirs, type EmptyDirScanResult, type EmptyDirDeleteResult } from './empty-dirs.js';
 
 /** scheduleVerdictFor 的结论:此刻该不该同步、被哪一层挡住、下一个边界何时。 */
@@ -88,6 +88,17 @@ export interface ScheduleVerdict {
 
 /** 对端 git 提交通知的消息形状(入队、结算、中继共用一份)。 */
 type GitCommitNotifyMsg = Extract<ControlMessage, { kind: 'git-commit-notify' }>;
+
+/** 「推送弹窗」每目录一行的数据源(commits 新→旧,最多 GIT_UNPUSHED_LIMIT 条)。 */
+export interface UnpushedFolderEntry {
+  folderId: string;
+  path: string;
+  /** 未推送提交总数:独立用 rev-list --count 数的,列表被截断时依然准确。 */
+  total: number;
+  commits: GitCommitEntry[];
+  /** 列表被上限截断(total 超出 GIT_UNPUSHED_LIMIT)。 */
+  truncated: boolean;
+}
 /** 提交通知的投递回执(销账用),形状见 src/net/wire.ts。 */
 type GitCommitAckMsg = Extract<ControlMessage, { kind: 'git-commit-ack' }>;
 
@@ -227,6 +238,12 @@ export interface FolderState {
    * (git status 只读、通常 <100ms);与 conflictCount 同一份推送节奏。
    */
   gitChangeCount: number;
+  /**
+   * 尚未推送到上游分支的提交数(目录卡「未推送 N」徽标)。每轮扫描顺带盘点
+   * (rev-list 只读);未设置上游(远程未配置/从未推送)时保持 0,徽标不出现。
+   * pushGitFolder / listUnpushedByFolder 完成时立即重算,不必等下一轮扫描。
+   */
+  gitUnpushedCount: number;
   /**
    * Git 提交同步:上次观测到的 HEAD 提交哈希。null 表示尚未初始化或非 git 仓库。
    * 每次扫描时比对当前 HEAD,不同则说明有新提交,触发广播。自动提交后也更新此字段,
@@ -663,6 +680,11 @@ export class SyncSessionManager {
    */
   private powerGuardReason: string | null = null;
   /**
+   * 推送的重入闸:并发跑同仓库的 `git push` 会抢 .git 锁,第二个请求直接拒绝。
+   * 推送是长网络操作(单目录最长 120s),没有这道闸,连点两下就会让两侧结果互相打架。
+   */
+  private gitPushRunning = false;
+  /**
    * 全局发送带宽上限(config.maxSendKbps 的内存镜像,KB/s):目录未单独配置
    * maxBandwidthKbps 时的兜底默认。构造时读取,热重载 / setGlobalSettings 时同步;
    * 生效点是 transport 的令牌桶(attach 时创建),改值后由 rebuildRateLimitedTransports
@@ -1026,7 +1048,7 @@ export class SyncSessionManager {
     // 索引为空 → 首扫是建基线(存量文件不算新增);索引有存量 → 首扫 diff 是
     // daemon 离线期间的真实改动,要写同步记录
     const baselinePending = usable.length === 0;
-    return { id, indexKey, path: f.path, index, executor, localIndex, ignoreLines, transports: [], peers: new Map(), transportDevice: new Map(), receiveLedger: new Map(), driftState: { lastAt: 0, round: 0 }, localAuditState: { lastAt: 0, round: 0 }, config: f, baselinePending, conflictCount: 0, gitChangeCount: 0, lastCommitHash: f.gitLastCommitHash ?? null, processedRemoteCommits: new Set(), gitBroadcast: readGitPending(id, f.gitBroadcastPending), pendingGitNotify: null, gitDrainWarned: false, gitRelay: readGitPending(id, f.gitRelayPending), diskBlocked: false };
+    return { id, indexKey, path: f.path, index, executor, localIndex, ignoreLines, transports: [], peers: new Map(), transportDevice: new Map(), receiveLedger: new Map(), driftState: { lastAt: 0, round: 0 }, localAuditState: { lastAt: 0, round: 0 }, config: f, baselinePending, conflictCount: 0, gitChangeCount: 0, gitUnpushedCount: 0, lastCommitHash: f.gitLastCommitHash ?? null, processedRemoteCommits: new Set(), gitBroadcast: readGitPending(id, f.gitBroadcastPending), pendingGitNotify: null, gitDrainWarned: false, gitRelay: readGitPending(id, f.gitRelayPending), diskBlocked: false };
   }
 
   /**
@@ -1390,6 +1412,12 @@ export class SyncSessionManager {
       // 这里只维持徽标的量级)。暂停/身份闸门挡住的目录不刷新,徽标保持旧值。
       folder.gitChangeCount = isGitRepo(folder.path)
         ? (getUncommittedChanges(folder.path)?.entries.length ?? 0)
+        : 0;
+      // 「未推送 N」徽标:与上游分支比较的提交数(只对 git 仓库盘点;未设置上游时 0,
+      // 徽标不出现)。与 gitChangeCount 同一份节奏 —— 本机的自动提交/推送都会在下一轮
+      // 扫描内反映出来,status 高频推送时绝不现跑 git。
+      folder.gitUnpushedCount = isGitRepo(folder.path)
+        ? (countUnpushedCommits(folder.path) ?? 0)
         : 0;
       // 结构性守卫:目录身份无法校验时(平台不提供 inode / 配置里尚未采集指纹),把
       // 「一个文件都没看到、却要删东西」当作目录不可信的形态,拒绝执行这批删除。
@@ -3578,6 +3606,20 @@ export class SyncSessionManager {
   }
 
   /**
+   * 每目录尚未推送到上游的提交数(目录卡「未推送 N」徽标)。
+   * 计数来自每轮扫描顺带的盘点(folder.gitUnpushedCount,status 高频推送,
+   * 不能在这里现跑 git)。未设置上游的目录不入表(与计数 0 同款:徽标不出现)。
+   * 键为 wire 目录 id,与前端 folderKey 对齐。
+   */
+  folderGitUnpushedCounts(): Record<string, number> {
+    const out: Record<string, number> = {};
+    for (const folder of this.folderStates) {
+      if (folder.gitUnpushedCount > 0) out[folder.id] = folder.gitUnpushedCount;
+    }
+    return out;
+  }
+
+  /**
    * 工作区未提交变更清单(「Git 改动」弹窗数据源):现查 git status,保证
    * 打开弹窗那一刻的清单是准的(徽标计数有最多一轮扫描的滞后)。
    * 返回 null = 目录不是 git 仓库。
@@ -3589,16 +3631,25 @@ export class SyncSessionManager {
   }
 
   /**
-   * 工作区某文件的「改动前 → 现在」两侧状态(双击文件看变更对比)。
-   * head 侧来自 git show HEAD(新文件不在 HEAD → exists:false),worktree 侧
-   * 复用对比弹窗的读盘口径(缺失/过大/二进制/图片都如实标记)。
-   * 只读,不碰索引、不碰暂存区。
+   * rev 读取结果(任意提交/HEAD)→ 对比弹窗单侧状态:缺失、读取失败、超限、
+   * 正常(文本/二进制/图片),四态口径与 readLocalFileForCompare 对齐。
    */
-  readGitDiff(folderId: string, relPath: string): { path: string; head: FileSideState; worktree: FileSideState } {
-    const folder = this.folderStates.find((f) => f.id === folderId);
-    if (!folder) throw new Error('共享目录不存在(可能刚被移除)');
-    // 仓库相对路径的安全闸:拒绝绝对路径、目录穿越与盘符样式的输入,
-    // `git show` 不经 resolveSharePath,这里必须自己把好这道门。
+  private sideFromRevRead(read: HeadReadResult, relPath: string): FileSideState {
+    if (read.kind === 'absent') {
+      return { exists: false };
+    }
+    if (read.kind === 'error') {
+      // 读取失败(对象损坏 / 超时等):不能谎报缺失,带上原因。
+      return { exists: false, error: read.error };
+    }
+    if (read.bytes.length > compareContentLimit(relPath)) {
+      return { exists: true, size: read.bytes.length, tooLarge: true };
+    }
+    return { exists: true, size: read.bytes.length, ...this.describeBytes(relPath, read.bytes) };
+  }
+
+  /** 仓库相对路径的安全闸:拒绝绝对路径、目录穿越与盘符样式的输入。 */
+  private assertSafeRelPath(relPath: string): void {
     if (
       relPath === '' ||
       relPath.startsWith('/') ||
@@ -3607,20 +3658,34 @@ export class SyncSessionManager {
     ) {
       throw new Error('非法的文件路径');
     }
-    const headRead = readFileAtHead(folder.path, relPath);
-    let head: FileSideState;
-    if (headRead.kind === 'absent') {
-      // 新文件 / 空仓库:HEAD 里确实没有,如实说「没有这个文件」。
-      head = { exists: false };
-    } else if (headRead.kind === 'error') {
-      // 读取失败(对象损坏 / 超时等):文件在盘上,不能谎报缺失,带上原因。
-      head = { exists: false, error: headRead.error };
-    } else if (headRead.bytes.length > compareContentLimit(relPath)) {
-      head = { exists: true, size: headRead.bytes.length, tooLarge: true };
-    } else {
-      head = { exists: true, size: headRead.bytes.length, ...this.describeBytes(relPath, headRead.bytes) };
+  }
+
+  /**
+   * 把 rev-list / rev-parse 的「找不到对象」类失败翻译成弹窗能懂的口径:
+   * 哈希曾被列出但此刻查不到,几乎总是历史被重写(rebase/amend)或提交被回收。
+   * 其余失败(对象损坏、超时)原样抛出,不冒充「提交不存在」。
+   */
+  private commitLookupError(e: unknown): Error {
+    const msg = e instanceof Error ? e.message : String(e);
+    if (/bad object|unknown revision|ambiguous argument|invalid object name/i.test(msg)) {
+      return new Error('提交不存在(可能已被重写或回收)');
     }
-    return { path: relPath, head, worktree: this.readLocalFileForCompare(folder, relPath) };
+    return e instanceof Error ? e : new Error(msg);
+  }
+
+  /**
+   * 工作区某文件的「改动前 → 现在」两侧状态(双击文件看变更对比)。
+   * head 侧来自 git show HEAD(新文件不在 HEAD → exists:false),worktree 侧
+   * 复用对比弹窗的读盘口径(缺失/过大/二进制/图片都如实标记)。
+   * 只读,不碰索引、不碰暂存区。
+   */
+  readGitDiff(folderId: string, relPath: string): { path: string; head: FileSideState; worktree: FileSideState } {
+    const folder = this.folderStates.find((f) => f.id === folderId);
+    if (!folder) throw new Error('共享目录不存在(可能刚被移除)');
+    // `git show` 不经 resolveSharePath,这里必须自己把好这道门。
+    this.assertSafeRelPath(relPath);
+    const headRead = readFileAtHead(folder.path, relPath);
+    return { path: relPath, head: this.sideFromRevRead(headRead, relPath), worktree: this.readLocalFileForCompare(folder, relPath) };
   }
 
   /**
@@ -3630,6 +3695,124 @@ export class SyncSessionManager {
     const folder = this.folderStates.find((f) => f.id === folderId);
     if (!folder) throw new Error('共享目录不存在(可能刚被移除)');
     return listRecentCommits(folder.path);
+  }
+
+  /**
+   * 某笔提交动了哪些文件(提交展开的文件清单)。返回 null = 目录不是 git 仓库
+   * (与 listGitLog 同款);哈希非法/不存在抛错,路由转 400。
+   */
+  listGitCommitFiles(folderId: string, hash: string): GitCommitFileEntry[] | null {
+    const folder = this.folderStates.find((f) => f.id === folderId);
+    if (!folder) throw new Error('共享目录不存在(可能刚被移除)');
+    if (!isCommitHash(hash)) throw new Error('非法的提交哈希');
+    if (!isGitRepo(folder.path)) return null;
+    try {
+      return listCommitFiles(folder.path, hash);
+    } catch (e) {
+      throw this.commitLookupError(e);
+    }
+  }
+
+  /**
+   * 某笔提交里某文件的「上一版 → 该提交」两侧状态(提交展开双击文件看对比)。
+   * 左侧 = 首父提交(「上一版」取主干侧;根提交没有父 → exists:false);右侧 = 该提交本身。
+   * 新增文件:父里没有 → 左侧 exists:false;删除:提交里已不在 → 右侧 exists:false。
+   * 改名文件传 origPath:父提交里是旧路径,直读新路径会谎报「上一版没有」。
+   */
+  readGitCommitDiff(
+    folderId: string,
+    hash: string,
+    relPath: string,
+    origPath?: string,
+  ): { path: string; parent: FileSideState; commit: FileSideState } {
+    const folder = this.folderStates.find((f) => f.id === folderId);
+    if (!folder) throw new Error('共享目录不存在(可能刚被移除)');
+    if (!isCommitHash(hash)) throw new Error('非法的提交哈希');
+    if (!isGitRepo(folder.path)) throw new Error('该目录不是 git 仓库');
+    this.assertSafeRelPath(relPath);
+    if (origPath !== undefined) this.assertSafeRelPath(origPath);
+
+    let parents: string[];
+    try {
+      parents = getCommitParents(folder.path, hash);
+    } catch (e) {
+      throw this.commitLookupError(e);
+    }
+    const parentRev = parents[0] ?? null;
+    const leftPath = origPath ?? relPath;
+    const parentRead =
+      parentRev === null ? ({ kind: 'absent' } as const) : readFileAt(folder.path, parentRev, leftPath);
+    const commitRead = readFileAt(folder.path, hash, relPath);
+    return {
+      path: relPath,
+      parent: this.sideFromRevRead(parentRead, leftPath),
+      commit: this.sideFromRevRead(commitRead, relPath),
+    };
+  }
+
+  /**
+   * 「推送弹窗」数据源:现查尚未推送到上游的提交(folderId 给了就只查那一个,否则全部目录)。
+   *
+   * 只列「此刻确实有未推送提交」的目录:非仓库 / 未设置上游 / 上游已同步(0 条)都不进
+   * 列表 —— 与「未推送 N」徽标同一个口径,不进列表的目录本来也没有徽标可点。开弹窗即
+   * 现跑 git(不清缓存、不 fetch):弹窗里的清单必须就是此刻盘上的事实。
+   *
+   * 现查的同时把扫描缓存的计数对齐到现查值(含归零):弹窗所列与徽标当场一致,不必等
+   * 下一轮扫描(有差异才 notifyStatus —— 它是高频通道)。
+   */
+  listUnpushedByFolder(folderId?: string): UnpushedFolderEntry[] {
+    let folders = this.folderStates;
+    if (folderId !== undefined) {
+      const folder = this.folderStates.find((f) => f.id === folderId);
+      if (!folder) throw new Error('共享目录不存在(可能刚被移除)');
+      folders = [folder];
+    }
+    const out: UnpushedFolderEntry[] = [];
+    let cacheChanged = false;
+    for (const folder of folders) {
+      const total = countUnpushedCommits(folder.path);
+      const next = total ?? 0;
+      if (folder.gitUnpushedCount !== next) {
+        folder.gitUnpushedCount = next;
+        cacheChanged = true;
+      }
+      if (total === null || total === 0) continue;
+      // 列表读取失败(理论上与 count 同生共死,留个兜底)时仍列目录:total 准确、列表空
+      const commits = listUnpushedCommits(folder.path) ?? [];
+      out.push({ folderId: folder.id, path: folder.path, total, commits, truncated: total > GIT_UNPUSHED_LIMIT });
+    }
+    if (cacheChanged) this.notifyStatus();
+    return out;
+  }
+
+  /**
+   * 推送单个目录:推当前分支到它配置的上游(异步、不带 -u、不 fetch,见 git-monitor.gitPush)。
+   * 推完(无论成败)立即重算该目录的未推送计数并 notifyStatus:徽标当场与盘上事实对齐
+   * (成功归零),不必等下一轮扫描。失败原样回报给路由(错误为 git 的 stderr 首行),
+   * **不**记录到目录卡错误横幅 —— 那种横幅留给同步错误,推送失败属于用户手动操作的即时反馈。
+   *
+   * 重入闸:已有推送进行中时直接拒绝(见 gitPushRunning)。前端按目录顺序循环调用,
+   * 每次调用单目录持闸;两个页面同时点推送时,后到者收到「已有推送正在进行」。
+   */
+  async pushGitFolder(folderId: string): Promise<GitPushResult> {
+    if (this.gitPushRunning) throw new Error('已有推送正在进行,请稍候');
+    const folder = this.folderStates.find((f) => f.id === folderId);
+    if (!folder) throw new Error('共享目录不存在(可能刚被移除)');
+    if (!isGitRepo(folder.path)) throw new Error('该目录不是 git 仓库');
+    this.gitPushRunning = true;
+    try {
+      const r = await gitPush(folder.path);
+      if (r.ok) {
+        this.logger.info(`git push ok: ${folder.id} (${folder.path})`);
+      } else {
+        this.logger.warn(`git push failed: ${folder.id} (${folder.path}): ${r.error}`);
+      }
+      folder.gitUnpushedCount = countUnpushedCommits(folder.path) ?? 0;
+      this.notifyStatus();
+      return r;
+    } finally {
+      this.gitPushRunning = false;
+    }
   }
 
   /* ==================== 空文件夹检查 ==================== */

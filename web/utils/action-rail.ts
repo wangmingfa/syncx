@@ -13,6 +13,7 @@ export type ActionIconName =
   | 'diff'
   | 'history'
   | 'commit'
+  | 'push'
   | 'report'
   | 'versions'
   | 'folder-clean'

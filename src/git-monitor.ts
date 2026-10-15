@@ -21,7 +21,7 @@
  */
 import { existsSync } from 'node:fs';
 import { join } from 'node:path';
-import { execFileSync } from 'node:child_process';
+import { execFile, execFileSync } from 'node:child_process';
 import { SCRATCH_SUFFIXES } from './ignore.js';
 
 export interface CommitInfo {
@@ -172,6 +172,35 @@ export interface GitCommitEntry {
 export const GIT_LOG_LIMIT = 20;
 
 /**
+ * git log 的机器可读记录格式:字段以 0x1f 分隔,记录以 NUL 分隔(配 -z)。
+ * 「最近提交」与「未推送提交」两处共用 —— 解析规则(含正文兜底并回)见 listRecentCommits 注释,
+ * 格式一旦分叉,两处的解析器就会各自悄悄漂移。
+ */
+const GIT_LOG_FORMAT = '%h%x1f%an%x1f%aI%x1f%D%x1f%s%x1f%b';
+
+/** NUL 记录 + 0x1f 字段 → GitCommitEntry[];各字段的容错语义见 listRecentCommits 注释。 */
+function parseCommitRecords(out: string): GitCommitEntry[] {
+  return out
+    .split('\0')
+    .filter((rec) => rec !== '')
+    .map((rec) => {
+      const f = rec.split('\x1f');
+      return {
+        hash: f[0] ?? '',
+        author: f[1] ?? '',
+        date: f[2] ?? '',
+        refs: f[3] ?? '',
+        subject: f[4] ?? '',
+        // 正文是最后一个字段:消息里混入 \x1f 时并回正文而不是丢内容
+        body: f
+          .slice(5)
+          .join('\x1f')
+          .trim(),
+      };
+    });
+}
+
+/**
  * 读取最近 N 条提交(默认 20)。返回 null = 不是 git 仓库,调用方据此隐藏入口。
  *
  * 为什么不用行解析:提交**正文是多行的**,`--format` 逐行读会在正文第二行处错位
@@ -192,10 +221,9 @@ export const GIT_LOG_LIMIT = 20;
 export function listRecentCommits(folderPath: string, limit = GIT_LOG_LIMIT): GitCommitEntry[] | null {
   if (!isGitRepo(folderPath)) return null;
 
-  const format = '%h%x1f%an%x1f%aI%x1f%D%x1f%s%x1f%b';
   let out: string;
   try {
-    out = execFileSync('git', ['log', '-n', String(limit), '-z', '--no-color', '--no-show-signature', `--format=${format}`], {
+    out = execFileSync('git', ['log', '-n', String(limit), '-z', '--no-color', '--no-show-signature', `--format=${GIT_LOG_FORMAT}`], {
       cwd: folderPath,
       encoding: 'utf8',
       stdio: ['ignore', 'pipe', 'pipe'],
@@ -215,24 +243,100 @@ export function listRecentCommits(folderPath: string, limit = GIT_LOG_LIMIT): Gi
     throw new Error(stderr.trim().split('\n')[0] || (e instanceof Error ? e.message : 'git log 读取失败'));
   }
 
-  return out
-    .split('\0')
-    .filter((rec) => rec !== '')
-    .map((rec) => {
-      const f = rec.split('\x1f');
-      return {
-        hash: f[0] ?? '',
-        author: f[1] ?? '',
-        date: f[2] ?? '',
-        refs: f[3] ?? '',
-        subject: f[4] ?? '',
-        // 正文是最后一个字段:消息里混入 \x1f 时并回正文而不是丢内容
-        body: f
-          .slice(5)
-          .join('\x1f')
-          .trim(),
-      };
-    });
+  return parseCommitRecords(out);
+}
+
+/* ==================== 提交文件清单(展开某笔提交看改了哪些文件) ==================== */
+
+/** 「提交展开」里的一行:该笔提交动了哪个文件、怎么动的。 */
+export interface GitCommitFileEntry {
+  /** git name-status 状态字母(M/A/D/R/C/T 等),前端翻成 改/增/删/移/复 胶囊。 */
+  status: string;
+  /** 提交后的路径(改名/复制时为新路径)。 */
+  path: string;
+  /** 改名/复制时的原路径(status 为 R/C 开头时存在)。 */
+  origPath?: string;
+}
+
+/**
+ * 提交哈希的形状闸:git 的对象名只可能是 7–40 位十六进制(短/全长 SHA-1)。
+ * 从源头挡掉两类输入 —— 以 `-` 开头的字符串会被 git 当成**选项**解析(选项注入),
+ * 以及任意把 rev 表达式当哈希传进来的调用方失误。
+ */
+export function isCommitHash(hash: string): boolean {
+  return /^[0-9a-f]{7,40}$/i.test(hash);
+}
+
+/**
+ * 某笔提交动了哪些文件(`git show --format= --name-status -z -M`)。
+ * git 失败(提交不存在/对象损坏等)抛 Error(首行 stderr),与 listRecentCommits 同款;
+ * 空数组 = 这笔提交没有文件改动(典型:干净的合并提交)。
+ *
+ * 实测口径(git 2.x,校准脚本验证):
+ *  - **必须 -z**:文本模式会把非 ASCII 路径转成 `"\344\270\255..."` 八进制转义,没法用;
+ *    -z 下记录为 `status\0path\0` 两段一组,改名/复制是三段一组 `R100\0old\0new\0`。
+ *  - 干净的合并提交输出为空且退出码 0(git 合并差异只列与**所有**父提交都不同的文件),
+ *    回 [] 不是失败。
+ *  - 根提交的全部文件都是 A(没有更早的版本可比)。
+ */
+export function listCommitFiles(folderPath: string, hash: string): GitCommitFileEntry[] {
+  if (!isCommitHash(hash)) throw new Error('非法的提交哈希');
+
+  const out = execFileSync(
+    'git',
+    ['show', '--format=', '--name-status', '-z', '-M', '--no-color', hash],
+    {
+      cwd: folderPath,
+      encoding: 'utf8',
+      stdio: ['ignore', 'pipe', 'pipe'],
+      windowsHide: true,
+      timeout: 10_000,
+      maxBuffer: 4 * 1024 * 1024,
+    },
+  );
+
+  const fields = out.split('\0');
+  const entries: GitCommitFileEntry[] = [];
+  for (let i = 0; i < fields.length; ) {
+    const status = fields[i];
+    // 尾部:最后一个记录以 \0 结尾,split 后残留一个空串,直接收尾。
+    if (status === undefined || status === '') break;
+    const path = fields[i + 1] ?? '';
+    if (path === '') break;
+    // 改名/复制状态带相似度后缀(R100/C75),语义按首字母;-z 三段为
+    // `R100\0旧路径\0新路径`(实测旧路径在前):path 取提交后的新路径。
+    if (/^[RC]/.test(status)) {
+      const origPath = fields[i + 1] ?? '';
+      const newPath = fields[i + 2] ?? '';
+      if (newPath === '') break;
+      entries.push({ status, path: newPath, origPath });
+      i += 3;
+    } else {
+      entries.push({ status, path });
+      i += 2;
+    }
+  }
+  return entries;
+}
+
+/**
+ * 某笔提交的父提交列表(`git rev-list --parents -n 1`)。
+ * git 失败(哈希不存在/非仓库等)抛 Error;空数组 = 根提交(没有父)。
+ * 合并提交会有两个以上父 —— 「上一版」的语义取**首父**(主干侧),调用方自行决定。
+ */
+export function getCommitParents(folderPath: string, hash: string): string[] {
+  if (!isCommitHash(hash)) throw new Error('非法的提交哈希');
+
+  const out = execFileSync('git', ['rev-list', '--parents', '-n', '1', hash], {
+    cwd: folderPath,
+    encoding: 'utf8',
+    stdio: ['ignore', 'pipe', 'pipe'],
+    windowsHide: true,
+    timeout: 10_000,
+  });
+  // 输出形如 `<hash> <parent1> [parent2 ...]`,首段是提交自己。
+  const parts = out.trim().split(/\s+/).filter((p) => p !== '');
+  return parts.slice(1);
 }
 
 /**
@@ -348,13 +452,14 @@ export function getUncommittedChanges(folderPath: string): { entries: GitChangeE
 }
 
 /**
- * 读取某文件在 HEAD 提交里的字节(工作区改动的「改前」一侧)。
+ * 读取某文件在任意 rev(HEAD 或某个提交哈希)里的字节。
  * relPath 必须是仓库相对路径且不含目录穿越 —— 由调用方(路由层)保证。
  *
  * 三种结果必须分清,不能糊成「取不到」:
- * - bytes:  HEAD 里有这个文件,拿到内容。
- * - absent: 文件确实不在 HEAD(新文件 / 空仓库无提交)。git 会明确说
- *           "not in 'HEAD'",据此判定。
+ * - bytes:  该 rev 里有这个文件,拿到内容。
+ * - absent: 文件确实不在该 rev(新文件 / 根提交里没有的东西)。git 会明确说
+ *           "does not exist in '<rev>'";目录形态则是 "exists on disk, but not in
+ *           '<rev>'"。两种都是「路径不在那个版本里」,都归 absent。
  * - error:  读取失败(对象损坏 / 超时 / 权限等)。典型是 .git 对象 zlib 头损坏,
  *           git 报 "inflate: data stream error"。这种**不能**谎报成「没有这个文件」,
  *           否则会把人支去查一个不存在的问题(文件明明在盘上)。
@@ -364,11 +469,11 @@ export type HeadReadResult =
   | { kind: 'absent' }
   | { kind: 'error'; error: string };
 
-export function readFileAtHead(folderPath: string, relPath: string): HeadReadResult {
+export function readFileAt(folderPath: string, rev: string, relPath: string): HeadReadResult {
   try {
     return {
       kind: 'bytes',
-      bytes: execFileSync('git', ['show', `HEAD:${relPath}`], {
+      bytes: execFileSync('git', ['show', `${rev}:${relPath}`], {
         cwd: folderPath,
         encoding: 'buffer',
         stdio: ['ignore', 'pipe', 'pipe'],
@@ -382,11 +487,16 @@ export function readFileAtHead(folderPath: string, relPath: string): HeadReadRes
       e instanceof Error && (e as { stderr?: Buffer | string }).stderr
         ? (e as { stderr?: Buffer | string }).stderr!.toString()
         : '';
-    if (/not in 'HEAD'/.test(stderr)) return { kind: 'absent' };
+    if (/does not exist in|exists on disk, but not in/.test(stderr)) return { kind: 'absent' };
     // 取第一行:多行 inflate 错误里第一行已能说明「读取失败」,整段塞进弹窗太长。
     const firstLine = stderr.trim().split('\n')[0];
     return { kind: 'error', error: firstLine || 'git 读取失败' };
   }
+}
+
+/** 读取某文件在 HEAD 提交里的字节(工作区改动的「改前」一侧)。 */
+export function readFileAtHead(folderPath: string, relPath: string): HeadReadResult {
+  return readFileAt(folderPath, 'HEAD', relPath);
 }
 
 export interface AutoCommitResult {
@@ -427,4 +537,115 @@ export function autoCommit(folderPath: string, message: string): AutoCommitResul
     const msg = err instanceof Error ? err.message : String(err);
     return { success: false, error: msg };
   }
+}
+
+/* ==================== 推送(未推送计数 + git push) ==================== */
+
+/**
+ * 统计当前分支尚未推送的提交数(与本机记录的**上游分支**比较,
+ * `git rev-list --count '@{upstream}..HEAD'`)。
+ * 返回 null = 不是 git 仓库 / 未设置上游(远程未配置,或从未 push 过) / 读取失败 ——
+ * 调用方(目录卡「未推送 N」徽标)据此不挂徽标。
+ *
+ * 只与本地远程跟踪引用比较,**绝不 fetch**:不产生网络请求、不改动任何引用。
+ * 上游是否落后于远端由用户自己的 fetch/push 更新,这是 git 的常规口径。
+ */
+export function countUnpushedCommits(folderPath: string): number | null {
+  // 非仓库直查 .git(与 listRecentCommits 同款):不闸的话,嵌在别的仓库内的 plain 目录
+  // 会让 git 向上回溯、数到外层仓库的提交 —— 那与本函数「非仓库回 null」的契约不符。
+  if (!isGitRepo(folderPath)) return null;
+  try {
+    const out = execFileSync('git', ['rev-list', '--count', '@{upstream}..HEAD'], {
+      cwd: folderPath,
+      encoding: 'utf8',
+      stdio: ['ignore', 'pipe', 'ignore'],
+      windowsHide: true,
+      timeout: 5000,
+    });
+    const n = Number.parseInt(out.trim(), 10);
+    return Number.isFinite(n) ? n : null;
+  } catch {
+    return null;
+  }
+}
+
+/** 「推送弹窗」每目录最多列出的提交条数:再长的列表没人读,完整条数由 rev-list --count 一并给出。 */
+export const GIT_UNPUSHED_LIMIT = 50;
+
+/**
+ * 读取当前分支尚未推送的提交(`@{upstream}..HEAD`,新→旧,最多 limit 条)。
+ * 返回 null = **不可列**:不是 git 仓库 / 未设置上游 / 读取失败 —— 调用方(推送弹窗)
+ * 据此把该目录整行跳过,与 countUnpushedCommits 的 null 同为「徽标不出现」的口径。
+ * 空范围(没有未推送提交)是正常状态,回 [](rev-list/log 对空范围都正常退出)。
+ *
+ * 必须与 countUnpushedCommits 出入一致地对非仓库先过 isGitRepo 闸:plain 目录嵌在
+ * 别的仓库内时 git 会向上回溯,不闸会把外层仓库的提交列进来(scratch 实测踩到过)。
+ * 记录解析与 listRecentCommits 完全同构(共用 GIT_LOG_FORMAT/parseCommitRecords)。
+ */
+export function listUnpushedCommits(folderPath: string, limit = GIT_UNPUSHED_LIMIT): GitCommitEntry[] | null {
+  if (!isGitRepo(folderPath)) return null;
+  let out: string;
+  try {
+    out = execFileSync(
+      'git',
+      ['log', '-n', String(limit), '-z', '--no-color', '--no-show-signature', `--format=${GIT_LOG_FORMAT}`, '@{upstream}..HEAD'],
+      {
+        cwd: folderPath,
+        encoding: 'utf8',
+        stdio: ['ignore', 'pipe', 'ignore'],
+        windowsHide: true,
+        timeout: 10_000,
+        maxBuffer: 4 * 1024 * 1024,
+      },
+    );
+  } catch {
+    // 无上游(rc=128 'fatal: no upstream configured')与读取失败都归「不可列」:
+    // 弹窗只负责列出可推送的,列不出来就不进列表,不在这里区分错误种类。
+    return null;
+  }
+  return parseCommitRecords(out);
+}
+
+/** 单目录 `git push` 的结果;失败时 error 为 stderr 首行(如 no upstream branch / auth 失败)。 */
+export type GitPushResult = { ok: true } | { ok: false; error: string };
+
+/** push 是网络操作,给足超时但必须有封顶:凭据缺失 / 网络黑洞不能让整批「一键推送」挂死。 */
+export const GIT_PUSH_TIMEOUT_MS = 120_000;
+
+/**
+ * 对目录执行 `git push`:推当前分支到它配置的上游,不带 -u、不 fetch、不改变其余语义。
+ *
+ * 与本地仓库操作的 execFileSync 不同,**必须异步**:push 要走网络,同步执行会把 daemon
+ * 的事件循环整个卡住(同步与接收全停),那不该是一个 UI 按钮的代价。回调式 execFile 包
+ * Promise,与 powerguard 的探针同一写法。
+ *
+ * GIT_TERMINAL_PROMPT=0:daemon 没有控制台,缺凭据时让 git 立刻报错,而不是等一个
+ * 永远不会出现的终端输入(干等到超时才失败)。
+ */
+export function gitPush(folderPath: string, timeoutMs = GIT_PUSH_TIMEOUT_MS): Promise<GitPushResult> {
+  return new Promise((resolve) => {
+    execFile(
+      'git',
+      ['push'],
+      {
+        cwd: folderPath,
+        windowsHide: true,
+        timeout: timeoutMs,
+        maxBuffer: 4 * 1024 * 1024,
+        env: { ...process.env, GIT_TERMINAL_PROMPT: '0' },
+      },
+      (err, _stdout, stderr) => {
+        if (!err) {
+          resolve({ ok: true });
+          return;
+        }
+        const firstLine = stderr.toString().trim().split('\n')[0];
+        // 超时被杀时 stderr 可能是空的,不能只交个空串;退回错误消息(含命令名)已足够定位
+        resolve({
+          ok: false,
+          error: firstLine || (err.killed ? `超时(>${Math.round(timeoutMs / 1000)}s)` : err.message),
+        });
+      },
+    );
+  });
 }

@@ -63,6 +63,13 @@ defineProps<{ name: ActionIconName }>();
       <line x1="12" y1="15.4" x2="12" y2="21" />
     </template>
 
+    <!-- 一键推送:托盘 + 上箭头(「推上去」的常规画法),与 commit 的竖线图形区分明确 -->
+    <template v-else-if="name === 'push'">
+      <line x1="12" y1="14.5" x2="12" y2="3.5" />
+      <polyline points="7.5 8 12 3.5 16.5 8" />
+      <path d="M5 14.5v3a2.5 2.5 0 0 0 2.5 2.5h9a2.5 2.5 0 0 0 2.5-2.5v-3" />
+    </template>
+
     <!-- 空文件夹检查:虚线(幽灵)文件夹 —— 实线文件夹已被「浏览文件」占用,
          虚线在这里读作「空的/不存在的实体」;不画翻盖线,和浏览图标再拉开一档 -->
     <template v-else-if="name === 'folder-clean'">

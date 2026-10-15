@@ -82,6 +82,7 @@ const cleanupDirs: string[] = [];
 function boot(
   mode: 'off' | 'send' | 'receive' | 'full',
   devices = ['PEER000001'],
+  extraPlainFolders: string[] = [],
 ): { dir: string; share: string; manager: SyncSessionManager; folder: NonNullable<SyncSessionManager['folderStates'][number]>; base: string } {
   const dir = mkdtempSync(join(tmpdir(), 'syncx-gitsync-drain-'));
   const share = join(dir, 'share');
@@ -89,7 +90,15 @@ function boot(
   const base = initRepo(share);
   const identity = loadOrCreateIdentity(dir);
   const configPath = join(dir, 'config.json');
-  const sharedFolders = [{ id: 'main', path: share, devices, gitSync: mode }];
+  // extraPlainFolders:再挂若干「非 git 仓库」共享目录(传入的名字即 dir 下的子目录名)。
+  const sharedFolders = [
+    { id: 'main', path: share, devices, gitSync: mode },
+    ...extraPlainFolders.map((name) => {
+      const plainPath = join(dir, name);
+      mkdirSync(plainPath, { recursive: true });
+      return { id: name, path: plainPath, devices, gitSync: 'off' as const };
+    }),
+  ];
   writeFileSync(configPath, JSON.stringify({ sharedFolders, knownDevices: [], peers: [] }));
   const manager = new SyncSessionManager(
     { identity, configPath, configDir: dir, peerPort: 0, logger: createLogger(undefined) },
@@ -1023,5 +1032,177 @@ describe('git changes inventory (manager API)', () => {
     expect(folder.gitChangeCount).toBe(2);
 
     (manager as unknown as { close(): void }).close();
+  });
+});
+
+describe('git commit files & diff (manager API)', () => {
+  /**
+   * 提交展开的两个数据源:某笔提交的文件清单(现查 git show --name-status)
+   * 与单文件「上一版(父提交) → 该提交」对比。共享目录不是仓库 → null;
+   * 哈希非法/不存在与路径穿越都必须挡下。
+   */
+  it.skipIf(!HAS_GIT)('lists a commit files and diffs it against the parent commit', async () => {
+    const { share, manager } = boot('off', ['PEER000001'], ['plain']);
+    const internals = manager as unknown as {
+      listGitCommitFiles(id: string, hash: string): Array<{ status: string; path: string; origPath?: string }> | null;
+      readGitCommitDiff(id: string, hash: string, p: string, origPath?: string): {
+        parent: { exists: boolean; text?: string };
+        commit: { exists: boolean; text?: string };
+      };
+    };
+
+    writeFileSync(join(share, 'a.txt'), 'v1');
+    git(share, ['add', '-A']);
+    git(share, ['commit', '-qm', '第一笔']);
+    const firstHash = git(share, ['rev-parse', 'HEAD']);
+    writeFileSync(join(share, 'a.txt'), 'v2');
+    writeFileSync(join(share, 'b.txt'), 'brand new');
+    git(share, ['add', '-A']);
+    git(share, ['commit', '-qm', '第二笔']);
+    const secondHash = git(share, ['rev-parse', 'HEAD']);
+
+    // 清单:改 a + 增 b
+    const files = internals.listGitCommitFiles('main', secondHash);
+    expect(files).not.toBeNull();
+    expect(files!.map((f) => [f.path, f.status[0]]).sort())
+      .toEqual([['a.txt', 'M'], ['b.txt', 'A']]);
+
+    // 对比:左 = 父提交里的旧内容,右 = 该提交的新内容
+    const pair = internals.readGitCommitDiff('main', secondHash, 'a.txt');
+    expect(pair.parent).toMatchObject({ exists: true, text: 'v1' });
+    expect(pair.commit).toMatchObject({ exists: true, text: 'v2' });
+
+    // 新增文件:父提交里没有 → 左栏如实缺失
+    const added = internals.readGitCommitDiff('main', secondHash, 'b.txt');
+    expect(added.parent.exists).toBe(false);
+    expect(added.commit.text).toBe('brand new');
+
+    // 根提交:没有父 → 左栏缺失,右栏照常(根提交里只动了 initRepo 的 README)
+    const rootHash = git(share, ['rev-list', '--max-parents=0', 'HEAD']);
+    const rootPair = internals.readGitCommitDiff('main', rootHash, 'README.md');
+    expect(rootPair.parent.exists).toBe(false);
+    expect(rootPair.commit).toMatchObject({ exists: true, text: '# git-sync drain fixture\n' });
+
+    // 改名:传 origPath 才能在父提交里读到旧路径(否则谎报「上一版没有」)
+    git(share, ['mv', 'a.txt', 'a2.txt']);
+    git(share, ['commit', '-qm', '改名']);
+    const renameHash = git(share, ['rev-parse', 'HEAD']);
+    const renamed = internals.readGitCommitDiff('main', renameHash, 'a2.txt', 'a.txt');
+    expect(renamed.parent).toMatchObject({ exists: true, text: 'v2' });
+    expect(renamed.commit).toMatchObject({ exists: true, text: 'v2' });
+    const renameFiles = internals.listGitCommitFiles('main', renameHash);
+    expect(renameFiles).toHaveLength(1);
+    expect(renameFiles![0]).toMatchObject({ path: 'a2.txt', origPath: 'a.txt' });
+
+    // 非仓库共享目录 → null(与 listGitLog 同款);目录不存在 → 抛
+    expect(internals.listGitCommitFiles('plain', secondHash)).toBeNull();
+    expect(() => internals.listGitCommitFiles('nope', secondHash)).toThrow('共享目录不存在');
+
+    // 非法哈希(含选项样式)与不存在但形状合法的哈希
+    expect(() => internals.listGitCommitFiles('main', '--upload-pack=x')).toThrow('非法的提交哈希');
+    expect(() => internals.listGitCommitFiles('main', 'a'.repeat(40))).toThrow('提交不存在');
+    expect(() => internals.readGitCommitDiff('main', 'a'.repeat(40), 'a.txt')).toThrow('提交不存在');
+
+    // 路径闸:穿越与绝对路径都拒
+    expect(() => internals.readGitCommitDiff('main', secondHash, '../x')).toThrow('非法的文件路径');
+    expect(() => internals.readGitCommitDiff('main', secondHash, '/etc/passwd')).toThrow('非法的文件路径');
+
+    (manager as unknown as { close(): void }).close();
+  });
+});
+
+describe('git push (manager API)', () => {
+  /** 建一个本地 bare 远程:push 全程离线,不碰网络也不碰用户凭据。 */
+  function tempBareRemote(): string {
+    const bare = mkdtempSync(join(tmpdir(), 'syncx-push-bare-'));
+    execFileSync('git', ['init', '-q', '--bare', bare], { stdio: 'ignore' });
+    cleanupDirs.push(bare);
+    return bare;
+  }
+
+  /** 「推送弹窗」数据源:只列仓库且有未推送提交的目录;现查同时对徽标缓存(含归零)。 */
+  it.skipIf(!HAS_GIT)('lists only repos with unpushed commits and aligns the cached badge count', async () => {
+    const { share, manager, folder } = boot('off', ['PEER000001'], ['plain']);
+    const bare = tempBareRemote();
+
+    // 没有上游:计数与列表都「不可列」—— 目录不进列表,预置的脏缓存被归零
+    folder.gitUnpushedCount = 5;
+    expect(manager.listUnpushedByFolder()).toEqual([]);
+    expect(folder.gitUnpushedCount).toBe(0);
+
+    // 配好远程与上游、全同步:0 条,同样不进列表
+    git(share, ['remote', 'add', 'origin', bare]);
+    git(share, ['push', '-u', '-q', 'origin', 'HEAD']);
+    expect(manager.listUnpushedByFolder()).toEqual([]);
+
+    // 提一笔未推送:目录进列表,提交清单新→旧,现查顺手把徽标缓存对齐到 1
+    writeFileSync(join(share, 'pushed.txt'), 'new work');
+    git(share, ['add', '-A']);
+    git(share, ['commit', '-qm', 'feat: 待推送']);
+    const all = manager.listUnpushedByFolder();
+    expect(all).toHaveLength(1);
+    expect(all[0]).toMatchObject({ folderId: 'main', path: share, total: 1, truncated: false });
+    expect(all[0]!.commits.map((c) => c.subject)).toEqual(['feat: 待推送']);
+    expect(folder.gitUnpushedCount).toBe(1);
+
+    // 单目录范围:只查那一个;非仓库目录回空列表;不存在的 id 抛错(路由转 400)
+    expect(manager.listUnpushedByFolder('main')).toHaveLength(1);
+    expect(manager.listUnpushedByFolder('plain')).toEqual([]);
+    expect(() => manager.listUnpushedByFolder('nope')).toThrow('共享目录不存在');
+
+    await shutdown(manager);
+  });
+
+  /** 单目录推送:成功归零计数(盘上事实为准);失败如实回报;非仓库/不存在直接拒绝。 */
+  it.skipIf(!HAS_GIT)('pushes one folder, zeroes its count, and reports failures honestly', async () => {
+    const { share, manager, folder } = boot('off', ['PEER000001'], ['plain']);
+    const bare = tempBareRemote();
+
+    // 没有远程也没有上游:推送失败(stderr 首行),且失败也重算 —— 计数归零而不是留旧值
+    folder.gitUnpushedCount = 3;
+    const failed = await manager.pushGitFolder('main');
+    expect(failed.ok).toBe(false);
+    if (!failed.ok) expect(failed.error.length).toBeGreaterThan(0);
+    expect(folder.gitUnpushedCount).toBe(0);
+
+    // 配好远程与上游,再提一笔:此刻确实有 1 笔未推送
+    git(share, ['remote', 'add', 'origin', bare]);
+    git(share, ['push', '-u', '-q', 'origin', 'HEAD']);
+    writeFileSync(join(share, 'pushed.txt'), 'new work');
+    git(share, ['add', '-A']);
+    git(share, ['commit', '-qm', 'feat: 待推送']);
+    // 徽标计数的常规刷新路径:随每轮扫描顺手盘点(不随 status 高频推送现跑 git)
+    await manager.runScan();
+    expect(folder.gitUnpushedCount).toBe(1);
+    folder.gitUnpushedCount = 7;
+
+    const r = await manager.pushGitFolder('main');
+    expect(r).toEqual({ ok: true });
+    expect(folder.gitUnpushedCount).toBe(0);
+    // 尺子:bare 远程的 HEAD 与本地一致 —— 提交确实到了远程,而不是只把计数抹掉
+    expect(git(bare, ['rev-parse', 'HEAD'])).toBe(git(share, ['rev-parse', 'HEAD']));
+
+    // 非仓库目录与不存在的目录:直接拒绝(弹窗只会点仓库目录,这是防线)
+    await expect(manager.pushGitFolder('plain')).rejects.toThrow('不是 git 仓库');
+    await expect(manager.pushGitFolder('nope')).rejects.toThrow('共享目录不存在');
+
+    await shutdown(manager);
+  });
+
+  /** 重入闸:并发跑同仓库 push 会抢 .git 锁,第二个请求必须直接拒绝。 */
+  it.skipIf(!HAS_GIT)('rejects a second push while one is already in flight', async () => {
+    const { share, manager } = boot('off');
+    const bare = tempBareRemote();
+    git(share, ['remote', 'add', 'origin', bare]);
+    git(share, ['push', '-u', '-q', 'origin', 'HEAD']);
+    writeFileSync(join(share, 'pushed.txt'), 'new work');
+    git(share, ['add', '-A']);
+    git(share, ['commit', '-qm', 'feat: 待推送']);
+
+    const first = manager.pushGitFolder('main');
+    await expect(manager.pushGitFolder('main')).rejects.toThrow('已有推送正在进行');
+    expect(await first).toEqual({ ok: true });
+
+    await shutdown(manager);
   });
 });

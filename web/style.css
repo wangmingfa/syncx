@@ -2094,6 +2094,21 @@ li.history-row.row-conflict {
   background: rgb(134 82 200 / 0.08);
 }
 
+/* 卡顶悬浮「未推送 N」徽标:尚未推送到上游分支的提交数(git),青绿调区别于
+   改动紫/冲突红/gitSync 绿/接收蓝。徽标是入口(点开「Git 推送」弹窗查看清单并推送)
+   —— 与 .conflict-float / .git-change-float 同理:button 清掉浏览器默认外观,
+   字体与内衬跟 .float-badge 对齐。 */
+.git-unpushed-float {
+  font-family: inherit;
+  cursor: pointer;
+  color: #0e8a9c;
+  border-color: rgb(14 138 156 / 0.6);
+}
+
+.git-unpushed-float:hover {
+  background: rgb(14 138 156 / 0.08);
+}
+
 /* 冲突行是「四段式」:时间/徽标/路径块/操作。路径块自己纵向排两行 */
 .conflict-list .history-row {
   grid-template-columns: auto auto minmax(0, 1fr) auto;
@@ -3588,6 +3603,9 @@ html[data-theme='dark'] .dir-remote { color: #b794f6; }
 html[data-theme='dark'] .receive-badge { color: #6ea6f0; border-color: rgb(110 166 240 / 0.5); }
 html[data-theme='dark'] .paused-badge { color: #e0a94a; border-color: rgb(224 169 74 / 0.55); }
 html[data-theme='dark'] .float-badge.git-badge--warn { color: #e0a94a; border-color: rgb(224 169 74 / 0.55); }
+html[data-theme='dark'] .git-unpushed-float { color: #52c5d8; border-color: rgb(82 197 216 / 0.55); }
+
+html[data-theme='dark'] .git-unpushed-float:hover { background: rgb(82 197 216 / 0.12); }
 html[data-theme='dark'] .conflict-float {
   color: #ff8a80;
   border-color: rgb(255 138 128 / 0.6);

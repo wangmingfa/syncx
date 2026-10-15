@@ -143,6 +143,8 @@ export interface StatusPayload {
   conflictCounts?: Record<string, number>;
   /** 每目录工作区未提交变更条数(目录卡「Git 改动 N」徽标)。空/缺省 = 旧后端。 */
   gitChangeCounts?: Record<string, number>;
+  /** 每目录尚未推送到上游的提交数(目录卡「未推送 N」徽标)。空/缺省 = 旧后端。 */
+  gitUnpushedCounts?: Record<string, number>;
   /** 传输统计:累计字节 + 采样序列(daemon 重启清零)。缺省 = 旧后端未提供。 */
   traffic?: TrafficStats;
   /** 本机主机名 / 局域网地址(顶栏 chip;旧后端缺省)。 */
@@ -258,6 +260,8 @@ export interface StatusExtras {
   conflictCounts?: Record<string, number>;
   /** 每目录工作区未提交变更条数(目录卡「Git 改动 N」徽标)。 */
   gitChangeCounts?: Record<string, number>;
+  /** 每目录尚未推送到上游的提交数(目录卡「未推送 N」徽标)。 */
+  gitUnpushedCounts?: Record<string, number>;
   /** 传输统计累计 + 采样(流量面板)。 */
   traffic?: TrafficStats;
   /** daemon 所在机器的操作系统主机名(顶栏本机 chip 展示)。 */
@@ -318,6 +322,7 @@ export function buildStatus(
     relayActivity,
     conflictCounts: extras.conflictCounts,
     gitChangeCounts: extras.gitChangeCounts,
+    gitUnpushedCounts: extras.gitUnpushedCounts,
     traffic: extras.traffic,
     hostname: extras.hostname,
     localAddresses: extras.localAddresses,
