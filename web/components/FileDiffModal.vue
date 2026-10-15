@@ -4,7 +4,7 @@ import { NButton, NTooltip } from 'naive-ui';
 import { applyHunk, countChanged, diffText, type DiffHunk } from '../utils/text-diff';
 import { formatBytes } from '../utils/bytes';
 import { fileIconKind } from '../utils/file-icon';
-import { escapeHtml, highlightText } from '../utils/syntax';
+import { escapeHtml, highlightLines, languageFor } from '../utils/syntax';
 import { useToast } from '../composables/useToast';
 import type { DiffActionCtx, DiffFooterAction, DiffHunkApply, DiffPaneData, FileSideData } from '../types';
 import ModalShell from './ModalShell.vue';
@@ -152,6 +152,91 @@ const changedCount = computed<number>(() => countChanged(diff.value.rows));
 
 const { showToast } = useToast();
 
+// ---------- 虚拟滚动 ----------
+//
+// 5 万行(2MiB 文本上限的最坏档)全量渲染要 ~3s、滚动同步跟不上,所以正文只渲染
+// 视口附近的窗口,其余高度用垫片撑出来。成立的前提(改动前先读这段):
+//
+//  **行高必须恒定**。靠的是 `.fd-text` 的 `white-space: pre`(长行不换行)与
+//  `.fd-row` 的 `min-height: calc(1.55 * 1em)`(与行盒同高)—— 每行严格一行高。
+//  若有人改成可换行,「第 n 行的偏移 = n × 行高」的算术定位全部失效,垫片也会
+//  把滚动条撑错,这里必须回退成全量渲染,不能带病窗口化。
+
+/**
+ * 行高(px)。初始值镜像 .fd-rows 的 CSS 决定值(12px × 1.55 数值行高,与字体无关;
+ * 浏览器缩放同倍作用于 scrollTop,恒成立),保证**第一帧**的窗口就是对的;
+ * 每次进入逐行视图后都在真实行上复测(见 measureRowH),之后一直用实测值 ——
+ * 将来字号/行高改了这里自动跟上。
+ */
+const ROW_H_FROM_CSS = 12 * 1.55;
+const rowH = ref(ROW_H_FROM_CSS);
+
+/** 视口外的渲染余量:上下各多画这些行,滚动时边缘不露白、小步滚动不闪。 */
+const OVERSCAN = 20;
+
+/** 用户当前纵向滚动位置。两窗格被 onPaneScroll 锁死同步,记一份即可,驱动窗口重算。 */
+const scrollTopY = ref(0);
+
+/** 窗格可视高度(不含横向滚动条)。窗口下沿 = scrollTopY + paneH。 */
+const paneH = ref(0);
+
+const winStart = computed<number>(() => {
+  if (rowH.value <= 0) return 0;
+  const raw = Math.floor(scrollTopY.value / rowH.value) - OVERSCAN;
+  return Math.max(0, Math.min(diff.value.rows.length, raw));
+});
+
+const winEnd = computed<number>(() => {
+  const n = diff.value.rows.length;
+  if (rowH.value <= 0) return n;
+  return Math.min(n, Math.ceil((scrollTopY.value + paneH.value) / rowH.value) + OVERSCAN);
+});
+
+/** 窗口切片(带全量行下标):模板与 hunkAtStart / hoverIndex 都只认全量行号。 */
+const winRows = computed(() =>
+  diff.value.rows.slice(winStart.value, winEnd.value).map((row, i) => ({ row, i: winStart.value + i })),
+);
+
+const spacerTop = computed<number>(() => winStart.value * rowH.value);
+const spacerBottom = computed<number>(() =>
+  Math.max(0, (diff.value.rows.length - winEnd.value) * rowH.value),
+);
+
+/**
+ * 进入逐行视图时窗格才存在:量视口高、并在真实行上复测行高(首次渲染后、绘制前,
+ * nextTick 是微任务,来得及在首帧前把窗口修正)。
+ */
+watch(showText, (v) => {
+  if (!v) return;
+  scrollTopY.value = 0;
+  void nextTick(() => {
+    measurePane();
+    measureRowH();
+  });
+});
+
+function measurePane(): void {
+  const el = paneLeftEl.value;
+  if (el) paneH.value = el.clientHeight;
+}
+
+/**
+ * 实测行高。取计算样式的 line-height(单行 + 不换行时行盒就是它,.fd-row 的
+ * min-height 与之同源)—— 用**布局坐标**而不是 getBoundingClientRect:两者在正常
+ * 浏览器里相等,但滚动算术要和 scrollTop/scrollHeight 同一坐标系,line-height 的
+ * 计算值天然就是,不留坐标系歧义。
+ */
+function measureRowH(): void {
+  const el = paneLeftEl.value?.querySelector('.fd-row');
+  if (!el) return;
+  const lh = Number.parseFloat(getComputedStyle(el).lineHeight);
+  if (Number.isFinite(lh) && lh > 0) rowH.value = lh;
+  else {
+    const h = el.getBoundingClientRect().height;
+    if (h > 0) rowH.value = h;
+  }
+}
+
 /**
  * ↑/↓ 差异块跳转:在差异块(hunk)之间滚动定位。
  *
@@ -159,31 +244,22 @@ const { showToast } = useToast();
  * 窗格顶(说明正看着它),↓ 就取下一块、↑ 取上一块 —— 连按会逐块走,不会卡在同一块上。
  * 到头了给 toast,不禁用:禁用态没法表达「再按一下就到头」。
  *
+ * 虚拟滚动后行是窗口切片,没有稳定的「第 n 个子节点」,锚点与落点全靠算术定位:
+ * 行高恒定(见虚拟滚动段的前提),h.start × rowH 就是该行顶边在内容顶下的偏移。
  * 只滚左窗格即可:programmatic scrollTop 变化会触发 scroll 事件,由既有的
  * onPaneScroll 双向同步把右窗格带到同一行。
  */
 const hunkCursor = ref(0);
 
-/** 每个差异块首行元素(左窗格的第 h.start 个子节点 —— 窗格里只有 v-for 的行)。 */
-function hunkRowEl(pane: HTMLElement, start: number): HTMLElement | undefined {
-  return pane.children[start] as HTMLElement | undefined;
-}
-
-/** 依据左窗格滚动位置重算当前差异块(驱动 n/m 计数)。 */
-function syncHunkCursor(): void {
-  const pane = paneLeftEl.value;
+/** 依据滚动位置重算当前差异块(驱动 n/m 计数):第一条底边还没完全滚出顶部的块。 */
+function syncHunkCursor(y: number): void {
   const hs = diff.value.hunks;
-  if (!pane || hs.length === 0) {
+  if (hs.length === 0) {
     hunkCursor.value = 0;
     return;
   }
-  const paneTop = pane.getBoundingClientRect().top;
-  const y = pane.scrollTop;
-  const idx = hs.findIndex((h) => {
-    const rowEl = hunkRowEl(pane, h.start);
-    // 底边还没完全滚出顶部(部分可见也算「还在看」)
-    return !!rowEl && rowEl.getBoundingClientRect().top - paneTop + y + rowEl.offsetHeight > y + 1;
-  });
+  // 底边 = (h.start + 1) 行的下边缘,超过 y+1 就是还没完全滚出顶部(部分可见也算「还在看」)
+  const idx = hs.findIndex((h) => (h.start + 1) * rowH.value > y + 1);
   hunkCursor.value = idx < 0 ? hs.length - 1 : idx;
 }
 
@@ -191,73 +267,123 @@ function jumpHunk(dir: 1 | -1): void {
   const pane = paneLeftEl.value;
   const hs = diff.value.hunks;
   if (!pane || hs.length === 0) return;
-  const paneTop = pane.getBoundingClientRect().top;
   const y = pane.scrollTop;
   // 是否已滚到窗格底部:底部钳制下差异块永远到不了顶,「贴顶」按成立处理,↓ 才能继续前进
   const atBottom = y >= pane.scrollHeight - pane.clientHeight - 1;
-  // 差异块首行顶边相对窗格内容顶部的坐标(不依赖 offsetParent)
-  const tops = hs.map((h) => {
-    const rowEl = hunkRowEl(pane, h.start);
-    return rowEl ? rowEl.getBoundingClientRect().top - paneTop + y : Number.POSITIVE_INFINITY;
-  });
   // 贴顶判定容差 6px:scrollTop 赋值会被取整,落点带亚像素偏差(~0.1px),太紧会把
   // 「已贴顶」误判成「还没到」,连按 ↓ 就会原地不动。落点定格为顶下 4px(TOP_PAD)。
   const TOP_PAD = 4;
   const NEAR = 6;
   // 锚点:第一条底边还没完全滚出顶部的差异块
-  const idx = hs.findIndex((h) => {
-    const rowEl = hunkRowEl(pane, h.start);
-    return !!rowEl && rowEl.getBoundingClientRect().top - paneTop + y + rowEl.offsetHeight > y + 1;
-  });
+  const idx = hs.findIndex((h) => (h.start + 1) * rowH.value > y + 1);
+  const topOf = (h: (typeof hs)[number]): number => h.start * rowH.value;
   let target = -1;
   if (dir > 0) {
     if (idx < 0) { showToast('已经是最后一个差异'); return; }
-    if (atBottom || tops[idx]! <= y + NEAR) target = idx + 1;
+    if (atBottom || topOf(hs[idx]!) <= y + NEAR) target = idx + 1;
     else target = idx;
     if (target >= hs.length) { showToast('已经是最后一个差异'); return; }
   } else {
     if (idx < 0) target = hs.length - 1; // 差异块全在顶部上方:回到最后一块
-    else if (tops[idx]! <= y + NEAR) {
+    else if (topOf(hs[idx]!) <= y + NEAR) {
       if (idx === 0) { showToast('已经是第一个差异'); return; }
       target = idx - 1;
     } else target = idx;
   }
-  const rowEl = hunkRowEl(pane, hs[target]!.start);
-  if (!rowEl) return;
   // 差异块首行顶边停在窗格顶往下 4px;滚左窗格,右窗格由 scroll 同步跟上
-  pane.scrollTop = Math.max(0, tops[target]! - TOP_PAD);
+  pane.scrollTop = Math.max(0, topOf(hs[target]!) - TOP_PAD);
   hunkCursor.value = target;
 }
 
 /**
- * 语法高亮:两侧各算一次,内容完全一致时直接共用同一份结果(大文件省一半高亮时间)。
+ * 整份文本按 diffText 同一套规格化规则切成行(CRLF→LF、剥结尾换行,见 text-diff 的
+ * prepare),行号才与差异行的 leftNo/rightNo 同源。缓存住:窗口随滚动重算时不再重切。
+ */
+function splitLines(text: string): string[] {
+  const norm = text.replace(/\r\n?/g, '\n');
+  return (norm.endsWith('\n') ? norm.slice(0, -1) : norm).split('\n');
+}
+
+const leftLinesCache = computed<string[] | null>(() =>
+  typeof left.value.text === 'string' ? splitLines(left.value.text) : null,
+);
+const rightLinesCache = computed<string[] | null>(() =>
+  typeof right.value.text === 'string' ? splitLines(right.value.text) : null,
+);
+
+/**
+ * 语法高亮(窗口化):只染当前窗口内出现的那些行。
  *
  * `null` = 不着色,是**预期路径不是错误**:扩展名没有对应语言(.log/.txt/.bat…)、
- * 文件超过上限、或者高亮本身抛错,都应静默退回纯文本 —— 染色是锦上添花,
- * 绝不能因为它的失败让对比本身看不了。
+ * 或者高亮本身抛错,都应静默退回纯文本 —— 染色是锦上添花,绝不能因为它的失败
+ * 让对比本身看不了。
+ *
+ * 窗口按**行号**切而不是按下标:纯增/纯删行只在一边有行号,同一窗口行里两侧的
+ * 行号范围并不相同,各切各的。窗口内部的行整段送 highlightLines,跨行结构
+ * (块注释、多行字符串)仍然正确;只有恰好跨窗口边界的 token 会丢着色 ——
+ * 窗口带 OVERSCAN 余量,边界在屏幕外,丢的也是看不见的行。
  */
-const hl = computed<{ left: string[] | null; right: string[] | null }>(() => {
+const hl = computed<{
+  left: { arr: string[]; base: number } | null;
+  right: { arr: string[]; base: number } | null;
+}>(() => {
   if (!showText.value) return { left: null, right: null };
-  const l = typeof left.value.text === 'string' ? left.value.text : null;
-  const r = typeof right.value.text === 'string' ? right.value.text : null;
-  const leftLines = l === null ? null : highlightText(l, props.path);
-  const rightLines = r === null ? null : l === r ? leftLines : highlightText(r, props.path);
-  return { left: leftLines, right: rightLines };
+  const ls = leftLinesCache.value;
+  const rs = rightLinesCache.value;
+  if (ls === null && rs === null) return { left: null, right: null };
+  const rows = diff.value.rows;
+  const s = winStart.value;
+  const e = Math.min(rows.length, winEnd.value);
+  if (s >= e) return { left: null, right: null };
+  let lLo = Number.POSITIVE_INFINITY;
+  let lHi = 0;
+  let rLo = Number.POSITIVE_INFINITY;
+  let rHi = 0;
+  for (let i = s; i < e; i++) {
+    const row = rows[i]!;
+    if (row.leftNo !== undefined) {
+      if (row.leftNo - 1 < lLo) lLo = row.leftNo - 1;
+      if (row.leftNo > lHi) lHi = row.leftNo;
+    }
+    if (row.rightNo !== undefined) {
+      if (row.rightNo - 1 < rLo) rLo = row.rightNo - 1;
+      if (row.rightNo > rHi) rHi = row.rightNo;
+    }
+  }
+  const lang = languageFor(props.path);
+  const windowOf = (
+    lines: string[] | null,
+    lo: number,
+    hi: number,
+  ): { arr: string[]; base: number } | null => {
+    if (lines === null) return null;
+    const from = Math.max(0, lo);
+    const to = Math.min(lines.length, hi);
+    if (from >= to) return null;
+    const arr = highlightLines(lines.slice(from, to), lang);
+    return arr === null ? null : { arr, base: from };
+  };
+  return { left: windowOf(ls, lLo, lHi), right: windowOf(rs, rLo, rHi) };
 });
 
 /**
  * 一行的渲染内容(HTML 字符串)。有高亮时按**行号**取,而不是按文本匹配 ——
- * 行号由 diff 给出、与对面那一栏天然对齐,重复行也不会取错。
+ * 行号由 diff 给出、与对面那一栏天然对齐,重复行也不会取错;高亮数组是窗口切片,
+ * `base` 是它的首行行号,索引 = 行号 - base。
  *
  * ⚠️ 模板里用的是 `v-html`,所以这里**必须自己保证内容已转义**,两种情况分别兜住:
  *  - 有高亮:内容是 hljs 的输出,它会把 `&` `<` `>` 转义成实体;
- *  - 不着色 / 行号越界:走 escapeHtml()。
+ *  - 不着色 / 行号不在窗口切片里:走 escapeHtml()。
  * 少兜一处就等于把「被对比的那个文件」当成 HTML 执行 —— 文件内容来自对端设备,不可信。
  */
-function cell(hlLines: string[] | null, no: number | undefined, text: string | undefined): string {
+function cell(
+  hlSide: { arr: string[]; base: number } | null,
+  no: number | undefined,
+  text: string | undefined,
+): string {
   const raw = text ?? '';
-  if (hlLines === null || no === undefined) return escapeHtml(raw);
-  return hlLines[no - 1] ?? escapeHtml(raw);
+  if (hlSide === null || no === undefined) return escapeHtml(raw);
+  return hlSide.arr[no - 1 - hlSide.base] ?? escapeHtml(raw);
 }
 
 /**
@@ -344,12 +470,13 @@ const paneRightEl = ref<HTMLElement | null>(null);
 let lockSource: HTMLElement | null = null;
 
 function onPaneScroll(which: 'left' | 'right'): void {
-  // 光标(当前差异块)只由左窗格的实际滚动位置决定,与同步锁无关 —— 先于锁检查更新,
-  // 否则「右窗格滚动带动左窗格」的那次联动会被锁吞掉、计数停在旧位置
-  syncHunkCursor();
   const src = which === 'left' ? paneLeftEl.value : paneRightEl.value;
   const dst = which === 'left' ? paneRightEl.value : paneLeftEl.value;
   if (!src || !dst) return;
+  // 窗口锚与光标(当前差异块)只由实际滚动位置决定,与同步锁无关 —— 先于锁检查更新,
+  // 否则「右窗格滚动带动左窗格」的那次联动会被锁吞掉、窗口和计数停在旧位置
+  scrollTopY.value = src.scrollTop;
+  syncHunkCursor(src.scrollTop);
   if (lockSource === src) return; // 这是上一步同步带给 src 的联动事件,不是用户滚动
   lockSource = dst;
   dst.scrollTop = src.scrollTop;
@@ -375,11 +502,14 @@ watch(
     pendingAction.value = null;
     hoverIndex.value = null;
     viewMode.value = 'preview';
+    scrollTopY.value = 0;
     // 双击文件行打开本弹窗时,浏览器会顺手选中那一行文字;不清掉,选区会残留到
     // 新渲染的对比文本上,整屏看起来像被全选。打开时清一次选区。
     if (props.open) window.getSelection()?.removeAllRanges();
     void nextTick(() => {
       hunkCursor.value = 0;
+      measurePane();
+      measureRowH();
       for (const el of [paneLeftEl.value, paneRightEl.value]) {
         if (!el) continue;
         el.scrollTop = 0;
@@ -404,8 +534,18 @@ function onKeydown(e: KeyboardEvent): void {
   }
   emit('close');
 }
-onMounted(() => window.addEventListener('keydown', onKeydown));
-onUnmounted(() => window.removeEventListener('keydown', onKeydown));
+// 窗格高度随弹窗(即视口)尺寸走:窗口下沿 = scrollTopY + paneH,尺寸变了要跟着量
+function onResize(): void {
+  measurePane();
+}
+onMounted(() => {
+  window.addEventListener('keydown', onKeydown);
+  window.addEventListener('resize', onResize);
+});
+onUnmounted(() => {
+  window.removeEventListener('keydown', onKeydown);
+  window.removeEventListener('resize', onResize);
+});
 
 /**
  * 把某个差异块应用到目标侧:算好应用后的完整新内容再抛给调用方
@@ -537,7 +677,10 @@ function apply(hunk: DiffHunk, target: 'left' | 'right'): void {
 
         <!-- 文本视图:左右各一个滚动区,滚动位置由 onPaneScroll 双向同步(横向+纵向):
              超宽行不会被压到对面行号上,行号(sticky left)与差异块按钮
-             (sticky right)始终钉在各自窗格边上。 -->
+             (sticky right)始终钉在各自窗格边上。
+             正文是虚拟滚动的窗口切片:上下垫片按「行数 × 行高」撑出未渲染行的总高,
+             滚动条长度与滚动位置始终代表整个文件;行 key 用全量行号,切片平移时
+             已渲染的行原地复用。 -->
         <div v-else class="fd-rows">
           <div
             ref="paneLeftEl"
@@ -545,8 +688,9 @@ function apply(hunk: DiffHunk, target: 'left' | 'right'): void {
             @scroll.passive="onPaneScroll('left')"
             @mouseleave="hoverIndex = null"
           >
+            <div class="fd-spacer" :style="{ height: `${spacerTop}px` }"></div>
             <div
-              v-for="(row, i) in diff.rows"
+              v-for="{ row, i } in winRows"
               :key="i"
               class="fd-row"
               :class="[rowClass(row.type), { 'is-hover': hoverIndex === i }]"
@@ -577,6 +721,7 @@ function apply(hunk: DiffHunk, target: 'left' | 'right'): void {
                 </template>
               </span>
             </div>
+            <div class="fd-spacer" :style="{ height: `${spacerBottom}px` }"></div>
           </div>
 
           <div
@@ -585,8 +730,9 @@ function apply(hunk: DiffHunk, target: 'left' | 'right'): void {
             @scroll.passive="onPaneScroll('right')"
             @mouseleave="hoverIndex = null"
           >
+            <div class="fd-spacer" :style="{ height: `${spacerTop}px` }"></div>
             <div
-              v-for="(row, i) in diff.rows"
+              v-for="{ row, i } in winRows"
               :key="i"
               class="fd-row"
               :class="[rowClass(row.type), { 'is-hover': hoverIndex === i }]"
@@ -595,6 +741,7 @@ function apply(hunk: DiffHunk, target: 'left' | 'right'): void {
               <span class="fd-no">{{ row.rightNo ?? '' }}</span>
               <pre class="fd-text" v-html="cell(hl.right, row.rightNo, row.rightText)"></pre>
             </div>
+            <div class="fd-spacer" :style="{ height: `${spacerBottom}px` }"></div>
           </div>
         </div>
       </div>

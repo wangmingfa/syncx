@@ -79,8 +79,15 @@ const titleId = `modal-title-${useId()}`;
 </script>
 
 <template>
-  <Transition name="guide">
-    <div v-if="open" class="modal-overlay" @click.self="!closeDisabled && !hideClose && emit('close')">
+  <!-- Teleport 到 body:弹窗必须脱离调用方的 DOM 祖先链。玻璃档给 .modal 加了
+       backdrop-filter(style.css 的玻璃档面板那条),而带 backdrop-filter 的元素会成为
+       fixed 后代的包含块 —— 套娃弹窗(提交历史/推送里双击文件开对比)的遮罩就会以
+       父弹窗为定位基准,子弹窗的百分比宽高全变成「父弹窗的 80%」。挪到 body 后,
+       遮罩永远以视口为基准,transform/filter 类的祖先也再伤不到弹窗。
+       层叠关系不受影响:遮罩 z-index 全档相同,后来者(后挂到 body)画在上面。 -->
+  <Teleport to="body">
+    <Transition name="guide">
+      <div v-if="open" class="modal-overlay" @click.self="!closeDisabled && !hideClose && emit('close')">
       <div
         class="modal"
         :class="{ 'modal-wide': wide }"
@@ -113,7 +120,8 @@ const titleId = `modal-title-${useId()}`;
         </div>
       </div>
     </div>
-  </Transition>
+    </Transition>
+  </Teleport>
 </template>
 
 <style>

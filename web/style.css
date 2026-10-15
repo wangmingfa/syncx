@@ -1608,6 +1608,15 @@ html[data-theme='dark'] .chip-menu__item--danger {
   max-width: 720px;
 }
 
+/* 「Git 推送」与「Git 提交历史」弹窗加宽(wide 的 640 → 740,用户要求 +100:
+   提交正文、路径与文件清单的行都不短,640 下省略号截断太早)。
+   两个弹窗都挂外壳的 wide(640),覆盖必须报 `.modal-wide.x` 双类压过它,
+   写法与 .history-modal 同一条规矩。 */
+.modal-wide.git-push-modal,
+.modal-wide.git-log-modal {
+  max-width: 740px;
+}
+
 /* 使用指南正文。这几个类名早就写在模板里,却一直没有对应样式:<ol class="guide-steps">
    的默认序号会和手写的 ①②③④ 叠成「1. ①」,各步之间也没有间距。这里补上基础排版,
    并去掉默认 marker(编号由正文自带,否则重复)。 */
@@ -3141,11 +3150,12 @@ html[data-theme='dark'] .conflict-state-diff {
 /* ---------- 文件内容对比弹窗 ---------- */
 
 .modal.fd-modal {
-  /* 百分比宽度:随窗口伸缩,不再被固定上限卡住 —— 并排差异要尽量铺开才好读。
+  /* 百分比宽度:随窗口伸缩,不再被固定上限卡住。80% 留出两侧呼吸,又不至于
+     压缩并排两栏的可读行宽。
      .modal-overlay 两侧各有 20px 内边距,该百分比是相对那个内容盒算的。
      报双类(`.modal.x`)是因为外壳的 `.modal` 现在住在 ModalShell.vue、注入比本文件更晚,
      它那两条 `width: 100%` / `max-width: 520px` 会把百分比盖掉 —— 单类靠顺序取胜的写法失效了。 */
-  width: 96%;
+  width: 80%;
   max-width: none;
   display: flex;
   flex-direction: column;
