@@ -245,9 +245,9 @@ function onHeadLeave(): void {
 const headActions = computed<RailAction[]>(() => {
   const b = busy.value;
   const actions: RailAction[] = [
-    { key: 'rescan', icon: 'rescan', disabled: b, tooltip: '扫描全部目录', onClick: () => rescan() },
-    { key: 'global-history', icon: 'history', tooltip: '全局同步记录:跨目录的归并时间线', onClick: () => openGlobalHistory() },
-    { key: 'report', icon: 'report', tooltip: '同步周报:近 7 天变更趋势 / 目录贡献 / 冲突汇总', onClick: () => (reportOpen.value = true) },
+    { key: 'rescan', icon: 'rescan', menuLabel: '扫描全部', disabled: b, tooltip: '扫描全部目录', onClick: () => rescan() },
+    { key: 'global-history', icon: 'history', menuLabel: '全局记录', tooltip: '全局同步记录:跨目录的归并时间线', onClick: () => openGlobalHistory() },
+    { key: 'report', icon: 'report', menuLabel: '同步周报', tooltip: '同步周报:近 7 天变更趋势 / 目录贡献 / 冲突汇总', onClick: () => (reportOpen.value = true) },
   ];
   // 「一键推送」:只在有 git 仓库目录时出现 —— 其余目录连仓库都不是,点了也推不出任何东西。
   // 点击只打开推送弹窗(列出各目录未推送提交,确认后逐个推),不在按钮上直接开推 ——
@@ -256,6 +256,7 @@ const headActions = computed<RailAction[]>(() => {
     actions.push({
       key: 'git-push-all',
       icon: 'push',
+      menuLabel: 'Git 推送',
       disabled: b,
       tooltip: 'Git 推送:查看各目录尚未推送到上游的提交,确认后逐目录推送',
       onClick: () => (gitPushScope.value = 'all'),
@@ -266,6 +267,7 @@ const headActions = computed<RailAction[]>(() => {
     actions.push({
       key: 'readopt-all',
       icon: 'shield',
+      menuLabel: '批量重新采集身份',
       active: true,
       disabled: b,
       tooltip: `批量重新采集身份:${identityBrokenFolders.value.length} 个目录不可信,一键全部恢复`,
@@ -276,6 +278,7 @@ const headActions = computed<RailAction[]>(() => {
     actions.push({
       key: 'global-pause',
       icon: status.value.paused ? 'play' : 'pause',
+      menuLabel: status.value.paused ? '恢复全部同步' : '暂停全部同步',
       active: status.value.paused,
       disabled: b,
       tooltip: status.value.paused ? '恢复所有目录的同步' : '暂停所有目录的同步(连接保持在线)',
@@ -320,6 +323,7 @@ function folderActions(f: FolderInfo): RailAction[] {
     {
       key: 'pause',
       icon: f.paused ? 'play' : 'pause',
+      menuLabel: f.paused ? '恢复同步' : '暂停同步',
       active: f.paused,
       disabled: b,
       tooltip: f.paused ? '恢复该目录的同步' : '暂停该目录的同步(连接保持在线)',
@@ -328,6 +332,7 @@ function folderActions(f: FolderInfo): RailAction[] {
     {
       key: 'files',
       icon: 'browse',
+      menuLabel: '浏览文件',
       disabled: b,
       tooltip: '浏览文件:查看本机目录内容,可下载单个文件或删除',
       onClick: () => openFiles(f),
@@ -335,6 +340,7 @@ function folderActions(f: FolderInfo): RailAction[] {
     {
       key: 'trash',
       icon: 'restore',
+      menuLabel: '回收站',
       disabled: b,
       tooltip: '回收站:本机删过的文件副本可还原或彻底删除',
       onClick: () => openTrash(f),
@@ -342,6 +348,7 @@ function folderActions(f: FolderInfo): RailAction[] {
     {
       key: 'empty-dirs',
       icon: 'folder-clean',
+      menuLabel: '空文件夹',
       disabled: b,
       tooltip: '空文件夹:盘点本机不含任何文件的文件夹,可勾选清理(只删空目录,不删文件)',
       onClick: () => openEmptyDirs(f),
@@ -349,6 +356,7 @@ function folderActions(f: FolderInfo): RailAction[] {
     {
       key: 'compare',
       icon: 'compare',
+      menuLabel: '双栏对比',
       disabled: b || noPeer,
       tooltip: noPeer ? '该目录还没有指派设备,无从对比' : '打开双栏对比:左右目录结构对齐,双击文件可看内容差异',
       onClick: () => openCompare(f),
@@ -356,16 +364,18 @@ function folderActions(f: FolderInfo): RailAction[] {
     {
       key: 'diff',
       icon: 'diff',
+      menuLabel: '差异报告',
       disabled: b || noPeer,
       tooltip: noPeer ? '该目录还没有指派设备,无从对比' : '差异报告:实时取两端索引,按「冲突/待推送/待拉取…」分类',
       onClick: () => openDiff(f),
     },
-    { key: 'history', icon: 'history', disabled: b, tooltip: '查看该目录的同步记录', onClick: () => openHistory(f) },
+    { key: 'history', icon: 'history', menuLabel: '同步记录', disabled: b, tooltip: '查看该目录的同步记录', onClick: () => openHistory(f) },
     // 非仓库不出现(gitRepo 由 daemon 每轮探测):点了也只有一句「不是仓库」的道歉
     ...(f.gitRepo === true
       ? [{
           key: 'git-log',
           icon: 'commit',
+          menuLabel: '提交历史',
           disabled: b,
           tooltip: '提交历史:查看该仓库最近的 20 个提交,可展开提交正文',
           onClick: () => openGitLog(f),
@@ -377,6 +387,7 @@ function folderActions(f: FolderInfo): RailAction[] {
       ? [{
           key: 'git-push',
           icon: 'push',
+          menuLabel: 'Git 推送',
           disabled: b,
           tooltip: `Git 推送:本目录有 ${gitUnpushedCountOf(f)} 个提交未推送到上游,点开查看并推送`,
           onClick: () => openGitPush(f),
@@ -385,6 +396,7 @@ function folderActions(f: FolderInfo): RailAction[] {
     {
       key: 'versions',
       icon: 'versions',
+      menuLabel: '文件版本',
       disabled: b,
       tooltip: '查看文件版本:被对端覆盖修改前的旧内容会自动留档,可恢复或删除',
       onClick: () => openVersions(f),
@@ -392,6 +404,7 @@ function folderActions(f: FolderInfo): RailAction[] {
     {
       key: 'ignore',
       icon: 'ignore',
+      menuLabel: '忽略规则',
       disabled: b,
       tooltip: '忽略规则:编辑 .syncxignore,粘贴路径即可测试命中哪条规则',
       onClick: () => openIgnoreEditor(f),
@@ -399,6 +412,7 @@ function folderActions(f: FolderInfo): RailAction[] {
     {
       key: 'e2e',
       icon: 'lock',
+      menuLabel: '端到端加密',
       active: f.e2eKeySet === true,
       disabled: b,
       tooltip: f.e2eKeySet
@@ -409,6 +423,7 @@ function folderActions(f: FolderInfo): RailAction[] {
     {
       key: 'remove',
       icon: 'trash',
+      menuLabel: '移除目录',
       danger: true,
       disabled: b,
       tooltip: '移除共享目录(磁盘文件不会被删除)',

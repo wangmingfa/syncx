@@ -19,10 +19,19 @@
  *
  * 展开方向(direction,默认 left)只影响面板锚点与收起位移的轴向/符号,由
  * .rail--xxx 方向类覆写两个 CSS 变量实现,动画机制四个方向完全一致。
+ *
+ * 4. **触屏/窄窗换「动作面板形态」**(useCompactRail 探测 hover:none 或 max-width 600px):
+ *    胶囊是单行绝对定位、右缘锚定向左摊开,13 个按钮 ≈ 396px 比手机屏还宽,最左的
+ *    按钮直接推出屏幕;而且触屏收不到 hover —— tooltip 文案看不见、纯图标猜不出动作。
+ *    所以该形态下面板整套不渲染,「更多」改弹**全屏遮罩 + 贴底动作面板**(teleport 到
+ *    body,复用 ModalShell 的 .modal-overlay/.modal 骨架与 .guide-* 动画):每项「图标 +
+ *    menuLabel 短名 + tooltip 说明」,纵向列表用满整屏高度,遮罩顺带交代「在操作哪张卡」。
+ *    父级驱动的 `expanded` 在动作面板形态下被忽略(没有 hover 可跟),面板开合由组件自管。
  */
-import { computed, ref } from 'vue';
+import { computed, onMounted, onUnmounted, ref, watch } from 'vue';
 import { NButton, NTooltip } from 'naive-ui';
 import ActionIcon from './ActionIcon.vue';
+import { useCompactRail } from '../composables/useCompactRail';
 import type { RailAction } from '../utils/action-rail';
 
 /** 展开方向:动作条相对「更多」按钮摊开的方位;竖直方向动作条排成一列。 */
@@ -53,6 +62,42 @@ function onMoreClick(): void {
   emit('update:expanded', next);
 }
 
+/** 紧凑形态(触屏/窄窗):「更多」弹全屏遮罩的贴底动作面板。见头部取舍第 4 条。 */
+const compact = useCompactRail();
+const menuOpen = ref(false);
+
+// 拖宽窗口回到胶囊形态时把开着的动作面板收掉:留着它,下次拖窄会「凭空」又弹出,
+// 而用户记得自己明明关掉了(或者根本没开过第二张卡的)。
+watch(compact, (v) => {
+  if (!v) menuOpen.value = false;
+});
+
+function onMenuItem(a: RailAction): void {
+  menuOpen.value = false;
+  a.onClick();
+}
+
+/** Esc 收面板。遮罩铺满全屏,同一时刻至多一张卡开着它,不用像弹窗那样争「最上层」。 */
+function onKeydown(e: KeyboardEvent): void {
+  if (e.key === 'Escape' && menuOpen.value) menuOpen.value = false;
+}
+onMounted(() => window.addEventListener('keydown', onKeydown));
+onUnmounted(() => window.removeEventListener('keydown', onKeydown));
+
+/**
+ * tooltip 在菜单里当第二行说明。常见写法是「动作名:整句说明」,短名列已经承担了
+ * 动作名,句首重复一遍就成了「浏览文件 / 浏览文件:查看本机…」;这里把句首的
+ * `menuLabel` + 冒号剥掉(全角半角都试),其余原样 —— 不做模糊去重,剥错了丢信息。
+ */
+function menuDesc(a: RailAction): string {
+  const tip = a.tooltip ?? '';
+  // 仓库现有文案一律半角冒号,全角那条是防御:将来有人写「说明：」不该漏剥
+  for (const prefix of [`${a.menuLabel}:`, `${a.menuLabel}：`]) {
+    if (tip.startsWith(prefix)) return tip.slice(prefix.length).trim();
+  }
+  return tip;
+}
+
 /**
  * 图标只能走 `#icon` 插槽,并且两条分支必须写成**两个独立的 v-if**,不能 v-if / v-else。
  *
@@ -69,52 +114,109 @@ function onMoreClick(): void {
 
 <template>
   <span class="rail" :class="[`rail--${direction}`, { 'is-open': open }]" :style="{ '--rail-n': actions.length }">
-    <span class="rail__panel">
-      <!-- 背板单独一层、铺满面板:收起时面板 visibility:hidden 会连它一起摘掉,
-           不会留下一条盖住标题的空心胶囊;它自己的 opacity 过渡则负责展开时淡入。
-           不直接写 .rail__panel 的 background 是因为面板盒子在收起时仍占着那一条宽度。 -->
-      <span class="rail__scrim" aria-hidden="true"></span>
-
-      <span v-for="(a, i) in actions" :key="a.key" class="rail__slot" :style="{ '--rail-i': i }">
-        <!-- 禁用态按钮不派发鼠标事件,tooltip 必须由外层 .icon-btn 承接 hover —— 沿用
-             目录卡原来的做法,否则「该目录还没有指派设备,无从对比」这类解释文案就看不到 -->
-        <n-tooltip trigger="hover" :disabled="!a.tooltip" :style="{ maxWidth: '280px' }">
-          <template #trigger>
-            <span class="icon-btn">
-              <n-button
-                size="small"
-                quaternary
-                :circle="!a.text"
-                :type="a.danger ? 'error' : a.active ? 'primary' : 'default'"
-                :disabled="a.disabled"
-                @click="a.onClick()"
-              >
-                <template v-if="a.icon" #icon>
-                  <ActionIcon :name="a.icon" />
-                </template>
-                <template v-if="!a.icon">{{ a.text }}</template>
-              </n-button>
-            </span>
-          </template>
-          {{ a.tooltip }}
-        </n-tooltip>
-      </span>
-    </span>
-
+    <!-- 紧凑形态:方向类/is-open 对它无意义(面板整套不渲染),「更多」原地留着,
+         动作本体在 body 层的动作面板里(见下方 Teleport)。 -->
     <n-button
+      v-if="compact"
       class="rail__more"
       size="small"
       quaternary
       circle
       :aria-label="label ?? '更多操作'"
-      :aria-expanded="open"
-      @click="onMoreClick"
+      :aria-expanded="menuOpen"
+      @click="menuOpen = !menuOpen"
     >
       <template #icon>
         <ActionIcon name="more" />
       </template>
     </n-button>
+
+    <template v-else>
+      <span class="rail__panel">
+        <!-- 背板单独一层、铺满面板:收起时面板 visibility:hidden 会连它一起摘掉,
+             不会留下一条盖住标题的空心胶囊;它自己的 opacity 过渡则负责展开时淡入。
+             不直接写 .rail__panel 的 background 是因为面板盒子在收起时仍占着那一条宽度。 -->
+        <span class="rail__scrim" aria-hidden="true"></span>
+
+        <span v-for="(a, i) in actions" :key="a.key" class="rail__slot" :style="{ '--rail-i': i }">
+          <!-- 禁用态按钮不派发鼠标事件,tooltip 必须由外层 .icon-btn 承接 hover —— 沿用
+               目录卡原来的做法,否则「该目录还没有指派设备,无从对比」这类解释文案就看不到 -->
+          <n-tooltip trigger="hover" :disabled="!a.tooltip" :style="{ maxWidth: '280px' }">
+            <template #trigger>
+              <span class="icon-btn">
+                <n-button
+                  size="small"
+                  quaternary
+                  :circle="!a.text"
+                  :type="a.danger ? 'error' : a.active ? 'primary' : 'default'"
+                  :disabled="a.disabled"
+                  @click="a.onClick()"
+                >
+                  <template v-if="a.icon" #icon>
+                    <ActionIcon :name="a.icon" />
+                  </template>
+                  <template v-if="!a.icon">{{ a.text }}</template>
+                </n-button>
+              </span>
+            </template>
+            {{ a.tooltip }}
+          </n-tooltip>
+        </span>
+      </span>
+
+      <n-button
+        class="rail__more"
+        size="small"
+        quaternary
+        circle
+        :aria-label="label ?? '更多操作'"
+        :aria-expanded="open"
+        @click="onMoreClick"
+      >
+        <template #icon>
+          <ActionIcon name="more" />
+        </template>
+      </n-button>
+    </template>
   </span>
+
+  <!-- 紧凑形态的动作面板:全屏遮罩 + 贴底面板,整屏都是它的展示空间 —— 手机屏上
+       锚在「更多」旁边的弹层无论怎么限宽都要么被屏幕下缘裁掉、要么在小窗里滚动,
+       而遮罩本身还顺带回答了「正在操作哪张卡」(背景压暗,只有这张卡是亮的)。
+       遮罩/表面整套复用 ModalShell 骨架的 .modal-overlay / .modal(含玻璃档覆盖,
+       它们按类名命中,不认渲染者),开合动画复用 .guide-*;本组件只写「贴底」这点
+       几何差异。依赖声明:这些全局类由 ModalShell.vue 的样式块与 style.css 提供,
+       本组件所在的应用必然也引了它们(FolderList 自己就挂着一排弹窗)。 -->
+  <Teleport to="body">
+    <Transition name="guide">
+      <div v-if="compact && menuOpen" class="modal-overlay rail-sheet__mask" @click.self="menuOpen = false">
+        <div class="modal rail-sheet" role="dialog" aria-modal="true" :aria-label="label ?? '更多操作'">
+          <div class="rail-sheet__head">{{ label ?? '更多操作' }}</div>
+          <div class="rail-menu" role="menu">
+            <button
+              v-for="a in actions"
+              :key="a.key"
+              type="button"
+              role="menuitem"
+              class="rail-menu__item"
+              :class="{ 'is-danger': a.danger, 'is-active': a.active }"
+              :disabled="a.disabled"
+              @click="onMenuItem(a)"
+            >
+              <span v-if="a.icon" class="rail-menu__icon" aria-hidden="true">
+                <ActionIcon :name="a.icon" />
+              </span>
+              <span v-else class="rail-menu__icon is-text">{{ a.text }}</span>
+              <span class="rail-menu__text">
+                <span class="rail-menu__label">{{ a.menuLabel }}</span>
+                <span v-if="menuDesc(a)" class="rail-menu__desc">{{ menuDesc(a) }}</span>
+              </span>
+            </button>
+          </div>
+        </div>
+      </div>
+    </Transition>
+  </Teleport>
 </template>
 
 <style scoped>
@@ -256,6 +358,144 @@ function onMoreClick(): void {
   opacity: 1;
   transform: none;
   transition-delay: calc(var(--rail-near-i) * var(--rail-stagger));
+}
+
+/* ---------- 紧凑形态:贴底动作面板 ----------
+   遮罩与表面本体复用全局骨架类(.modal-overlay/.modal,连玻璃档覆盖一起白拿),
+   这里只写「贴底」的几何差异。选择器都写成 `自己的类.骨架类` 双类:骨架是单类
+   (0,1,0),scoped 再抬一档,不依赖注入顺序就能稳压(AGENTS.md 的同款判据)。
+   面板不另设滚动 —— .modal 本就是「定高 flex 列、只有一段滚」的结构,这里让
+   .rail-menu 扮演那个滚动段(min-height:0 + overscroll-behavior 是这套分工的钥匙,
+   缺了前者滚动条会跑回整块面板上)。 */
+.rail-sheet__mask.modal-overlay {
+  align-items: flex-end;
+  padding: 0;
+}
+
+.rail-sheet.modal {
+  max-height: 85vh;
+  border-radius: 16px 16px 0 0;
+  /* 左右与底边的描边贴到屏幕缘会被读成「面板没铺满」,只留顶部那道 */
+  border-inline: 0;
+  border-bottom: 0;
+  padding: 8px 12px calc(14px + env(safe-area-inset-bottom));
+}
+
+.rail-sheet__head {
+  flex: none;
+  text-align: center;
+  font-size: 12px;
+  color: var(--muted);
+  padding: 2px 0 8px;
+}
+
+.rail-menu {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  flex: 1 1 auto;
+  min-height: 0;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+}
+
+/* 开合动画:.guide-* 给 .modal 的是「居中弹窗」的淡入+微缩放,对贴底面板应该
+   从屏幕下缘推上来。覆写靠双类 + scoped 抬档压过骨架的 (0,2,0)。 */
+.rail-sheet__mask.guide-enter-active .rail-sheet,
+.rail-sheet__mask.guide-leave-active .rail-sheet {
+  transition: transform 0.28s cubic-bezier(0.22, 1, 0.36, 1);
+}
+
+.rail-sheet__mask.guide-enter-from .rail-sheet,
+.rail-sheet__mask.guide-leave-to .rail-sheet {
+  transform: translateY(100%);
+}
+
+@media (prefers-reduced-motion: reduce) {
+  /* 骨架的 reduce 块只压得到 `.guide-* .modal`(单类),上面两条双类赢它 —— 要自己收掉 */
+  .rail-sheet__mask.guide-enter-active .rail-sheet,
+  .rail-sheet__mask.guide-leave-active .rail-sheet {
+    transition: none;
+  }
+
+  .rail-sheet__mask.guide-enter-from .rail-sheet,
+  .rail-sheet__mask.guide-leave-to .rail-sheet {
+    transform: none;
+  }
+}
+
+.rail-menu__item {
+  display: flex;
+  align-items: flex-start;
+  gap: 10px;
+  width: 100%;
+  margin: 0 -8px;
+  padding: 7px 8px;
+  border: 0;
+  border-radius: 8px;
+  background: none;
+  font: inherit;
+  text-align: left;
+  color: var(--text);
+  cursor: pointer;
+}
+
+.rail-menu__item:hover:not(:disabled) {
+  background: rgb(127 140 170 / 0.14);
+}
+
+.rail-menu__item:disabled {
+  opacity: 0.45;
+  cursor: not-allowed;
+}
+
+/* 危险/激活态整行转色(图标是 currentColor,一起跟)——与胶囊形态里
+   naive 给按钮的 error/primary 同一语义。 */
+.rail-menu__item.is-danger {
+  color: #c0392b;
+}
+
+html[data-theme='dark'] .rail-menu__item.is-danger {
+  color: #f0796f;
+}
+
+.rail-menu__item.is-active {
+  color: var(--accent, #4f7cff);
+}
+
+.rail-menu__icon {
+  flex: none;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 18px;
+  /* 20px = label 行高(13px × 行距),图标与第一行文字基线对齐,而不是垂直居中
+     于「label+说明」两行的整块高度 */
+  height: 20px;
+}
+
+.rail-menu__icon.is-text {
+  width: auto;
+}
+
+.rail-menu__text {
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+  min-width: 0;
+}
+
+.rail-menu__label {
+  font-size: 13px;
+  font-weight: 500;
+  line-height: 20px;
+}
+
+.rail-menu__desc {
+  font-size: 11px;
+  line-height: 1.5;
+  color: var(--muted);
+  word-break: break-word;
 }
 
 @media (prefers-reduced-motion: reduce) {

@@ -34,13 +34,21 @@ export type ActionIconName =
  *
  * `onClick` 必填:一个没有回调的动作没有存在意义,给它开缺省值只会让漏接线
  * 静默变成「点了没反应」。
+ *
+ * `menuLabel` 必填:触屏/窄窗下 ActionRail 换成「图标 + 短名」的贴底动作面板(见组件里
+ * 紧凑形态的说明),这一列就是那个短名。之所以不进 tooltip 而是单独一个字段:
+ * tooltip 是给 hover 浮层用的整句说明,拿来当菜单标签会把菜单撑成长文段;
+ * 而写成可选、漏了再退回 tooltip,退回态没人测、也没人记得补 —— 类型强制最老实。
  */
 export type RailAction = {
   /** v-for 的稳定 key。必须稳定:展开动画靠 CSS transition 驱动同一批 DOM 节点,
    *  节点若因 key 变化被重建,动画会从中间帧重来。 */
   key: string;
+  /** 菜单形态里的短动作名(两三个字的动宾短语,不是句子)。 */
+  menuLabel: string;
   onClick: () => void;
-  /** hover tooltip。可省 —— 但省掉后鼠标悬停没有任何解释,只适合旁边就有文字的按钮。 */
+  /** hover tooltip。可省 —— 但省掉后鼠标悬停没有任何解释,只适合旁边就有文字的按钮。
+   *  紧凑(菜单)形态下这句话就是菜单项第二行的说明文字(见组件 menuDesc)。 */
   tooltip?: string;
   disabled?: boolean;
   /** 危险动作(移除/删除):描边与文字转红,与现有 .act-delete 的语义色一致。 */
