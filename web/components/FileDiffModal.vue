@@ -271,7 +271,8 @@ function jumpHunk(dir: 1 | -1): void {
   const hs = diff.value.hunks;
   if (!pane || hs.length === 0) return;
   const y = pane.scrollTop;
-  // 是否已滚到窗格底部:底部钳制下差异块永远到不了顶,「贴顶」按成立处理,↓ 才能继续前进
+  // 是否已滚到窗格底部:底部钳制下差异块永远到不了顶,「贴顶」按成立处理,
+  // ↓ 才能继续前进、↑ 才能退回上一块
   const atBottom = y >= pane.scrollHeight - pane.clientHeight - 1;
   // 贴顶判定容差 6px:scrollTop 赋值会被取整,落点带亚像素偏差(~0.1px),太紧会把
   // 「已贴顶」误判成「还没到」,连按 ↓ 就会原地不动。落点定格为顶下 4px(TOP_PAD)。
@@ -288,7 +289,9 @@ function jumpHunk(dir: 1 | -1): void {
     if (target >= hs.length) { showToast('已经是最后一个差异'); return; }
   } else {
     if (idx < 0) target = hs.length - 1; // 差异块全在顶部上方:回到最后一块
-    else if (topOf(hs[idx]!) <= y + NEAR) {
+    // 底部同样按「已在看它」处理:否则 target 仍是它自己,scrollTop 又越界被钳住,
+    // ↑ 会一直原地不动
+    else if (atBottom || topOf(hs[idx]!) <= y + NEAR) {
       if (idx === 0) { showToast('已经是第一个差异'); return; }
       target = idx - 1;
     } else target = idx;
