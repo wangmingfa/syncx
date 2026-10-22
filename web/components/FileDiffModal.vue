@@ -148,6 +148,9 @@ const hunkAtStart = computed<Map<number, DiffHunk>>(() => {
   return map;
 });
 
+/** 有任一方向的逐块按钮才保留行尾按钮列;只读对比(变更/提交)不留下一条空列。 */
+const hasHunkGutter = computed<boolean>(() => !!(props.hunkApply?.toLeft || props.hunkApply?.toRight));
+
 const changedCount = computed<number>(() => countChanged(diff.value.rows));
 
 const { showToast } = useToast();
@@ -685,6 +688,7 @@ function apply(hunk: DiffHunk, target: 'left' | 'right'): void {
           <div
             ref="paneLeftEl"
             class="fd-pane fd-pane--left"
+            :class="{ 'fd-pane--no-apply': !hasHunkGutter }"
             @scroll.passive="onPaneScroll('left')"
             @mouseleave="hoverIndex = null"
           >
@@ -700,7 +704,7 @@ function apply(hunk: DiffHunk, target: 'left' | 'right'): void {
               <!-- 语法高亮:内容是 hljs 的输出或 escapeHtml 过的纯文本(见 cell 的说明),
                    走 v-html 而不是插值。行号仍由 .fd-no 这一格负责。 -->
               <pre class="fd-text" v-html="cell(hl.left, row.leftNo, row.leftText)"></pre>
-              <span class="fd-gutter">
+              <span v-if="hasHunkGutter" class="fd-gutter">
                 <!-- 逐块按钮由调用方配置方向与文案(hunkApply):对比页两个方向都给,
                      冲突收件箱只给「应用到原文件」(←),另一侧没有写回路径就不出按钮。 -->
                 <template v-if="hunkAtStart.get(i)">

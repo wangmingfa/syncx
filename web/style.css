@@ -3382,8 +3382,19 @@ html[data-theme='dark'] .conflict-state-diff {
 }
 
 /* 每个窗格自己滚(横+纵);纵向由组件同步 scrollTop,保证同一行左右对齐。
-   高度由 .fd-rows 的栅格行撑满(grid 单行默认 stretch),不再写死 max-height。 */
+   高度由 .fd-rows 的栅格行撑满(grid 单行默认 stretch),不再写死 max-height。
+
+   单列 auto 栅格是为了让所有行共享「内容总宽」而不是「视口宽」:块级行只拿得到
+   clientWidth,超长的 pre 会溢出到行盒子之外,横向滚动后行底色/悬停色只铺到
+   「窗格右缘 - scrollLeft」,右侧露出一条白带。auto 轨道在内容窄时按默认 stretch
+   铺满视口、在内容超宽时取最宽行,行背景就能一直盖到窗格右缘。
+   两处不能动:① 别换成 minmax(100%, max-content) —— 百分比下限会压住内在增长,
+   Chrome 实测列宽仍是视口宽;② align-content: start 不能省 —— 否则行少时 auto 行
+   会被拉高填满窗格,行高不再等于 line-height,虚拟滚动按常量行高算的几何随之错位。 */
 .fd-pane {
+  display: grid;
+  grid-template-columns: auto;
+  align-content: start;
   min-width: 0;
   min-height: 0;
   overflow: auto;
@@ -3398,6 +3409,12 @@ html[data-theme='dark'] .conflict-state-diff {
 /* 行号 | 左文本 | 差异块操作区 */
 .fd-pane--left .fd-row {
   grid-template-columns: 46px minmax(max-content, 1fr) 46px;
+}
+
+/* 没有逐块按钮的只读对比(变更/提交):整列不保留,文本直接用满窗格。
+   按钮列一旦存在,即使该行没有按钮也要留着 —— 否则行与行之间会错位。 */
+.fd-pane--left.fd-pane--no-apply .fd-row {
+  grid-template-columns: 46px minmax(max-content, 1fr);
 }
 
 /* 行号 | 右文本 */
