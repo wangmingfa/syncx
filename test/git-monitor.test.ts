@@ -7,6 +7,8 @@ import { join } from 'node:path';
 import {
   autoCommit,
   countUnpushedCommits,
+  findGitIndexLock,
+  removeGitIndexLock,
   getCommitInfo,
   getCommitParents,
   getLastCommitHash,
@@ -820,6 +822,39 @@ describe('read file at an arbitrary rev', () => {
       expect(getCommitParents(repo, second)).toEqual([root]);
     } finally {
       rmDir(repo);
+    }
+  });
+});
+
+describe('index.lock residue', () => {
+  it.skipIf(!HAS_GIT)('finds and removes the repo index.lock, idempotently', () => {
+    const repo = tempGitRepo();
+    try {
+      writeFileSync(join(repo, 'a.txt'), '1');
+      commitAll(repo, '初始');
+      const lock = join(repo, '.git', 'index.lock');
+
+      expect(findGitIndexLock(repo)).toBeNull();
+      writeFileSync(lock, '');
+      expect(findGitIndexLock(repo)).toMatchObject({ path: lock, size: 0 });
+      expect(findGitIndexLock(repo)?.mtimeMs).toBeGreaterThan(0);
+
+      expect(removeGitIndexLock(repo)).toEqual({ ok: true, path: lock, removed: true });
+      expect(existsSync(lock)).toBe(false);
+      // 已经不在也算目的达成(弹窗连点两下不出错)
+      expect(removeGitIndexLock(repo)).toEqual({ ok: true, path: lock, removed: false });
+    } finally {
+      rmDir(repo);
+    }
+  });
+
+  it.skipIf(!HAS_GIT)('reports no lock and refuses deletion outside a git repo', () => {
+    const dir = mkdtempSync(join(tmpdir(), 'syncx-plain-'));
+    try {
+      expect(findGitIndexLock(dir)).toBeNull();
+      expect(removeGitIndexLock(dir)).toEqual({ ok: false, error: '该目录不是 git 仓库' });
+    } finally {
+      rmDir(dir);
     }
   });
 });

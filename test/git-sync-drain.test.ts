@@ -1,5 +1,5 @@
 import { execFileSync } from 'node:child_process';
-import { mkdirSync, mkdtempSync, readFileSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, beforeAll, describe, expect, it } from 'vitest';
@@ -324,6 +324,136 @@ describe('git auto-commit deferred until receive ledger drains', () => {
     folder.pendingGitNotify = null;
     internals.onGitCommitNotify(notify(hash));
     expect(folder.pendingGitNotify).toBeNull();
+
+    (manager as unknown as { close(): void }).close();
+  });
+});
+
+/**
+ * 本地提交失败(残留 index.lock、预提交钩子拒绝等)不丢通知:工作树里的内容
+ * 还在,按退避间隔重试就能补上镜像提交。旧做法失败即丢,只能等下一条通知来
+ * 顺带扫走 —— 对端不再提交时工作树会一直脏着,而且发送端只看到投递回执、
+ * 根本不知道这笔没落成(2026-10-26 实测:锁自 10-16 残留,四笔提交全静默失败)。
+ */
+describe('git auto-commit retries local failures instead of dropping the notify', () => {
+  it.skipIf(!HAS_GIT)('keeps the notify through an index.lock conflict and commits once the lock is gone', () => {
+    const { share, manager, folder } = boot('full');
+    const internals = manager as unknown as Internals;
+    const lock = join(share, '.git', 'index.lock');
+
+    writeFileSync(join(share, 'a.txt'), 'from peer');
+    writeFileSync(lock, '');
+    internals.onGitCommitNotify(notify('e'.repeat(40)));
+    internals.flushPendingGitNotify();
+
+    // 锁在:提交失败,但通知还挂着,横幅是可操作的提示而不是 git 原文
+    expect(commitCount(share)).toBe(1);
+    expect(folder.pendingGitNotify).not.toBeNull();
+    expect(folder.gitAutoCommitAttempts).toBe(1);
+    const banner = manager.getFolderErrors().find((e) => e.folder === 'main')?.message ?? '';
+    expect(banner).toContain('index.lock');
+    expect(banner).toContain('删除它');
+
+    // 退避期内不吃扫描节拍:再结算不会重复跑 git
+    internals.flushPendingGitNotify();
+    expect(folder.gitAutoCommitAttempts).toBe(1);
+
+    // 锁清掉 + 退避到点:同一笔通知落地,横幅自清
+    rmSync(lock);
+    folder.gitAutoCommitRetryAt = undefined;
+    internals.flushPendingGitNotify();
+    expect(commitCount(share)).toBe(2);
+    expect(git(share, ['log', '-1', '--format=%s'])).toBe('feat: 远端提交');
+    expect(git(share, ['status', '--porcelain'])).toBe('');
+    expect(folder.pendingGitNotify).toBeNull();
+    expect(folder.gitAutoCommitAttempts).toBe(0);
+    expect(manager.getFolderErrors().some((e) => e.folder === 'main')).toBe(false);
+
+    (manager as unknown as { close(): void }).close();
+  });
+
+  it.skipIf(!HAS_GIT)('stops auto-retrying at the cap but keeps the notify for manual retry', () => {
+    const { share, manager, folder } = boot('full');
+    const internals = manager as unknown as Internals;
+    const lock = join(share, '.git', 'index.lock');
+
+    writeFileSync(join(share, 'a.txt'), 'from peer');
+    writeFileSync(lock, '');
+    internals.onGitCommitNotify(notify('f'.repeat(40)));
+    for (let i = 0; i < 5; i++) {
+      folder.gitAutoCommitRetryAt = undefined; // 模拟退避到点
+      internals.flushPendingGitNotify();
+    }
+
+    // 自动重试停止,但通知与横幅都留着:手动重试 / 下一条通知还要用它
+    expect(commitCount(share)).toBe(1);
+    expect(folder.pendingGitNotify).not.toBeNull();
+    expect(folder.gitAutoCommitAttempts).toBe(5);
+    expect(folder.gitAutoCommitRetryAt).toBeUndefined();
+    expect(manager.getFolderErrors().some((e) => e.folder === 'main')).toBe(true);
+
+    // 放弃后扫描不再碰 git:多刷几轮也不增加尝试次数
+    internals.flushPendingGitNotify();
+    internals.flushPendingGitNotify();
+    expect(folder.gitAutoCommitAttempts).toBe(5);
+
+    // 用户从弹窗删锁 + 立即提交:同一笔通知补上,横幅自清
+    rmSync(lock);
+    const retry = manager.retryGitAutoCommit('main');
+    expect(retry.ok).toBe(true);
+    expect(retry.hash).toBe(git(share, ['rev-parse', 'HEAD']));
+    expect(commitCount(share)).toBe(2);
+    expect(git(share, ['log', '-1', '--format=%s'])).toBe('feat: 远端提交');
+    expect(git(share, ['status', '--porcelain'])).toBe('');
+    expect(folder.pendingGitNotify).toBeNull();
+    expect(folder.gitAutoCommitAttempts).toBe(0);
+    expect(manager.getFolderErrors().some((e) => e.folder === 'main')).toBe(false);
+
+    // 已结清后再点「立即提交」:没有通知可用,如实拒绝
+    expect(manager.retryGitAutoCommit('main')).toMatchObject({ ok: false, error: '没有待提交的通知' });
+
+    (manager as unknown as { close(): void }).close();
+  });
+
+  it.skipIf(!HAS_GIT)('reports the pending notify, retry state and index.lock, and deletes only the lock', () => {
+    const { share, manager, folder } = boot('full');
+    const internals = manager as unknown as Internals;
+    const lock = join(share, '.git', 'index.lock');
+
+    writeFileSync(join(share, 'a.txt'), 'from peer');
+    writeFileSync(lock, '');
+    internals.onGitCommitNotify(notify('b'.repeat(40), 'feat: 远端的第二笔\n\n正文'));
+    internals.flushPendingGitNotify();
+
+    const st = manager.getGitAutoCommitStatus('main');
+    expect(st).toMatchObject({
+      pending: true,
+      commitMessage: 'feat: 远端的第二笔',
+      changedFiles: ['a.txt'],
+      attempts: 1,
+      maxAttempts: 5,
+      givenUp: false,
+    });
+    expect(st.retryAt).toBeGreaterThan(Date.now());
+    expect(st.error?.message).toContain('index.lock');
+    expect(st.lock).toMatchObject({ path: lock, size: 0 });
+
+    // 删锁只删 git 指认的 index.lock;内容文件不动,错误横幅也还在(还没提交)
+    expect(manager.deleteGitIndexLock('main')).toMatchObject({ ok: true, path: lock, removed: true });
+    expect(existsSync(lock)).toBe(false);
+    expect(manager.getGitAutoCommitStatus('main').lock).toBeNull();
+    expect(manager.getFolderErrors().some((e) => e.folder === 'main')).toBe(true);
+
+    // 锁已不在:重复删除是幂等的
+    expect(manager.deleteGitIndexLock('main')).toMatchObject({ ok: true, path: lock, removed: false });
+
+    // 手动重试:不受上一轮退避影响,立刻提交
+    const retry = manager.retryGitAutoCommit('main');
+    expect(retry.ok).toBe(true);
+    expect(commitCount(share)).toBe(2);
+    expect(manager.getGitAutoCommitStatus('main')).toMatchObject({ pending: false, attempts: 0, givenUp: false });
+    expect(manager.getFolderErrors().some((e) => e.folder === 'main')).toBe(false);
+    expect(folder.lastCommitHash).toBe(git(share, ['rev-parse', 'HEAD']));
 
     (manager as unknown as { close(): void }).close();
   });

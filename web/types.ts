@@ -483,6 +483,48 @@ export interface GitUnpushedData {
   folders: GitUnpushedFolder[];
 }
 
+/** 残留 index.lock 的现况(与 src/git-monitor.ts 的 GitIndexLockInfo 同形)。 */
+export interface GitIndexLockInfo {
+  path: string;
+  size: number;
+  /** 最后修改时刻(ms);文件系统不给时可能是 0。 */
+  mtimeMs: number;
+}
+
+/** GET /api/folders/git-commit-status 的响应(「自动提交失败」弹窗数据源)。 */
+export interface GitAutoCommitStatus {
+  /** 还有一笔提交通知等着结算(放弃自动重试后仍保留)。 */
+  pending: boolean;
+  /** 待结算通知的提交信息首行。 */
+  commitMessage?: string;
+  changedFiles: string[];
+  attempts: number;
+  maxAttempts: number;
+  /** 下一次自动重试的时刻(ms);缺省 = 没有排定的重试。 */
+  retryAt?: number;
+  /** 自动重试已放弃,等手动重试或下一条通知。 */
+  givenUp: boolean;
+  error?: { message: string; ts: number };
+  lock: GitIndexLockInfo | null;
+}
+
+/** POST /api/folders/git-index-lock/delete 的响应。 */
+export interface GitIndexLockDeleteData {
+  ok: boolean;
+  path?: string;
+  /** false = 调用时锁已不存在(目的已达成)。 */
+  removed?: boolean;
+  error?: string;
+}
+
+/** POST /api/folders/git-commit-retry 的响应。 */
+export interface GitAutoCommitRetryData {
+  ok: boolean;
+  hash?: string;
+  error?: string;
+  attempts: number;
+}
+
 /** GET /api/folders/empty-dirs 的响应:盘点到空文件夹清单。 */
 export interface EmptyDirsData {
   /** 空目录(相对共享根的 POSIX 路径),字典序。 */

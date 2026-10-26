@@ -153,6 +153,15 @@ export interface ControlServerDeps {
   listGitChanges?: (folderId: string) => unknown;
   /** 工作区某文件的改动对比:HEAD 版 vs 盘上当前,复用通用差异弹窗的侧形状。 */
   readGitDiff?: (folderId: string, path: string) => unknown;
+  /**
+   * 「自动提交失败」弹窗:挂起通知 / 重试计数 / 失败原因 / 残留 index.lock 现况
+   * (锁是现查的)。只读。
+   */
+  getGitAutoCommitStatus?: (folderId: string) => unknown;
+  /** 删除残留的 index.lock(用户确认后触发);只删 git 指认的那一个文件。 */
+  deleteGitIndexLock?: (folderId: string) => unknown;
+  /** 手动重试自动提交:清零退避后立即结算,返回 { ok, hash?, error?, attempts }。 */
+  retryGitAutoCommit?: (folderId: string) => unknown;
   /** 最近提交历史(「Git 提交历史」弹窗):现跑 git log,非 git 仓库返回 null。 */
   listGitLog?: (folderId: string) => unknown;
   /** 某笔提交动了哪些文件(提交展开的文件清单)。非 git 仓库返回 null。 */

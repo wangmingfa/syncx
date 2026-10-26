@@ -72,7 +72,7 @@ import { NETWORK_OFFLINE_BACKOFF_MS, offlineAwareReconnectDelay, reconnectDelayM
 import { hasRoutableInterface } from './net/offline-probe.js';
 import { isSelfPeerUrl, localInterfaceAddresses } from './net/peer-address.js';
 import { CAP_BINARY1 } from './handshake.js';
-import { isGitRepo, getLastCommitHash, getCommitInfo, hasUncommittedChanges, autoCommit, getUncommittedChanges, readFileAtHead, readFileAt, listCommitFiles, getCommitParents, isCommitHash, listRecentCommits, countUnpushedCommits, listUnpushedCommits, GIT_UNPUSHED_LIMIT, gitPush, type CommitInfo, type GitChangeEntry, type GitCommitEntry, type GitCommitFileEntry, type GitPushResult, type HeadReadResult } from './git-monitor.js';
+import { isGitRepo, getLastCommitHash, getCommitInfo, hasUncommittedChanges, autoCommit, getUncommittedChanges, readFileAtHead, readFileAt, listCommitFiles, getCommitParents, isCommitHash, listRecentCommits, countUnpushedCommits, listUnpushedCommits, GIT_UNPUSHED_LIMIT, gitPush, findGitIndexLock, removeGitIndexLock, type CommitInfo, type GitChangeEntry, type GitCommitEntry, type GitCommitFileEntry, type GitPushResult, type HeadReadResult, type GitIndexLockInfo, type GitIndexLockRemoveResult } from './git-monitor.js';
 import { scanEmptyDirs, removeEmptyDirs, type EmptyDirScanResult, type EmptyDirDeleteResult } from './empty-dirs.js';
 
 /** scheduleVerdictFor 的结论:此刻该不该同步、被哪一层挡住、下一个边界何时。 */
@@ -99,6 +99,39 @@ export interface UnpushedFolderEntry {
   /** 列表被上限截断(total 超出 GIT_UNPUSHED_LIMIT)。 */
   truncated: boolean;
 }
+
+/** 「Git 自动提交失败」弹窗的数据源:挂起通知、重试状态、失败原因与残留锁现况。 */
+export interface GitAutoCommitStatus {
+  /** 是否还有一笔提交通知等着结算(放弃自动重试后仍保留,手动重试要用它的提交信息)。 */
+  pending: boolean;
+  /** 待结算通知的提交信息首行。 */
+  commitMessage?: string;
+  /** 待结算通知声称改动的文件(展示用,实际提交按工作树全量扫)。 */
+  changedFiles: string[];
+  /** 本笔已尝试次数。 */
+  attempts: number;
+  maxAttempts: number;
+  /** 下一次自动重试的时刻(ms);缺省 = 没有排定的重试(放弃或退避未起算)。 */
+  retryAt?: number;
+  /** 自动重试已放弃(次数用尽),等手动重试或下一条通知。 */
+  givenUp: boolean;
+  /** 最近一次自动提交失败(kind = git-auto-commit)。 */
+  error?: { message: string; ts: number };
+  /** 当前残留的 index.lock;不存在/非仓库为 null。 */
+  lock: GitIndexLockInfo | null;
+}
+
+/** 手动重试自动提交的结果。 */
+export interface GitAutoCommitRetryResult {
+  ok: boolean;
+  /** 成功时本机镜像提交 / 当前 HEAD 的哈希。 */
+  hash?: string;
+  /** 失败原因(git stderr + 可操作提示),或提交仍被延后的说明。 */
+  error?: string;
+  /** 本次尝试后的计数(成功后归零)。 */
+  attempts: number;
+}
+
 /** 提交通知的投递回执(销账用),形状见 src/net/wire.ts。 */
 type GitCommitAckMsg = Extract<ControlMessage, { kind: 'git-commit-ack' }>;
 
@@ -175,11 +208,44 @@ function composeMirrorCommitMessage(msg: GitCommitNotifyMsg): string {
 }
 
 /**
+ * 自动提交失败时补一句能照着做的提示。index.lock 冲突是 syncx 自己解不开的那一类:
+ * 往往是被杀掉的 git 进程留下的残留锁(git 退出时来不及清),而原始报错只给一句
+ * 「remove the file manually」。从报错里取出锁路径并报出存在多久、多大,用户才知道
+ * 这是陈旧残留而不是别的进程正在提交。
+ */
+function describeAutoCommitFailure(error: string): string | undefined {
+  const lockMatch = /Unable to create '([^']+)': File exists/.exec(error);
+  if (!lockMatch) return undefined;
+  const lockPath = lockMatch[1]!;
+  let info: string;
+  try {
+    const st = statSync(lockPath);
+    const mins = Math.floor((Date.now() - st.mtimeMs) / 60_000);
+    info = `已存在${mins >= 1 ? `约 ${mins} 分钟` : '不到 1 分钟'}、${st.size} 字节`;
+  } catch {
+    return `仓库里有 git 锁文件冲突:${lockPath}(已不可读),下一轮扫描会自动重试`;
+  }
+  return `仓库里有残留的 git 锁文件 ${lockPath}(${info})。确认没有其它 git 进程在操作后删除它,syncx 会自动重试提交`;
+}
+
+/**
  * 未回执通知的最大重发次数(每次扫描一轮,与邀请台账 offer-retry 同一套口径)。
  * 只累计「本地写成功却没等到回执」的尝试:离线目标不计数、账一直记着 —— 它迟早会回来,
  * 而这时补投正是「内容同步了、提交却永久少一笔」的解药。
  */
 const GIT_NOTIFY_MAX_RESENDS = 5;
+
+/**
+ * 自动提交本地失败后的重试上限与退避间隔。
+ *
+ * 失败不丢通知:文件内容已经在工作树里,重试一次就能补上镜像提交;旧做法失败即丢,
+ * 只能等下一条提交通知来「顺带扫走」,若对端不再提交,工作树就一直脏着(2026-10-26
+ * 实测:残留 index.lock 让四笔提交全部静默失败)。但本地失败可能是持久的(预提交
+ * 钩子拒绝、仓库只读),而扫描节拍是 5s —— 不退避就是每 5s 跑一遍 git、刷一屏 WARN,
+ * 所以按 60s 间隔重试,上限 5 次(约 4 分钟,与回执台账的口径一致)。
+ */
+const GIT_AUTO_COMMIT_MAX_ATTEMPTS = 5;
+const GIT_AUTO_COMMIT_RETRY_MS = 60_000;
 
 /** 一个共享目录的运行期状态:索引、执行器与本地索引,随配置热重载增删。 */
 export interface FolderState {
@@ -284,6 +350,13 @@ export interface FolderState {
    * 自愈时钟,到点强制放行(见 flushPendingGitNotify)。
    */
   gitDrainSince?: number;
+  /**
+   * 当前挂起通知的自动提交尝试次数与退避到点时刻(见 GIT_AUTO_COMMIT_MAX_ATTEMPTS)。
+   * 本地提交失败不丢通知 —— 工作树里的内容还在,重试就能补上;退避是为了持久性失败
+   * (预提交钩子、残留锁)不至于每轮扫描都跑一遍 git。新通知入队时归零:新消息该立刻试。
+   */
+  gitAutoCommitAttempts: number;
+  gitAutoCommitRetryAt?: number;
   /**
    * Git 提交同步:本机镜像提交完成后向其余对端**中继**原始通知,链式拓扑
    * (A—B—C,C 只与 B 配对)的末端因此也能把收到的内容落成提交。
@@ -1048,7 +1121,7 @@ export class SyncSessionManager {
     // 索引为空 → 首扫是建基线(存量文件不算新增);索引有存量 → 首扫 diff 是
     // daemon 离线期间的真实改动,要写同步记录
     const baselinePending = usable.length === 0;
-    return { id, indexKey, path: f.path, index, executor, localIndex, ignoreLines, transports: [], peers: new Map(), transportDevice: new Map(), receiveLedger: new Map(), driftState: { lastAt: 0, round: 0 }, localAuditState: { lastAt: 0, round: 0 }, config: f, baselinePending, conflictCount: 0, gitChangeCount: 0, gitUnpushedCount: 0, lastCommitHash: f.gitLastCommitHash ?? null, processedRemoteCommits: new Set(), gitBroadcast: readGitPending(id, f.gitBroadcastPending), pendingGitNotify: null, gitDrainWarned: false, gitRelay: readGitPending(id, f.gitRelayPending), diskBlocked: false };
+    return { id, indexKey, path: f.path, index, executor, localIndex, ignoreLines, transports: [], peers: new Map(), transportDevice: new Map(), receiveLedger: new Map(), driftState: { lastAt: 0, round: 0 }, localAuditState: { lastAt: 0, round: 0 }, config: f, baselinePending, conflictCount: 0, gitChangeCount: 0, gitUnpushedCount: 0, lastCommitHash: f.gitLastCommitHash ?? null, processedRemoteCommits: new Set(), gitBroadcast: readGitPending(id, f.gitBroadcastPending), pendingGitNotify: null, gitDrainWarned: false, gitAutoCommitAttempts: 0, gitRelay: readGitPending(id, f.gitRelayPending), diskBlocked: false };
   }
 
   /**
@@ -1121,12 +1194,19 @@ export class SyncSessionManager {
     }
   }
 
-  private clearFolderError(folderId: string, opts?: { exceptKind?: string }): void {
-    // exceptKind:该 kind 的错误生命周期由专门状态机维护(如磁盘守卫),扫描的
-    // 「本轮干净」不算它恢复 —— 否则横幅每 5s 闪现闪灭
+  private clearFolderError(folderId: string, opts?: { exceptKind?: string | string[]; onlyKind?: string }): void {
+    // onlyKind:只清指定 kind 的错误(该状态机自己确认已恢复),别顺手抹掉
+    // 目录身份 / 磁盘守卫这类别人负责的横幅
+    if (opts?.onlyKind) {
+      const cur = this.folderErrorsState.get(folderId);
+      if (cur?.kind !== opts.onlyKind) return;
+    }
+    // exceptKind:这些 kind 的错误生命周期由专门状态机维护(磁盘守卫、自动提交重试),
+    // 扫描的「本轮干净」不算它们恢复 —— 否则横幅每 5s 闪现闪灭
     if (opts?.exceptKind) {
       const cur = this.folderErrorsState.get(folderId);
-      if (cur?.kind === opts.exceptKind) return;
+      const except = Array.isArray(opts.exceptKind) ? opts.exceptKind : [opts.exceptKind];
+      if (cur?.kind && except.includes(cur.kind)) return;
     }
     // 内容未变时不打扰推送通道(clearFolderError 每轮扫描都会对每个目录调用)
     if (this.folderErrorsState.delete(folderId)) {
@@ -1341,7 +1421,9 @@ export class SyncSessionManager {
       // 一轮扫描走到这里且后续无错误即视为「干净」:清除该目录上一次的错误提示,
       // 让问题自愈后目录卡上的错误横幅自动消失。磁盘守卫错误除外 —— 它的解除
       // 只认磁盘实际可用空间(下面复检),扫描干净不代表盘有空间。
-      this.clearFolderError(folder.id, { exceptKind: 'disk-space' });
+      // git-auto-commit 也豁免:通知还挂在队列里、只是处于失败退避期时,横幅要一直
+      // 亮着(它由结算路径在提交成功/放弃时自己清,见 flushPendingGitNotify)
+      this.clearFolderError(folder.id, { exceptKind: ['disk-space', 'git-auto-commit'] });
       // 磁盘守卫复检:扫描是必然存在的低频心跳。被拦期间若空间已恢复,
       // checkFolderDiskSpace(0) 会顺带解除拦截、清错误并重放各 peer 的积压索引。
       if (folder.diskBlocked) this.checkFolderDiskSpace(folder, 0);
@@ -1596,6 +1678,11 @@ export class SyncSessionManager {
    * 提交,但仍把基线推到当前 HEAD:不提交就没有新哈希,基线不推进下一轮又会被
    * 「新提交检测」当成有一笔要广播的提交,白耗一次重试。
    *
+   * 自动提交**本地失败**时不丢通知:内容已经在工作树里,退避重试就能补上(见
+   * GIT_AUTO_COMMIT_MAX_ATTEMPTS);旧做法失败即丢,只能等下一条通知来顺带扫走,
+   * 对端不再提交时工作树会一直脏着。次数用尽后只停止自动重试、通知仍保留 ——
+   * 目录卡「提交失败」弹窗里的手动重试与下一条通知都要靠它(见 retryGitAutoCommit)。
+   *
    * 真正落成一笔镜像提交后要把这条通知**中继**给本机其余对端(见 relayGitCommitNotify),
    * 链式拓扑 A—B—C 的末端因此也能提交;开头先补投两份未拿到回执的台账 —— 上一轮的
    * 中继(替别人转发)与本机的出站广播(自己那笔提交,见 gitBroadcast)。
@@ -1611,11 +1698,14 @@ export class SyncSessionManager {
       if (!pending) continue;
       const mode = folder.config.gitSync;
       if (!mode || mode === 'off' || mode === 'send') {
-        folder.pendingGitNotify = null;
+        this.settlePendingGitNotify(folder);
         folder.gitDrainWarned = false;
         folder.gitDrainSince = undefined;
         continue;
       }
+      // 自动重试已放弃:通知还挂着,但不再由扫描反复尝试 —— 留给用户手动重试,
+      // 或下一条通知覆盖槽位时把计数归零(见 onGitCommitNotify)。
+      if (folder.gitAutoCommitAttempts >= GIT_AUTO_COMMIT_MAX_ATTEMPTS) continue;
       // 暂停与身份拦阻是结算的中场休息、不是挡法本身:挂起计时清零,恢复后重新起算 ——
       // 否则一次隔夜的定时暂停就能把下面「交换未落定」的 60s 封顶用光,解停后对端
       // 的索引还没换完,半套文件就被强提交了。
@@ -1665,7 +1755,9 @@ export class SyncSessionManager {
           continue;
         }
       }
-      folder.pendingGitNotify = null;
+      // 上一轮尝试失败后的退避期:通知留在队列里,到点再试。扫描是 5s 节拍,
+      // 不退避就会对持久性失败(钩子、残留锁)每 5s 跑一遍 git、刷一屏 WARN。
+      if (folder.gitAutoCommitRetryAt !== undefined && now < folder.gitAutoCommitRetryAt) continue;
       folder.gitDrainWarned = false;
       folder.gitDrainSince = undefined;
       const stalled = folder.receiveLedger.size;
@@ -1679,6 +1771,7 @@ export class SyncSessionManager {
         this.logger.info(
           `git auto-commit skipped (nothing to commit): ${folder.id} (from ${msg.fromDeviceId}) "${msg.commitMessage.split('\n')[0]}"`,
         );
+        this.settlePendingGitNotify(folder);
         this.setGitBaseline(folder, getLastCommitHash(folder.path));
         continue;
       }
@@ -1688,9 +1781,11 @@ export class SyncSessionManager {
       this.logger.info(
         `auto-committing: ${folder.id} (from ${msg.fromDeviceId}) "${msg.commitMessage.split('\n')[0]}" — ${filesDesc}`,
       );
+      folder.gitAutoCommitAttempts += 1;
       const result = autoCommit(folder.path, composeMirrorCommitMessage(msg));
       if (result.success) {
         this.logger.info(`auto-commit success: ${folder.id} -> ${result.hash?.slice(0, 8)}`);
+        this.settlePendingGitNotify(folder);
         // 更新基线并落盘:防止扫描循环把这个自动提交误判为「新提交」再广播回去(死循环防护)
         this.setGitBaseline(folder, result.hash ?? getLastCommitHash(folder.path));
         // 同时把本机产生的新哈希也加入去重集合
@@ -1699,10 +1794,43 @@ export class SyncSessionManager {
         }
         this.relayGitCommitNotify(folder, msg);
       } else {
-        this.logger.warn(`auto-commit failed: ${folder.id}: ${result.error}`);
-        this.recordFolderError(folder.id, new Error(`Git auto-commit failed: ${result.error}`), 'Git 自动提交失败');
+        const error = result.error ?? 'git auto-commit failed';
+        this.logger.warn(
+          `auto-commit failed (attempt ${folder.gitAutoCommitAttempts}/${GIT_AUTO_COMMIT_MAX_ATTEMPTS}): ${folder.id}: ${error}`,
+        );
+        // 通知不丢:内容还在工作树里,退避到点再试就能补上这一笔。横幅给出能照着做的
+        // 提示(残留 index.lock 是这类失败里最常见、也是唯一需要用户动手的一种)。
+        const hint = describeAutoCommitFailure(error);
+        this.recordFolderError(
+          folder.id,
+          new Error(hint ? `${error}\n${hint}` : error),
+          'Git 自动提交失败',
+          'git-auto-commit',
+        );
+        if (folder.gitAutoCommitAttempts >= GIT_AUTO_COMMIT_MAX_ATTEMPTS) {
+          // 停止自动重试但**保留通知与横幅**:工作树依旧是脏的、这一笔仍未提交,
+          // 手动「立即提交」与下一条通知都还要用它(提交信息 / 积压内容);下一次
+          // 提交的通知照旧覆盖并重置计数。横幅由 settle / 新通知成功提交后自清。
+          folder.gitAutoCommitRetryAt = undefined;
+          this.logger.warn(
+            `auto-commit giving up after ${GIT_AUTO_COMMIT_MAX_ATTEMPTS} attempts: ${folder.id}; notify kept for manual retry or the next commit notification`,
+          );
+        } else {
+          folder.gitAutoCommitRetryAt = now + GIT_AUTO_COMMIT_RETRY_MS;
+        }
       }
     }
+  }
+
+  /**
+   * 通知已结清(提交成功 / 工作树干净无需提交 / 目录关掉了 git 同步):清队列、
+   * 重试账与专属横幅。放弃重试那一步刻意不走这里 —— 工作树还脏,横幅要留着。
+   */
+  private settlePendingGitNotify(folder: FolderState): void {
+    folder.pendingGitNotify = null;
+    folder.gitAutoCommitAttempts = 0;
+    folder.gitAutoCommitRetryAt = undefined;
+    this.clearFolderError(folder.id, { onlyKind: 'git-auto-commit' });
   }
 
   /**
@@ -1950,6 +2078,9 @@ export class SyncSessionManager {
     }
 
     folder.pendingGitNotify = { msg, viaDeviceId: hopDeviceId };
+    // 新消息覆盖旧槽:上一笔的失败次数与退避一起归零,让新消息立刻试一次
+    folder.gitAutoCommitAttempts = 0;
+    folder.gitAutoCommitRetryAt = undefined;
     this.logger.info(
       `git-commit-notify queued: ${folderId} (from ${fromDeviceId}) "${msg.commitMessage.split('\n')[0]}"`,
     );
@@ -3628,6 +3759,81 @@ export class SyncSessionManager {
     const folder = this.folderStates.find((f) => f.id === folderId);
     if (!folder) throw new Error('共享目录不存在(可能刚被移除)');
     return getUncommittedChanges(folder.path);
+  }
+
+  /**
+   * 「Git 自动提交失败」弹窗的数据源:挂起通知、重试进度、失败原因与残留锁现况。
+   *
+   * 锁是**现查**的(打开弹窗 / 每次操作后都要反映盘上事实),不使用错误文案里
+   * 那一刻的路径快照;错误只认 kind = git-auto-commit,别的目录错误不混进来。
+   */
+  getGitAutoCommitStatus(folderId: string): GitAutoCommitStatus {
+    const folder = this.folderStates.find((f) => f.id === folderId);
+    if (!folder) throw new Error('共享目录不存在(可能刚被移除)');
+    const pending = folder.pendingGitNotify;
+    const err = this.folderErrorsState.get(folderId);
+    return {
+      pending: pending !== null,
+      ...(pending
+        ? { commitMessage: pending.msg.commitMessage.split('\n')[0] ?? '', changedFiles: pending.msg.changedFiles }
+        : { changedFiles: [] }),
+      attempts: folder.gitAutoCommitAttempts,
+      maxAttempts: GIT_AUTO_COMMIT_MAX_ATTEMPTS,
+      ...(folder.gitAutoCommitRetryAt !== undefined ? { retryAt: folder.gitAutoCommitRetryAt } : {}),
+      givenUp:
+        folder.gitAutoCommitAttempts >= GIT_AUTO_COMMIT_MAX_ATTEMPTS && folder.gitAutoCommitRetryAt === undefined,
+      ...(err?.kind === 'git-auto-commit' ? { error: { message: err.message, ts: err.ts } } : {}),
+      lock: findGitIndexLock(folder.path),
+    };
+  }
+
+  /**
+   * 删除残留的 index.lock(用户确认「没有其它 git 进程在操作」后从弹窗触发)。
+   * 只删 git 指认的那一个文件,不接收调用方路径;删完不清错误横幅 ——
+   * 这一笔仍未提交,等手动提交成功或下一条通知结算后再自清。
+   */
+  deleteGitIndexLock(folderId: string): GitIndexLockRemoveResult {
+    const folder = this.folderStates.find((f) => f.id === folderId);
+    if (!folder) throw new Error('共享目录不存在(可能刚被移除)');
+    const r = removeGitIndexLock(folder.path);
+    if (r.ok) {
+      this.logger.info(`git index.lock ${r.removed === false ? 'already gone' : 'removed'}: ${folder.id} (${r.path})`);
+    } else {
+      this.logger.warn(`git index.lock removal failed: ${folder.id}: ${r.error}`);
+    }
+    this.notifyStatus();
+    return r;
+  }
+
+  /**
+   * 手动重试自动提交:清零计数与退避后立即跑一遍结算,返回提交结果。
+   *
+   * 仍走完整结算闸门(在途接收 / 索引交换 / 暂停),不因为「用户点的」就跳过 ——
+   * 半套文件被定格正是这些闸门要防的事;被挡时如实回报「仍被延后」。
+   */
+  retryGitAutoCommit(folderId: string): GitAutoCommitRetryResult {
+    const folder = this.folderStates.find((f) => f.id === folderId);
+    if (!folder) throw new Error('共享目录不存在(可能刚被移除)');
+    if (!folder.pendingGitNotify) return { ok: false, error: '没有待提交的通知', attempts: folder.gitAutoCommitAttempts };
+    folder.gitAutoCommitAttempts = 0;
+    folder.gitAutoCommitRetryAt = undefined;
+    this.flushPendingGitNotify();
+    if (folder.pendingGitNotify) {
+      const err = this.folderErrorsState.get(folderId);
+      return {
+        ok: false,
+        error:
+          err?.kind === 'git-auto-commit'
+            ? err.message
+            : '提交被延后:仍在等待在途内容收齐或对端索引交换',
+        attempts: folder.gitAutoCommitAttempts,
+      };
+    }
+    return {
+      ok: true,
+      ...(folder.lastCommitHash ? { hash: folder.lastCommitHash } : {}),
+      attempts: folder.gitAutoCommitAttempts,
+    };
   }
 
   /**

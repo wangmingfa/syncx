@@ -889,6 +889,10 @@ export async function run(args: ParsedArgs): Promise<void> {
     // 「Git 推送」弹窗:未推送提交清单(现查 git)+ 单目录推送(git push,网络操作单目录持闸)
     listUnpushedByFolder: (folderId) => manager.listUnpushedByFolder(folderId),
     pushGitFolder: (folderId) => manager.pushGitFolder(folderId),
+    // 「自动提交失败」弹窗:现查挂起通知/退避/残留锁;删残留锁与手动重试
+    getGitAutoCommitStatus: (folderId) => manager.getGitAutoCommitStatus(folderId),
+    deleteGitIndexLock: (folderId) => manager.deleteGitIndexLock(folderId),
+    retryGitAutoCommit: (folderId) => manager.retryGitAutoCommit(folderId),
     // 「空文件夹」弹窗:盘点 + 确认后删除(只 rmdir、不触发扫描 —— 目录不是同步实体)
     listEmptyDirs: (folderId) => manager.listEmptyDirs(folderId),
     deleteEmptyDirs: (folderId, paths) => manager.deleteEmptyDirs(folderId, paths),

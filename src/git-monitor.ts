@@ -19,8 +19,8 @@
  * 「每隔几秒弹两次、两次之间隔几百毫秒」。从终端手工启动的 daemon 有控制台可继承,
  * 所以不闪 —— 这正是「升级之后才开始闪」的原因。新增调用点时别忘了它。
  */
-import { existsSync } from 'node:fs';
-import { join } from 'node:path';
+import { existsSync, statSync, unlinkSync } from 'node:fs';
+import { basename, join, resolve } from 'node:path';
 import { execFile, execFileSync } from 'node:child_process';
 import { SCRATCH_SUFFIXES } from './ignore.js';
 
@@ -536,6 +536,83 @@ export function autoCommit(folderPath: string, message: string): AutoCommitResul
   } catch (err) {
     const msg = err instanceof Error ? err.message : String(err);
     return { success: false, error: msg };
+  }
+}
+
+/* ==================== index.lock 残留 ==================== */
+
+/**
+ * 仓库 index.lock 的现况。`path` 是 git 自己算出来的实际位置:
+ * 普通仓库是 `<root>/.git/index.lock`,linked worktree / submodule 的 gitdir 在别处,
+ * 只有 `git rev-parse --git-path` 答得准。
+ */
+export interface GitIndexLockInfo {
+  path: string;
+  size: number;
+  mtimeMs: number;
+}
+
+export interface GitIndexLockRemoveResult {
+  ok: boolean;
+  path?: string;
+  /** false = 调用时锁已不存在(幂等:目的已达成)。 */
+  removed?: boolean;
+  error?: string;
+}
+
+/** 向 git 要 index.lock 的绝对路径(worktree 的 .git 是文件,不能拼 join(folder, '.git')）。 */
+function gitIndexLockPath(folderPath: string): string {
+  const out = execFileSync('git', ['rev-parse', '--git-path', 'index.lock'], {
+    cwd: folderPath,
+    encoding: 'utf8',
+    stdio: ['ignore', 'pipe', 'ignore'],
+    windowsHide: true,
+    timeout: 5000,
+  }).trim();
+  return resolve(folderPath, out);
+}
+
+/** 读 index.lock 的现况;不存在 / 不是仓库 / git 答不上来时返回 null。只读。 */
+export function findGitIndexLock(folderPath: string): GitIndexLockInfo | null {
+  if (!isGitRepo(folderPath)) return null;
+  let lockPath: string;
+  try {
+    lockPath = gitIndexLockPath(folderPath);
+  } catch {
+    return null;
+  }
+  // 路径虽然由 git 给出,仍校验文件名 —— 这个函数只该碰 index.lock
+  if (basename(lockPath) !== 'index.lock') return null;
+  try {
+    const st = statSync(lockPath);
+    if (!st.isFile()) return null;
+    return { path: lockPath, size: st.size, mtimeMs: st.mtimeMs };
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * 删除残留的 index.lock(不接收调用方给的路径,只删 git 指认的那一个)。
+ * 调用方负责确认没有其它 git 进程正在操作 —— 本函数无法跨平台判断锁的持有者。
+ */
+export function removeGitIndexLock(folderPath: string): GitIndexLockRemoveResult {
+  if (!isGitRepo(folderPath)) return { ok: false, error: '该目录不是 git 仓库' };
+  let lockPath: string;
+  try {
+    lockPath = gitIndexLockPath(folderPath);
+  } catch (e) {
+    return { ok: false, error: e instanceof Error ? e.message : '无法定位 git 锁文件' };
+  }
+  if (basename(lockPath) !== 'index.lock') {
+    return { ok: false, error: 'git 返回的锁路径异常,已中止删除' };
+  }
+  try {
+    unlinkSync(lockPath);
+    return { ok: true, path: lockPath, removed: true };
+  } catch (e) {
+    if ((e as NodeJS.ErrnoException).code === 'ENOENT') return { ok: true, path: lockPath, removed: false };
+    return { ok: false, path: lockPath, error: e instanceof Error ? e.message : '删除锁文件失败' };
   }
 }
 

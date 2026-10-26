@@ -544,6 +544,119 @@ describe('control api git log and empty dirs', () => {
     server.close();
   });
 
+  it('GET /api/folders/git-commit-status passes the state through and needs folderId', async () => {
+    const status = {
+      pending: true,
+      commitMessage: 'feat: 远端',
+      changedFiles: ['a.txt'],
+      attempts: 1,
+      maxAttempts: 5,
+      retryAt: 1_700_000_000_000,
+      givenUp: false,
+      error: { message: 'index.lock', ts: 1_700_000_000_000 },
+      lock: { path: '/a/.git/index.lock', size: 0, mtimeMs: 1_700_000_000_000 },
+    };
+    const seen: string[] = [];
+    const server = createControlServer({
+      token: 'secret',
+      getStatus: () => ({}),
+      getGitAutoCommitStatus: (folderId) => {
+        seen.push(folderId);
+        return status;
+      },
+    });
+    server.listen(0, '127.0.0.1');
+    await once(server, 'listening');
+    const port = (server.address() as AddressInfo).port;
+
+    const res = await fetchJson(port, '/api/folders/git-commit-status?folderId=f1', 'secret');
+    expect(res.status).toBe(200);
+    expect(res.body).toEqual(status);
+
+    const missing = await fetchJson(port, '/api/folders/git-commit-status', 'secret');
+    expect(missing.status).toBe(400);
+    expect(seen).toEqual(['f1']);
+
+    const noAuth = await fetchJson(port, '/api/folders/git-commit-status?folderId=f1');
+    expect(noAuth.status).toBe(401);
+
+    server.close();
+  });
+
+  it('POST /api/folders/git-index-lock/delete passes the result through and validates folderId', async () => {
+    const seen: string[] = [];
+    const server = createControlServer({
+      token: 'secret',
+      getStatus: () => ({}),
+      deleteGitIndexLock: (folderId) => {
+        seen.push(folderId);
+        return { ok: true, path: '/a/.git/index.lock', removed: true };
+      },
+    });
+    server.listen(0, '127.0.0.1');
+    await once(server, 'listening');
+    const port = (server.address() as AddressInfo).port;
+
+    const ok = await fetchJson(port, '/api/folders/git-index-lock/delete', 'secret', {
+      method: 'POST',
+      body: { folderId: 'f1' },
+    });
+    expect(ok.status).toBe(200);
+    expect(ok.body).toEqual({ ok: true, path: '/a/.git/index.lock', removed: true });
+
+    const missing = await fetchJson(port, '/api/folders/git-index-lock/delete', 'secret', {
+      method: 'POST',
+      body: {},
+    });
+    expect(missing.status).toBe(400);
+    expect(seen).toEqual(['f1']);
+
+    const noAuth = await fetchJson(port, '/api/folders/git-index-lock/delete', undefined, {
+      method: 'POST',
+      body: { folderId: 'f1' },
+    });
+    expect(noAuth.status).toBe(401);
+
+    server.close();
+  });
+
+  it('POST /api/folders/git-commit-retry passes the result through and validates folderId', async () => {
+    const seen: string[] = [];
+    const server = createControlServer({
+      token: 'secret',
+      getStatus: () => ({}),
+      retryGitAutoCommit: (folderId) => {
+        seen.push(folderId);
+        return { ok: false, error: 'index.lock', attempts: 1 };
+      },
+    });
+    server.listen(0, '127.0.0.1');
+    await once(server, 'listening');
+    const port = (server.address() as AddressInfo).port;
+
+    const res = await fetchJson(port, '/api/folders/git-commit-retry', 'secret', {
+      method: 'POST',
+      body: { folderId: 'f1' },
+    });
+    expect(res.status).toBe(200);
+    expect(res.body).toEqual({ ok: false, error: 'index.lock', attempts: 1 });
+
+    const missing = await fetchJson(port, '/api/folders/git-commit-retry', 'secret', {
+      method: 'POST',
+      body: { folderId: '' },
+    });
+    expect(missing.status).toBe(400);
+    expect(seen).toEqual(['f1']);
+
+    const noAuth = await fetchJson(port, '/api/folders/git-commit-retry', undefined, {
+      method: 'POST',
+      body: { folderId: 'f1' },
+    });
+    expect(noAuth.status).toBe(401);
+
+    server.close();
+  });
+
   it('GET /api/folders/empty-dirs passes the scan result through and needs folderId', async () => {
     const server = createControlServer({
       token: 'secret',

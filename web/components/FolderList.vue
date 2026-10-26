@@ -5,6 +5,7 @@ import { useStatusContext } from '../composables/statusContext';
 import ActionRail from './ActionRail.vue';
 import WeeklyReportModal from './WeeklyReportModal.vue';
 import GitChangesModal from './GitChangesModal.vue';
+import GitCommitErrorModal from './GitCommitErrorModal.vue';
 import GitLogModal from './GitLogModal.vue';
 import GitPushModal from './GitPushModal.vue';
 import EmptyDirsModal from './EmptyDirsModal.vue';
@@ -50,6 +51,22 @@ const gitChangesFolder = ref<{ id?: string; path: string } | null>(null);
 
 function openGitChanges(f: FolderInfo): void {
   gitChangesFolder.value = { id: f.id, path: f.path };
+}
+
+/**
+ * 该目录是否挂着「自动提交失败」(kind = git-auto-commit)。
+ * 这一类的展示面是「提交失败」徽标 + 弹窗:卡上不再渲染通用错误横幅 ——
+ * 那边是一段没有操作入口的长文,同一件事说两遍还占两次空间。
+ */
+function hasGitCommitFailure(f: FolderInfo): boolean {
+  return folderErrorOf(f)?.kind === 'git-auto-commit';
+}
+
+/** 「自动提交失败」弹窗开关(徽标入口;弹窗里可删残留锁 / 立即重试)。 */
+const gitCommitErrorFolder = ref<{ id?: string; path: string } | null>(null);
+
+function openGitCommitError(f: FolderInfo): void {
+  gitCommitErrorFolder.value = { id: f.id, path: f.path };
 }
 
 /**
@@ -556,7 +573,7 @@ function visibleFiles(f: FolderInfo): TransferFile[] {
            title 说明(「接收」没有专属操作按钮,只能靠徽标自身的 tooltip 解释)。
            「冲突 N」做成按钮:徽标本身就是收件箱入口,点它直接处理。
            「Git 仅发送/仅接收/双向」同理只靠 title 解释 —— 它没有专属按钮,开关在「编辑目录」里。 -->
-      <div v-if="f.receiveOnly || (f.gitSync && f.gitSync !== 'off') || f.paused || outsideNow(f) || conflictCountOf(f) > 0 || gitChangeCountOf(f) > 0 || gitUnpushedCountOf(f) > 0" class="card-floats">
+      <div v-if="f.receiveOnly || (f.gitSync && f.gitSync !== 'off') || f.paused || outsideNow(f) || conflictCountOf(f) > 0 || gitChangeCountOf(f) > 0 || gitUnpushedCountOf(f) > 0 || hasGitCommitFailure(f)" class="card-floats">
         <span v-if="f.receiveOnly" class="float-badge receive-badge" title="接收模式:只拉不推,本机改动不会同步出去">接收</span>
         <!-- Git 提交同步:模式文案与编辑弹窗的下拉框逐字一致,方向由文字给出;
              双向额外铺一层淡底,一眼能从「只做一边」的两条里分出来;
@@ -607,6 +624,15 @@ function visibleFiles(f: FolderInfo): TransferFile[] {
           :title="`${gitUnpushedCountOf(f)} 个提交未推送到远程:点击查看清单并推送;栏头「一键推送」可一并处理所有目录`"
           @click="openGitPush(f)"
         >未推送 {{ gitUnpushedCountOf(f) }}</button>
+        <!-- 自动提交失败:对端提交的内容已落地,但本机镜像提交没成功。徽标是入口:
+             点开看失败原因、删残留锁、立即重试。该错误不会再渲染下面的通用横幅 -->
+        <button
+          v-if="hasGitCommitFailure(f)"
+          type="button"
+          class="float-badge git-commit-fail-float"
+          title="自动提交失败:内容已同步到本机,但镜像提交没有成功(通知仍保留)。点击查看原因、删除残留锁或立即重试"
+          @click="openGitCommitError(f)"
+        >提交失败</button>
       </div>
 
       <div class="item-top">
@@ -666,8 +692,10 @@ function visibleFiles(f: FolderInfo): TransferFile[] {
         </n-tooltip>
       </div>
 
-      <!-- 同步错误横幅:该目录最近一次同步失败的原因(扫描干净后自动消失) -->
-      <div v-if="folderErrorOf(f)" class="folder-error" :class="{ 'folder-error--identity': folderErrorOf(f)!.kind?.startsWith('identity') }" role="alert">
+      <!-- 同步错误横幅:该目录最近一次同步失败的原因(扫描干净后自动消失)。
+           自动提交失败不在这里:它有自己的「提交失败」徽标 + 弹窗(原因全文、
+           删除残留锁、立即重试都在那边),横幅只会在卡上重复一段没法操作的长文。 -->
+      <div v-if="folderErrorOf(f) && !hasGitCommitFailure(f)" class="folder-error" :class="{ 'folder-error--identity': folderErrorOf(f)!.kind?.startsWith('identity') }" role="alert">
         <svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" class="folder-error__icon">
           <path d="M12 3 2.5 20h19z" />
           <line x1="12" y1="10" x2="12" y2="14" />
@@ -801,6 +829,7 @@ function visibleFiles(f: FolderInfo): TransferFile[] {
   <!-- 同步周报:入口在栏头动作;弹窗本体就近挂在组件尾(ModalShell 自带遮罩定位) -->
   <WeeklyReportModal :open="reportOpen" @close="reportOpen = false" />
   <GitChangesModal :folder="gitChangesFolder" @close="gitChangesFolder = null" />
+  <GitCommitErrorModal :folder="gitCommitErrorFolder" @close="gitCommitErrorFolder = null" />
   <GitLogModal :folder="gitLogFolder" @close="gitLogFolder = null" />
   <GitPushModal :scope="gitPushScope" @close="gitPushScope = null" />
   <EmptyDirsModal :folder="emptyDirsFolder" @close="emptyDirsFolder = null" />

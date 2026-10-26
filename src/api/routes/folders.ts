@@ -57,7 +57,7 @@ export async function tryFolderRoutes(
   res: ServerResponse,
   deps: ControlServerDeps,
 ): Promise<boolean> {
-  const { addFolder, removeFolder, setFolderDevices, setFolderUseGitignore, setFolderPaused, setFolderFilePaused, setFolderSchedule, setFolderGitSync, setFolderConflictPolicy, setFolderE2E, setFolderOnDemand, setFolderOnDemandDir, prioritizeTransfer, materializeFile, getFolderIgnoreInfo, setFolderIgnoreLines, testFolderIgnore, reAdoptFolderIdentity, reAdoptAllIdentities, getFolderHistory, getGlobalHistory, getWeeklyReport, clearFolderHistory, listFolderConflicts, resolveFolderConflict, conflictFilePair, applyConflictMerge, cleanIdenticalConflicts, diffFolder, compareFolder, readFilePair, applyFileSync, listFolderVersions, restoreFolderVersion, deleteFolderVersion, getFolderVersionContent, rollbackFolder, setScheduleOverride, setCalendarOverride, getCalendar, listGitChanges, readGitDiff, listGitLog, listGitCommitFiles, readGitCommitDiff, listUnpushedByFolder, pushGitFolder, listEmptyDirs, deleteEmptyDirs } = deps;
+  const { addFolder, removeFolder, setFolderDevices, setFolderUseGitignore, setFolderPaused, setFolderFilePaused, setFolderSchedule, setFolderGitSync, setFolderConflictPolicy, setFolderE2E, setFolderOnDemand, setFolderOnDemandDir, prioritizeTransfer, materializeFile, getFolderIgnoreInfo, setFolderIgnoreLines, testFolderIgnore, reAdoptFolderIdentity, reAdoptAllIdentities, getFolderHistory, getGlobalHistory, getWeeklyReport, clearFolderHistory, listFolderConflicts, resolveFolderConflict, conflictFilePair, applyConflictMerge, cleanIdenticalConflicts, diffFolder, compareFolder, readFilePair, applyFileSync, listFolderVersions, restoreFolderVersion, deleteFolderVersion, getFolderVersionContent, rollbackFolder, setScheduleOverride, setCalendarOverride, getCalendar, listGitChanges, readGitDiff, listGitLog, listGitCommitFiles, readGitCommitDiff, listUnpushedByFolder, pushGitFolder, getGitAutoCommitStatus, deleteGitIndexLock, retryGitAutoCommit, listEmptyDirs, deleteEmptyDirs } = deps;
   const path = req.url ? pathname(req.url) : '/';
 
   // Form POST /folders : add or (via _method=DELETE) remove a folder
@@ -1139,6 +1139,59 @@ export async function tryFolderRoutes(
       sendJson(res, 200, await pushGitFolder(folderId));
     } catch (e) {
       sendJson(res, 400, { error: e instanceof Error ? e.message : '推送失败' });
+    }
+    return true;
+  }
+
+  // GET /api/folders/git-commit-status?folderId=xxx : 「自动提交失败」弹窗的数据源。
+  // 只读,但会现查 index.lock(打开弹窗 / 每次操作后都要反映盘上事实)。
+  if (req.method === 'GET' && req.url && path === '/api/folders/git-commit-status' && getGitAutoCommitStatus) {
+    const url = new URL(req.url, 'http://localhost');
+    const folderId = url.searchParams.get('folderId');
+    if (!folderId) {
+      sendJson(res, 400, { error: 'folderId is required' });
+      return true;
+    }
+    try {
+      sendJson(res, 200, getGitAutoCommitStatus(folderId));
+    } catch (e) {
+      sendJson(res, 400, { error: e instanceof Error ? e.message : '读取自动提交状态失败' });
+    }
+    return true;
+  }
+
+  // POST /api/folders/git-index-lock/delete { folderId } : 删除残留的 index.lock。
+  // 只删 git 指认的那一个文件;用户须先确认没有其它 git 进程在操作(弹窗里有二次确认)。
+  if (req.method === 'POST' && path === '/api/folders/git-index-lock/delete' && deleteGitIndexLock) {
+    try {
+      const raw = await readBody(req);
+      const body = raw === '' ? {} : JSON.parse(raw);
+      const folderId = (body as { folderId?: unknown }).folderId;
+      if (typeof folderId !== 'string' || folderId === '') {
+        sendJson(res, 400, { error: 'folderId is required' });
+        return true;
+      }
+      sendJson(res, 200, deleteGitIndexLock(folderId));
+    } catch (e) {
+      sendJson(res, 400, { error: e instanceof Error ? e.message : '删除锁文件失败' });
+    }
+    return true;
+  }
+
+  // POST /api/folders/git-commit-retry { folderId } : 手动重试自动提交。
+  // 仍走完整结算闸门;被挡时返回 { ok:false, error:'仍被延后…' }。
+  if (req.method === 'POST' && path === '/api/folders/git-commit-retry' && retryGitAutoCommit) {
+    try {
+      const raw = await readBody(req);
+      const body = raw === '' ? {} : JSON.parse(raw);
+      const folderId = (body as { folderId?: unknown }).folderId;
+      if (typeof folderId !== 'string' || folderId === '') {
+        sendJson(res, 400, { error: 'folderId is required' });
+        return true;
+      }
+      sendJson(res, 200, retryGitAutoCommit(folderId));
+    } catch (e) {
+      sendJson(res, 400, { error: e instanceof Error ? e.message : '重试自动提交失败' });
     }
     return true;
   }
