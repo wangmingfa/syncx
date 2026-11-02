@@ -4,11 +4,13 @@ import type { VNodeChild } from 'vue';
 import { NButton, NDropdown, NPopover } from 'naive-ui';
 import type { DropdownOption } from 'naive-ui';
 import OsIcon from './OsIcon.vue';
+import BackendIcon from './BackendIcon.vue';
 import { useStatusContext } from '../composables/statusContext';
 import { useTheme, type ThemeMode } from '../composables/useTheme';
 import { useSkin, type SkinMode } from '../composables/useSkin';
 import { formatBytes } from '../utils/bytes';
 import { osIconLabel } from '../utils/os-icon';
+import { backendIconLabel } from '../utils/backend-icon';
 import { isNodeRuntime } from '../utils/format';
 
 const { status, busy, checkForUpdate, openUpload, openLogs, openTopology, openTraffic, openGuide, openSettings, openTerminal, openFleet, openAuth, logout, copy, notifSupported, notifEnabled, toggleNotifications } = useStatusContext();
@@ -87,6 +89,14 @@ const anyPeerOnline = computed<boolean>(() => status.value.devices.some((p) => p
 const chipOsHint = computed<string>(
   () => `${osIconLabel(status.value.platform)} · ${anyPeerOnline.value ? '已有对端在线' : '暂无对端连接'}`,
 );
+
+/**
+ * 本机后端标识的 hover 文本。**单独成句**,不复用 chipOsHint:那行说的是
+ * 「系统 + 对端在线状态」,与「后端形态」是两件事,混在一句里既有歧义又对不上
+ * 各自的图标(悬停任何一枚都读到同一段话,等于没解释)。
+ * 形态缺省时(理论上本机不会有,留作兜底)说「后端未知」,不猜成 Node。
+ */
+const chipBackendHint = computed<string>(() => `${backendIconLabel(status.value.runtime)} 后端`);
 
 /**
  * 顶栏收纳策略(定稿):所有低频操作收进本机 chip 的 hover 浮层,
@@ -268,6 +278,10 @@ function runChipRow(row: ChipRow): void {
       <template #trigger>
         <span class="device-chip">
           <OsIcon :platform="status.platform" :offline="!anyPeerOnline" :hint="chipOsHint" />
+          <!-- 后端标识紧贴系统图标:两者合起来才是「这台机器的运行画像」。
+               不去色 —— 本机后端形态与有没有对端在线无关(系统图标的灰/彩表达的是
+               「有没有对端连上」,这枚要是跟着变灰,会被读成「后端掉了」)。 -->
+          <BackendIcon :runtime="status.runtime" :hint="chipBackendHint" />
           <span class="mono">{{ status.deviceId }}</span>
           <span v-if="status.version" class="chip-version">{{ status.version === 'dev' ? status.version : `v${status.version}` }}</span>
           <svg class="chip-caret" viewBox="0 0 24 24" width="10" height="10" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">

@@ -2,9 +2,11 @@
 import { ref } from 'vue';
 import { NButton, NInput } from 'naive-ui';
 import OsIcon from './OsIcon.vue';
+import BackendIcon from './BackendIcon.vue';
 import PairQrModal from './PairQrModal.vue';
 import { useStatusContext } from '../composables/statusContext';
 import { osIconLabel } from '../utils/os-icon';
+import { backendIconLabel } from '../utils/backend-icon';
 
 const {
   status,
@@ -146,6 +148,15 @@ const qrOpen = ref(false);
         <span class="item-addr">
           <span class="addr-label">版本</span><span class="addr-value mono">{{ p.version ?? '未知' }}</span>
         </span>
+        <!-- 后端标识:对端宣告了 runtime 才渲染。旧版本对端不发该字段(undefined),
+             此时整块不出现 —— 留一个「后端 未知」的空位只会占据本已紧张的一行。 -->
+        <span v-if="p.runtime" class="item-addr backend-tag">
+          <span class="addr-label">后端</span>
+          <span class="backend-tag__value">
+            <BackendIcon :runtime="p.runtime" :offline="!p.online" :size="13" :hint="`${backendIconLabel(p.runtime)} 后端 · ${p.deviceId}`" />
+            <span class="addr-value mono">{{ backendIconLabel(p.runtime) }}</span>
+          </span>
+        </span>
       </div>
       <div v-if="p.url || p.hostname" class="item-addr">
         <span class="addr-label">{{ p.url ? '地址' : '主机名' }}</span><span class="addr-value mono">{{ deviceAddrLine(p) }}</span>
@@ -169,13 +180,17 @@ const qrOpen = ref(false);
 </template>
 
 <style scoped>
-/* 设备卡把「共享 N 个目录」和「版本」并成一行,省一档竖向空间。
+/* 设备卡把「共享 N 个目录」「版本」「后端」并成一行,省两档竖向空间。
    .item-sub / .item-addr / .addr-* 的视觉骨架来自 style.css(多组件共用),
-   这里只管本卡的排布:左侧文字可收缩省略,版本 chip 保持完整不换行。 */
+   这里只管本卡的排布:左侧文字可收缩省略,版本 / 后端 chip 保持完整不换行。
+   允许 wrap:窄屏上三块并排放不下时,后端整块落到第二行,而不是把设备卡撑宽
+   (整行的 flex-basis 都按内容算,不给 wrap 就只能溢出卡片)。 */
 .item-meta {
   display: flex;
   align-items: center;
+  flex-wrap: wrap;
   gap: 6px;
+  row-gap: 4px;
   min-width: 0;
 }
 .item-meta .item-sub {
@@ -193,6 +208,15 @@ const qrOpen = ref(false);
 .item-meta .item-addr::before {
   content: '·';
   color: var(--muted);
+}
+
+/* 后端标签把图标和文字并成一组:图标是扫读入口,文字是色觉障碍用户的兜底。
+   gap 取 4px 而不是 6px —— 图标紧贴它自己的文字,才不会与左侧「版本」的值
+   读成「v0.4.1 Rust」一整串。 */
+.backend-tag__value {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
 }
 </style>
 

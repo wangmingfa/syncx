@@ -9,6 +9,13 @@ export interface IndexStats {
   tombstones: number;
 }
 
+/**
+ * 后端运行时形态(ADR-0025):同一份协议由三种语言的后端实现。
+ *  - 本机形态决定「上传 npm 安装包」入口是否可用;
+ *  - 对端形态经控制消息的 `runtime` 字段宣告,用于设备卡上的后端标识。
+ */
+export type PeerRuntime = 'node' | 'rust' | 'moonbit';
+
 export interface DeviceStatus {
   deviceId: string;
   online: boolean;
@@ -19,6 +26,9 @@ export interface DeviceStatus {
   /** 对端经 hello 宣告的运行平台(process.platform);用于设备卡画操作系统图标。
    *  undefined = 对端旧版本未发,UI 退回字母头像。 */
   platform?: string;
+  /** 对端运行的后端形态(node/rust/moonbit);用于设备卡画后端标识。
+   *  undefined = 对端旧版本未发,UI 不展示后端标识(而不是猜成 node)。 */
+  runtime?: PeerRuntime;
   /** 本机配置里该设备被指派到的目录 id 列表(用于界面展示「共享 N 个目录」)。 */
   folders: string[];
   /** 对端经 folder-sync-list 宣告的「它与本机在同步的目录 id 集合」。
@@ -127,7 +137,7 @@ export interface StatusPayload {
   /** 后端运行时形态(ADR-0025 第 3 节):本实现恒为 'node'。
    *  前端据此决定「上传 npm 安装包」入口是否可用 —— 缺省会被读成非 node 而拦掉,
    *  所以这个字段必须显式下发,不能省。 */
-  runtime: 'node' | 'rust' | 'moonbit';
+  runtime: PeerRuntime;
   /** 自更新来源:node 形态走 npm。 */
   updateSource: 'npm' | 'github';
   folders: SharedFolderConfig[];

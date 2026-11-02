@@ -56,12 +56,18 @@ pub const MAX_SNAPSHOT_CHUNKS: usize = 500;
 /// 自更新安装包的默认通道。
 pub const DEFAULT_TAG: &str = update::DEFAULT_UPGRADE_TAG;
 
+/// 本后端的运行时形态(ADR-0025 第 3 节)。与 `syncx-api` 的 `/api/status`
+/// 里 `runtime` 字段同源:都是「这个二进制是用哪种语言写的」这一编译期事实。
+pub const RUNTIME: &str = "rust";
+
 /// 一台对端最近一次自报的软件信息。
 #[derive(Debug, Clone, Default)]
 pub struct PeerInfo {
     pub version: Option<String>,
     pub hostname: Option<String>,
     pub platform: Option<String>,
+    /// 对端后端形态(node/rust/moonbit);`None` = 旧版本对端未宣告。
+    pub runtime: Option<String>,
 }
 
 /// 对端索引快照(经分片收齐)。
@@ -200,9 +206,12 @@ impl GitNotice {
             diff_stat: self.diff_stat.clone(),
             commit_subjects: self.commit_subjects.clone(),
             parent_hash: self.parent_hash.clone(),
+            // 中继出去的帧署的是**最初那台提交设备**:本机的版本/主机名/平台/形态
+            // 一个都不能盖上去,否则对端会把中继机的属性安到源头设备头上。
             version: None,
             hostname: None,
             platform: None,
+            runtime: None,
         }
     }
 
@@ -374,6 +383,7 @@ impl RuntimeOps {
         version: Option<&str>,
         hostname: Option<&str>,
         platform: Option<&str>,
+        runtime: Option<&str>,
     ) -> bool {
         let Ok(mut map) = self.peer_info.lock() else {
             return false;
@@ -392,6 +402,9 @@ impl RuntimeOps {
         }
         if let Some(value) = platform {
             entry.platform = Some(value.to_string());
+        }
+        if let Some(value) = runtime {
+            entry.runtime = Some(value.to_string());
         }
         changed
     }
@@ -439,6 +452,7 @@ impl RuntimeOps {
                     version: Some(version.clone()),
                     hostname: hostname.clone(),
                     platform: platform.clone(),
+                    runtime: Some(RUNTIME.to_string()),
                 },
             );
         }
@@ -451,6 +465,7 @@ impl RuntimeOps {
                     version: Some(version),
                     hostname,
                     platform,
+                    runtime: Some(RUNTIME.to_string()),
                 },
             );
         }
@@ -487,6 +502,7 @@ impl RuntimeOps {
                 version: Some(version),
                 hostname,
                 platform,
+                runtime: Some(RUNTIME.to_string()),
             },
         );
     }
@@ -519,6 +535,7 @@ impl RuntimeOps {
                 version: Some(version),
                 hostname,
                 platform,
+                runtime: Some(RUNTIME.to_string()),
             },
         );
         self.push_shares_to(device_id);
@@ -1175,6 +1192,7 @@ impl ControlOps for RuntimeOps {
                     version: Some(version),
                     hostname,
                     platform,
+                    runtime: Some(RUNTIME.to_string()),
                 },
             );
             tracing::info!(
@@ -1199,6 +1217,7 @@ impl ControlOps for RuntimeOps {
                     version: Some(version),
                     hostname,
                     platform,
+                    runtime: Some(RUNTIME.to_string()),
                 },
             );
             tracing::info!("accepted pairing request from {}", offer.from_device_id);
@@ -1222,6 +1241,7 @@ impl ControlOps for RuntimeOps {
                 version: Some(version),
                 hostname,
                 platform,
+                runtime: Some(RUNTIME.to_string()),
             }
         } else {
             ControlMessage::PairingAck {
@@ -1231,6 +1251,7 @@ impl ControlOps for RuntimeOps {
                 version: Some(version),
                 hostname,
                 platform,
+                runtime: Some(RUNTIME.to_string()),
             }
         };
         let _ = self.send_to(&offer.from_device_id, ack);
@@ -1366,6 +1387,7 @@ impl ControlOps for RuntimeOps {
                     version: Some(version),
                     hostname: hostname.clone(),
                     platform: platform.clone(),
+                    runtime: Some(RUNTIME.to_string()),
                 },
             );
             self.push_folder_sync_list(&device_id);
@@ -1545,8 +1567,9 @@ pub fn should_log_version_change(
     version: Option<&str>,
     hostname: Option<&str>,
     platform: Option<&str>,
+    runtime: Option<&str>,
 ) -> bool {
-    ops.learn_peer_info(device_id, version, hostname, platform)
+    ops.learn_peer_info(device_id, version, hostname, platform, runtime)
 }
 
 #[cfg(test)]

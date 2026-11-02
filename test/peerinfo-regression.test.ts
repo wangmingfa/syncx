@@ -71,6 +71,7 @@ describe('peerInfo keyed by deviceId (regression: version survives non-bookmark 
         version: '9.9.9',
         hostname: 'hostC',
         platform: 'darwin',
+        runtime: 'rust',
       });
 
       // 等待 hello 被处理(异步 WS 收发 + 解密)
@@ -82,6 +83,9 @@ describe('peerInfo keyed by deviceId (regression: version survives non-bookmark 
       expect(link.hostname).toBe('hostC');
       // platform 走的是同一条按 deviceId 缓存的路(设备卡的操作系统图标据此画)
       expect(link.platform).toBe('darwin');
+      // runtime 同理(设备卡的后端标识据此画):与 platform 共用一个缓存,
+      // 任意一条控制消息带过来就学到,不依赖那条可能被丢的 hello
+      expect(link.runtime).toBe('rust');
       // 双连接:两条会话都应在线
       expect(link.online).toBe(true);
 
@@ -142,6 +146,7 @@ describe('peer version learned from non-hello control messages (regression: lost
         version: '9.9.9',
         hostname: 'hostC',
         platform: 'win32',
+        runtime: 'moonbit',
       });
 
       await waitFor(() => managerA.describeDevice(cId.deviceId).version === '9.9.9', 5000);
@@ -151,6 +156,8 @@ describe('peer version learned from non-hello control messages (regression: lost
       expect(link.hostname).toBe('hostC');
       // 平台同样不依赖那条可能被丢的 hello
       expect(link.platform).toBe('win32');
+      // 后端形态走同一条路:非 hello 的控制消息也足以让设备卡标出后端
+      expect(link.runtime).toBe('moonbit');
       expect(link.online).toBe(true);
 
       managerA.close();

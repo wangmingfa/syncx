@@ -1,5 +1,8 @@
 /** Web UI 共享类型:status 载荷与各弹窗组件的 Props 形状。 */
 
+/** 后端运行时形态(ADR-0025):node / rust / moonbit 三份实现共用一套协议。 */
+export type PeerRuntime = 'node' | 'rust' | 'moonbit';
+
 /** 单个正在传输的文件(文件级进度);bytesTotal 为 0 时表示大小未知。 */
 export interface TransferFile {
   path: string;
@@ -70,6 +73,9 @@ export interface DeviceInfo {
   hostname?: string;
   /** 对端运行平台(hello 宣告的 process.platform);undefined=旧版本对端未发,头像退回字母。 */
   platform?: string;
+  /** 对端后端形态(hello / 任意控制消息宣告的 runtime);undefined=旧版本对端未发,
+   *  设备卡不展示后端标识(而不是猜成 node)。 */
+  runtime?: PeerRuntime;
   /** 该设备被指派到的目录 id 列表(用于展示「共享 N 个目录」)。 */
   folders: string[];
   /** 对端宣告的「它与本机在同步的目录 id 集合」;undefined=旧版本对端,无法判断已停止共享。 */
@@ -174,7 +180,7 @@ export interface StatusData {
   updateAvailable?: { latest: string; current: string } | null;
   /** 后端运行时形态(ADR-0025;缺省 = 旧后端,视作 node)。
    *  判「是否 node」请用 utils/format.ts 的 isNodeRuntime,别直接比 !== 'node'。 */
-  runtime?: 'node' | 'rust' | 'moonbit';
+  runtime?: PeerRuntime;
   /** 自更新来源:node 形态走 npm,rust 形态走 GitHub Releases(缺省 = npm)。 */
   updateSource?: 'npm' | 'github';
   /** 最近的中转活动(ADR-0014):本机把来源设备的目录变更转发给其他对端时记录。无中转则缺省。 */

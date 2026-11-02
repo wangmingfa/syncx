@@ -538,6 +538,7 @@ pub fn get_status(runtime_ops: &RuntimeOps, extras: &Extras) -> Value {
             url: runtime_ops.peer_url_of(device_id),
             hostname: info.hostname,
             platform: info.platform,
+            runtime: info.runtime,
             folders: folder_devices.get(device_id).cloned().unwrap_or_default(),
             remote_folders: runtime_ops
                 .remote_folders
@@ -731,6 +732,7 @@ fn on_open(runtime: &Runtime, link: driver::ControlLink) {
             version,
             hostname,
             platform,
+            runtime: Some(super::RUNTIME.to_string()),
         },
     );
     ops.push_folder_sync_list(&link.device_id);
@@ -763,6 +765,7 @@ pub fn on_control(runtime: &Runtime, link: driver::ControlLink, message: Control
             version,
             hostname,
             platform,
+            runtime,
         } => {
             if super::should_log_version_change(
                 ops,
@@ -770,6 +773,7 @@ pub fn on_control(runtime: &Runtime, link: driver::ControlLink, message: Control
                 Some(&version),
                 hostname.as_deref(),
                 platform.as_deref(),
+                runtime.as_deref(),
             ) {
                 tracing::info!("对端版本:{from_device_id} → {version}");
             }
@@ -780,6 +784,7 @@ pub fn on_control(runtime: &Runtime, link: driver::ControlLink, message: Control
             version,
             hostname,
             platform,
+            runtime,
         } => {
             super::should_log_version_change(
                 ops,
@@ -787,6 +792,7 @@ pub fn on_control(runtime: &Runtime, link: driver::ControlLink, message: Control
                 version.as_deref(),
                 hostname.as_deref(),
                 platform.as_deref(),
+                runtime.as_deref(),
             );
             offers::receive_offer(
                 &ops.store,
@@ -808,6 +814,7 @@ pub fn on_control(runtime: &Runtime, link: driver::ControlLink, message: Control
                     version: Some(self_version),
                     hostname: self_hostname,
                     platform: self_platform,
+                    runtime: Some(super::RUNTIME.to_string()),
                 },
             );
             tracing::info!("收到配对请求:{from_device_id}");
@@ -820,6 +827,7 @@ pub fn on_control(runtime: &Runtime, link: driver::ControlLink, message: Control
             version,
             hostname,
             platform,
+            runtime,
         } => {
             super::should_log_version_change(
                 ops,
@@ -827,6 +835,7 @@ pub fn on_control(runtime: &Runtime, link: driver::ControlLink, message: Control
                 version.as_deref(),
                 hostname.as_deref(),
                 platform.as_deref(),
+                runtime.as_deref(),
             );
             let created = offers::receive_offer(
                 &ops.store,
@@ -847,6 +856,7 @@ pub fn on_control(runtime: &Runtime, link: driver::ControlLink, message: Control
                     version: Some(self_version),
                     hostname: self_hostname,
                     platform: self_platform,
+                    runtime: Some(super::RUNTIME.to_string()),
                 },
             );
             // 新落成一个待确认项后立刻反推目录清单(带 pendingFolderIds),
@@ -897,6 +907,7 @@ pub fn on_control(runtime: &Runtime, link: driver::ControlLink, message: Control
             version,
             hostname,
             platform,
+            runtime,
         } => {
             super::should_log_version_change(
                 ops,
@@ -904,6 +915,7 @@ pub fn on_control(runtime: &Runtime, link: driver::ControlLink, message: Control
                 version.as_deref(),
                 hostname.as_deref(),
                 platform.as_deref(),
+                runtime.as_deref(),
             );
             if let Ok(mut map) = ops.remote_folders.lock() {
                 map.insert(from_device_id.clone(), folder_ids.clone());
@@ -982,6 +994,7 @@ pub fn on_control(runtime: &Runtime, link: driver::ControlLink, message: Control
                     version: Some(version),
                     hostname,
                     platform,
+                    runtime: Some(super::RUNTIME.to_string()),
                 },
             );
             // 记住这一跳(而非消息里署名的提交设备):中继时不回给来源端,

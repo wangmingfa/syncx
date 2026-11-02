@@ -170,6 +170,8 @@ pub enum ControlMessage {
         hostname: Option<String>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         platform: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        runtime: Option<String>,
     },
     FolderInvitationAck {
         #[serde(rename = "offerId")]
@@ -183,6 +185,8 @@ pub enum ControlMessage {
         hostname: Option<String>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         platform: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        runtime: Option<String>,
     },
     PairingRequest {
         #[serde(rename = "offerId")]
@@ -195,6 +199,8 @@ pub enum ControlMessage {
         hostname: Option<String>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         platform: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        runtime: Option<String>,
     },
     PairingAck {
         #[serde(rename = "offerId")]
@@ -208,6 +214,8 @@ pub enum ControlMessage {
         hostname: Option<String>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         platform: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        runtime: Option<String>,
     },
     /// 邀请投递回执(控制面「至少一次」的第二道锁):接收方**处理了**邀请/配对请求
     /// 即回此帧,与用户是否决策无关 —— 用户决策走 `*-ack`,可能迟到很久,不能驱动重发。
@@ -222,6 +230,8 @@ pub enum ControlMessage {
         hostname: Option<String>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         platform: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        runtime: Option<String>,
     },
     FolderSyncList {
         #[serde(rename = "fromDeviceId")]
@@ -240,6 +250,8 @@ pub enum ControlMessage {
         hostname: Option<String>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         platform: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        runtime: Option<String>,
     },
     /// 会话建立时互发的版本宣告。dev 态(src 直跑)`version` 为 `"dev"`。
     Hello {
@@ -250,6 +262,8 @@ pub enum ControlMessage {
         hostname: Option<String>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         platform: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        runtime: Option<String>,
     },
     SelfBinaryRequest {
         #[serde(rename = "requestId")]
@@ -262,6 +276,8 @@ pub enum ControlMessage {
         hostname: Option<String>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         platform: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        runtime: Option<String>,
     },
     SelfBinaryResponse {
         #[serde(rename = "requestId")]
@@ -276,6 +292,8 @@ pub enum ControlMessage {
         hostname: Option<String>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         platform: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        runtime: Option<String>,
     },
     FolderIndexRequest {
         #[serde(rename = "requestId")]
@@ -290,6 +308,8 @@ pub enum ControlMessage {
         hostname: Option<String>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         platform: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        runtime: Option<String>,
     },
     FolderIndexSnapshot {
         #[serde(rename = "requestId")]
@@ -318,6 +338,8 @@ pub enum ControlMessage {
         hostname: Option<String>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         platform: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        runtime: Option<String>,
     },
     FileContentRequest {
         #[serde(rename = "requestId")]
@@ -333,6 +355,8 @@ pub enum ControlMessage {
         hostname: Option<String>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         platform: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        runtime: Option<String>,
     },
     FileContentResponse {
         #[serde(rename = "requestId")]
@@ -361,6 +385,8 @@ pub enum ControlMessage {
         hostname: Option<String>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         platform: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        runtime: Option<String>,
     },
     FileContentWrite {
         #[serde(rename = "requestId")]
@@ -379,6 +405,8 @@ pub enum ControlMessage {
         hostname: Option<String>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         platform: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        runtime: Option<String>,
     },
     FileContentWriteResult {
         #[serde(rename = "requestId")]
@@ -397,6 +425,8 @@ pub enum ControlMessage {
         hostname: Option<String>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         platform: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        runtime: Option<String>,
     },
     GitCommitNotify {
         #[serde(rename = "fromDeviceId")]
@@ -425,6 +455,8 @@ pub enum ControlMessage {
         hostname: Option<String>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         platform: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        runtime: Option<String>,
     },
     GitCommitAck {
         #[serde(rename = "fromDeviceId")]
@@ -439,6 +471,8 @@ pub enum ControlMessage {
         hostname: Option<String>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         platform: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        runtime: Option<String>,
     },
 }
 

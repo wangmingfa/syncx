@@ -5,7 +5,7 @@ import type { BlockRequest, BlockResponse } from '../messages.js';
 import { encodeIndex, encodeIndexChunks, decodeIndex } from '../messages.js';
 import type { PeerTransport, SyncPeer, IndexMode } from '../peer.js';
 import { RateLimiter } from '../ratelimit.js';
-import type { ProgressCounts } from '../status.js';
+import type { PeerRuntime, ProgressCounts } from '../status.js';
 
 export type WireMessage =
   /**
@@ -42,42 +42,44 @@ export type WireMessage =
  * 由接收方路由到一个全局处理器(而非按 folder 找 SyncPeer)。
  */
 export type ControlMessage =
-  | { kind: 'folder-invitation'; offerId: string; fromDeviceId: string; folderId: string; folderName: string; version?: string; hostname?: string; platform?: string }
-  | { kind: 'folder-invitation-ack'; offerId: string; fromDeviceId: string; accepted: boolean; version?: string; hostname?: string; platform?: string }
-  | { kind: 'pairing-request'; offerId: string; fromDeviceId: string; version?: string; hostname?: string; platform?: string }
-  | { kind: 'pairing-ack'; offerId: string; fromDeviceId: string; accepted: boolean; version?: string; hostname?: string; platform?: string }
+  | { kind: 'folder-invitation'; offerId: string; fromDeviceId: string; folderId: string; folderName: string; version?: string; hostname?: string; platform?: string; runtime?: PeerRuntime }
+  | { kind: 'folder-invitation-ack'; offerId: string; fromDeviceId: string; accepted: boolean; version?: string; hostname?: string; platform?: string; runtime?: PeerRuntime }
+  | { kind: 'pairing-request'; offerId: string; fromDeviceId: string; version?: string; hostname?: string; platform?: string; runtime?: PeerRuntime }
+  | { kind: 'pairing-ack'; offerId: string; fromDeviceId: string; accepted: boolean; version?: string; hostname?: string; platform?: string; runtime?: PeerRuntime }
   /**
    * 邀请投递回执(控制面「至少一次」的第二道锁):接收方**处理了** folder-invitation /
    * pairing-request(无论新建待确认、去重命中还是已互信跳过)即回此帧,与用户是否
    * 决策无关 —— 用户决策走 `*-ack`,可能迟到很久,不能驱动重发。发送方
    * (OfferRetryLedger)据此销账;旧版本对端不回此帧,发送方重发至上限自动放弃。
    */
-  | { kind: 'offer-receipt'; offerId: string; fromDeviceId: string; version?: string; hostname?: string; platform?: string }
+  | { kind: 'offer-receipt'; offerId: string; fromDeviceId: string; version?: string; hostname?: string; platform?: string; runtime?: PeerRuntime }
   /** 会话建立与共享关系变更时互发的「本机当前与你在同步的目录清单」,
    *  接收方据此在 UI 上区分设备标签的 同步中 / 已停止共享 状态。
    *  pendingFolderIds:本机仍待确认的、来自对方的目录邀请 id 集合,
    *  对方据此把标签显示为「待对方确认」而非误判「已停止共享」。
    *  旧版本对端不发送该字段(undefined),接收方按未知处理,退回旧逻辑。 */
-  | { kind: 'folder-sync-list'; fromDeviceId: string; folderIds: string[]; pendingFolderIds?: string[]; version?: string; hostname?: string; platform?: string }
+  | { kind: 'folder-sync-list'; fromDeviceId: string; folderIds: string[]; pendingFolderIds?: string[]; version?: string; hostname?: string; platform?: string; runtime?: PeerRuntime }
   /** 会话建立时互发的版本宣告。dev 态(src 直跑)version 为 'dev'。
    *  hostname 为本机 node:os 主机名,供对端在设备卡 / 配对 / 共享邀请上展示来源主机,
    *  旧版本对端不发送该字段,接收方按 undefined 处理(不展示主机名)。
    *  platform 为本机 process.platform,供对端设备卡 / 顶栏画操作系统图标;与 hostname
-   *  同一套兼容口径 —— 旧版本对端不发,接收方按 undefined 处理(退回字母头像)。 */
-  | { kind: 'hello'; fromDeviceId: string; version: string; hostname?: string; platform?: string }
+   *  同一套兼容口径 —— 旧版本对端不发,接收方按 undefined 处理(退回字母头像)。
+   *  runtime 为本机后端形态(node/rust/moonbit),供对端设备卡画后端标识;同为
+   *  可缺省字段,旧版本对端不发时按 undefined 处理(不展示后端标识,而不是猜成 node)。 */
+  | { kind: 'hello'; fromDeviceId: string; version: string; hostname?: string; platform?: string; runtime?: PeerRuntime }
   /** 请求对端的自身安装包(tgz,整包),用于「版本低于对方时从对方升级」。
    *  仅经握手签名校验过的会话可发;对端 dev 态时 response.data 为 undefined。 */
-  | { kind: 'self-binary-request'; requestId: string; fromDeviceId: string; version?: string; hostname?: string; platform?: string }
+  | { kind: 'self-binary-request'; requestId: string; fromDeviceId: string; version?: string; hostname?: string; platform?: string; runtime?: PeerRuntime }
   /** 对端安装包回传:base64 的整包 tgz(含 package.json 与 dist/syncx.js)+ 内容
    *  sha256 指纹;data 缺省 = 对端无法提供(dev 态或打包失败)。 */
-  | { kind: 'self-binary-response'; requestId: string; fromDeviceId: string; version: string; sha256: string; data?: string; hostname?: string; platform?: string }
+  | { kind: 'self-binary-response'; requestId: string; fromDeviceId: string; version: string; sha256: string; data?: string; hostname?: string; platform?: string; runtime?: PeerRuntime }
   /**
    * 内容对比:请求对端把它某个共享目录的索引快照发过来。**全程只读** ——
    * 不改动任何一端的状态、不触发索引交换。刻意不走「强制重连拿全量索引」那条路:
    * 诊断工具不该扰动被观察的系统,否则用户看到的可能是自己造成的现象。
    * requestId 用于把分片的响应拼回同一次请求(并发多次对比互不干扰)。
    */
-  | { kind: 'folder-index-request'; requestId: string; fromDeviceId: string; folderId: string; version?: string; hostname?: string; platform?: string }
+  | { kind: 'folder-index-request'; requestId: string; fromDeviceId: string; folderId: string; version?: string; hostname?: string; platform?: string; runtime?: PeerRuntime }
   /**
    * 索引快照分片:seq 从 0 开始,total 为总片数。ignoreLines 与 progress 每片都带
    * (体量远小于条目本身,冗余一点换「不依赖首片必达」的简单性)。
@@ -86,7 +88,7 @@ export type ControlMessage =
    * progress 让报告能提示「对端正在收 3 个文件,本报告可能含传输中的中间态」——
    * 传输中的文件在索引里已是新版本、盘上却是旧内容,不标注会误导排查方向。
    */
-  | { kind: 'folder-index-snapshot'; requestId: string; fromDeviceId: string; folderId: string; seq: number; total: number; entries?: string; error?: string; ignoreLines?: string[]; progress?: ProgressCounts; version?: string; hostname?: string; platform?: string }
+  | { kind: 'folder-index-snapshot'; requestId: string; fromDeviceId: string; folderId: string; seq: number; total: number; entries?: string; error?: string; ignoreLines?: string[]; progress?: ProgressCounts; version?: string; hostname?: string; platform?: string; runtime?: PeerRuntime }
   /**
    * 双栏对比页:向对端索取它某个共享目录里**单个文件的内容**(只读)。
    *
@@ -94,7 +96,7 @@ export type ControlMessage =
    * servePeerFile):目录没把对方列进 devices 就一个字节都不给 —— 否则这条通道
    * 会变成绕过共享关系的任意文件读取入口。
    */
-  | { kind: 'file-content-request'; requestId: string; fromDeviceId: string; folderId: string; path: string; version?: string; hostname?: string; platform?: string }
+  | { kind: 'file-content-request'; requestId: string; fromDeviceId: string; folderId: string; path: string; version?: string; hostname?: string; platform?: string; runtime?: PeerRuntime }
   /**
    * 文件内容回传。data 为 base64;error 非空表示对端无法提供(未共享 / 不存在 /
    * 不是文件 / 超过体积上限),此时 data 缺省。
@@ -102,7 +104,7 @@ export type ControlMessage =
    * version 是「syncx 运行版本」(withSelfInfo 每条都注入),两者混用会让读代码的人
    * 把版本向量当成软件版本号。
    */
-  | { kind: 'file-content-response'; requestId: string; fromDeviceId: string; folderId: string; path: string; data?: string; size?: number; entryVersion?: Array<[string, number]>; error?: string; version?: string; hostname?: string; platform?: string }
+  | { kind: 'file-content-response'; requestId: string; fromDeviceId: string; folderId: string; path: string; data?: string; size?: number; entryVersion?: Array<[string, number]>; error?: string; version?: string; hostname?: string; platform?: string; runtime?: PeerRuntime }
   /**
    * 双栏对比页的「把本机内容推到对端」:请对端按给定内容落盘,并**采纳给定版本**。
    *
@@ -110,8 +112,8 @@ export type ControlMessage =
    * 版本向量可控地对齐:否则对端下一轮扫描会把刚写入的内容判成「本机新编辑」再推回来,
    * 而这一侧又会把它当成远端更新拉一次 —— 一次点击变成两轮无意义传输。
    */
-  | { kind: 'file-content-write'; requestId: string; fromDeviceId: string; folderId: string; path: string; data: string; entryVersion: Array<[string, number]>; version?: string; hostname?: string; platform?: string }
-  | { kind: 'file-content-write-result'; requestId: string; fromDeviceId: string; folderId: string; path: string; ok: boolean; error?: string; version?: string; hostname?: string; platform?: string }
+  | { kind: 'file-content-write'; requestId: string; fromDeviceId: string; folderId: string; path: string; data: string; entryVersion: Array<[string, number]>; version?: string; hostname?: string; platform?: string; runtime?: PeerRuntime }
+  | { kind: 'file-content-write-result'; requestId: string; fromDeviceId: string; folderId: string; path: string; ok: boolean; error?: string; version?: string; hostname?: string; platform?: string; runtime?: PeerRuntime }
   /**
    * Git 提交同步:本机在某共享目录检测到新提交,通知对端也执行自动提交。
    * 接收方按 folderId 找到本地目录,等本次提交的内容在本地落齐后执行
@@ -123,7 +125,7 @@ export type ControlMessage =
    * 与 commitHash 都不改写,中继设备的镜像哈希永不出门),链式拓扑的末端因此也能提交。
    * 旧版本对端不识别该 kind,直接忽略,不影响既有功能。
    */
-  | { kind: 'git-commit-notify'; fromDeviceId: string; folderId: string; commitHash: string; commitMessage: string; changedFiles: string[]; diffStat?: string; commitSubjects?: string[]; parentHash: string; version?: string; hostname?: string; platform?: string }
+  | { kind: 'git-commit-notify'; fromDeviceId: string; folderId: string; commitHash: string; commitMessage: string; changedFiles: string[]; diffStat?: string; commitSubjects?: string[]; parentHash: string; version?: string; hostname?: string; platform?: string; runtime?: PeerRuntime }
   /**
    * Git 提交通知的**投递回执**(控制面「至少一次」的最后一道锁):接收方只要**处理了**
    * 这条通知就立刻回此帧,与它随后有没有落成一笔镜像提交无关 —— 提不提交取决于模式、
@@ -132,7 +134,7 @@ export type ControlMessage =
    * (旧版本对端不回此帧);离线的设备不消耗次数、账一直记着,等它回来补投。
    * commitHash 是通知里那笔**原始提交**的哈希(中继不改写),发送方按它匹配台账。
    */
-  | { kind: 'git-commit-ack'; fromDeviceId: string; folderId: string; commitHash: string; version?: string; hostname?: string; platform?: string };
+  | { kind: 'git-commit-ack'; fromDeviceId: string; folderId: string; commitHash: string; version?: string; hostname?: string; platform?: string; runtime?: PeerRuntime };
 
 export function encodeWireMessage(message: WireMessage): string {
   return JSON.stringify(message);

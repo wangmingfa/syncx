@@ -34,12 +34,21 @@ pub fn WireError::to_text(self : WireError) -> String {
 ///|
 /// 构造会话建立时的版本宣告(version 取单一来源的 syncx 版本,与
 /// Node 侧 `hello` 消息同口径:dev 态由调用方传 "dev" 覆盖)。
+///
+/// runtime 是编译期事实(本模块就是 MoonBit 后端),写死在这里而不由调用方传:
+/// 要冒充别的后端只能直接构造 `Hello`,那是测试的事,不该混进正常入口。
 pub fn make_hello(
   from_device_id : String,
   hostname : String?,
   platform : String?,
 ) -> ControlMessage {
-  Hello(from_device_id~, version=@core.VERSION, hostname~, platform~)
+  Hello(
+    from_device_id~,
+    version=@core.VERSION,
+    hostname~,
+    platform~,
+    runtime=Some("moonbit"),
+  )
 }
 
 // ==================== 解析辅助(照 Rust serde 的严格口径) ====================
@@ -352,17 +361,24 @@ fn set_self_info(
   version : String?,
   hostname : String?,
   platform : String?,
+  runtime : String?,
 ) -> Unit {
   set_opt_str(map, "version", version)
   set_opt_str(map, "hostname", hostname)
   set_opt_str(map, "platform", platform)
+  set_opt_str(map, "runtime", runtime)
 }
 
 ///|
 fn opt_self_info(
   map : Map[String, Json],
-) -> (String?, String?, String?) raise WireError {
-  (opt_str(map, "version"), opt_str(map, "hostname"), opt_str(map, "platform"))
+) -> (String?, String?, String?, String?) raise WireError {
+  (
+    opt_str(map, "version"),
+    opt_str(map, "hostname"),
+    opt_str(map, "platform"),
+    opt_str(map, "runtime"),
+  )
 }
 
 // ==================== 索引条目(WireEntry) ====================
@@ -639,7 +655,8 @@ pub(all) enum ControlMessage {
     folder_name~ : String,
     version~ : String?,
     hostname~ : String?,
-    platform~ : String?
+    platform~ : String?,
+    runtime~ : String?
   )
   /// offerId
   FolderInvitationAck(
@@ -649,7 +666,8 @@ pub(all) enum ControlMessage {
     accepted~ : Bool,
     version~ : String?,
     hostname~ : String?,
-    platform~ : String?
+    platform~ : String?,
+    runtime~ : String?
   )
   /// offerId
   PairingRequest(
@@ -658,7 +676,8 @@ pub(all) enum ControlMessage {
     from_device_id~ : String,
     version~ : String?,
     hostname~ : String?,
-    platform~ : String?
+    platform~ : String?,
+    runtime~ : String?
   )
   /// offerId
   PairingAck(
@@ -668,7 +687,8 @@ pub(all) enum ControlMessage {
     accepted~ : Bool,
     version~ : String?,
     hostname~ : String?,
-    platform~ : String?
+    platform~ : String?,
+    runtime~ : String?
   )
   /// 邀请投递回执(控制面「至少一次」的第二道锁):接收方**处理了**
   /// folder-invitation / pairing-request(无论新建待确认、去重命中还是已互信
@@ -681,7 +701,8 @@ pub(all) enum ControlMessage {
     from_device_id~ : String,
     version~ : String?,
     hostname~ : String?,
-    platform~ : String?
+    platform~ : String?,
+    runtime~ : String?
   )
   /// 会话建立与共享关系变更时互发的「本机当前与你在同步的目录清单」。
   /// pending_folder_ids:本机仍待确认的、来自对方的目录邀请 id 集合。
@@ -694,7 +715,8 @@ pub(all) enum ControlMessage {
     pending_folder_ids~ : Array[String]?,
     version~ : String?,
     hostname~ : String?,
-    platform~ : String?
+    platform~ : String?,
+    runtime~ : String?
   )
   /// 会话建立时互发的版本宣告。dev 态(src 直跑)version 为 "dev"。
   /// fromDeviceId
@@ -702,7 +724,8 @@ pub(all) enum ControlMessage {
     from_device_id~ : String,
     version~ : String,
     hostname~ : String?,
-    platform~ : String?
+    platform~ : String?,
+    runtime~ : String?
   )
   /// 请求对端的自身安装包(tgz,整包),用于「版本低于对方时从对方升级」。
   /// 仅经握手签名校验过的会话可发。
@@ -713,7 +736,8 @@ pub(all) enum ControlMessage {
     from_device_id~ : String,
     version~ : String?,
     hostname~ : String?,
-    platform~ : String?
+    platform~ : String?,
+    runtime~ : String?
   )
   /// 对端安装包回传:base64 的整包 tgz + 内容 sha256 指纹;
   /// data 缺省 = 对端无法提供(dev 态或打包失败)。
@@ -726,7 +750,8 @@ pub(all) enum ControlMessage {
     sha256~ : String,
     data~ : String?,
     hostname~ : String?,
-    platform~ : String?
+    platform~ : String?,
+    runtime~ : String?
   )
   /// 内容对比:请求对端把它某个共享目录的索引快照发过来。**全程只读** ——
   /// 不改动任何一端的状态、不触发索引交换(诊断工具不该扰动被观察的系统)。
@@ -739,7 +764,8 @@ pub(all) enum ControlMessage {
     folder_id~ : String,
     version~ : String?,
     hostname~ : String?,
-    platform~ : String?
+    platform~ : String?,
+    runtime~ : String?
   )
   /// 索引快照分片:seq 从 0 开始,total 为总片数。ignore_lines 与 progress
   /// 每片都带(体量远小于条目本身,冗余一点换「不依赖首片必达」的简单性)。
@@ -760,7 +786,8 @@ pub(all) enum ControlMessage {
     progress~ : Json?,
     version~ : String?,
     hostname~ : String?,
-    platform~ : String?
+    platform~ : String?,
+    runtime~ : String?
   )
   /// 双栏对比页:向对端索取它某个共享目录里**单个文件的内容**(只读)。
   /// requestId
@@ -773,7 +800,8 @@ pub(all) enum ControlMessage {
     path~ : String,
     version~ : String?,
     hostname~ : String?,
-    platform~ : String?
+    platform~ : String?,
+    runtime~ : String?
   )
   /// 文件内容回传。data 为 base64;error 非空表示对端无法提供,此时 data 缺省。
   /// entry_version 是对端该条目的**版本向量** —— 字段名刻意用 `entryVersion`
@@ -794,7 +822,8 @@ pub(all) enum ControlMessage {
     error~ : String?,
     version~ : String?,
     hostname~ : String?,
-    platform~ : String?
+    platform~ : String?,
+    runtime~ : String?
   )
   /// 双栏对比页的「把本机内容推到对端」:请对端按给定内容落盘,并**采纳给定
   /// 版本**(采纳外部版本让两端版本向量可控地对齐,否则对端下一轮扫描会把
@@ -812,7 +841,8 @@ pub(all) enum ControlMessage {
     entry_version~ : Array[(String, Int64)],
     version~ : String?,
     hostname~ : String?,
-    platform~ : String?
+    platform~ : String?,
+    runtime~ : String?
   )
   /// requestId
   FileContentWriteResult(
@@ -826,7 +856,8 @@ pub(all) enum ControlMessage {
     error~ : String?,
     version~ : String?,
     hostname~ : String?,
-    platform~ : String?
+    platform~ : String?,
+    runtime~ : String?
   )
   /// Git 提交同步:本机在某共享目录检测到新提交,通知对端也执行自动提交。
   /// commit_hash 用于去重;changed_files 与 diff_stat 仅用于日志展示;
@@ -851,7 +882,8 @@ pub(all) enum ControlMessage {
     parent_hash~ : String,
     version~ : String?,
     hostname~ : String?,
-    platform~ : String?
+    platform~ : String?,
+    runtime~ : String?
   )
   /// Git 提交通知的投递回执:接收方只要**处理了**这条通知就立刻回此帧,
   /// 与它随后有没有落成一笔镜像提交无关。commit_hash 是通知里那笔原始提交的
@@ -865,7 +897,8 @@ pub(all) enum ControlMessage {
     commit_hash~ : String,
     version~ : String?,
     hostname~ : String?,
-    platform~ : String?
+    platform~ : String?,
+    runtime~ : String?
   )
 } derive(Eq, Debug)
 
@@ -885,7 +918,8 @@ pub fn ControlMessage::to_json(self : ControlMessage) -> Json {
       folder_name~,
       version~,
       hostname~,
-      platform~
+      platform~,
+      runtime~
     ) => {
       let map : Map[String, Json] = Map([])
       set_str(map, "kind", "folder-invitation")
@@ -893,7 +927,7 @@ pub fn ControlMessage::to_json(self : ControlMessage) -> Json {
       set_str(map, "fromDeviceId", from_device_id)
       set_str(map, "folderId", folder_id)
       set_str(map, "folderName", folder_name)
-      set_self_info(map, version, hostname, platform)
+      set_self_info(map, version, hostname, platform, runtime)
       Json::object(map)
     }
     FolderInvitationAck(
@@ -902,22 +936,23 @@ pub fn ControlMessage::to_json(self : ControlMessage) -> Json {
       accepted~,
       version~,
       hostname~,
-      platform~
+      platform~,
+      runtime~
     ) => {
       let map : Map[String, Json] = Map([])
       set_str(map, "kind", "folder-invitation-ack")
       set_str(map, "offerId", offer_id)
       set_str(map, "fromDeviceId", from_device_id)
       set_opt_bool(map, "accepted", Some(accepted))
-      set_self_info(map, version, hostname, platform)
+      set_self_info(map, version, hostname, platform, runtime)
       Json::object(map)
     }
-    PairingRequest(offer_id~, from_device_id~, version~, hostname~, platform~) => {
+    PairingRequest(offer_id~, from_device_id~, version~, hostname~, platform~, runtime~) => {
       let map : Map[String, Json] = Map([])
       set_str(map, "kind", "pairing-request")
       set_str(map, "offerId", offer_id)
       set_str(map, "fromDeviceId", from_device_id)
-      set_self_info(map, version, hostname, platform)
+      set_self_info(map, version, hostname, platform, runtime)
       Json::object(map)
     }
     PairingAck(
@@ -926,22 +961,23 @@ pub fn ControlMessage::to_json(self : ControlMessage) -> Json {
       accepted~,
       version~,
       hostname~,
-      platform~
+      platform~,
+      runtime~
     ) => {
       let map : Map[String, Json] = Map([])
       set_str(map, "kind", "pairing-ack")
       set_str(map, "offerId", offer_id)
       set_str(map, "fromDeviceId", from_device_id)
       set_opt_bool(map, "accepted", Some(accepted))
-      set_self_info(map, version, hostname, platform)
+      set_self_info(map, version, hostname, platform, runtime)
       Json::object(map)
     }
-    OfferReceipt(offer_id~, from_device_id~, version~, hostname~, platform~) => {
+    OfferReceipt(offer_id~, from_device_id~, version~, hostname~, platform~, runtime~) => {
       let map : Map[String, Json] = Map([])
       set_str(map, "kind", "offer-receipt")
       set_str(map, "offerId", offer_id)
       set_str(map, "fromDeviceId", from_device_id)
-      set_self_info(map, version, hostname, platform)
+      set_self_info(map, version, hostname, platform, runtime)
       Json::object(map)
     }
     FolderSyncList(
@@ -950,22 +986,23 @@ pub fn ControlMessage::to_json(self : ControlMessage) -> Json {
       pending_folder_ids~,
       version~,
       hostname~,
-      platform~
+      platform~,
+      runtime~
     ) => {
       let map : Map[String, Json] = Map([])
       set_str(map, "kind", "folder-sync-list")
       set_str(map, "fromDeviceId", from_device_id)
       set_str_array(map, "folderIds", folder_ids)
       set_opt_str_array(map, "pendingFolderIds", pending_folder_ids)
-      set_self_info(map, version, hostname, platform)
+      set_self_info(map, version, hostname, platform, runtime)
       Json::object(map)
     }
-    Hello(from_device_id~, version~, hostname~, platform~) => {
+    Hello(from_device_id~, version~, hostname~, platform~, runtime~) => {
       let map : Map[String, Json] = Map([])
       set_str(map, "kind", "hello")
       set_str(map, "fromDeviceId", from_device_id)
       set_str(map, "version", version)
-      set_self_info(map, None, hostname, platform)
+      set_self_info(map, None, hostname, platform, runtime)
       Json::object(map)
     }
     SelfBinaryRequest(
@@ -973,13 +1010,14 @@ pub fn ControlMessage::to_json(self : ControlMessage) -> Json {
       from_device_id~,
       version~,
       hostname~,
-      platform~
+      platform~,
+      runtime~
     ) => {
       let map : Map[String, Json] = Map([])
       set_str(map, "kind", "self-binary-request")
       set_str(map, "requestId", request_id)
       set_str(map, "fromDeviceId", from_device_id)
-      set_self_info(map, version, hostname, platform)
+      set_self_info(map, version, hostname, platform, runtime)
       Json::object(map)
     }
     SelfBinaryResponse(
@@ -989,7 +1027,8 @@ pub fn ControlMessage::to_json(self : ControlMessage) -> Json {
       sha256~,
       data~,
       hostname~,
-      platform~
+      platform~,
+      runtime~
     ) => {
       let map : Map[String, Json] = Map([])
       set_str(map, "kind", "self-binary-response")
@@ -1000,6 +1039,7 @@ pub fn ControlMessage::to_json(self : ControlMessage) -> Json {
       set_opt_str(map, "data", data)
       set_opt_str(map, "hostname", hostname)
       set_opt_str(map, "platform", platform)
+      set_opt_str(map, "runtime", runtime)
       Json::object(map)
     }
     FolderIndexRequest(
@@ -1008,14 +1048,15 @@ pub fn ControlMessage::to_json(self : ControlMessage) -> Json {
       folder_id~,
       version~,
       hostname~,
-      platform~
+      platform~,
+      runtime~
     ) => {
       let map : Map[String, Json] = Map([])
       set_str(map, "kind", "folder-index-request")
       set_str(map, "requestId", request_id)
       set_str(map, "fromDeviceId", from_device_id)
       set_str(map, "folderId", folder_id)
-      set_self_info(map, version, hostname, platform)
+      set_self_info(map, version, hostname, platform, runtime)
       Json::object(map)
     }
     FolderIndexSnapshot(
@@ -1030,7 +1071,8 @@ pub fn ControlMessage::to_json(self : ControlMessage) -> Json {
       progress~,
       version~,
       hostname~,
-      platform~
+      platform~,
+      runtime~
     ) => {
       let map : Map[String, Json] = Map([])
       set_str(map, "kind", "folder-index-snapshot")
@@ -1046,7 +1088,7 @@ pub fn ControlMessage::to_json(self : ControlMessage) -> Json {
         Some(p) => map.set("progress", p)
         None => ()
       }
-      set_self_info(map, version, hostname, platform)
+      set_self_info(map, version, hostname, platform, runtime)
       Json::object(map)
     }
     FileContentRequest(
@@ -1056,7 +1098,8 @@ pub fn ControlMessage::to_json(self : ControlMessage) -> Json {
       path~,
       version~,
       hostname~,
-      platform~
+      platform~,
+      runtime~
     ) => {
       let map : Map[String, Json] = Map([])
       set_str(map, "kind", "file-content-request")
@@ -1064,7 +1107,7 @@ pub fn ControlMessage::to_json(self : ControlMessage) -> Json {
       set_str(map, "fromDeviceId", from_device_id)
       set_str(map, "folderId", folder_id)
       set_str(map, "path", path)
-      set_self_info(map, version, hostname, platform)
+      set_self_info(map, version, hostname, platform, runtime)
       Json::object(map)
     }
     FileContentResponse(
@@ -1078,7 +1121,8 @@ pub fn ControlMessage::to_json(self : ControlMessage) -> Json {
       error~,
       version~,
       hostname~,
-      platform~
+      platform~,
+      runtime~
     ) => {
       let map : Map[String, Json] = Map([])
       set_str(map, "kind", "file-content-response")
@@ -1090,7 +1134,7 @@ pub fn ControlMessage::to_json(self : ControlMessage) -> Json {
       set_opt_u64(map, "size", size)
       set_opt_version(map, "entryVersion", entry_version)
       set_opt_str(map, "error", error)
-      set_self_info(map, version, hostname, platform)
+      set_self_info(map, version, hostname, platform, runtime)
       Json::object(map)
     }
     FileContentWrite(
@@ -1102,7 +1146,8 @@ pub fn ControlMessage::to_json(self : ControlMessage) -> Json {
       entry_version~,
       version~,
       hostname~,
-      platform~
+      platform~,
+      runtime~
     ) => {
       let map : Map[String, Json] = Map([])
       set_str(map, "kind", "file-content-write")
@@ -1112,7 +1157,7 @@ pub fn ControlMessage::to_json(self : ControlMessage) -> Json {
       set_str(map, "path", path)
       set_str(map, "data", data)
       set_opt_version(map, "entryVersion", Some(entry_version))
-      set_self_info(map, version, hostname, platform)
+      set_self_info(map, version, hostname, platform, runtime)
       Json::object(map)
     }
     FileContentWriteResult(
@@ -1124,7 +1169,8 @@ pub fn ControlMessage::to_json(self : ControlMessage) -> Json {
       error~,
       version~,
       hostname~,
-      platform~
+      platform~,
+      runtime~
     ) => {
       let map : Map[String, Json] = Map([])
       set_str(map, "kind", "file-content-write-result")
@@ -1134,7 +1180,7 @@ pub fn ControlMessage::to_json(self : ControlMessage) -> Json {
       set_str(map, "path", path)
       set_opt_bool(map, "ok", Some(ok))
       set_opt_str(map, "error", error)
-      set_self_info(map, version, hostname, platform)
+      set_self_info(map, version, hostname, platform, runtime)
       Json::object(map)
     }
     GitCommitNotify(
@@ -1148,7 +1194,8 @@ pub fn ControlMessage::to_json(self : ControlMessage) -> Json {
       parent_hash~,
       version~,
       hostname~,
-      platform~
+      platform~,
+      runtime~
     ) => {
       let map : Map[String, Json] = Map([])
       set_str(map, "kind", "git-commit-notify")
@@ -1160,7 +1207,7 @@ pub fn ControlMessage::to_json(self : ControlMessage) -> Json {
       set_opt_str(map, "diffStat", diff_stat)
       set_opt_str_array(map, "commitSubjects", commit_subjects)
       set_str(map, "parentHash", parent_hash)
-      set_self_info(map, version, hostname, platform)
+      set_self_info(map, version, hostname, platform, runtime)
       Json::object(map)
     }
     GitCommitAck(
@@ -1169,14 +1216,15 @@ pub fn ControlMessage::to_json(self : ControlMessage) -> Json {
       commit_hash~,
       version~,
       hostname~,
-      platform~
+      platform~,
+      runtime~
     ) => {
       let map : Map[String, Json] = Map([])
       set_str(map, "kind", "git-commit-ack")
       set_str(map, "fromDeviceId", from_device_id)
       set_str(map, "folderId", folder_id)
       set_str(map, "commitHash", commit_hash)
-      set_self_info(map, version, hostname, platform)
+      set_self_info(map, version, hostname, platform, runtime)
       Json::object(map)
     }
   }
@@ -1196,7 +1244,7 @@ fn ControlMessage::from_map(
   let kind = req_str(obj, "kind")
   match kind {
     "folder-invitation" => {
-      let (version, hostname, platform) = opt_self_info(obj)
+      let (version, hostname, platform, runtime) = opt_self_info(obj)
       FolderInvitation(
         offer_id=req_str(obj, "offerId"),
         from_device_id=req_str(obj, "fromDeviceId"),
@@ -1205,10 +1253,11 @@ fn ControlMessage::from_map(
         version~,
         hostname~,
         platform~,
+        runtime~,
       )
     }
     "folder-invitation-ack" => {
-      let (version, hostname, platform) = opt_self_info(obj)
+      let (version, hostname, platform, runtime) = opt_self_info(obj)
       FolderInvitationAck(
         offer_id=req_str(obj, "offerId"),
         from_device_id=req_str(obj, "fromDeviceId"),
@@ -1216,20 +1265,22 @@ fn ControlMessage::from_map(
         version~,
         hostname~,
         platform~,
+        runtime~,
       )
     }
     "pairing-request" => {
-      let (version, hostname, platform) = opt_self_info(obj)
+      let (version, hostname, platform, runtime) = opt_self_info(obj)
       PairingRequest(
         offer_id=req_str(obj, "offerId"),
         from_device_id=req_str(obj, "fromDeviceId"),
         version~,
         hostname~,
         platform~,
+        runtime~,
       )
     }
     "pairing-ack" => {
-      let (version, hostname, platform) = opt_self_info(obj)
+      let (version, hostname, platform, runtime) = opt_self_info(obj)
       PairingAck(
         offer_id=req_str(obj, "offerId"),
         from_device_id=req_str(obj, "fromDeviceId"),
@@ -1237,20 +1288,22 @@ fn ControlMessage::from_map(
         version~,
         hostname~,
         platform~,
+        runtime~,
       )
     }
     "offer-receipt" => {
-      let (version, hostname, platform) = opt_self_info(obj)
+      let (version, hostname, platform, runtime) = opt_self_info(obj)
       OfferReceipt(
         offer_id=req_str(obj, "offerId"),
         from_device_id=req_str(obj, "fromDeviceId"),
         version~,
         hostname~,
         platform~,
+        runtime~,
       )
     }
     "folder-sync-list" => {
-      let (version, hostname, platform) = opt_self_info(obj)
+      let (version, hostname, platform, runtime) = opt_self_info(obj)
       FolderSyncList(
         from_device_id=req_str(obj, "fromDeviceId"),
         folder_ids=req_str_array(obj, "folderIds"),
@@ -1258,29 +1311,32 @@ fn ControlMessage::from_map(
         version~,
         hostname~,
         platform~,
+        runtime~,
       )
     }
     "hello" => {
-      let (_, hostname, platform) = opt_self_info(obj)
+      let (_, hostname, platform, runtime) = opt_self_info(obj)
       Hello(
         from_device_id=req_str(obj, "fromDeviceId"),
         version=req_str(obj, "version"),
         hostname~,
         platform~,
+        runtime~,
       )
     }
     "self-binary-request" => {
-      let (version, hostname, platform) = opt_self_info(obj)
+      let (version, hostname, platform, runtime) = opt_self_info(obj)
       SelfBinaryRequest(
         request_id=req_str(obj, "requestId"),
         from_device_id=req_str(obj, "fromDeviceId"),
         version~,
         hostname~,
         platform~,
+        runtime~,
       )
     }
     "self-binary-response" => {
-      let (_, hostname, platform) = opt_self_info(obj)
+      let (_, hostname, platform, runtime) = opt_self_info(obj)
       SelfBinaryResponse(
         request_id=req_str(obj, "requestId"),
         from_device_id=req_str(obj, "fromDeviceId"),
@@ -1289,10 +1345,11 @@ fn ControlMessage::from_map(
         data=opt_str(obj, "data"),
         hostname~,
         platform~,
+        runtime~,
       )
     }
     "folder-index-request" => {
-      let (version, hostname, platform) = opt_self_info(obj)
+      let (version, hostname, platform, runtime) = opt_self_info(obj)
       FolderIndexRequest(
         request_id=req_str(obj, "requestId"),
         from_device_id=req_str(obj, "fromDeviceId"),
@@ -1300,10 +1357,11 @@ fn ControlMessage::from_map(
         version~,
         hostname~,
         platform~,
+        runtime~,
       )
     }
     "folder-index-snapshot" => {
-      let (version, hostname, platform) = opt_self_info(obj)
+      let (version, hostname, platform, runtime) = opt_self_info(obj)
       FolderIndexSnapshot(
         request_id=req_str(obj, "requestId"),
         from_device_id=req_str(obj, "fromDeviceId"),
@@ -1317,10 +1375,11 @@ fn ControlMessage::from_map(
         version~,
         hostname~,
         platform~,
+        runtime~,
       )
     }
     "file-content-request" => {
-      let (version, hostname, platform) = opt_self_info(obj)
+      let (version, hostname, platform, runtime) = opt_self_info(obj)
       FileContentRequest(
         request_id=req_str(obj, "requestId"),
         from_device_id=req_str(obj, "fromDeviceId"),
@@ -1329,10 +1388,11 @@ fn ControlMessage::from_map(
         version~,
         hostname~,
         platform~,
+        runtime~,
       )
     }
     "file-content-response" => {
-      let (version, hostname, platform) = opt_self_info(obj)
+      let (version, hostname, platform, runtime) = opt_self_info(obj)
       FileContentResponse(
         request_id=req_str(obj, "requestId"),
         from_device_id=req_str(obj, "fromDeviceId"),
@@ -1345,10 +1405,11 @@ fn ControlMessage::from_map(
         version~,
         hostname~,
         platform~,
+        runtime~,
       )
     }
     "file-content-write" => {
-      let (version, hostname, platform) = opt_self_info(obj)
+      let (version, hostname, platform, runtime) = opt_self_info(obj)
       FileContentWrite(
         request_id=req_str(obj, "requestId"),
         from_device_id=req_str(obj, "fromDeviceId"),
@@ -1359,10 +1420,11 @@ fn ControlMessage::from_map(
         version~,
         hostname~,
         platform~,
+        runtime~,
       )
     }
     "file-content-write-result" => {
-      let (version, hostname, platform) = opt_self_info(obj)
+      let (version, hostname, platform, runtime) = opt_self_info(obj)
       FileContentWriteResult(
         request_id=req_str(obj, "requestId"),
         from_device_id=req_str(obj, "fromDeviceId"),
@@ -1373,10 +1435,11 @@ fn ControlMessage::from_map(
         version~,
         hostname~,
         platform~,
+        runtime~,
       )
     }
     "git-commit-notify" => {
-      let (version, hostname, platform) = opt_self_info(obj)
+      let (version, hostname, platform, runtime) = opt_self_info(obj)
       GitCommitNotify(
         from_device_id=req_str(obj, "fromDeviceId"),
         folder_id=req_str(obj, "folderId"),
@@ -1389,10 +1452,11 @@ fn ControlMessage::from_map(
         version~,
         hostname~,
         platform~,
+        runtime~,
       )
     }
     "git-commit-ack" => {
-      let (version, hostname, platform) = opt_self_info(obj)
+      let (version, hostname, platform, runtime) = opt_self_info(obj)
       GitCommitAck(
         from_device_id=req_str(obj, "fromDeviceId"),
         folder_id=req_str(obj, "folderId"),
@@ -1400,6 +1464,7 @@ fn ControlMessage::from_map(
         version~,
         hostname~,
         platform~,
+        runtime~,
       )
     }
     _ => raise Malformed("未知控制面消息 kind:\{kind}")

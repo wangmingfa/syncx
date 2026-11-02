@@ -1,4 +1,4 @@
-import type { DeviceInfo, SyncProgressItem } from '../types.js';
+import type { DeviceInfo, PeerRuntime, SyncProgressItem } from '../types.js';
 
 /** 目录稳定标识(与后端 folderIdFor 一致:id 优先,回退 path),用作列表 key 与进度匹配。 */
 export function folderKey(f: { id?: string; path: string }): string {
@@ -13,7 +13,7 @@ export function folderKey(f: { id?: string; path: string }): string {
  * 「非 node」会让老版本 Node 后端的「上传升级」入口与拖入安装包一起失效,报出
  * 「单二进制后端不支持上传 npm 安装包」—— 与服务端实际的形态正好相反。
  */
-export function isNodeRuntime(status: { runtime?: 'node' | 'rust' | 'moonbit' }): boolean {
+export function isNodeRuntime(status: { runtime?: PeerRuntime }): boolean {
   return (status.runtime ?? 'node') === 'node';
 }
 

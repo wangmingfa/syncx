@@ -96,6 +96,7 @@ pub fn request_snapshot(
             version: Some(ops.version.clone()),
             hostname: own_hostname(),
             platform: Some(syncx_api::status::platform_name().to_string()),
+            runtime: Some(super::RUNTIME.to_string()),
         },
     );
     if !sent {
@@ -212,6 +213,7 @@ pub fn serve_index_snapshot(ops: &RuntimeOps, device_id: &str, folder_id: &str, 
                 version: Some(ops.version.clone()),
                 hostname: own_hostname(),
                 platform: Some(syncx_api::status::platform_name().to_string()),
+                runtime: Some(super::RUNTIME.to_string()),
             },
         );
     };
@@ -264,6 +266,7 @@ pub fn serve_index_snapshot(ops: &RuntimeOps, device_id: &str, folder_id: &str, 
                 version: Some(ops.version.clone()),
                 hostname: own_hostname(),
                 platform: Some(syncx_api::status::platform_name().to_string()),
+                runtime: Some(super::RUNTIME.to_string()),
             },
         );
     }
@@ -597,6 +600,7 @@ pub fn request_peer_file(
             version: Some(ops.version.clone()),
             hostname: own_hostname(),
             platform: Some(syncx_api::status::platform_name().to_string()),
+            runtime: Some(super::RUNTIME.to_string()),
         },
     );
     if !sent {
@@ -706,6 +710,7 @@ pub fn write_peer_file(
             version: Some(ops.version.clone()),
             hostname: own_hostname(),
             platform: Some(syncx_api::status::platform_name().to_string()),
+            runtime: Some(super::RUNTIME.to_string()),
         },
     );
     if !sent {
@@ -746,6 +751,7 @@ pub fn apply_peer_file_write(ops: &RuntimeOps, message: ControlMessage) {
                 version: Some(ops.version.clone()),
                 hostname: own_hostname(),
                 platform: Some(syncx_api::status::platform_name().to_string()),
+                runtime: Some(super::RUNTIME.to_string()),
             },
         );
     };
@@ -811,6 +817,7 @@ pub fn serve_peer_file(
                 version: Some(ops.version.clone()),
                 hostname: own_hostname(),
                 platform: Some(syncx_api::status::platform_name().to_string()),
+                runtime: Some(super::RUNTIME.to_string()),
             },
         );
     };
@@ -1170,6 +1177,7 @@ pub fn request_self_binary(ops: &RuntimeOps, device_id: &str) -> Result<Vec<u8>,
             version: Some(ops.version.clone()),
             hostname: own_hostname(),
             platform: Some(syncx_api::status::platform_name().to_string()),
+            runtime: Some(super::RUNTIME.to_string()),
         },
     );
     if !sent {
@@ -1216,6 +1224,7 @@ pub fn answer_self_binary_request(ops: &RuntimeOps, device_id: &str, request_id:
             data,
             hostname: own_hostname(),
             platform: Some(syncx_api::status::platform_name().to_string()),
+            runtime: Some(super::RUNTIME.to_string()),
         },
     );
 }

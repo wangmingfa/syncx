@@ -40,6 +40,7 @@ test "wire: 顶层消息往返" {
         version="0.4.0",
         hostname=Some("macbook"),
         platform=Some("darwin"),
+        runtime=None,
       ),
     ),
   ]
@@ -62,6 +63,7 @@ test "wire: 控制面消息往返" {
       version=Some("0.4.0"),
       hostname=Some("mba"),
       platform=Some("darwin"),
+      runtime=None,
     ),
     @net.FolderInvitationAck(
       offer_id="o1",
@@ -70,6 +72,7 @@ test "wire: 控制面消息往返" {
       version=None,
       hostname=None,
       platform=None,
+      runtime=None,
     ),
     @net.PairingRequest(
       offer_id="o2",
@@ -77,6 +80,7 @@ test "wire: 控制面消息往返" {
       version=None,
       hostname=None,
       platform=None,
+      runtime=None,
     ),
     @net.PairingAck(
       offer_id="o2",
@@ -85,6 +89,7 @@ test "wire: 控制面消息往返" {
       version=None,
       hostname=None,
       platform=None,
+      runtime=None,
     ),
     @net.OfferReceipt(
       offer_id="o1",
@@ -92,6 +97,7 @@ test "wire: 控制面消息往返" {
       version=None,
       hostname=None,
       platform=None,
+      runtime=None,
     ),
     @net.FolderSyncList(
       from_device_id="dev-1",
@@ -100,12 +106,14 @@ test "wire: 控制面消息往返" {
       version=None,
       hostname=None,
       platform=None,
+      runtime=None,
     ),
     @net.Hello(
       from_device_id="dev-1",
       version="dev",
       hostname=Some("mba"),
       platform=Some("win32"),
+      runtime=None,
     ),
     @net.SelfBinaryRequest(
       request_id="r1",
@@ -113,6 +121,7 @@ test "wire: 控制面消息往返" {
       version=None,
       hostname=None,
       platform=None,
+      runtime=None,
     ),
     @net.SelfBinaryResponse(
       request_id="r1",
@@ -122,6 +131,7 @@ test "wire: 控制面消息往返" {
       data=None,
       hostname=None,
       platform=None,
+      runtime=None,
     ),
     @net.FolderIndexRequest(
       request_id="r2",
@@ -130,6 +140,7 @@ test "wire: 控制面消息往返" {
       version=None,
       hostname=None,
       platform=None,
+      runtime=None,
     ),
     @net.FolderIndexSnapshot(
       request_id="r2",
@@ -144,6 +155,7 @@ test "wire: 控制面消息往返" {
       version=None,
       hostname=None,
       platform=None,
+      runtime=None,
     ),
     @net.FileContentRequest(
       request_id="r3",
@@ -153,6 +165,7 @@ test "wire: 控制面消息往返" {
       version=None,
       hostname=None,
       platform=None,
+      runtime=None,
     ),
     @net.FileContentResponse(
       request_id="r3",
@@ -166,6 +179,7 @@ test "wire: 控制面消息往返" {
       version=None,
       hostname=None,
       platform=None,
+      runtime=None,
     ),
     @net.FileContentWrite(
       request_id="r4",
@@ -177,6 +191,7 @@ test "wire: 控制面消息往返" {
       version=None,
       hostname=None,
       platform=None,
+      runtime=None,
     ),
     @net.FileContentWriteResult(
       request_id="r4",
@@ -188,6 +203,7 @@ test "wire: 控制面消息往返" {
       version=None,
       hostname=None,
       platform=None,
+      runtime=None,
     ),
     @net.GitCommitNotify(
       from_device_id="dev-1",
@@ -201,6 +217,7 @@ test "wire: 控制面消息往返" {
       version=None,
       hostname=None,
       platform=None,
+      runtime=None,
     ),
     @net.GitCommitAck(
       from_device_id="dev-1",
@@ -209,6 +226,7 @@ test "wire: 控制面消息往返" {
       version=None,
       hostname=None,
       platform=None,
+      runtime=None,
     ),
   ]
   for msg in msgs {
@@ -278,6 +296,7 @@ test "wire: entryVersion 拼写与数组对形态(golden)" {
       version=None,
       hostname=None,
       platform=None,
+      runtime=None,
     ),
   )
   assert_eq(msg, expected)
@@ -348,6 +367,7 @@ test "wire: hello 控制消息(golden)" {
         version="0.4.0",
         hostname=Some("mba"),
         platform=Some("darwin"),
+        runtime=None,
       ),
     ),
   )
@@ -363,6 +383,7 @@ test "wire: hello 控制消息(golden)" {
         version="0.4.0",
         hostname=None,
         platform=None,
+        runtime=None,
       ),
     ),
   )

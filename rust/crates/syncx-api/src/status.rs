@@ -45,6 +45,10 @@ pub struct DeviceStatus {
     pub hostname: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub platform: Option<String>,
+    /// 对端后端形态(`node` / `rust` / `moonbit`);`None` = 旧版本对端未宣告,
+    /// 前端不展示后端标识(而不是猜成某一种)。
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub runtime: Option<String>,
     /// 本机配置里该设备被指派到的目录 id 列表。
     pub folders: Vec<String>,
     #[serde(rename = "remoteFolders", skip_serializing_if = "Option::is_none")]

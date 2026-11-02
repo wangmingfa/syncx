@@ -623,6 +623,8 @@ export async function run(args: ParsedArgs): Promise<void> {
           hostname: link.hostname,
           // 对端宣告的运行平台:undefined=旧版本对端未发,UI 退回字母头像
           platform: link.platform,
+          // 对端宣告的后端形态:undefined=旧版本对端未发,UI 不展示后端标识
+          runtime: link.runtime,
           folders: folderDevices.get(deviceId) ?? [],
           // 对端宣告的目录清单:undefined=旧版本对端(无法判断「已停止共享」)
           remoteFolders: link.remoteFolders,

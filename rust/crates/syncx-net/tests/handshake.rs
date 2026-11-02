@@ -116,6 +116,7 @@ async fn peer_handshake_end_to_end() {
                         version: "0.0.0-test".to_string(),
                         hostname: None,
                         platform: None,
+                        runtime: None,
                     },
                 };
                 let _ = connection.send_message(&hello).await;
@@ -229,6 +230,7 @@ fn wire_json_shape_is_stable() {
             version: None,
             hostname: None,
             platform: None,
+            runtime: None,
         },
     };
     let json = serde_json::to_string(&write).unwrap();
