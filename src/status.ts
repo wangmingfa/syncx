@@ -124,6 +124,12 @@ export interface StatusPayload {
    *  Web UI 据此给出与平台相符的「本机目录」示例。必须由后端提供而不能读浏览器的
    *  navigator:控制台常被从**另一台机器**打开,浏览器平台 ≠ 目录所在机器的平台。 */
   platform: string;
+  /** 后端运行时形态(ADR-0025 第 3 节):本实现恒为 'node'。
+   *  前端据此决定「上传 npm 安装包」入口是否可用 —— 缺省会被读成非 node 而拦掉,
+   *  所以这个字段必须显式下发,不能省。 */
+  runtime: 'node' | 'rust' | 'moonbit';
+  /** 自更新来源:node 形态走 npm。 */
+  updateSource: 'npm' | 'github';
   folders: SharedFolderConfig[];
   /** 全局暂停同步:为 true 时所有目录的数据面停摆(各目录自己的 paused 仍独立生效)。 */
   paused?: boolean;
@@ -303,6 +309,9 @@ export function buildStatus(
     deviceId: identity.deviceId,
     version: selfVersion,
     platform: process.platform,
+    // 形态是编译期事实,不走 extras:没有「某种 Node 运行时不报 runtime」的合法场景。
+    runtime: 'node',
+    updateSource: 'npm',
     // 端到端密钥本体永不出 daemon:有 e2eKey 的目录只外发「已设置」标志(置布尔、抹记录)。
     // gitRepo 每轮实时探测(existsSync 一次,元级开销;与 session-manager 的 git 闸门同口径):
     // 前端据此对「目录非 git 仓库 + 开了提交同步」的组合给出「不会生效」警告。

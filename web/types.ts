@@ -172,7 +172,8 @@ export interface StatusData {
   folderErrors?: FolderErrorItem[];
   /** npm 检查到的可用更新(打包态且发现更高版本时才有值)。 */
   updateAvailable?: { latest: string; current: string } | null;
-  /** 后端运行时形态(ADR-0025;缺省 = 旧后端,视作 node)。 */
+  /** 后端运行时形态(ADR-0025;缺省 = 旧后端,视作 node)。
+   *  判「是否 node」请用 utils/format.ts 的 isNodeRuntime,别直接比 !== 'node'。 */
   runtime?: 'node' | 'rust' | 'moonbit';
   /** 自更新来源:node 形态走 npm,rust 形态走 GitHub Releases(缺省 = npm)。 */
   updateSource?: 'npm' | 'github';

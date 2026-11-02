@@ -33,6 +33,10 @@ describe('status aggregation', () => {
     // 平台要透给前端:共享目录输入框的路径示例按 **daemon 平台** 给(web/utils/format.ts 的
     // folderPathPlaceholder),浏览器可能跑在另一台机器上,不能用 navigator 判断。
     expect(status.platform).toBe(process.platform);
+    // 形态字段必须始终显式下发:前端把缺省读成「非 node」并拦掉上传安装包入口,
+    // 少发这两个字段等于让 Node 后端的上传升级功能凭空消失(ADR-0025 第 3 节)。
+    expect(status.runtime).toBe('node');
+    expect(status.updateSource).toBe('npm');
   });
 
   it('folders 的 gitRepo 是实时探测:仓库为 true,普通目录/不存在路径为 false', () => {

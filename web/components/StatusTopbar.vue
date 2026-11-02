@@ -9,6 +9,7 @@ import { useTheme, type ThemeMode } from '../composables/useTheme';
 import { useSkin, type SkinMode } from '../composables/useSkin';
 import { formatBytes } from '../utils/bytes';
 import { osIconLabel } from '../utils/os-icon';
+import { isNodeRuntime } from '../utils/format';
 
 const { status, busy, checkForUpdate, openUpload, openLogs, openTopology, openTraffic, openGuide, openSettings, openTerminal, openFleet, openAuth, logout, copy, notifSupported, notifEnabled, toggleNotifications } = useStatusContext();
 const { mode: themeMode, resolved: themeResolved, setMode } = useTheme();
@@ -106,9 +107,9 @@ const chipRows = computed<ChipRow[]>(() => [
   { kind: 'divider' },
   { kind: 'item', label: '检查更新', run: () => void checkForUpdate(), disabled: busy.value },
   // 非 node 形态自更新走 GitHub Releases,没有 npm 包可传,上传入口整体不渲染(ADR-0025/0026)
-  ...(status.value.runtime !== 'node'
-    ? []
-    : [{ kind: 'item' as const, label: '上传升级', run: openUpload, disabled: busy.value }]),
+  ...(isNodeRuntime(status.value)
+    ? [{ kind: 'item' as const, label: '上传升级', run: openUpload, disabled: busy.value }]
+    : []),
   { kind: 'divider' },
   { kind: 'item', label: '使用指南', run: openGuide },
   { kind: 'item', label: '登录密码', run: openAuth },

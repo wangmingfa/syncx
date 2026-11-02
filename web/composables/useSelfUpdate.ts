@@ -2,6 +2,7 @@ import { ref } from 'vue';
 import type { Ref } from 'vue';
 import { useToast } from './useToast';
 import { apiJson, errText } from '../utils/api';
+import { isNodeRuntime } from '../utils/format';
 import type { CoreDeps } from './statusContext';
 import type { UploadPackageInfo } from '../types';
 
@@ -64,7 +65,7 @@ export function useSelfUpdate(deps: CoreDeps): {
       showToast(DEV_UPDATE_BLOCKED, 'alert');
       return false;
     }
-    if (status.value.runtime !== 'node') {
+    if (!isNodeRuntime(status.value)) {
       showToast(NON_NODE_UPLOAD_BLOCKED, 'alert');
       return false;
     }

@@ -5,6 +5,18 @@ export function folderKey(f: { id?: string; path: string }): string {
   return f.id ?? f.path;
 }
 
+/**
+ * 后端是否为 Node 形态(即:npm 载体可自更新)。
+ *
+ * 判据必须写成 `(runtime ?? 'node') === 'node'`:这个字段是 ADR-0025 才加上的,
+ * 更早的 Node 后端不会发它,而它们恰恰是能上传 npm 安装包的那批。直接把缺省当
+ * 「非 node」会让老版本 Node 后端的「上传升级」入口与拖入安装包一起失效,报出
+ * 「单二进制后端不支持上传 npm 安装包」—— 与服务端实际的形态正好相反。
+ */
+export function isNodeRuntime(status: { runtime?: 'node' | 'rust' | 'moonbit' }): boolean {
+  return (status.runtime ?? 'node') === 'node';
+}
+
 /** 设备首字母徽标(浅色主题里替代纯文字,增强可读性)。 */
 export function monogram(id: string): string {
   return id.replace(/[^A-Za-z0-9]/g, '').slice(0, 2).toUpperCase() || '··';
