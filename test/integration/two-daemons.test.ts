@@ -113,7 +113,12 @@ async function setupDaemon(
   };
 }
 
-function startDaemon(setup: DaemonSetup, peers: string[], peerDeviceIds: string[]): ChildProcess {
+function startDaemon(
+  setup: DaemonSetup,
+  peers: string[],
+  peerDeviceIds: string[],
+  extraEnv: Record<string, string> = {},
+): ChildProcess {
   writeFileSync(
     setup.configPath,
     JSON.stringify({
@@ -136,7 +141,7 @@ function startDaemon(setup: DaemonSetup, peers: string[], peerDeviceIds: string[
       '--control-port',
       String(setup.controlPort),
     ],
-    { cwd: process.cwd(), stdio: ['ignore', 'pipe', 'pipe'], env: cleanDaemonEnv() },
+    { cwd: process.cwd(), stdio: ['ignore', 'pipe', 'pipe'], env: cleanDaemonEnv(extraEnv) },
   );
   // 捕获 daemon 输出,失败时可读日志定位
   child.stdout?.pipe(createWriteStream(join(setup.dir, 'daemon.out.log')));
@@ -329,6 +334,49 @@ describe('two real daemons sync over peers config', () => {
       rmDir(b.dir);
     },
     45000,
+  );
+
+  it(
+    'syncs a repository whose build output lives under a nested .gitignore',
+    async () => {
+      // 2026-11 故障的最小复现:monorepo 把构建产物规则写在子目录 `.gitignore` 里。
+      // 改前 syncx 只读共享根的 `.gitignore`,于是 `rust/target/**` 全量进索引 ——
+      // 真实仓库里那是十万级条目、50MB 单帧索引,连探活都被拖死(见 ADR-0027)。
+      const a = await setupDaemon('a', []);
+      const b = await setupDaemon('b', []);
+      mkdirSync(join(a.share, 'rust/target/debug'), { recursive: true });
+      mkdirSync(join(a.share, 'rust/src'), { recursive: true });
+      writeFileSync(join(a.share, 'rust/.gitignore'), '/target\n');
+      writeFileSync(join(a.share, 'rust/src/main.rs'), 'fn main() {}');
+      // 构建产物:内容随机,避免与源文件内容相同掩盖问题
+      writeFileSync(join(a.share, 'rust/target/debug/app'), 'artifacts-'.repeat(200));
+
+      // 分片上限调到 256B:这条用例的索引只有几百字节,默认 8MiB 时永远是单帧。
+      // 压到 256B 后它必然被切成多片,于是分片发送、接收侧拼装与真实 ws 链路一起跑
+      // 一遍(分片本身的正确性由 test/index-chunking.test.ts 钉住,这里要的是
+      // 「这两条路径在真 daemon 上确实被走到且不互相干扰」)。
+      // 注意不要用「关掉分片仍然通过」反证本用例 —— 单帧路径本来也能同步这份小索引,
+      // 本用例的判据是嵌套 .gitignore(关掉它立刻红,已验证)。
+      const chunked = { SYNCX_INDEX_CHUNK_BYTES: '256' };
+      startDaemon(a, [`ws://127.0.0.1:${b.peerPort}`], [b.deviceId], chunked);
+      await waitForDaemonReady(a);
+      startDaemon(b, [`ws://127.0.0.1:${a.peerPort}`], [a.deviceId], chunked);
+
+      try {
+        await waitFor(() => existsSync(join(b.share, 'rust/src/main.rs')), 45000);
+        // 再等一轮扫描,给「错误地也同步 target」留出发生的时间
+        await new Promise((r) => setTimeout(r, 1500));
+        expect(existsSync(join(b.share, 'rust/target'))).toBe(false);
+      } catch (error) {
+        dumpLogs(a, b);
+        throw error;
+      }
+
+      await stopChildren();
+      rmDir(a.dir);
+      rmDir(b.dir);
+    },
+    90000,
   );
 
   it(

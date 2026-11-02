@@ -1,0 +1,58 @@
+// Generated using `moon info`, DON'T EDIT IT
+package "wangmingfa/syncx/sqlite"
+
+import {
+  "moonbitlang/core/debug",
+}
+
+// Values
+pub fn open(String) -> Db raise SqliteError
+
+// Errors
+pub(all) suberror SqliteError {
+  OpenFailed(String)
+  ExecFailed(String)
+  PrepareFailed(String)
+  StepFailed(String)
+  BindFailed(String)
+}
+
+// Types and methods
+pub(all) struct Db {
+  mut handle : Int64
+}
+pub fn Db::changes(Self) -> Int64
+pub fn Db::close(Self) -> Unit
+pub fn Db::exec(Self, String) -> Unit raise SqliteError
+pub fn Db::last_insert_rowid(Self) -> Int64
+pub fn Db::prepare(Self, String) -> Stmt raise SqliteError
+
+pub(all) enum StepResult {
+  Row
+  Done
+} derive(Eq, @debug.Debug)
+pub fn StepResult::equal(Self, Self) -> Bool
+pub fn StepResult::not_equal(Self, Self) -> Bool
+pub fn StepResult::to_repr(Self) -> @debug.Repr
+
+pub(all) struct Stmt {
+  mut handle : Int64
+  db : Int64
+}
+pub fn Stmt::bind_blob(Self, Int32, Bytes) -> Unit raise SqliteError
+pub fn Stmt::bind_double(Self, Int32, Double) -> Unit raise SqliteError
+pub fn Stmt::bind_int(Self, Int32, Int64) -> Unit raise SqliteError
+pub fn Stmt::bind_null(Self, Int32) -> Unit raise SqliteError
+pub fn Stmt::bind_text(Self, Int32, String) -> Unit raise SqliteError
+pub fn Stmt::column_blob(Self, Int32) -> Bytes
+pub fn Stmt::column_count(Self) -> Int32
+pub fn Stmt::column_double(Self, Int32) -> Double
+pub fn Stmt::column_int(Self, Int32) -> Int64
+pub fn Stmt::column_is_null(Self, Int32) -> Bool
+pub fn Stmt::column_text(Self, Int32) -> String
+pub fn Stmt::finalize(Self) -> Unit
+pub fn Stmt::step(Self) -> StepResult raise SqliteError
+
+// Type aliases
+
+// Traits

@@ -11,6 +11,8 @@ import {
   verifyKxMessage,
   decodeKxMessage,
   CAP_BINARY1,
+  CAP_INDEX_CHUNK1,
+  PEER_CAPS,
 } from '../src/handshake.js';
 import { connectPeer } from '../src/net/client.js';
 import { mkdtempSync } from 'node:fs';
@@ -150,11 +152,13 @@ describe('session key exchange', () => {
     const session = generateX25519KeyPair();
 
     const kx = buildKxMessage(session, identity.privateKey, 22000);
-    // 缺省宣告本机全部能力(现在只有 binary1)
-    expect(kx.caps).toEqual([CAP_BINARY1]);
+    // 缺省宣告本机全部能力(binary1 + 分片索引,见 ADR-0027)
+    expect(kx.caps).toEqual([...PEER_CAPS]);
+    expect(kx.caps).toContain(CAP_BINARY1);
+    expect(kx.caps).toContain(CAP_INDEX_CHUNK1);
 
     const decoded = decodeKxMessage(JSON.stringify(kx));
-    expect(decoded.caps).toEqual([CAP_BINARY1]);
+    expect(decoded.caps).toEqual([...PEER_CAPS]);
     // 关键:签名只盖 X25519 DER,多出的 caps 不影响旧对端验签
     expect(verifyKxMessage(decoded, identity.publicKey)).toBe(session.publicKeyPem);
   });

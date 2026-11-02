@@ -1,0 +1,716 @@
+{
+  "pathCases": [
+    {
+      "name": "absent-both",
+      "local": null,
+      "remote": null,
+      "action": null
+    },
+    {
+      "name": "local-only",
+      "local": {
+        "path": "/x",
+        "version": {
+          "A": 1
+        },
+        "size": 100,
+        "deleted": false,
+        "blocks": [
+          "b1"
+        ]
+      },
+      "remote": null,
+      "action": {
+        "kind": "send",
+        "path": "/x",
+        "entry": {
+          "path": "/x",
+          "version": {
+            "A": 1
+          },
+          "size": 100,
+          "deleted": false,
+          "blocks": [
+            "b1"
+          ]
+        }
+      }
+    },
+    {
+      "name": "remote-only",
+      "local": null,
+      "remote": {
+        "path": "/x",
+        "version": {
+          "A": 1
+        },
+        "size": 100,
+        "deleted": false,
+        "blocks": [
+          "b1"
+        ]
+      },
+      "action": {
+        "kind": "receive",
+        "path": "/x",
+        "entry": {
+          "path": "/x",
+          "version": {
+            "A": 1
+          },
+          "size": 100,
+          "deleted": false,
+          "blocks": [
+            "b1"
+          ]
+        }
+      }
+    },
+    {
+      "name": "equal",
+      "local": {
+        "path": "/x",
+        "version": {
+          "A": 1
+        },
+        "size": 100,
+        "deleted": false,
+        "blocks": [
+          "b1"
+        ]
+      },
+      "remote": {
+        "path": "/x",
+        "version": {
+          "A": 1
+        },
+        "size": 100,
+        "deleted": false,
+        "blocks": [
+          "b1"
+        ]
+      },
+      "action": null
+    },
+    {
+      "name": "local-newer",
+      "local": {
+        "path": "/x",
+        "version": {
+          "A": 2
+        },
+        "size": 100,
+        "deleted": false,
+        "blocks": [
+          "b1"
+        ]
+      },
+      "remote": {
+        "path": "/x",
+        "version": {
+          "A": 1
+        },
+        "size": 100,
+        "deleted": false,
+        "blocks": [
+          "b1"
+        ]
+      },
+      "action": {
+        "kind": "send",
+        "path": "/x",
+        "entry": {
+          "path": "/x",
+          "version": {
+            "A": 2
+          },
+          "size": 100,
+          "deleted": false,
+          "blocks": [
+            "b1"
+          ]
+        }
+      }
+    },
+    {
+      "name": "remote-newer",
+      "local": {
+        "path": "/x",
+        "version": {
+          "A": 1
+        },
+        "size": 100,
+        "deleted": false,
+        "blocks": [
+          "b1"
+        ]
+      },
+      "remote": {
+        "path": "/x",
+        "version": {
+          "A": 2
+        },
+        "size": 100,
+        "deleted": false,
+        "blocks": [
+          "b1"
+        ]
+      },
+      "action": {
+        "kind": "receive",
+        "path": "/x",
+        "entry": {
+          "path": "/x",
+          "version": {
+            "A": 2
+          },
+          "size": 100,
+          "deleted": false,
+          "blocks": [
+            "b1"
+          ]
+        }
+      }
+    },
+    {
+      "name": "conflict",
+      "local": {
+        "path": "/x",
+        "version": {
+          "A": 1,
+          "B": 1
+        },
+        "size": 100,
+        "deleted": false,
+        "blocks": [
+          "b1"
+        ]
+      },
+      "remote": {
+        "path": "/x",
+        "version": {
+          "A": 1,
+          "C": 1
+        },
+        "size": 100,
+        "deleted": false,
+        "blocks": [
+          "b1"
+        ]
+      },
+      "action": {
+        "kind": "conflict",
+        "path": "/x",
+        "local": {
+          "path": "/x",
+          "version": {
+            "A": 1,
+            "B": 1
+          },
+          "size": 100,
+          "deleted": false,
+          "blocks": [
+            "b1"
+          ]
+        },
+        "remote": {
+          "path": "/x",
+          "version": {
+            "A": 1,
+            "C": 1
+          },
+          "size": 100,
+          "deleted": false,
+          "blocks": [
+            "b1"
+          ]
+        }
+      }
+    },
+    {
+      "name": "local-deleted-newer",
+      "local": {
+        "path": "/x",
+        "version": {
+          "A": 2
+        },
+        "size": 100,
+        "deleted": true,
+        "blocks": [
+          "b1"
+        ]
+      },
+      "remote": {
+        "path": "/x",
+        "version": {
+          "A": 1
+        },
+        "size": 100,
+        "deleted": false,
+        "blocks": [
+          "b1"
+        ]
+      },
+      "action": {
+        "kind": "delete",
+        "path": "/x"
+      }
+    },
+    {
+      "name": "remote-deleted-newer",
+      "local": {
+        "path": "/x",
+        "version": {
+          "A": 1
+        },
+        "size": 100,
+        "deleted": false,
+        "blocks": [
+          "b1"
+        ]
+      },
+      "remote": {
+        "path": "/x",
+        "version": {
+          "A": 2
+        },
+        "size": 100,
+        "deleted": true,
+        "blocks": [
+          "b1"
+        ]
+      },
+      "action": {
+        "kind": "delete",
+        "path": "/x"
+      }
+    },
+    {
+      "name": "local-deleted-equal",
+      "local": {
+        "path": "/x",
+        "version": {
+          "A": 1
+        },
+        "size": 100,
+        "deleted": true,
+        "blocks": [
+          "b1"
+        ]
+      },
+      "remote": {
+        "path": "/x",
+        "version": {
+          "A": 1
+        },
+        "size": 100,
+        "deleted": true,
+        "blocks": [
+          "b1"
+        ]
+      },
+      "action": null
+    }
+  ],
+  "full": {
+    "local": {
+      "/conflict": {
+        "path": "/conflict",
+        "version": {
+          "A": 1,
+          "B": 1
+        },
+        "size": 100,
+        "deleted": false,
+        "blocks": [
+          "b1"
+        ]
+      },
+      "/local-newer": {
+        "path": "/local-newer",
+        "version": {
+          "A": 2
+        },
+        "size": 100,
+        "deleted": false,
+        "blocks": [
+          "b1"
+        ]
+      },
+      "/local-only": {
+        "path": "/local-only",
+        "version": {
+          "A": 1
+        },
+        "size": 100,
+        "deleted": false,
+        "blocks": [
+          "b1"
+        ]
+      },
+      "/remote-newer": {
+        "path": "/remote-newer",
+        "version": {
+          "A": 1
+        },
+        "size": 100,
+        "deleted": false,
+        "blocks": [
+          "b1"
+        ]
+      },
+      "/same": {
+        "path": "/same",
+        "version": {
+          "A": 1
+        },
+        "size": 100,
+        "deleted": false,
+        "blocks": [
+          "b1"
+        ]
+      }
+    },
+    "remote": {
+      "/conflict": {
+        "path": "/conflict",
+        "version": {
+          "A": 1,
+          "C": 1
+        },
+        "size": 100,
+        "deleted": false,
+        "blocks": [
+          "b1"
+        ]
+      },
+      "/local-newer": {
+        "path": "/local-newer",
+        "version": {
+          "A": 1
+        },
+        "size": 100,
+        "deleted": false,
+        "blocks": [
+          "b1"
+        ]
+      },
+      "/remote-newer": {
+        "path": "/remote-newer",
+        "version": {
+          "A": 2
+        },
+        "size": 100,
+        "deleted": false,
+        "blocks": [
+          "b1"
+        ]
+      },
+      "/remote-only": {
+        "path": "/remote-only",
+        "version": {
+          "A": 1
+        },
+        "size": 100,
+        "deleted": false,
+        "blocks": [
+          "b1"
+        ]
+      },
+      "/same": {
+        "path": "/same",
+        "version": {
+          "A": 1
+        },
+        "size": 100,
+        "deleted": false,
+        "blocks": [
+          "b1"
+        ]
+      }
+    },
+    "actions": [
+      {
+        "kind": "conflict",
+        "path": "/conflict",
+        "local": {
+          "path": "/conflict",
+          "version": {
+            "A": 1,
+            "B": 1
+          },
+          "size": 100,
+          "deleted": false,
+          "blocks": [
+            "b1"
+          ]
+        },
+        "remote": {
+          "path": "/conflict",
+          "version": {
+            "A": 1,
+            "C": 1
+          },
+          "size": 100,
+          "deleted": false,
+          "blocks": [
+            "b1"
+          ]
+        }
+      },
+      {
+        "kind": "send",
+        "path": "/local-newer",
+        "entry": {
+          "path": "/local-newer",
+          "version": {
+            "A": 2
+          },
+          "size": 100,
+          "deleted": false,
+          "blocks": [
+            "b1"
+          ]
+        }
+      },
+      {
+        "kind": "send",
+        "path": "/local-only",
+        "entry": {
+          "path": "/local-only",
+          "version": {
+            "A": 1
+          },
+          "size": 100,
+          "deleted": false,
+          "blocks": [
+            "b1"
+          ]
+        }
+      },
+      {
+        "kind": "receive",
+        "path": "/remote-newer",
+        "entry": {
+          "path": "/remote-newer",
+          "version": {
+            "A": 2
+          },
+          "size": 100,
+          "deleted": false,
+          "blocks": [
+            "b1"
+          ]
+        }
+      },
+      {
+        "kind": "receive",
+        "path": "/remote-only",
+        "entry": {
+          "path": "/remote-only",
+          "version": {
+            "A": 1
+          },
+          "size": 100,
+          "deleted": false,
+          "blocks": [
+            "b1"
+          ]
+        }
+      }
+    ]
+  },
+  "delta": {
+    "local": {
+      "/conflict": {
+        "path": "/conflict",
+        "version": {
+          "A": 1,
+          "B": 1
+        },
+        "size": 100,
+        "deleted": false,
+        "blocks": [
+          "b1"
+        ]
+      },
+      "/local-newer": {
+        "path": "/local-newer",
+        "version": {
+          "A": 2
+        },
+        "size": 100,
+        "deleted": false,
+        "blocks": [
+          "b1"
+        ]
+      },
+      "/local-only": {
+        "path": "/local-only",
+        "version": {
+          "A": 1
+        },
+        "size": 100,
+        "deleted": false,
+        "blocks": [
+          "b1"
+        ]
+      },
+      "/remote-newer": {
+        "path": "/remote-newer",
+        "version": {
+          "A": 1
+        },
+        "size": 100,
+        "deleted": false,
+        "blocks": [
+          "b1"
+        ]
+      },
+      "/same": {
+        "path": "/same",
+        "version": {
+          "A": 1
+        },
+        "size": 100,
+        "deleted": false,
+        "blocks": [
+          "b1"
+        ]
+      }
+    },
+    "remote": {
+      "/conflict": {
+        "path": "/conflict",
+        "version": {
+          "A": 1,
+          "C": 1
+        },
+        "size": 100,
+        "deleted": false,
+        "blocks": [
+          "b1"
+        ]
+      },
+      "/local-newer": {
+        "path": "/local-newer",
+        "version": {
+          "A": 1
+        },
+        "size": 100,
+        "deleted": false,
+        "blocks": [
+          "b1"
+        ]
+      },
+      "/remote-newer": {
+        "path": "/remote-newer",
+        "version": {
+          "A": 2
+        },
+        "size": 100,
+        "deleted": false,
+        "blocks": [
+          "b1"
+        ]
+      },
+      "/remote-only": {
+        "path": "/remote-only",
+        "version": {
+          "A": 1
+        },
+        "size": 100,
+        "deleted": false,
+        "blocks": [
+          "b1"
+        ]
+      },
+      "/same": {
+        "path": "/same",
+        "version": {
+          "A": 1
+        },
+        "size": 100,
+        "deleted": false,
+        "blocks": [
+          "b1"
+        ]
+      }
+    },
+    "actions": [
+      {
+        "kind": "conflict",
+        "path": "/conflict",
+        "local": {
+          "path": "/conflict",
+          "version": {
+            "A": 1,
+            "B": 1
+          },
+          "size": 100,
+          "deleted": false,
+          "blocks": [
+            "b1"
+          ]
+        },
+        "remote": {
+          "path": "/conflict",
+          "version": {
+            "A": 1,
+            "C": 1
+          },
+          "size": 100,
+          "deleted": false,
+          "blocks": [
+            "b1"
+          ]
+        }
+      },
+      {
+        "kind": "send",
+        "path": "/local-newer",
+        "entry": {
+          "path": "/local-newer",
+          "version": {
+            "A": 2
+          },
+          "size": 100,
+          "deleted": false,
+          "blocks": [
+            "b1"
+          ]
+        }
+      },
+      {
+        "kind": "receive",
+        "path": "/remote-newer",
+        "entry": {
+          "path": "/remote-newer",
+          "version": {
+            "A": 2
+          },
+          "size": 100,
+          "deleted": false,
+          "blocks": [
+            "b1"
+          ]
+        }
+      },
+      {
+        "kind": "receive",
+        "path": "/remote-only",
+        "entry": {
+          "path": "/remote-only",
+          "version": {
+            "A": 1
+          },
+          "size": 100,
+          "deleted": false,
+          "blocks": [
+            "b1"
+          ]
+        }
+      }
+    ]
+  }
+}

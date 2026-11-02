@@ -5,6 +5,7 @@ import type { E2EKeyRecord } from './e2e.js';
 import { normalizeSchedule, type Schedule } from './schedule.js';
 import type { CalendarOverrides, DayType } from './holidays.js';
 import { isRealDateKey } from './holidays.js';
+import { packageVersion } from './usage.js';
 
 /**
  * 共享根的目录身份指纹:根目录的 `dev` + `ino`,以十进制字符串存放。
@@ -492,14 +493,68 @@ export interface Config {
    * 所以「10-10 我们公司上班」写 workday 即可盖掉任何自动结果。键为 `YYYY-MM-DD`。
    */
   calendarOverrides?: CalendarOverrides;
+  /**
+   * 落盘格式代数(见 docs/adr/0025):Node 与 Rust 后端共用同一数据目录,靠这个整数
+   * 约定「同一代数内落盘结构完全一致」。**只在落盘结构变化时 +1**(加列、改列语义、
+   * 改 JSON 字段含义、改文件名规则);加 API / 改 UI / 修 bug 一律不动。
+   *
+   * 运行时若发现库里的值高于本端支持上限,直接拒绝启动而非降级读取 ——
+   * 旧代码读新数据会静默读坏,这里宁可拒绝。缺省(本字段引入前的配置)= 1。
+   */
+  formatVersion?: number;
+  /**
+   * 最后写入这份配置的软件版本(仅排查用,不参与任何判定)。
+   * 版本号与落盘结构无关,不能当闸门用:一个 bugfix 不改结构却会被挡住。
+   */
+  generatedBy?: string;
 }
+
+/**
+ * 本端支持的落盘格式代数(见 docs/adr/0025 与 Config.formatVersion)。
+ *
+ * **只在落盘结构(索引库列、配置文件字段语义、数据文件名规则)变化时 +1。**
+ * 加 API、改 UI、修 bug 一律不动 —— 版本号与格式无关,拿软件版本当闸门会误挡
+ * 一个纯粹修 bug 的降级。两个后端(Node / Rust)必须同时遵守这条,否则
+ * 「同一代数内结构完全一致」的前提失效,共用数据目录就不再安全。
+ *
+ * 声明在 DEFAULT_CONFIG 之前:后者要引用它,而 const 的 TDZ 不允许倒序。
+ */
+export const FORMAT_VERSION = 1;
 
 export const DEFAULT_CONFIG: Config = {
   sharedFolders: [],
   peers: [],
   knownDevices: [],
   pendingOffers: [],
+  formatVersion: FORMAT_VERSION,
 };
+
+/** 数据目录由更新版本生成时抛出的错误;CLI 捕获后打印指引并以非零码退出。 */
+export class FormatVersionError extends Error {
+  constructor(
+    readonly found: number,
+    readonly supported: number,
+  ) {
+    super(
+      `数据目录由更新版本生成(formatVersion ${found},本版本最高支持 ${supported})。\n` +
+        '请升级 syncx 后再运行;降级运行会损坏索引数据。',
+    );
+    this.name = 'FormatVersionError';
+  }
+}
+
+/**
+ * 闸门:在打开任何数据文件**之前**调用(见 cli.ts 的 run)。
+ *
+ * 缺失按 1 处理 —— 本字段引入前的配置就是一个合法的第 1 代,不能因此拒绝启动。
+ * 低于支持的代数不做迁移:到目前为止只有第 1 代,真正的迁移器等第一次 bump 时再写。
+ */
+export function assertFormatVersion(config: Config): void {
+  const found = typeof config.formatVersion === 'number' && Number.isFinite(config.formatVersion)
+    ? config.formatVersion
+    : 1;
+  if (found > FORMAT_VERSION) throw new FormatVersionError(found, FORMAT_VERSION);
+}
 
 /**
  * 规范化一条 ws:// 对端地址:
@@ -552,6 +607,18 @@ export function loadConfig(configPath: string): Config {
   const raw = readFileSync(configPath, 'utf8');
   const parsed = JSON.parse(raw) as Config;
   return {
+    // 未知字段原样保留:数据目录可能被另一个后端(Rust)写过,它新增的配置键本端不认识。
+    // loadConfig 是「挑拣后重建新对象」,而 mutateConfig 的路径是 load→改→saveConfig
+    // 整体回写 —— 若不铺开原对象,未知键会在第一次 mutateConfig 时被静默抹掉
+    // (devices.ts 28 处、offers.ts 6 处…几乎覆盖所有用户操作),见 docs/adr/0025。
+    // **必须先铺开、后覆盖已知字段**:反过来的话手改坏的值(如负数 maxSendKbps)
+    // 会绕过下方 sanitize 直接进内存。
+    ...parsed,
+    // 格式代数:缺失(本字段引入前的配置)按第 1 代处理,是合法值而非脏数据。
+    // 高于本端支持的代数是错误状态,交给 assertFormatVersion 在启动时拒绝,这里不纠正。
+    formatVersion: typeof parsed.formatVersion === 'number' && Number.isFinite(parsed.formatVersion)
+      ? parsed.formatVersion
+      : 1,
     // 目录时段:旧字符串形态在加载时迁移成规则(与 peers 同一套「加载即自愈」手法)
     sharedFolders: (parsed.sharedFolders ?? []).map((f) => ({
       ...f,
@@ -673,7 +740,10 @@ function sanitizeCount(v: unknown, min: number): number | undefined {
  */
 export function saveConfig(configPath: string, config: Config): void {
   const tmp = `${configPath}.tmp`;
-  writeFileSync(tmp, JSON.stringify(config, null, 2));
+  // 落盘前打上本端代数与版本:任何一次写都声明「这份数据是本代写出来的」。
+  // 这是「缺失即第 1 代」能成立的另一半 —— 只认不写的话,库里的代数永远不会前进。
+  const stamped: Config = { ...config, formatVersion: FORMAT_VERSION, generatedBy: packageVersion() };
+  writeFileSync(tmp, JSON.stringify(stamped, null, 2));
   renameSync(tmp, configPath);
 }
 

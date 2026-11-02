@@ -2,7 +2,7 @@ import { createCipheriv, createDecipheriv, randomBytes } from 'node:crypto';
 import type { WebSocket } from 'ws';
 import type { IndexEntry } from '../index.js';
 import type { BlockRequest, BlockResponse } from '../messages.js';
-import { encodeIndex, decodeIndex } from '../messages.js';
+import { encodeIndex, encodeIndexChunks, decodeIndex } from '../messages.js';
 import type { PeerTransport, SyncPeer, IndexMode } from '../peer.js';
 import { RateLimiter } from '../ratelimit.js';
 import type { ProgressCounts } from '../status.js';
@@ -14,8 +14,21 @@ export type WireMessage =
    * 旧版对端不发该字段,而它**确实**会发增量索引,所以缺省必须按增量处理
    * (见 peer.ts 的 IndexMode):当成全量会为「它没提到的本地条目」回推,
    * 两端互为回声、无限循环。旧版对端收到我们多出的字段会直接忽略,不受影响。
+   *
+   * `seq`/`total` 是分片索引(见 ADR-0027):total > 1 时,这一帧只是整份索引的第
+   * seq 片(从 0 开始),接收方必须集齐 total 片再交给规划器。两者都缺省时语义与
+   * 升级前完全一致(单帧整份索引);旧版对端不认识这两个字段,只会把它当成一次
+   * 普通索引 —— 所以分片只在**对端宣告 CAP_INDEX_CHUNK1** 时才启用。
    */
-  | { type: 'index'; folder: string; payload: string; full?: boolean; relayed?: boolean }
+  | {
+      type: 'index';
+      folder: string;
+      payload: string;
+      full?: boolean;
+      relayed?: boolean;
+      seq?: number;
+      total?: number;
+    }
   | { type: 'index-fingerprint'; folder: string; fingerprint: string }
   | { type: 'index-ack'; folder: string }
   | { type: 'index-request'; folder: string }
@@ -257,6 +270,27 @@ function bufferedBytes(socket: WebSocket): number {
 }
 
 /**
+ * 分片索引单片的目标体积(明文字节)。取值由两件事夹出来:
+ *  - 上限:文本信封对明文是 16/9 倍,8MiB → ≈14.2MB,离 64MB 的 maxPayload 很远;
+ *  - 下限:太小会让一份大索引变成几十帧,回推/规划的机会变多(虽然无害)。
+ *
+ * 真正让这个值有意义的是**背压**(见 drainOutbox 的 bulk 分支):每帧之间等写缓冲
+ * 降到水位以下才交下一帧,于是 ws 的 ping 最多排在一帧后面,而不是排在整份索引后面。
+ * 2026-11 的故障正是「50MB 单帧占满写缓冲 → ping 迟到 → 20s 探活判死 → 重连 →
+ * 再发 50MB」的死循环(见 ADR-0027)。
+ */
+const INDEX_CHUNK_PLAIN_BYTES =
+  Number(process.env.SYNCX_INDEX_CHUNK_BYTES) || 8 * 1024 * 1024;
+/** 大量数据出站时允许积压的写缓冲水位:超过它就先等链路吐掉一些再继续交帧。 */
+const BULK_HIGH_WATER_BYTES = 16 * 1024 * 1024;
+/** 降到这个水位以下才继续:高低水位分开,避免在阈值附近来回抖动。 */
+const BULK_LOW_WATER_BYTES = 4 * 1024 * 1024;
+/** 一份索引最多多少片:防畸形 total 让接收侧攒出天量内存。 */
+const MAX_INDEX_CHUNKS = 256;
+/** 拼装中的分片索引明文上限(远大于单帧,留足多片余量;超限即视为异常)。 */
+const MAX_INDEX_ASSEMBLY_BYTES = 256 * 1024 * 1024;
+
+/**
  * Send-side transport bound to one shared folder: every message carries
  * the folder path so a single socket can multiplex several folders.
  *
@@ -269,10 +303,11 @@ export function makePeerTransport(
   key: Buffer,
   folderPath: string,
   rateLimiter?: RateLimiter,
-  opts: { canSendBinary?: () => boolean } = {},
+  opts: { canSendBinary?: () => boolean; canChunkIndex?: () => boolean } = {},
 ): PeerTransport {
   const limiter = rateLimiter ?? new RateLimiter(0);
   const binaryOn = (): boolean => opts.canSendBinary?.() === true;
+  const chunkOn = (): boolean => opts.canChunkIndex?.() === true;
   // 限速发送队列(数组):令牌等待天然串行 —— 每条消息都在轮到自己时重新评估
   // 等待,不会基于同一令牌快照同时醒来造成约 2 倍速率的突发发送。
   // 「优先同步」的块响应插到队首(见 enqueue 的 priority),让被大队列卡住的
@@ -284,6 +319,16 @@ export function makePeerTransport(
   // 供块侧的窗口判定用(见 peer.ts 的 SEND_WINDOW_BYTES):整文件爆发索块时,这个
   // 数字就是内存曲线 —— 没有它,队列长度只由对端一次发出多少请求决定。
   let outboxBytes = 0;
+  /**
+   * 「批量发送」模式:正在投递一份分片索引(见 sendChunkedIndex)。
+   *
+   * 批量期间队列里出现的其他消息(块响应、增量索引、控制帧)照常插到**队首**优先
+   * 发出 —— 一份大索引进队不该把已排队的块响应和增量压到它后面。反过来,批量帧自己
+   * 一次只入队一帧,并且每帧之前等写缓冲降到低水位:这样 ws 的 ping 永远只排在
+   * **一帧** (~14MB)之后,而不是整份索引 (50MB+) 之后 —— 2026-11 的故障就是后者
+   * 把 20s 探活拖死,重连后重发整份索引,再死一次(见 ADR-0027)。
+   */
+  let bulkActive = false;
 
   const spaceWatchers = new Set<() => void>();
   let spaceTimer: ReturnType<typeof setInterval> | undefined;
@@ -309,6 +354,25 @@ export function makePeerTransport(
       if (outboxBytes + bufferedBytes(socket) === 0) disarmSpaceWatch();
     }, SPACE_POLL_MS);
     spaceTimer.unref(); // 轮询不该拖住进程退出(测试、CLI 一次性命令)
+  }
+
+  /**
+   * 等写缓冲降到低水位(见 BULK_LOW_WATER_BYTES)。批量投递用:一帧一帧地交,
+   * 让 ping / pong 与本目录之外的小消息总有插入的空隙。
+   *
+   * 没有缓冲可见性(测试替身 / 非 ws 实现)时立即返回 —— 能力缺失不能变成卡死。
+   * 单帧最长等 30s:链路彻底不动时宁可让这一帧照发(与升级前的行为一致),也不能
+   * 让整份索引永远停在这一步。
+   */
+  async function waitForBulkSpace(): Promise<void> {
+    const deadline = Date.now() + 30_000;
+    while (bufferedBytes(socket) > BULK_LOW_WATER_BYTES) {
+      if (Date.now() >= deadline) return;
+      await new Promise((resolve) => {
+        const timer = setTimeout(resolve, SPACE_POLL_MS);
+        timer.unref?.();
+      });
+    }
   }
 
   async function drainOutbox(): Promise<void> {
@@ -340,42 +404,105 @@ export function makePeerTransport(
     }
   }
 
-  /** 按限速发送一条消息:入队(priority = true 插队到队首)并由 drain 循环串行发出。 */
-  function sendRateLimited(data: string | Buffer, priority = false): void {
+  /**
+   * 按限速发送一条消息:入队并由 drain 循环串行发出。
+   *  `priority` = true 插队到队首;
+   *  `bulk` = true 表示这是批量投递中的一帧 —— 它自己是「背景流量」,要排队尾,
+   *  不能受 bulkActive 的插队规则影响(否则第 2 片会插到第 1 片前面)。
+   */
+  function sendRateLimited(data: string | Buffer, priority = false, bulk = false): void {
     // 只在入队时量一次字节:每条都是 MB 级,别在出队时再扫一遍。
     // Buffer 直接取长度;string 要按 utf8 字节量(不是字符数)。
     const bytes = typeof data === 'string' ? Buffer.byteLength(data) : data.length;
-    if (priority) {
+    // 批量投递期间:其他消息一律插到队首 —— 大索引是「背景流量」,块响应与增量
+    // 才是对端正等着的东西(见 bulkActive 的注释)。
+    if (bulk) {
+      outbox.push({ data, bytes, priority: false });
+    } else if (priority || bulkActive) {
       outbox.unshift({ data, bytes, priority: true });
     } else {
       outbox.push({ data, bytes, priority: false });
     }
     outboxBytes += bytes;
-    armSpaceWatch(); // 订阅者此刻可能正因为窗口满而等着被叫醒
+    armSpaceWatch(); // 订阅者此刻正因为窗口满而等着被叫醒
     void drainOutbox();
+  }
+
+  /** 编一帧索引。binary = 走二进制信封(裸 JSON 体),否则文本信封(base64 两层)。 */
+  function encodeIndexFrame(
+    payload: Buffer,
+    full: boolean,
+    relayed: boolean,
+    chunk: { seq: number; total: number } | undefined,
+  ): string | Buffer {
+    if (binaryOn()) {
+      // 索引 JSON 直接当 body:省掉「payload 先 base64、整条信封再 base64」的两次 4/3
+      return encodeBinaryFrame(key, 'index', {
+        folder: folderPath,
+        full,
+        relayed,
+        ...(chunk ? { seq: chunk.seq, total: chunk.total } : {}),
+      }, payload);
+    }
+    return encryptMessage(key, {
+      type: 'index',
+      folder: folderPath,
+      payload: payload.toString('base64'),
+      full,
+      relayed,
+      ...(chunk ? { seq: chunk.seq, total: chunk.total } : {}),
+    });
+  }
+
+  /**
+   * 分片投递一份索引:每片单独一帧,并带 seq/total(见 ADR-0027)。
+   *
+   * 帧的**编码在轮到它时才做**(而不是一次把 N 帧全编好压进队列):50MB 的明文切
+   * 成 7 片,一次性编码会让内存同时持有整份 JSON 的两三份副本,而这一路径恰恰是为
+   * 「索引很大」准备的。代价是每片多一次 stringify 级别的 CPU,可忽略。
+   *
+   * 失败/拆除时不做补偿:索引是幂等声明,重连后会重新开始。
+   */
+  async function sendChunkedIndex(
+    payloads: Buffer[],
+    full: boolean,
+    relayed: boolean,
+  ): Promise<void> {
+    const total = payloads.length;
+    bulkActive = true;
+    try {
+      for (let seq = 0; seq < total; seq++) {
+        // 连接已经没了(对端断开 / 本端 terminate):剩下的帧没有任何意义。
+        // 没有这条,拆连后仍会一帧一帧走完全程,每帧还白等一次水位轮询。
+        // 没有 readyState 的实现(测试替身)不参与判定,按「还能发」继续。
+        const state = (socket as { readyState?: unknown }).readyState;
+        if (typeof state === 'number' && state !== 1 /* OPEN */) return;
+        await waitForBulkSpace(); // 一帧一帧交:ping 只排在一帧后面
+        // 单片本身不插队,但批量期间其他消息会插到它前面(见 sendRateLimited)
+        sendRateLimited(encodeIndexFrame(payloads[seq]!, full, relayed, { seq, total }), false, true);
+        // 让出事件循环:接收侧的解码/落盘与 ws 的 ping/pong 都需要机会运行,
+        // 同步连发 7 帧会把它们全压到这一轮循环之后(同样拖死探活)
+        await new Promise((resolve) => setTimeout(resolve, 0));
+      }
+    } finally {
+      bulkActive = false;
+    }
   }
 
   return {
     sendEntries(entries: IndexEntry[], mode: IndexMode, opts?: { relayed?: boolean }): void {
-      const payload = encodeIndex(entries); // 条目清单的 JSON 字节
       const full = mode === 'full';
       const relayed = opts?.relayed === true;
-      if (binaryOn()) {
-        // 索引 JSON 直接当 body:省掉「payload 先 base64、整条信封再 base64」的两次 4/3
-        sendRateLimited(
-          encodeBinaryFrame(key, 'index', { folder: folderPath, full, relayed }, payload),
-        );
-        return;
+      // 对端宣告了分片能力才分:旧版对端会把每一片都当成一次完整索引去规划。
+      // 小索引分片没有收益(还多一次拆包),单片能装下就照旧整份发。
+      if (chunkOn()) {
+        const payloads = encodeIndexChunks(entries, INDEX_CHUNK_PLAIN_BYTES);
+        if (payloads.length > 1) {
+          void sendChunkedIndex(payloads, full, relayed);
+          return;
+        }
       }
-      sendRateLimited(
-        encryptMessage(key, {
-          type: 'index',
-          folder: folderPath,
-          payload: payload.toString('base64'),
-          full,
-          relayed,
-        }),
-      );
+      sendRateLimited(encodeIndexFrame(encodeIndex(entries), full, relayed, undefined));
     },
     sendBlockRequest(request: BlockRequest): void {
       sendRateLimited(encryptMessage(key, { type: 'block-request', folder: folderPath, payload: request }));
@@ -468,6 +595,81 @@ export function attachPeerMessages(
   onControl?: (message: ControlMessage) => void,
   takePending?: () => Buffer[],
 ): void {
+  /**
+   * 分片索引的拼装状态(见 ADR-0027)。每个目录一份:
+   *  - 分片按 seq 存,集齐 total 片才拼成一份交给 onPeerIndex;
+   *  - 同一目录又来一个「第 0 片」= 对方重新开始了一份索引(重连、告警重发),
+   *    旧的一半直接丢掉 —— 索引是声明而非事务,新声明覆盖旧声明;
+   *  - 畸形声明(非整数、越界、片间不一致、超量)整体丢弃,不因此掀翻连接
+   *    (与其它坏帧同一策略),下轮索引交换会重来。
+   */
+  const chunkAssemblies = new Map<
+    string,
+    { total: number; full: boolean; relayed: boolean; parts: Map<number, IndexEntry[]>; bytes: number }
+  >();
+
+  function dropAssembly(folder: string): void {
+    chunkAssemblies.delete(folder);
+  }
+
+  /**
+   * 收一片索引,集齐时返回整份(连同**第 0 片**声明的 full/relayed)。
+   *
+   * full/relayed 取第 0 片的,而不是「最后到的那片」:一份分片索引的语义由开头
+   * 那片定义,最后一帧可以是任一分片(发送顺序有背压与插队,不保证字节序)。
+   */
+  function acceptIndexChunk(
+    folder: string,
+    entries: IndexEntry[],
+    header: { full: boolean; relayed: boolean; seq?: number; total?: number },
+    rawBytes: number,
+  ): { entries: IndexEntry[]; full: boolean; relayed: boolean } | undefined {
+    const { seq, total } = header;
+    // 不是分片帧:整份索引一次到齐,原样交给调用方(与升级前逐字节一致)
+    if (seq === undefined || total === undefined) {
+      dropAssembly(folder);
+      return { entries, full: header.full, relayed: header.relayed };
+    }
+    const sane =
+      Number.isInteger(seq) &&
+      Number.isInteger(total) &&
+      total >= 1 &&
+      total <= MAX_INDEX_CHUNKS &&
+      seq >= 0 &&
+      seq < total;
+    if (!sane) {
+      dropAssembly(folder);
+      return undefined;
+    }
+    if (total === 1) {
+      dropAssembly(folder);
+      return seq === 0 ? { entries, full: header.full, relayed: header.relayed } : undefined;
+    }
+    let assembly = chunkAssemblies.get(folder);
+    if (seq === 0 || !assembly || assembly.total !== total) {
+      // 新的一份(或片数变了):从这一片重新开始
+      assembly = { total, full: header.full, relayed: header.relayed, parts: new Map(), bytes: 0 };
+      chunkAssemblies.set(folder, assembly);
+    }
+    if (assembly.parts.has(seq)) return undefined; // 重复片:忽略,不重复计数
+    assembly.parts.set(seq, entries);
+    assembly.bytes += rawBytes;
+    if (assembly.bytes > MAX_INDEX_ASSEMBLY_BYTES) {
+      dropAssembly(folder);
+      return undefined;
+    }
+    if (assembly.parts.size < assembly.total) return undefined;
+    const { full, relayed } = assembly;
+    dropAssembly(folder);
+    const merged: IndexEntry[] = [];
+    for (let i = 0; i < assembly.total; i++) {
+      const part = assembly.parts.get(i);
+      if (!part) return undefined; // 不该发生(size === total);防御性丢弃
+      merged.push(...part);
+    }
+    return { entries: merged, full, relayed };
+  }
+
   const dispatch = (data: Buffer, isBinary?: boolean): void => {
     const raw = data instanceof ArrayBuffer ? Buffer.from(data) : Buffer.from(data as Buffer);
     // 二进制信封:帧类型由 ws 直接告知(isBinary),不需嗅探首字节。
@@ -479,10 +681,19 @@ export function attachPeerMessages(
       const peer = peers.get(folder);
       if (!peer) return;
       if (frame.kind === 'index') {
-        void peer.onPeerIndex(decodeIndex(frame.body), {
-          full: frame.header.full === true,
-          relayed: frame.header.relayed === true,
-        });
+        const merged = acceptIndexChunk(
+          folder,
+          decodeIndex(frame.body),
+          {
+            full: frame.header.full === true,
+            relayed: frame.header.relayed === true,
+            seq: typeof frame.header.seq === 'number' ? frame.header.seq : undefined,
+            total: typeof frame.header.total === 'number' ? frame.header.total : undefined,
+          },
+          frame.body.length,
+        );
+        if (!merged) return;
+        void peer.onPeerIndex(merged.entries, { full: merged.full, relayed: merged.relayed });
       } else {
         void peer.onBlockResponse({
           deviceId: String(frame.header.deviceId ?? ''),
@@ -508,13 +719,24 @@ export function attachPeerMessages(
     const peer = peers.get(message.folder);
     if (!peer) return;
     switch (message.type) {
-      case 'index':
+      case 'index': {
         // 缺省(旧对端不发该字段)按增量处理,理由见 WireMessage 上 index 的注释
-        void peer.onPeerIndex(decodeIndex(Buffer.from(message.payload, 'base64')), {
-          full: message.full === true,
-          relayed: message.relayed === true,
-        });
+        const body = Buffer.from(message.payload, 'base64');
+        const merged = acceptIndexChunk(
+          message.folder,
+          decodeIndex(body),
+          {
+            full: message.full === true,
+            relayed: message.relayed === true,
+            seq: typeof message.seq === 'number' ? message.seq : undefined,
+            total: typeof message.total === 'number' ? message.total : undefined,
+          },
+          body.length,
+        );
+        if (!merged) break;
+        void peer.onPeerIndex(merged.entries, { full: merged.full, relayed: merged.relayed });
         break;
+      }
       case 'index-fingerprint':
         peer.onIndexFingerprint(message.fingerprint);
         break;

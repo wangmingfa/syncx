@@ -1,0 +1,39 @@
+[package]
+name = "syncx-cli"
+description = "syncx Rust 后端的命令行入口"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+
+[[bin]]
+name = "syncx-rs"
+path = "src/main.rs"
+
+[dependencies]
+syncx-api = { path = "../syncx-api" }
+syncx-core = { path = "../syncx-core" }
+syncx-daemon = { path = "../syncx-daemon" }
+syncx-net = { path = "../syncx-net" }
+axum.workspace = true
+clap.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+# 控制令牌 = 24 字节随机数的 hex(与 Node `randomBytes(24).toString('hex')` 同长度)
+rand = "0.8"
+portable-pty = "0.9"
+flate2 = "1"
+tar = "0.4"
+sha2 = "0.10"
+chrono = { version = "0.4", default-features = false, features = ["clock", "std"] }
+tokio.workspace = true
+tracing.workspace = true
+tracing-subscriber.workspace = true
+self-replace = "1.5.1"
+reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "json"] }
+semver = "1.0.28"
+hostname = "0.4.2"
+if-addrs = "0.13.4"
+base64 = "0.22"
+hex = "0.4.3"
+libc = "0.2.191"

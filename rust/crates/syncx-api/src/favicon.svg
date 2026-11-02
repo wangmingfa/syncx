@@ -1,0 +1,11 @@
+<!-- 真值在 src/favicon.ts(Node 侧内联常量)。Rust 侧没有跨语言 import 的办法,
+     故逐字复制一份;改图标时两处都要动。见 docs/adr/0025 第 4 节。 -->
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 32 32">
+<rect width="32" height="32" rx="7" fill="#0F6E56"/>
+<g fill="none" stroke="#FFFFFF" stroke-width="2.4" stroke-linecap="round">
+<path d="M8.5 13H20"/>
+<path d="M24 19H12"/>
+</g>
+<path d="M20 10.5 24.5 13 20 15.5Z" fill="#FFFFFF"/>
+<path d="M12 16.5 7.5 19 12 21.5Z" fill="#FFFFFF"/>
+</svg>

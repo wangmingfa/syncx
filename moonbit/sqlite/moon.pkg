@@ -1,0 +1,10 @@
+import {
+  "moonbitlang/core/encoding/utf8",
+  "moonbitlang/core/debug",
+}
+
+supported_targets = "native"
+
+options(
+  "native-stub": [ "sqlite3.c", "stub.c" ],
+)

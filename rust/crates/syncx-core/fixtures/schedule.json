@@ -1,0 +1,2410 @@
+{
+  "workdays": [
+    "2026-10-28",
+    "2026-10-29",
+    "2026-10-30",
+    "2026-10-31"
+  ],
+  "cases": [
+    {
+      "name": "undefined",
+      "raw": null,
+      "normalized": null,
+      "unbounded": true,
+      "summary": "全天同步",
+      "evaluations": [
+        {
+          "year": 2026,
+          "month": 10,
+          "day": 28,
+          "minutes": 539,
+          "dow": 3,
+          "allowed": true
+        },
+        {
+          "year": 2026,
+          "month": 10,
+          "day": 28,
+          "minutes": 540,
+          "dow": 3,
+          "allowed": true
+        },
+        {
+          "year": 2026,
+          "month": 10,
+          "day": 28,
+          "minutes": 720,
+          "dow": 3,
+          "allowed": true
+        },
+        {
+          "year": 2026,
+          "month": 10,
+          "day": 28,
+          "minutes": 1079,
+          "dow": 3,
+          "allowed": true
+        },
+        {
+          "year": 2026,
+          "month": 10,
+          "day": 28,
+          "minutes": 1080,
+          "dow": 3,
+          "allowed": true
+        },
+        {
+          "year": 2026,
+          "month": 10,
+          "day": 28,
+          "minutes": 1410,
+          "dow": 3,
+          "allowed": true
+        },
+        {
+          "year": 2026,
+          "month": 10,
+          "day": 29,
+          "minutes": 30,
+          "dow": 4,
+          "allowed": true
+        },
+        {
+          "year": 2026,
+          "month": 10,
+          "day": 31,
+          "minutes": 780,
+          "dow": 6,
+          "allowed": true
+        },
+        {
+          "year": 2026,
+          "month": 11,
+          "day": 1,
+          "minutes": 660,
+          "dow": 0,
+          "allowed": true
+        }
+      ],
+      "nextChanges": [
+        {
+          "from": {
+            "year": 2026,
+            "month": 10,
+            "day": 28,
+            "minutes": 539
+          },
+          "next": null
+        },
+        {
+          "from": {
+            "year": 2026,
+            "month": 10,
+            "day": 28,
+            "minutes": 540
+          },
+          "next": null
+        },
+        {
+          "from": {
+            "year": 2026,
+            "month": 10,
+            "day": 28,
+            "minutes": 720
+          },
+          "next": null
+        },
+        {
+          "from": {
+            "year": 2026,
+            "month": 10,
+            "day": 28,
+            "minutes": 1079
+          },
+          "next": null
+        }
+      ]
+    },
+    {
+      "name": "empty-array",
+      "raw": [],
+      "normalized": null,
+      "unbounded": true,
+      "summary": "全天同步",
+      "evaluations": [
+        {
+          "year": 2026,
+          "month": 10,
+          "day": 28,
+          "minutes": 539,
+          "dow": 3,
+          "allowed": true
+        },
+        {
+          "year": 2026,
+          "month": 10,
+          "day": 28,
+          "minutes": 540,
+          "dow": 3,
+          "allowed": true
+        },
+        {
+          "year": 2026,
+          "month": 10,
+          "day": 28,
+          "minutes": 720,
+          "dow": 3,
+          "allowed": true
+        },
+        {
+          "year": 2026,
+          "month": 10,
+          "day": 28,
+          "minutes": 1079,
+          "dow": 3,
+          "allowed": true
+        },
+        {
+          "year": 2026,
+          "month": 10,
+          "day": 28,
+          "minutes": 1080,
+          "dow": 3,
+          "allowed": true
+        },
+        {
+          "year": 2026,
+          "month": 10,
+          "day": 28,
+          "minutes": 1410,
+          "dow": 3,
+          "allowed": true
+        },
+        {
+          "year": 2026,
+          "month": 10,
+          "day": 29,
+          "minutes": 30,
+          "dow": 4,
+          "allowed": true
+        },
+        {
+          "year": 2026,
+          "month": 10,
+          "day": 31,
+          "minutes": 780,
+          "dow": 6,
+          "allowed": true
+        },
+        {
+          "year": 2026,
+          "month": 11,
+          "day": 1,
+          "minutes": 660,
+          "dow": 0,
+          "allowed": true
+        }
+      ],
+      "nextChanges": [
+        {
+          "from": {
+            "year": 2026,
+            "month": 10,
+            "day": 28,
+            "minutes": 539
+          },
+          "next": null
+        },
+        {
+          "from": {
+            "year": 2026,
+            "month": 10,
+            "day": 28,
+            "minutes": 540
+          },
+          "next": null
+        },
+        {
+          "from": {
+            "year": 2026,
+            "month": 10,
+            "day": 28,
+            "minutes": 720
+          },
+          "next": null
+        },
+        {
+          "from": {
+            "year": 2026,
+            "month": 10,
+            "day": 28,
+            "minutes": 1079
+          },
+          "next": null
+        }
+      ]
+    },
+    {
+      "name": "legacy-string",
+      "raw": "22:00-08:00",
+      "normalized": [
+        {
+          "days": {
+            "kind": "any"
+          },
+          "windows": [
+            {
+              "from": 1320,
+              "to": 480
+            }
+          ]
+        }
+      ],
+      "unbounded": false,
+      "summary": "每天 22:00–08:00",
+      "evaluations": [
+        {
+          "year": 2026,
+          "month": 10,
+          "day": 28,
+          "minutes": 539,
+          "dow": 3,
+          "allowed": false
+        },
+        {
+          "year": 2026,
+          "month": 10,
+          "day": 28,
+          "minutes": 540,
+          "dow": 3,
+          "allowed": false
+        },
+        {
+          "year": 2026,
+          "month": 10,
+          "day": 28,
+          "minutes": 720,
+          "dow": 3,
+          "allowed": false
+        },
+        {
+          "year": 2026,
+          "month": 10,
+          "day": 28,
+          "minutes": 1079,
+          "dow": 3,
+          "allowed": false
+        },
+        {
+          "year": 2026,
+          "month": 10,
+          "day": 28,
+          "minutes": 1080,
+          "dow": 3,
+          "allowed": false
+        },
+        {
+          "year": 2026,
+          "month": 10,
+          "day": 28,
+          "minutes": 1410,
+          "dow": 3,
+          "allowed": true
+        },
+        {
+          "year": 2026,
+          "month": 10,
+          "day": 29,
+          "minutes": 30,
+          "dow": 4,
+          "allowed": true
+        },
+        {
+          "year": 2026,
+          "month": 10,
+          "day": 31,
+          "minutes": 780,
+          "dow": 6,
+          "allowed": false
+        },
+        {
+          "year": 2026,
+          "month": 11,
+          "day": 1,
+          "minutes": 660,
+          "dow": 0,
+          "allowed": false
+        }
+      ],
+      "nextChanges": [
+        {
+          "from": {
+            "year": 2026,
+            "month": 10,
+            "day": 28,
+            "minutes": 539
+          },
+          "next": {
+            "year": 2026,
+            "month": 10,
+            "day": 28,
+            "minutes": 1320
+          }
+        },
+        {
+          "from": {
+            "year": 2026,
+            "month": 10,
+            "day": 28,
+            "minutes": 540
+          },
+          "next": {
+            "year": 2026,
+            "month": 10,
+            "day": 28,
+            "minutes": 1320
+          }
+        },
+        {
+          "from": {
+            "year": 2026,
+            "month": 10,
+            "day": 28,
+            "minutes": 720
+          },
+          "next": {
+            "year": 2026,
+            "month": 10,
+            "day": 28,
+            "minutes": 1320
+          }
+        },
+        {
+          "from": {
+            "year": 2026,
+            "month": 10,
+            "day": 28,
+            "minutes": 1079
+          },
+          "next": {
+            "year": 2026,
+            "month": 10,
+            "day": 28,
+            "minutes": 1320
+          }
+        }
+      ]
+    },
+    {
+      "name": "legacy-same",
+      "raw": "09:00-09:00",
+      "normalized": null,
+      "unbounded": true,
+      "summary": "全天同步",
+      "evaluations": [
+        {
+          "year": 2026,
+          "month": 10,
+          "day": 28,
+          "minutes": 539,
+          "dow": 3,
+          "allowed": true
+        },
+        {
+          "year": 2026,
+          "month": 10,
+          "day": 28,
+          "minutes": 540,
+          "dow": 3,
+          "allowed": true
+        },
+        {
+          "year": 2026,
+          "month": 10,
+          "day": 28,
+          "minutes": 720,
+          "dow": 3,
+          "allowed": true
+        },
+        {
+          "year": 2026,
+          "month": 10,
+          "day": 28,
+          "minutes": 1079,
+          "dow": 3,
+          "allowed": true
+        },
+        {
+          "year": 2026,
+          "month": 10,
+          "day": 28,
+          "minutes": 1080,
+          "dow": 3,
+          "allowed": true
+        },
+        {
+          "year": 2026,
+          "month": 10,
+          "day": 28,
+          "minutes": 1410,
+          "dow": 3,
+          "allowed": true
+        },
+        {
+          "year": 2026,
+          "month": 10,
+          "day": 29,
+          "minutes": 30,
+          "dow": 4,
+          "allowed": true
+        },
+        {
+          "year": 2026,
+          "month": 10,
+          "day": 31,
+          "minutes": 780,
+          "dow": 6,
+          "allowed": true
+        },
+        {
+          "year": 2026,
+          "month": 11,
+          "day": 1,
+          "minutes": 660,
+          "dow": 0,
+          "allowed": true
+        }
+      ],
+      "nextChanges": [
+        {
+          "from": {
+            "year": 2026,
+            "month": 10,
+            "day": 28,
+            "minutes": 539
+          },
+          "next": null
+        },
+        {
+          "from": {
+            "year": 2026,
+            "month": 10,
+            "day": 28,
+            "minutes": 540
+          },
+          "next": null
+        },
+        {
+          "from": {
+            "year": 2026,
+            "month": 10,
+            "day": 28,
+            "minutes": 720
+          },
+          "next": null
+        },
+        {
+          "from": {
+            "year": 2026,
+            "month": 10,
+            "day": 28,
+            "minutes": 1079
+          },
+          "next": null
+        }
+      ]
+    },
+    {
+      "name": "legacy-garbage",
+      "raw": "nonsense",
+      "normalized": null,
+      "unbounded": true,
+      "summary": "全天同步",
+      "evaluations": [
+        {
+          "year": 2026,
+          "month": 10,
+          "day": 28,
+          "minutes": 539,
+          "dow": 3,
+          "allowed": true
+        },
+        {
+          "year": 2026,
+          "month": 10,
+          "day": 28,
+          "minutes": 540,
+          "dow": 3,
+          "allowed": true
+        },
+        {
+          "year": 2026,
+          "month": 10,
+          "day": 28,
+          "minutes": 720,
+          "dow": 3,
+          "allowed": true
+        },
+        {
+          "year": 2026,
+          "month": 10,
+          "day": 28,
+          "minutes": 1079,
+          "dow": 3,
+          "allowed": true
+        },
+        {
+          "year": 2026,
+          "month": 10,
+          "day": 28,
+          "minutes": 1080,
+          "dow": 3,
+          "allowed": true
+        },
+        {
+          "year": 2026,
+          "month": 10,
+          "day": 28,
+          "minutes": 1410,
+          "dow": 3,
+          "allowed": true
+        },
+        {
+          "year": 2026,
+          "month": 10,
+          "day": 29,
+          "minutes": 30,
+          "dow": 4,
+          "allowed": true
+        },
+        {
+          "year": 2026,
+          "month": 10,
+          "day": 31,
+          "minutes": 780,
+          "dow": 6,
+          "allowed": true
+        },
+        {
+          "year": 2026,
+          "month": 11,
+          "day": 1,
+          "minutes": 660,
+          "dow": 0,
+          "allowed": true
+        }
+      ],
+      "nextChanges": [
+        {
+          "from": {
+            "year": 2026,
+            "month": 10,
+            "day": 28,
+            "minutes": 539
+          },
+          "next": null
+        },
+        {
+          "from": {
+            "year": 2026,
+            "month": 10,
+            "day": 28,
+            "minutes": 540
+          },
+          "next": null
+        },
+        {
+          "from": {
+            "year": 2026,
+            "month": 10,
+            "day": 28,
+            "minutes": 720
+          },
+          "next": null
+        },
+        {
+          "from": {
+            "year": 2026,
+            "month": 10,
+            "day": 28,
+            "minutes": 1079
+          },
+          "next": null
+        }
+      ]
+    },
+    {
+      "name": "legacy-out-of-range",
+      "raw": "25:00-08:00",
+      "normalized": null,
+      "unbounded": true,
+      "summary": "全天同步",
+      "evaluations": [
+        {
+          "year": 2026,
+          "month": 10,
+          "day": 28,
+          "minutes": 539,
+          "dow": 3,
+          "allowed": true
+        },
+        {
+          "year": 2026,
+          "month": 10,
+          "day": 28,
+          "minutes": 540,
+          "dow": 3,
+          "allowed": true
+        },
+        {
+          "year": 2026,
+          "month": 10,
+          "day": 28,
+          "minutes": 720,
+          "dow": 3,
+          "allowed": true
+        },
+        {
+          "year": 2026,
+          "month": 10,
+          "day": 28,
+          "minutes": 1079,
+          "dow": 3,
+          "allowed": true
+        },
+        {
+          "year": 2026,
+          "month": 10,
+          "day": 28,
+          "minutes": 1080,
+          "dow": 3,
+          "allowed": true
+        },
+        {
+          "year": 2026,
+          "month": 10,
+          "day": 28,
+          "minutes": 1410,
+          "dow": 3,
+          "allowed": true
+        },
+        {
+          "year": 2026,
+          "month": 10,
+          "day": 29,
+          "minutes": 30,
+          "dow": 4,
+          "allowed": true
+        },
+        {
+          "year": 2026,
+          "month": 10,
+          "day": 31,
+          "minutes": 780,
+          "dow": 6,
+          "allowed": true
+        },
+        {
+          "year": 2026,
+          "month": 11,
+          "day": 1,
+          "minutes": 660,
+          "dow": 0,
+          "allowed": true
+        }
+      ],
+      "nextChanges": [
+        {
+          "from": {
+            "year": 2026,
+            "month": 10,
+            "day": 28,
+            "minutes": 539
+          },
+          "next": null
+        },
+        {
+          "from": {
+            "year": 2026,
+            "month": 10,
+            "day": 28,
+            "minutes": 540
+          },
+          "next": null
+        },
+        {
+          "from": {
+            "year": 2026,
+            "month": 10,
+            "day": 28,
+            "minutes": 720
+          },
+          "next": null
+        },
+        {
+          "from": {
+            "year": 2026,
+            "month": 10,
+            "day": 28,
+            "minutes": 1079
+          },
+          "next": null
+        }
+      ]
+    },
+    {
+      "name": "workday-window",
+      "raw": [
+        {
+          "days": {
+            "kind": "workday"
+          },
+          "windows": [
+            {
+              "from": "09:00",
+              "to": "18:00"
+            }
+          ]
+        }
+      ],
+      "normalized": [
+        {
+          "days": {
+            "kind": "workday"
+          },
+          "windows": [
+            {
+              "from": 540,
+              "to": 1080
+            }
+          ]
+        }
+      ],
+      "unbounded": false,
+      "summary": "工作日 09:00–18:00",
+      "evaluations": [
+        {
+          "year": 2026,
+          "month": 10,
+          "day": 28,
+          "minutes": 539,
+          "dow": 3,
+          "allowed": false
+        },
+        {
+          "year": 2026,
+          "month": 10,
+          "day": 28,
+          "minutes": 540,
+          "dow": 3,
+          "allowed": true
+        },
+        {
+          "year": 2026,
+          "month": 10,
+          "day": 28,
+          "minutes": 720,
+          "dow": 3,
+          "allowed": true
+        },
+        {
+          "year": 2026,
+          "month": 10,
+          "day": 28,
+          "minutes": 1079,
+          "dow": 3,
+          "allowed": true
+        },
+        {
+          "year": 2026,
+          "month": 10,
+          "day": 28,
+          "minutes": 1080,
+          "dow": 3,
+          "allowed": false
+        },
+        {
+          "year": 2026,
+          "month": 10,
+          "day": 28,
+          "minutes": 1410,
+          "dow": 3,
+          "allowed": false
+        },
+        {
+          "year": 2026,
+          "month": 10,
+          "day": 29,
+          "minutes": 30,
+          "dow": 4,
+          "allowed": false
+        },
+        {
+          "year": 2026,
+          "month": 10,
+          "day": 31,
+          "minutes": 780,
+          "dow": 6,
+          "allowed": true
+        },
+        {
+          "year": 2026,
+          "month": 11,
+          "day": 1,
+          "minutes": 660,
+          "dow": 0,
+          "allowed": false
+        }
+      ],
+      "nextChanges": [
+        {
+          "from": {
+            "year": 2026,
+            "month": 10,
+            "day": 28,
+            "minutes": 539
+          },
+          "next": {
+            "year": 2026,
+            "month": 10,
+            "day": 28,
+            "minutes": 540
+          }
+        },
+        {
+          "from": {
+            "year": 2026,
+            "month": 10,
+            "day": 28,
+            "minutes": 540
+          },
+          "next": {
+            "year": 2026,
+            "month": 10,
+            "day": 28,
+            "minutes": 1080
+          }
+        },
+        {
+          "from": {
+            "year": 2026,
+            "month": 10,
+            "day": 28,
+            "minutes": 720
+          },
+          "next": {
+            "year": 2026,
+            "month": 10,
+            "day": 28,
+            "minutes": 1080
+          }
+        },
+        {
+          "from": {
+            "year": 2026,
+            "month": 10,
+            "day": 28,
+            "minutes": 1079
+          },
+          "next": {
+            "year": 2026,
+            "month": 10,
+            "day": 28,
+            "minutes": 1080
+          }
+        }
+      ]
+    },
+    {
+      "name": "any-with-overnight",
+      "raw": [
+        {
+          "days": {
+            "kind": "any"
+          },
+          "windows": [
+            {
+              "from": 1320,
+              "to": 480
+            }
+          ]
+        }
+      ],
+      "normalized": [
+        {
+          "days": {
+            "kind": "any"
+          },
+          "windows": [
+            {
+              "from": 1320,
+              "to": 480
+            }
+          ]
+        }
+      ],
+      "unbounded": false,
+      "summary": "每天 22:00–08:00",
+      "evaluations": [
+        {
+          "year": 2026,
+          "month": 10,
+          "day": 28,
+          "minutes": 539,
+          "dow": 3,
+          "allowed": false
+        },
+        {
+          "year": 2026,
+          "month": 10,
+          "day": 28,
+          "minutes": 540,
+          "dow": 3,
+          "allowed": false
+        },
+        {
+          "year": 2026,
+          "month": 10,
+          "day": 28,
+          "minutes": 720,
+          "dow": 3,
+          "allowed": false
+        },
+        {
+          "year": 2026,
+          "month": 10,
+          "day": 28,
+          "minutes": 1079,
+          "dow": 3,
+          "allowed": false
+        },
+        {
+          "year": 2026,
+          "month": 10,
+          "day": 28,
+          "minutes": 1080,
+          "dow": 3,
+          "allowed": false
+        },
+        {
+          "year": 2026,
+          "month": 10,
+          "day": 28,
+          "minutes": 1410,
+          "dow": 3,
+          "allowed": true
+        },
+        {
+          "year": 2026,
+          "month": 10,
+          "day": 29,
+          "minutes": 30,
+          "dow": 4,
+          "allowed": true
+        },
+        {
+          "year": 2026,
+          "month": 10,
+          "day": 31,
+          "minutes": 780,
+          "dow": 6,
+          "allowed": false
+        },
+        {
+          "year": 2026,
+          "month": 11,
+          "day": 1,
+          "minutes": 660,
+          "dow": 0,
+          "allowed": false
+        }
+      ],
+      "nextChanges": [
+        {
+          "from": {
+            "year": 2026,
+            "month": 10,
+            "day": 28,
+            "minutes": 539
+          },
+          "next": {
+            "year": 2026,
+            "month": 10,
+            "day": 28,
+            "minutes": 1320
+          }
+        },
+        {
+          "from": {
+            "year": 2026,
+            "month": 10,
+            "day": 28,
+            "minutes": 540
+          },
+          "next": {
+            "year": 2026,
+            "month": 10,
+            "day": 28,
+            "minutes": 1320
+          }
+        },
+        {
+          "from": {
+            "year": 2026,
+            "month": 10,
+            "day": 28,
+            "minutes": 720
+          },
+          "next": {
+            "year": 2026,
+            "month": 10,
+            "day": 28,
+            "minutes": 1320
+          }
+        },
+        {
+          "from": {
+            "year": 2026,
+            "month": 10,
+            "day": 28,
+            "minutes": 1079
+          },
+          "next": {
+            "year": 2026,
+            "month": 10,
+            "day": 28,
+            "minutes": 1320
+          }
+        }
+      ]
+    },
+    {
+      "name": "dow-subset",
+      "raw": [
+        {
+          "days": {
+            "kind": "dow",
+            "days": [
+              1,
+              3,
+              5
+            ]
+          },
+          "windows": [
+            {
+              "from": 600,
+              "to": 700
+            }
+          ]
+        }
+      ],
+      "normalized": [
+        {
+          "days": {
+            "kind": "dow",
+            "days": [
+              1,
+              3,
+              5
+            ]
+          },
+          "windows": [
+            {
+              "from": 600,
+              "to": 700
+            }
+          ]
+        }
+      ],
+      "unbounded": false,
+      "summary": "周一、周三、周五 10:00–11:40",
+      "evaluations": [
+        {
+          "year": 2026,
+          "month": 10,
+          "day": 28,
+          "minutes": 539,
+          "dow": 3,
+          "allowed": false
+        },
+        {
+          "year": 2026,
+          "month": 10,
+          "day": 28,
+          "minutes": 540,
+          "dow": 3,
+          "allowed": false
+        },
+        {
+          "year": 2026,
+          "month": 10,
+          "day": 28,
+          "minutes": 720,
+          "dow": 3,
+          "allowed": false
+        },
+        {
+          "year": 2026,
+          "month": 10,
+          "day": 28,
+          "minutes": 1079,
+          "dow": 3,
+          "allowed": false
+        },
+        {
+          "year": 2026,
+          "month": 10,
+          "day": 28,
+          "minutes": 1080,
+          "dow": 3,
+          "allowed": false
+        },
+        {
+          "year": 2026,
+          "month": 10,
+          "day": 28,
+          "minutes": 1410,
+          "dow": 3,
+          "allowed": false
+        },
+        {
+          "year": 2026,
+          "month": 10,
+          "day": 29,
+          "minutes": 30,
+          "dow": 4,
+          "allowed": false
+        },
+        {
+          "year": 2026,
+          "month": 10,
+          "day": 31,
+          "minutes": 780,
+          "dow": 6,
+          "allowed": false
+        },
+        {
+          "year": 2026,
+          "month": 11,
+          "day": 1,
+          "minutes": 660,
+          "dow": 0,
+          "allowed": false
+        }
+      ],
+      "nextChanges": [
+        {
+          "from": {
+            "year": 2026,
+            "month": 10,
+            "day": 28,
+            "minutes": 539
+          },
+          "next": {
+            "year": 2026,
+            "month": 10,
+            "day": 28,
+            "minutes": 600
+          }
+        },
+        {
+          "from": {
+            "year": 2026,
+            "month": 10,
+            "day": 28,
+            "minutes": 540
+          },
+          "next": {
+            "year": 2026,
+            "month": 10,
+            "day": 28,
+            "minutes": 600
+          }
+        },
+        {
+          "from": {
+            "year": 2026,
+            "month": 10,
+            "day": 28,
+            "minutes": 720
+          },
+          "next": null
+        },
+        {
+          "from": {
+            "year": 2026,
+            "month": 10,
+            "day": 28,
+            "minutes": 1079
+          },
+          "next": null
+        }
+      ]
+    },
+    {
+      "name": "dow-all-seven-collapses",
+      "raw": [
+        {
+          "days": {
+            "kind": "dow",
+            "days": [
+              0,
+              1,
+              2,
+              3,
+              4,
+              5,
+              6
+            ]
+          },
+          "windows": [
+            {
+              "from": 600,
+              "to": 700
+            }
+          ]
+        }
+      ],
+      "normalized": [
+        {
+          "days": {
+            "kind": "any"
+          },
+          "windows": [
+            {
+              "from": 600,
+              "to": 700
+            }
+          ]
+        }
+      ],
+      "unbounded": false,
+      "summary": "每天 10:00–11:40",
+      "evaluations": [
+        {
+          "year": 2026,
+          "month": 10,
+          "day": 28,
+          "minutes": 539,
+          "dow": 3,
+          "allowed": false
+        },
+        {
+          "year": 2026,
+          "month": 10,
+          "day": 28,
+          "minutes": 540,
+          "dow": 3,
+          "allowed": false
+        },
+        {
+          "year": 2026,
+          "month": 10,
+          "day": 28,
+          "minutes": 720,
+          "dow": 3,
+          "allowed": false
+        },
+        {
+          "year": 2026,
+          "month": 10,
+          "day": 28,
+          "minutes": 1079,
+          "dow": 3,
+          "allowed": false
+        },
+        {
+          "year": 2026,
+          "month": 10,
+          "day": 28,
+          "minutes": 1080,
+          "dow": 3,
+          "allowed": false
+        },
+        {
+          "year": 2026,
+          "month": 10,
+          "day": 28,
+          "minutes": 1410,
+          "dow": 3,
+          "allowed": false
+        },
+        {
+          "year": 2026,
+          "month": 10,
+          "day": 29,
+          "minutes": 30,
+          "dow": 4,
+          "allowed": false
+        },
+        {
+          "year": 2026,
+          "month": 10,
+          "day": 31,
+          "minutes": 780,
+          "dow": 6,
+          "allowed": false
+        },
+        {
+          "year": 2026,
+          "month": 11,
+          "day": 1,
+          "minutes": 660,
+          "dow": 0,
+          "allowed": true
+        }
+      ],
+      "nextChanges": [
+        {
+          "from": {
+            "year": 2026,
+            "month": 10,
+            "day": 28,
+            "minutes": 539
+          },
+          "next": {
+            "year": 2026,
+            "month": 10,
+            "day": 28,
+            "minutes": 600
+          }
+        },
+        {
+          "from": {
+            "year": 2026,
+            "month": 10,
+            "day": 28,
+            "minutes": 540
+          },
+          "next": {
+            "year": 2026,
+            "month": 10,
+            "day": 28,
+            "minutes": 600
+          }
+        },
+        {
+          "from": {
+            "year": 2026,
+            "month": 10,
+            "day": 28,
+            "minutes": 720
+          },
+          "next": {
+            "year": 2026,
+            "month": 10,
+            "day": 29,
+            "minutes": 600
+          }
+        },
+        {
+          "from": {
+            "year": 2026,
+            "month": 10,
+            "day": 28,
+            "minutes": 1079
+          },
+          "next": {
+            "year": 2026,
+            "month": 10,
+            "day": 29,
+            "minutes": 600
+          }
+        }
+      ]
+    },
+    {
+      "name": "dow-empty-collapses",
+      "raw": [
+        {
+          "days": {
+            "kind": "dow",
+            "days": []
+          },
+          "windows": [
+            {
+              "from": 600,
+              "to": 700
+            }
+          ]
+        }
+      ],
+      "normalized": [
+        {
+          "days": {
+            "kind": "any"
+          },
+          "windows": [
+            {
+              "from": 600,
+              "to": 700
+            }
+          ]
+        }
+      ],
+      "unbounded": false,
+      "summary": "每天 10:00–11:40",
+      "evaluations": [
+        {
+          "year": 2026,
+          "month": 10,
+          "day": 28,
+          "minutes": 539,
+          "dow": 3,
+          "allowed": false
+        },
+        {
+          "year": 2026,
+          "month": 10,
+          "day": 28,
+          "minutes": 540,
+          "dow": 3,
+          "allowed": false
+        },
+        {
+          "year": 2026,
+          "month": 10,
+          "day": 28,
+          "minutes": 720,
+          "dow": 3,
+          "allowed": false
+        },
+        {
+          "year": 2026,
+          "month": 10,
+          "day": 28,
+          "minutes": 1079,
+          "dow": 3,
+          "allowed": false
+        },
+        {
+          "year": 2026,
+          "month": 10,
+          "day": 28,
+          "minutes": 1080,
+          "dow": 3,
+          "allowed": false
+        },
+        {
+          "year": 2026,
+          "month": 10,
+          "day": 28,
+          "minutes": 1410,
+          "dow": 3,
+          "allowed": false
+        },
+        {
+          "year": 2026,
+          "month": 10,
+          "day": 29,
+          "minutes": 30,
+          "dow": 4,
+          "allowed": false
+        },
+        {
+          "year": 2026,
+          "month": 10,
+          "day": 31,
+          "minutes": 780,
+          "dow": 6,
+          "allowed": false
+        },
+        {
+          "year": 2026,
+          "month": 11,
+          "day": 1,
+          "minutes": 660,
+          "dow": 0,
+          "allowed": true
+        }
+      ],
+      "nextChanges": [
+        {
+          "from": {
+            "year": 2026,
+            "month": 10,
+            "day": 28,
+            "minutes": 539
+          },
+          "next": {
+            "year": 2026,
+            "month": 10,
+            "day": 28,
+            "minutes": 600
+          }
+        },
+        {
+          "from": {
+            "year": 2026,
+            "month": 10,
+            "day": 28,
+            "minutes": 540
+          },
+          "next": {
+            "year": 2026,
+            "month": 10,
+            "day": 28,
+            "minutes": 600
+          }
+        },
+        {
+          "from": {
+            "year": 2026,
+            "month": 10,
+            "day": 28,
+            "minutes": 720
+          },
+          "next": {
+            "year": 2026,
+            "month": 10,
+            "day": 29,
+            "minutes": 600
+          }
+        },
+        {
+          "from": {
+            "year": 2026,
+            "month": 10,
+            "day": 28,
+            "minutes": 1079
+          },
+          "next": {
+            "year": 2026,
+            "month": 10,
+            "day": 29,
+            "minutes": 600
+          }
+        }
+      ]
+    },
+    {
+      "name": "flat-window-shorthand",
+      "raw": [
+        {
+          "days": {
+            "kind": "any"
+          },
+          "from": "08:00",
+          "to": "10:00"
+        }
+      ],
+      "normalized": [
+        {
+          "days": {
+            "kind": "any"
+          },
+          "windows": [
+            {
+              "from": 480,
+              "to": 600
+            }
+          ]
+        }
+      ],
+      "unbounded": false,
+      "summary": "每天 08:00–10:00",
+      "evaluations": [
+        {
+          "year": 2026,
+          "month": 10,
+          "day": 28,
+          "minutes": 539,
+          "dow": 3,
+          "allowed": true
+        },
+        {
+          "year": 2026,
+          "month": 10,
+          "day": 28,
+          "minutes": 540,
+          "dow": 3,
+          "allowed": true
+        },
+        {
+          "year": 2026,
+          "month": 10,
+          "day": 28,
+          "minutes": 720,
+          "dow": 3,
+          "allowed": false
+        },
+        {
+          "year": 2026,
+          "month": 10,
+          "day": 28,
+          "minutes": 1079,
+          "dow": 3,
+          "allowed": false
+        },
+        {
+          "year": 2026,
+          "month": 10,
+          "day": 28,
+          "minutes": 1080,
+          "dow": 3,
+          "allowed": false
+        },
+        {
+          "year": 2026,
+          "month": 10,
+          "day": 28,
+          "minutes": 1410,
+          "dow": 3,
+          "allowed": false
+        },
+        {
+          "year": 2026,
+          "month": 10,
+          "day": 29,
+          "minutes": 30,
+          "dow": 4,
+          "allowed": false
+        },
+        {
+          "year": 2026,
+          "month": 10,
+          "day": 31,
+          "minutes": 780,
+          "dow": 6,
+          "allowed": false
+        },
+        {
+          "year": 2026,
+          "month": 11,
+          "day": 1,
+          "minutes": 660,
+          "dow": 0,
+          "allowed": false
+        }
+      ],
+      "nextChanges": [
+        {
+          "from": {
+            "year": 2026,
+            "month": 10,
+            "day": 28,
+            "minutes": 539
+          },
+          "next": {
+            "year": 2026,
+            "month": 10,
+            "day": 28,
+            "minutes": 600
+          }
+        },
+        {
+          "from": {
+            "year": 2026,
+            "month": 10,
+            "day": 28,
+            "minutes": 540
+          },
+          "next": {
+            "year": 2026,
+            "month": 10,
+            "day": 28,
+            "minutes": 600
+          }
+        },
+        {
+          "from": {
+            "year": 2026,
+            "month": 10,
+            "day": 28,
+            "minutes": 720
+          },
+          "next": {
+            "year": 2026,
+            "month": 10,
+            "day": 29,
+            "minutes": 480
+          }
+        },
+        {
+          "from": {
+            "year": 2026,
+            "month": 10,
+            "day": 28,
+            "minutes": 1079
+          },
+          "next": {
+            "year": 2026,
+            "month": 10,
+            "day": 29,
+            "minutes": 480
+          }
+        }
+      ]
+    },
+    {
+      "name": "zero-length-window-is-unbounded",
+      "raw": [
+        {
+          "days": {
+            "kind": "workday"
+          },
+          "windows": [
+            {
+              "from": 540,
+              "to": 540
+            }
+          ]
+        }
+      ],
+      "normalized": [
+        {
+          "days": {
+            "kind": "workday"
+          },
+          "windows": [
+            {
+              "from": 540,
+              "to": 540
+            }
+          ]
+        }
+      ],
+      "unbounded": true,
+      "summary": "全天同步",
+      "evaluations": [
+        {
+          "year": 2026,
+          "month": 10,
+          "day": 28,
+          "minutes": 539,
+          "dow": 3,
+          "allowed": true
+        },
+        {
+          "year": 2026,
+          "month": 10,
+          "day": 28,
+          "minutes": 540,
+          "dow": 3,
+          "allowed": true
+        },
+        {
+          "year": 2026,
+          "month": 10,
+          "day": 28,
+          "minutes": 720,
+          "dow": 3,
+          "allowed": true
+        },
+        {
+          "year": 2026,
+          "month": 10,
+          "day": 28,
+          "minutes": 1079,
+          "dow": 3,
+          "allowed": true
+        },
+        {
+          "year": 2026,
+          "month": 10,
+          "day": 28,
+          "minutes": 1080,
+          "dow": 3,
+          "allowed": true
+        },
+        {
+          "year": 2026,
+          "month": 10,
+          "day": 28,
+          "minutes": 1410,
+          "dow": 3,
+          "allowed": true
+        },
+        {
+          "year": 2026,
+          "month": 10,
+          "day": 29,
+          "minutes": 30,
+          "dow": 4,
+          "allowed": true
+        },
+        {
+          "year": 2026,
+          "month": 10,
+          "day": 31,
+          "minutes": 780,
+          "dow": 6,
+          "allowed": true
+        },
+        {
+          "year": 2026,
+          "month": 11,
+          "day": 1,
+          "minutes": 660,
+          "dow": 0,
+          "allowed": true
+        }
+      ],
+      "nextChanges": [
+        {
+          "from": {
+            "year": 2026,
+            "month": 10,
+            "day": 28,
+            "minutes": 539
+          },
+          "next": null
+        },
+        {
+          "from": {
+            "year": 2026,
+            "month": 10,
+            "day": 28,
+            "minutes": 540
+          },
+          "next": null
+        },
+        {
+          "from": {
+            "year": 2026,
+            "month": 10,
+            "day": 28,
+            "minutes": 720
+          },
+          "next": null
+        },
+        {
+          "from": {
+            "year": 2026,
+            "month": 10,
+            "day": 28,
+            "minutes": 1079
+          },
+          "next": null
+        }
+      ]
+    },
+    {
+      "name": "dedupes-windows",
+      "raw": [
+        {
+          "days": {
+            "kind": "any"
+          },
+          "windows": [
+            {
+              "from": 540,
+              "to": 600
+            },
+            {
+              "from": 540,
+              "to": 600
+            },
+            {
+              "from": 660,
+              "to": 720
+            }
+          ]
+        }
+      ],
+      "normalized": [
+        {
+          "days": {
+            "kind": "any"
+          },
+          "windows": [
+            {
+              "from": 540,
+              "to": 600
+            },
+            {
+              "from": 660,
+              "to": 720
+            }
+          ]
+        }
+      ],
+      "unbounded": false,
+      "summary": "每天 09:00–10:00、11:00–12:00",
+      "evaluations": [
+        {
+          "year": 2026,
+          "month": 10,
+          "day": 28,
+          "minutes": 539,
+          "dow": 3,
+          "allowed": false
+        },
+        {
+          "year": 2026,
+          "month": 10,
+          "day": 28,
+          "minutes": 540,
+          "dow": 3,
+          "allowed": true
+        },
+        {
+          "year": 2026,
+          "month": 10,
+          "day": 28,
+          "minutes": 720,
+          "dow": 3,
+          "allowed": false
+        },
+        {
+          "year": 2026,
+          "month": 10,
+          "day": 28,
+          "minutes": 1079,
+          "dow": 3,
+          "allowed": false
+        },
+        {
+          "year": 2026,
+          "month": 10,
+          "day": 28,
+          "minutes": 1080,
+          "dow": 3,
+          "allowed": false
+        },
+        {
+          "year": 2026,
+          "month": 10,
+          "day": 28,
+          "minutes": 1410,
+          "dow": 3,
+          "allowed": false
+        },
+        {
+          "year": 2026,
+          "month": 10,
+          "day": 29,
+          "minutes": 30,
+          "dow": 4,
+          "allowed": false
+        },
+        {
+          "year": 2026,
+          "month": 10,
+          "day": 31,
+          "minutes": 780,
+          "dow": 6,
+          "allowed": false
+        },
+        {
+          "year": 2026,
+          "month": 11,
+          "day": 1,
+          "minutes": 660,
+          "dow": 0,
+          "allowed": true
+        }
+      ],
+      "nextChanges": [
+        {
+          "from": {
+            "year": 2026,
+            "month": 10,
+            "day": 28,
+            "minutes": 539
+          },
+          "next": {
+            "year": 2026,
+            "month": 10,
+            "day": 28,
+            "minutes": 540
+          }
+        },
+        {
+          "from": {
+            "year": 2026,
+            "month": 10,
+            "day": 28,
+            "minutes": 540
+          },
+          "next": {
+            "year": 2026,
+            "month": 10,
+            "day": 28,
+            "minutes": 600
+          }
+        },
+        {
+          "from": {
+            "year": 2026,
+            "month": 10,
+            "day": 28,
+            "minutes": 720
+          },
+          "next": {
+            "year": 2026,
+            "month": 10,
+            "day": 29,
+            "minutes": 540
+          }
+        },
+        {
+          "from": {
+            "year": 2026,
+            "month": 10,
+            "day": 28,
+            "minutes": 1079
+          },
+          "next": {
+            "year": 2026,
+            "month": 10,
+            "day": 29,
+            "minutes": 540
+          }
+        }
+      ]
+    },
+    {
+      "name": "drops-bad-windows",
+      "raw": [
+        {
+          "days": {
+            "kind": "any"
+          },
+          "windows": [
+            {
+              "from": "abc",
+              "to": 600
+            },
+            {
+              "from": 700,
+              "to": 800
+            }
+          ]
+        }
+      ],
+      "normalized": [
+        {
+          "days": {
+            "kind": "any"
+          },
+          "windows": [
+            {
+              "from": 700,
+              "to": 800
+            }
+          ]
+        }
+      ],
+      "unbounded": false,
+      "summary": "每天 11:40–13:20",
+      "evaluations": [
+        {
+          "year": 2026,
+          "month": 10,
+          "day": 28,
+          "minutes": 539,
+          "dow": 3,
+          "allowed": false
+        },
+        {
+          "year": 2026,
+          "month": 10,
+          "day": 28,
+          "minutes": 540,
+          "dow": 3,
+          "allowed": false
+        },
+        {
+          "year": 2026,
+          "month": 10,
+          "day": 28,
+          "minutes": 720,
+          "dow": 3,
+          "allowed": true
+        },
+        {
+          "year": 2026,
+          "month": 10,
+          "day": 28,
+          "minutes": 1079,
+          "dow": 3,
+          "allowed": false
+        },
+        {
+          "year": 2026,
+          "month": 10,
+          "day": 28,
+          "minutes": 1080,
+          "dow": 3,
+          "allowed": false
+        },
+        {
+          "year": 2026,
+          "month": 10,
+          "day": 28,
+          "minutes": 1410,
+          "dow": 3,
+          "allowed": false
+        },
+        {
+          "year": 2026,
+          "month": 10,
+          "day": 29,
+          "minutes": 30,
+          "dow": 4,
+          "allowed": false
+        },
+        {
+          "year": 2026,
+          "month": 10,
+          "day": 31,
+          "minutes": 780,
+          "dow": 6,
+          "allowed": true
+        },
+        {
+          "year": 2026,
+          "month": 11,
+          "day": 1,
+          "minutes": 660,
+          "dow": 0,
+          "allowed": false
+        }
+      ],
+      "nextChanges": [
+        {
+          "from": {
+            "year": 2026,
+            "month": 10,
+            "day": 28,
+            "minutes": 539
+          },
+          "next": {
+            "year": 2026,
+            "month": 10,
+            "day": 28,
+            "minutes": 700
+          }
+        },
+        {
+          "from": {
+            "year": 2026,
+            "month": 10,
+            "day": 28,
+            "minutes": 540
+          },
+          "next": {
+            "year": 2026,
+            "month": 10,
+            "day": 28,
+            "minutes": 700
+          }
+        },
+        {
+          "from": {
+            "year": 2026,
+            "month": 10,
+            "day": 28,
+            "minutes": 720
+          },
+          "next": {
+            "year": 2026,
+            "month": 10,
+            "day": 28,
+            "minutes": 800
+          }
+        },
+        {
+          "from": {
+            "year": 2026,
+            "month": 10,
+            "day": 28,
+            "minutes": 1079
+          },
+          "next": {
+            "year": 2026,
+            "month": 10,
+            "day": 29,
+            "minutes": 700
+          }
+        }
+      ]
+    },
+    {
+      "name": "two-rules-or",
+      "raw": [
+        {
+          "days": {
+            "kind": "workday"
+          },
+          "windows": [
+            {
+              "from": "09:00",
+              "to": "18:00"
+            }
+          ]
+        },
+        {
+          "days": {
+            "kind": "offday"
+          },
+          "windows": [
+            {
+              "from": "10:00",
+              "to": "20:00"
+            }
+          ]
+        }
+      ],
+      "normalized": [
+        {
+          "days": {
+            "kind": "workday"
+          },
+          "windows": [
+            {
+              "from": 540,
+              "to": 1080
+            }
+          ]
+        },
+        {
+          "days": {
+            "kind": "offday"
+          },
+          "windows": [
+            {
+              "from": 600,
+              "to": 1200
+            }
+          ]
+        }
+      ],
+      "unbounded": false,
+      "summary": "工作日 09:00–18:00；休息日 10:00–20:00",
+      "evaluations": [
+        {
+          "year": 2026,
+          "month": 10,
+          "day": 28,
+          "minutes": 539,
+          "dow": 3,
+          "allowed": false
+        },
+        {
+          "year": 2026,
+          "month": 10,
+          "day": 28,
+          "minutes": 540,
+          "dow": 3,
+          "allowed": true
+        },
+        {
+          "year": 2026,
+          "month": 10,
+          "day": 28,
+          "minutes": 720,
+          "dow": 3,
+          "allowed": true
+        },
+        {
+          "year": 2026,
+          "month": 10,
+          "day": 28,
+          "minutes": 1079,
+          "dow": 3,
+          "allowed": true
+        },
+        {
+          "year": 2026,
+          "month": 10,
+          "day": 28,
+          "minutes": 1080,
+          "dow": 3,
+          "allowed": false
+        },
+        {
+          "year": 2026,
+          "month": 10,
+          "day": 28,
+          "minutes": 1410,
+          "dow": 3,
+          "allowed": false
+        },
+        {
+          "year": 2026,
+          "month": 10,
+          "day": 29,
+          "minutes": 30,
+          "dow": 4,
+          "allowed": false
+        },
+        {
+          "year": 2026,
+          "month": 10,
+          "day": 31,
+          "minutes": 780,
+          "dow": 6,
+          "allowed": true
+        },
+        {
+          "year": 2026,
+          "month": 11,
+          "day": 1,
+          "minutes": 660,
+          "dow": 0,
+          "allowed": true
+        }
+      ],
+      "nextChanges": [
+        {
+          "from": {
+            "year": 2026,
+            "month": 10,
+            "day": 28,
+            "minutes": 539
+          },
+          "next": {
+            "year": 2026,
+            "month": 10,
+            "day": 28,
+            "minutes": 540
+          }
+        },
+        {
+          "from": {
+            "year": 2026,
+            "month": 10,
+            "day": 28,
+            "minutes": 540
+          },
+          "next": {
+            "year": 2026,
+            "month": 10,
+            "day": 28,
+            "minutes": 1080
+          }
+        },
+        {
+          "from": {
+            "year": 2026,
+            "month": 10,
+            "day": 28,
+            "minutes": 720
+          },
+          "next": {
+            "year": 2026,
+            "month": 10,
+            "day": 28,
+            "minutes": 1080
+          }
+        },
+        {
+          "from": {
+            "year": 2026,
+            "month": 10,
+            "day": 28,
+            "minutes": 1079
+          },
+          "next": {
+            "year": 2026,
+            "month": 10,
+            "day": 28,
+            "minutes": 1080
+          }
+        }
+      ]
+    }
+  ]
+}

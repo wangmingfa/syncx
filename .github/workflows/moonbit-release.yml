@@ -1,0 +1,153 @@
+# 构建 MoonBit 后端多平台二进制并上传到 GitHub Release(ADR-0026 §3)
+#
+# 触发:与 publish.yml / rust-release.yml 同一个 tag(`v*`),三者并行,互不依赖 ——
+# npm 包、Rust 资产、MoonBit 资产必须永远是同一个版本号。
+#
+# 产物(6 个目标,二进制名固定 syncx-mb):
+#   syncx-mbt-v{version}-x86_64-unknown-linux-gnu.tar.gz
+#   syncx-mbt-v{version}-aarch64-unknown-linux-gnu.tar.gz
+#   syncx-mbt-v{version}-x86_64-apple-darwin.tar.gz
+#   syncx-mbt-v{version}-aarch64-apple-darwin.tar.gz
+#   syncx-mbt-v{version}-x86_64-pc-windows-msvc.zip
+#   syncx-mbt-v{version}-aarch64-pc-windows-msvc.zip
+#
+# MoonBit native 无交叉编译工具链(与 mvm 同策略),arm 目标靠原生 arm runner:
+#   aarch64-linux → ubuntu-24.04-arm;aarch64-windows → windows-11-arm;
+#   x86_64-darwin → macos-13( x64 runner),arm64 darwin → macos-15。
+
+name: Release MoonBit Binaries
+
+on:
+  push:
+    tags:
+      - 'v*'
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    name: build ${{ matrix.target }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - target: x86_64-unknown-linux-gnu
+            os: ubuntu-latest
+          - target: aarch64-unknown-linux-gnu
+            os: ubuntu-24.04-arm
+          - target: x86_64-apple-darwin
+            os: macos-13
+          - target: aarch64-apple-darwin
+            os: macos-15
+          - target: x86_64-pc-windows-msvc
+            os: windows-latest
+          - target: aarch64-pc-windows-msvc
+            os: windows-11-arm
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+
+      # 版本号单一来源是 package.json;syncx 会读它注入版本(构建前 sed 对齐,mvm 同款)。
+      - name: Sync version from tag
+        shell: bash
+        run: |
+          VERSION="${GITHUB_REF_NAME#v}"
+          node -e "const fs=require('fs');const p=JSON.parse(fs.readFileSync('package.json'));p.version='$VERSION';fs.writeFileSync('package.json',JSON.stringify(p,null,2)+'\n')"
+          # 同步注入 MoonBit 侧版本常量
+          sed -i.bak "s/pub const VERSION : String = \".*\"/pub const VERSION : String = \"$VERSION\"/" moonbit/core/version.mbt && rm -f moonbit/core/version.mbt.bak
+
+      - name: Install MoonBit toolchain
+        shell: bash
+        run: |
+          if [[ "$RUNNER_OS" == "Windows" ]]; then
+            powershell -c "irm https://cli.moonbitlang.com/install/powershell.ps1 | iex"
+            echo "C:\\Users\\runneradmin\\.moon\\bin" >> "$GITHUB_PATH"
+          else
+            curl -fsSL https://cli.moonbitlang.com/install/unix.sh | bash
+            echo "$HOME/.moon/bin" >> "$GITHUB_PATH"
+          fi
+
+      - name: Build
+        working-directory: moonbit
+        shell: bash
+        run: |
+          moon update
+          moon build --release
+          ls -la _build/native/release/build/cli/
+
+      - name: Package(unix)
+        if: ${{ !contains(matrix.target, 'windows') }}
+        shell: bash
+        run: |
+          VERSION="${GITHUB_REF_NAME#v}"
+          BIN="moonbit/_build/native/release/build/cli/cli.exe"
+          STAGE="syncx-mbt-v${VERSION}-${{ matrix.target }}"
+          mkdir -p "dist/$STAGE"
+          cp "$BIN" "dist/$STAGE/syncx-mb"
+          cp README.md "dist/$STAGE/" 2>/dev/null || true
+          tar -czf "dist/${STAGE}.tar.gz" -C dist "$STAGE"
+
+      - name: Package(windows)
+        if: contains(matrix.target, 'windows')
+        # Compress-Archive 与解压端 Expand-Archive 配套;7z 不在 runner PATH 上
+        shell: pwsh
+        run: |
+          $version = $env:GITHUB_REF_NAME -replace '^v', ''
+          $stage = "syncx-mbt-v$version-${{ matrix.target }}"
+          New-Item -ItemType Directory -Force "dist/$stage" | Out-Null
+          Copy-Item "moonbit/_build/native/release/build/cli/cli.exe" "dist/$stage/syncx-mb.exe"
+          if (Test-Path README.md) { Copy-Item README.md "dist/$stage/" }
+          Compress-Archive -Path "dist/$stage" -DestinationPath "dist/$stage.zip"
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: syncx-mb-${{ matrix.target }}
+          path: |
+            dist/*.tar.gz
+            dist/*.zip
+          if-no-files-found: error
+
+  release:
+    name: create release
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - name: Download artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+
+      - name: Generate checksums
+        shell: bash
+        run: |
+          cd dist
+          # 与 rust-release.yml 同一份两空格 checksums.txt;三个 workflow 的
+          # 资产会通过 --clobber 合并进同一个 Release,自更新端统一解析。
+          sha256sum * > checksums.txt
+          echo "--- checksums.txt ---"
+          cat checksums.txt
+
+      - name: Upload to release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: bash
+        run: |
+          VERSION="${GITHUB_REF_NAME#v}"
+          PRERELEASE=""
+          case "$VERSION" in
+            *-*) PRERELEASE="--prerelease" ;;
+          esac
+          # 与 rust-release.yml 共用同一个 Release:已存在则只补资产
+          if gh release view "$GITHUB_REF_NAME" >/dev/null 2>&1; then
+            gh release upload "$GITHUB_REF_NAME" dist/* --clobber
+          else
+            gh release create "$GITHUB_REF_NAME" dist/* \
+              --title "syncx $VERSION" \
+              --generate-notes \
+              $PRERELEASE
+          fi

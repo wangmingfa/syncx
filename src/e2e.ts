@@ -205,6 +205,8 @@ export function wrapTransportBlind(t: PeerTransport, key: Buffer, root: string):
   return {
     sendEntries(entries: IndexEntry[], mode: IndexMode, opts?: { relayed?: boolean }): void {
       const blind = toBlindEntries(entries, key, root);
+      // 分片能力属于内层 transport(它按对端 caps 现读),包装只做密文视图转换,
+      // 因此这里不复制也不改动 opts —— 原样转交即可(见 ADR-0027)。
       if (blind.length > 0) t.sendEntries(blind, mode, opts);
     },
     sendBlockRequest(request) {

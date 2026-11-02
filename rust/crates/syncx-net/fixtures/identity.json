@@ -1,0 +1,25 @@
+{
+  "cases": [
+    {
+      "seed": "0101010101010101010101010101010101010101010101010101010101010101",
+      "publicKeyPem": "-----BEGIN PUBLIC KEY-----\nMCowBQYDK2VwAyEAiojj3XQJ8ZX9UtstPLpdcspnCb8dlBIb83SIAbQPb1w=\n-----END PUBLIC KEY-----\n",
+      "privateKeyPem": "-----BEGIN PRIVATE KEY-----\nMC4CAQAwBQYDK2VwBCIEIAEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEB\n-----END PRIVATE KEY-----\n",
+      "deviceId": "B5JQBQKNFR",
+      "sha256PrefixHex": "3d4c030534b1"
+    },
+    {
+      "seed": "4242424242424242424242424242424242424242424242424242424242424242",
+      "publicKeyPem": "-----BEGIN PUBLIC KEY-----\nMCowBQYDK2VwAyEAIVL40Zt5HSRFMkLhXy6rbLfP+ntqXtMAl5YOBpiB2xI=\n-----END PUBLIC KEY-----\n",
+      "privateKeyPem": "-----BEGIN PRIVATE KEY-----\nMC4CAQAwBQYDK2VwBCIEIEJCQkJCQkJCQkJCQkJCQkJCQkJCQkJCQkJCQkJCQkJC\n-----END PRIVATE KEY-----\n",
+      "deviceId": "AT6TQ764DV",
+      "sha256PrefixHex": "13f4e1ff7075"
+    },
+    {
+      "seed": "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+      "publicKeyPem": "-----BEGIN PUBLIC KEY-----\nMCowBQYDK2VwAyEAIHoGeJKCHiXXcPH7oMR8Ef9LgT5UFi7Onrg54HYjGrY=\n-----END PUBLIC KEY-----\n",
+      "privateKeyPem": "-----BEGIN PRIVATE KEY-----\nMC4CAQAwBQYDK2VwBCIEIAEjRWeJq83vASNFZ4mrze8BI0VniavN7wEjRWeJq83v\n-----END PRIVATE KEY-----\n",
+      "deviceId": "FDUTCG7DRN",
+      "sha256PrefixHex": "a3a4c46f8e2d"
+    }
+  ]
+}

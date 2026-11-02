@@ -24,6 +24,11 @@ import { equalPairs, readDriftKnobs, runAudit, type DriftReport } from './drift.
 export type IndexMode = 'full' | 'delta';
 
 export interface PeerTransport {
+  /**
+   * 发一份索引。是否**分片**由 transport 自己按对端能力决定(见 wire.ts 的
+   * canChunkIndex / ADR-0027):调用方只需表达「这是全量还是增量」,不必知道
+   * 对端能不能拼片 —— 与二进制信封同一种分工。
+   */
   sendEntries(entries: IndexEntry[], mode: IndexMode, opts?: { relayed?: boolean }): void;
   sendBlockRequest(request: BlockRequest): void;
   /** opts.priority = 源块请求带「优先同步」标记:实现侧据此把响应插到发送队列最前。 */

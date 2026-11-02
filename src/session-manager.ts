@@ -71,7 +71,7 @@ import { compareVersions } from './upgrade.js';
 import { NETWORK_OFFLINE_BACKOFF_MS, offlineAwareReconnectDelay, reconnectDelayMs } from './args.js';
 import { hasRoutableInterface } from './net/offline-probe.js';
 import { isSelfPeerUrl, localInterfaceAddresses } from './net/peer-address.js';
-import { CAP_BINARY1 } from './handshake.js';
+import { CAP_BINARY1, CAP_INDEX_CHUNK1 } from './handshake.js';
 import { isGitRepo, getLastCommitHash, getCommitInfo, hasUncommittedChanges, autoCommit, getUncommittedChanges, readFileAtHead, readFileAt, listCommitFiles, getCommitParents, isCommitHash, listRecentCommits, countUnpushedCommits, listUnpushedCommits, GIT_UNPUSHED_LIMIT, gitPush, findGitIndexLock, removeGitIndexLock, type CommitInfo, type GitChangeEntry, type GitCommitEntry, type GitCommitFileEntry, type GitPushResult, type HeadReadResult, type GitIndexLockInfo, type GitIndexLockRemoveResult } from './git-monitor.js';
 import { scanEmptyDirs, removeEmptyDirs, type EmptyDirScanResult, type EmptyDirDeleteResult } from './empty-dirs.js';
 
@@ -673,6 +673,12 @@ export class SyncSessionManager {
    * 并排定重连,杜绝僵尸在线。
    */
   private readonly peerLiveness = new Map<WebSocket, boolean>();
+  /**
+   * 上一轮心跳时各 socket 的写缓冲字节数(见 outboundDrainObserved)。
+   * 探活判死前用它区分「链路忙」与「对端已死」:这是大索引帧拖死 ping/pong 的
+   * 误杀保护(ADR-0027),不是新的超时机制。
+   */
+  private readonly peerOutboundBytes = new Map<WebSocket, number>();
   /** 心跳定时器句柄;close() 时清除,避免阻止 daemon 退出。 */
   private heartbeatTimer: ReturnType<typeof setInterval> | undefined;
   /** 最近的中转活动环形缓冲(ADR-0014 遥测);上限 100,溢出丢弃最旧。仅供拓扑视图展示。 */
@@ -1008,14 +1014,24 @@ export class SyncSessionManager {
       for (const socket of this.peerSockets) {
         const alive = this.peerLiveness.get(socket);
         if (alive === false) {
-          // 上一轮 ping 后始终没收到 pong:探活失败,强制断开(close 会清理 + 重连)
-          this.logger.info('peer socket failed liveness probe (no pong); terminating');
-          try {
-            socket.terminate();
-          } catch {
-            // socket 已关闭,close 回调会做清理
+          // 上一轮 ping 后始终没收到 pong:探活失败,强制断开(close 会清理 + 重连)。
+          //
+          // 例外:**本端出站积压仍在减少**时不判死。ping/pong 与数据共用同一条 ws
+          // socket,写缓冲里压着几十 MB 时 pong 确实会晚到 —— 那是「链路忙」而不是
+          // 「对端死了」。把忙当死会形成 2026-11 的死循环:大索引发不完 → 判死 →
+          // 重连 → 从头再发一份(ADR-0027)。判据取「在途字节比上一轮少」:真死连接
+          // 的写缓冲只增不减(对端不读),忙链路的缓冲会随对端消费持续下降。
+          if (this.outboundDrainObserved(socket)) {
+            this.peerLiveness.set(socket, true);
+          } else {
+            this.logger.info('peer socket failed liveness probe (no pong); terminating');
+            try {
+              socket.terminate();
+            } catch {
+              // socket 已关闭,close 回调会做清理
+            }
+            continue;
           }
-          continue;
         }
         // 标记待探测,随后发 ping;本端 OPEN 但实际已死的对端不会回 pong,下轮即被收割
         this.peerLiveness.set(socket, false);
@@ -1028,6 +1044,18 @@ export class SyncSessionManager {
     }, INTERVAL_MS);
     // 心跳定时器不应阻止 daemon 在 SIGTERM 时退出
     if (typeof this.heartbeatTimer.unref === 'function') this.heartbeatTimer.unref();
+  }
+
+  /**
+   * 这条 socket 上一轮心跳以来的出站积压是否在减少(见 startHeartbeat 的例外分支)。
+   * 记下本轮读数供下轮比较;首次见到该 socket 时返回 true(还没有基线,不判死)。
+   */
+  private outboundDrainObserved(socket: WebSocket): boolean {
+    const now = this.peerOutboundBytes.get(socket);
+    const current = Math.max(0, Number(socket.bufferedAmount) || 0);
+    this.peerOutboundBytes.set(socket, current);
+    if (now === undefined) return true;
+    return current < now;
   }
 
   /** 当前是否在网(无非回环可用接口 = 离线;供 mDNS 门控与状态透出)。 */
@@ -2277,6 +2305,9 @@ export class SyncSessionManager {
     // 逐字节不变的文本 JSON。同目录挂多条连接时各自的谓词只认自己那条会话。
     const rawTransport = makePeerTransport(session.socket, session.key, folder.id, rateLimiter, {
       canSendBinary: () => session.peerCaps?.includes(CAP_BINARY1) === true,
+      // 大索引分片(ADR-0027):对端宣告才分。旧版对端会把每一片当成完整索引
+      // 反复规划,所以这项能力必须两端都宣告,不能单方面开。
+      canChunkIndex: () => session.peerCaps?.includes(CAP_INDEX_CHUNK1) === true,
     });
     // 端到端加密(不可信对端):把 transport 包成密文视图壳 —— 本目录×该对端的**所有**索引
     // 宣告出口(挂接全量 / 扫描增量 / 中转转发)统一经它换路径换哈希;SyncPeer 拿同一份
@@ -3509,6 +3540,7 @@ export class SyncSessionManager {
       this.logger.debug(`socket closed for peer ${remoteDeviceId}, code=${code}, reason=${reason?.toString('utf8') ?? '(empty)'}`);
       this.peerSockets.delete(socket);
       this.peerLiveness.delete(socket);
+      this.peerOutboundBytes.delete(socket);
       const sessionIdx = this.activeSessions.indexOf(session);
       if (sessionIdx >= 0) this.activeSessions.splice(sessionIdx, 1);
       for (const { folder, transport } of session.transports) {
@@ -4730,6 +4762,7 @@ export class SyncSessionManager {
       this.heartbeatTimer = undefined;
     }
     this.peerLiveness.clear();
+    this.peerOutboundBytes.clear();
     // 关闭所有 peer socket(入站 + 出站),否则客户端 socket 保持事件循环活跃
     // 导致进程收到 SIGTERM 后无法退出。用 terminate() 强制断开 TCP 连接,
     // 避免 close 握手在对端同时关闭时挂起。

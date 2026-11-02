@@ -1,0 +1,141 @@
+// Generated using `moon info`, DON'T EDIT IT
+package "wangmingfa/syncx/api"
+
+import {
+  "moonbitlang/async/aqueue",
+  "oboard/mocket",
+  "wangmingfa/syncx/core",
+  "wangmingfa/syncx/daemon",
+}
+
+// Values
+pub const EVENTS_PATH : String = "/api/events"
+
+pub const SESSION_COOKIE : String = "syncx_session"
+
+pub const SESSION_TTL_MS : Int64 = 86400000
+
+pub fn add_folder_to_config(@core.Config, String, Array[String], String?, Bool) -> Result[Bool, String]
+
+pub fn auth_middleware(ApiOptions) -> async (@mocket.MocketEvent, async () -> &@mocket.Responder) -> &@mocket.Responder
+
+pub fn build_app(ApiOptions) -> @mocket.App
+
+pub fn clear_cookie_header(String) -> String
+
+pub fn cookie_header(String, String, Int64) -> String
+
+pub async fn credential_ok(String, String, String?) -> Bool
+
+pub fn default_config_path() -> String
+
+pub fn derive_password_hash(String, Bytes) -> Bytes
+
+pub async fn handle_add_folder(ApiOptions, @mocket.MocketEvent) -> &@mocket.Responder
+
+pub async fn handle_auth_info(ApiOptions, @mocket.MocketEvent) -> &@mocket.Responder
+
+pub async fn handle_list_devices(ApiOptions, @mocket.MocketEvent) -> &@mocket.Responder
+
+pub async fn handle_list_folders(ApiOptions, @mocket.MocketEvent) -> &@mocket.Responder
+
+pub async fn handle_login(ApiOptions, @mocket.MocketEvent) -> &@mocket.Responder
+
+pub fn handle_logout(ApiOptions, @mocket.MocketEvent) -> &@mocket.Responder
+
+pub async fn handle_pause(ApiOptions, @mocket.MocketEvent) -> &@mocket.Responder
+
+pub async fn handle_shutdown(ApiOptions, @mocket.MocketEvent) -> &@mocket.Responder
+
+pub async fn handle_token_login(ApiOptions, @mocket.MocketEvent) -> &@mocket.Responder
+
+pub fn health_json() -> Json
+
+pub fn index_html() -> String
+
+pub fn is_shell_path(String) -> Bool
+
+pub async fn load_account(String) -> AccountRecord?
+
+pub async fn load_config(String) -> @core.Config
+
+pub fn mount_static(@mocket.App, String) -> Unit
+
+pub fn new_status_hub(ApiOptions, @daemon.ActorHandle) -> StatusHub
+
+pub fn now_ms() -> Int64
+
+pub fn ping_frame(Int64) -> String
+
+pub fn safe_equal(String, String) -> Bool
+
+pub async fn save_config(String, @core.Config) -> Unit
+
+pub async fn serve(ApiOptions, String) -> Unit
+
+pub async fn session_base(String, String?) -> String
+
+pub async fn session_cookie_value(SessionPayload, String, String?) -> String
+
+pub fn session_secret(String) -> String
+
+pub fn sign_session(SessionPayload, String) -> String
+
+pub fn status_frame(Json) -> String
+
+pub fn status_json(ApiOptions) -> Json
+
+pub fn sync_event_frame(String, @daemon.SyncEventRecord, Int64) -> String
+
+pub fn verify_password(AccountRecord, String, String) -> Bool
+
+pub fn verify_session(String, String) -> SessionPayload?
+
+// Errors
+
+// Types and methods
+pub(all) struct AccountRecord {
+  username : String
+  algo : String
+  salt : String
+  hash : String
+}
+
+pub(all) struct ApiOptions {
+  device_id : String
+  control_token : String
+  auth_file : String?
+  config_file : String
+  actor : @daemon.ActorHandle?
+  web_dist : String?
+  on_shutdown : (() -> Unit)?
+}
+pub fn ApiOptions::new(device_id~ : String, control_token? : String, auth_file? : String?, config_file? : String?, actor? : @daemon.ActorHandle?, web_dist? : String?, on_shutdown? : (() -> Unit)?) -> Self
+
+type DistProvider
+pub async fn DistProvider::get_contents(Self, StringView) -> &@mocket.Responder
+pub fn DistProvider::get_encodings(Self) -> Map[String, String]
+pub fn DistProvider::get_fallthrough(Self) -> Bool
+pub fn DistProvider::get_index_names(Self) -> Array[String]
+pub async fn DistProvider::get_meta(Self, StringView) -> @mocket.StaticAssetMeta?
+pub fn DistProvider::get_type(Self, String) -> String?
+pub impl @mocket.ServeStaticProvider for DistProvider
+
+pub(all) struct SessionPayload {
+  via : String
+  sub : String
+  exp : Int64
+}
+
+pub struct StatusHub {
+  // private fields
+}
+pub fn StatusHub::attach(Self) -> (String, @aqueue.Queue[String])
+pub fn StatusHub::client_count(Self) -> Int32
+pub fn StatusHub::close(Self) -> Unit
+pub fn StatusHub::detach(Self, String) -> Unit
+pub async fn StatusHub::run(Self) -> Unit
+
+// Type aliases
+
+// Traits

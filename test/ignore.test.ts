@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest';
-import { mkdtempSync, writeFileSync } from 'node:fs';
+import { mkdirSync, mkdtempSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { dirname, join } from 'node:path';
 import { rmDir } from './helpers.js';
 import {
   parseIgnoreRules,
@@ -294,5 +294,114 @@ describe('ignore editor helpers (read/write .syncxignore, compose, explain)', ()
       const rules = parseIgnoreRules(lines);
       expect(explainIgnore(rules, path, isDir).ignored).toBe(isIgnoredPath(rules, path, isDir));
     }
+  });
+});
+
+/**
+ * 嵌套 `.gitignore`(2026-11-02 故障):共享根是 monorepo 时,构建产物由**子目录**
+ * 的 `.gitignore` 声明(`rust/.gitignore` 的 `/target`、`moonbit/.gitignore` 的
+ * `_build/`)。只读根 `.gitignore` 会让这些目录整棵进索引 —— 实测 `shared/syncx`
+ * 因此攒到 10.6 万条活条目(其中 10.5 万是构建产物)、单帧全量索引 50.9MB。
+ *
+ * 语义以 git 为准:子目录规则相对**它自己所在目录**;不含斜杠的模式在该目录下
+ * 任意层级生效;更深的目录优先级更高;被忽略的目录里的 `.gitignore` 不读。
+ */
+describe('nested .gitignore', () => {
+  function folder(files: Record<string, string>): string {
+    const dir = mkdtempSync(join(tmpdir(), 'syncx-nested-ignore-'));
+    for (const [rel, content] of Object.entries(files)) {
+      const abs = join(dir, rel);
+      mkdirSync(dirname(abs), { recursive: true });
+      writeFileSync(abs, content, 'utf8');
+    }
+    return dir;
+  }
+
+  it('honours a subdirectory .gitignore (the rust/target + moonbit/_build case)', () => {
+    const dir = folder({
+      '.gitignore': 'node_modules/\n',
+      'rust/.gitignore': '/target\n',
+      'moonbit/.gitignore': '_build/\n.mooncakes/\n',
+      'rust/src/main.rs': 'fn main() {}',
+      'moonbit/main/main.mbt': 'fn main {}',
+    });
+    const rules = parseIgnoreRules(readFolderIgnoreLines(dir, true));
+
+    expect(isIgnoredPath(rules, 'rust/target/debug/syncx', false)).toBe(true);
+    expect(isIgnoredPath(rules, 'rust/target', true)).toBe(true);
+    // `/target` 锚定在 rust/ 下,同名的别处目录不受影响
+    expect(isIgnoredPath(rules, 'target/debug/x', false)).toBe(false);
+    expect(isIgnoredPath(rules, 'other/rust/target/x', false)).toBe(false);
+
+    expect(isIgnoredPath(rules, 'moonbit/_build/release/x.js', false)).toBe(true);
+    expect(isIgnoredPath(rules, 'moonbit/.mooncakes/foo/src/lib.mbt', false)).toBe(true);
+    // 不含斜杠的模式在**该目录下任意层级**生效,但不会外溢到别的目录
+    expect(isIgnoredPath(rules, 'moonbit/sub/_build/x', false)).toBe(true);
+    expect(isIgnoredPath(rules, 'elsewhere/_build/x', false)).toBe(false);
+
+    // 真正的源码照常参与同步
+    expect(isIgnoredPath(rules, 'rust/src/main.rs', false)).toBe(false);
+    expect(isIgnoredPath(rules, 'moonbit/main/main.mbt', false)).toBe(false);
+    rmDir(dir);
+  });
+
+  it('lets a deeper .gitignore override a shallower one (git precedence)', () => {
+    const dir = folder({
+      '.gitignore': '*.log\n',
+      'pkg/.gitignore': '!keep.log\n',
+      'pkg/keep.log': 'x',
+      'pkg/other.log': 'x',
+    });
+    const rules = parseIgnoreRules(readFolderIgnoreLines(dir, true));
+    expect(isIgnoredPath(rules, 'pkg/keep.log', false)).toBe(false);
+    expect(isIgnoredPath(rules, 'pkg/other.log', false)).toBe(true);
+    expect(isIgnoredPath(rules, 'root.log', false)).toBe(true);
+    rmDir(dir);
+  });
+
+  it('does not read .gitignore inside an ignored directory', () => {
+    const dir = folder({
+      '.gitignore': 'build/\n',
+      'build/.gitignore': '!keep.txt\n',
+      'build/keep.txt': 'x',
+    });
+    const rules = parseIgnoreRules(readFolderIgnoreLines(dir, true));
+    expect(isIgnoredPath(rules, 'build/keep.txt', false)).toBe(true);
+    rmDir(dir);
+  });
+
+  it('stays inert when the gitignore switch is off', () => {
+    const dir = folder({
+      'rust/.gitignore': '/target\n',
+      'rust/target/x': 'x',
+    });
+    const rules = parseIgnoreRules(readFolderIgnoreLines(dir, false));
+    expect(isIgnoredPath(rules, 'rust/target/x', false)).toBe(false);
+    rmDir(dir);
+  });
+
+  it('keeps the priority order: nested gitignore below .syncxignore', () => {
+    const dir = folder({
+      'rust/.gitignore': '/target\n',
+      'rust/target/x': 'x',
+      '.syncxignore': '!rust/target/\n',
+    });
+    const rules = parseIgnoreRules(readFolderIgnoreLines(dir, true));
+    // `.syncxignore` 最后读 => 能覆盖嵌套 .gitignore(硬忽略不在此列,另测)
+    expect(isIgnoredPath(rules, 'rust/target/x', false)).toBe(false);
+    rmDir(dir);
+  });
+
+  it('composeIgnoreLines includes nested rules for the editor preview', () => {
+    const dir = folder({ 'crate/.gitignore': 'target/\n' });
+    const lines = composeIgnoreLines(dir, true, []);
+    expect(lines.some((l) => l.includes('crate'))).toBe(true);
+    const rules = parseIgnoreRules(lines);
+    expect(isIgnoredPath(rules, 'crate/target/x', false)).toBe(true);
+    // 关掉开关:编辑器预览也应当同步关掉嵌套规则
+    expect(parseIgnoreRules(composeIgnoreLines(dir, false, [])).length).toBe(
+      parseIgnoreRules([...BUILTIN_IGNORE_LINES]).length,
+    );
+    rmDir(dir);
   });
 });

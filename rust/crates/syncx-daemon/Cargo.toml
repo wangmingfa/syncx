@@ -1,0 +1,25 @@
+[package]
+name = "syncx-daemon"
+description = "syncx 的会话状态机:扫描、传输规划、接收落地、冲突与版本。"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+syncx-core = { path = "../syncx-core" }
+syncx-net = { path = "../syncx-net" }
+tokio.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+tracing.workspace = true
+# ADR-0025 第 5 节:`bundled` 静态链接 SQLite,介质不依赖系统库;schema 与 Node 侧
+# (`src/indexstore.ts`)完全一致。刻意不用 sqlx —— 同步 API + spawn_blocking 更简单。
+rusqlite = { version = "0.40", features = ["bundled"] }
+sha2 = "0.10"
+base64 = "0.22"
+thiserror = "2"
+
+[dev-dependencies]
+# 端到端示例(`examples/rust_peer.rs`)要能被 Node 测试观察:开启 RUST_LOG 才有输出。
+tracing-subscriber.workspace = true

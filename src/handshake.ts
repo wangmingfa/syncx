@@ -56,8 +56,18 @@ export function deriveSessionKey(privateKeyPem: string, peerPublicKeyPem: string
  */
 export const CAP_BINARY1 = 'binary1';
 
+/**
+ * 索引可分片(见 ADR-0027)。宣告该能力表示:发端可以把一份大索引拆成带
+ * `seq`/`total` 的多帧,收端负责拼回一份完整索引再交给规划器。
+ *
+ * 为什么需要协商:分片帧对**旧版对端**是灾难 —— 它会把每一片都当成一次完整的
+ * 全量索引(或增量)去规划,于是同一批条目被反复规划、每片都触发一轮回推。所以
+ * 只有对端明确宣告才分片;未宣告时逐字节沿用原来的单帧发送。
+ */
+export const CAP_INDEX_CHUNK1 = 'index-chunk1';
+
 /** 本机支持的全部能力(随版本追加;空数组 = 什么都不宣告)。 */
-export const PEER_CAPS: readonly string[] = [CAP_BINARY1];
+export const PEER_CAPS: readonly string[] = [CAP_BINARY1, CAP_INDEX_CHUNK1];
 
 /** 握手第二阶段的密钥交换消息:携带 X25519 公钥及其 Ed25519 签名。 */
 export interface KxMessage {

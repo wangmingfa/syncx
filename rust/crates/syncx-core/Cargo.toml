@@ -1,0 +1,16 @@
+[package]
+name = "syncx-core"
+description = "syncx 的纯逻辑内核:版本向量、忽略规则、分块、冲突判定、传输规划。无 I/O。"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+serde.workspace = true
+serde_json.workspace = true
+sha2 = "0.10"
+regex = "1"
+
+[dev-dependencies]
+insta = { version = "1", features = ["json"] }

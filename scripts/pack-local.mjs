@@ -18,6 +18,16 @@
  *   npm run pack:local -- --no-build        直接用现有 dist/syncx.js 打包
  *   npm run pack:local -- --append local.1  附预发布后缀,便于区分本地测试构建
  *   npm run pack:local -- --out <目录>       指定输出目录(默认项目根)
+ *   npm run pack:local -- --backend rust    打 Rust 后端安装包(syncx-rs)
+ *   npm run pack:local -- --backend moonbit 打 MoonBit 后端安装包(syncx-mb)
+ *
+ * --backend(node 缺省):
+ *   node     现有行为 —— npm 载体的 tgz,喂给 Web UI「上传升级」。
+ *   rust / moonbit  按发布 workflow 的资产命名(syncx-v{version}-{target-triple}.tar.gz
+ *   / Windows .zip)打「本机目标」的包:解压结构与 GitHub Release 资产一致,
+ *   便于在多台设备上验证自更新的下载/换入链路(真实 Release 的本地替身)。
+ *   --append 对 rust/moonbit 同样生效(仅改包内二进制的版本注入走不到,
+ *   版本号只体现在资产文件名里)。
  *
  * 注意:升级是「整包替换安装目录」。请勿对源码仓库目录做升级 —— 直接
  * `node dist/syncx.js` 从仓库里跑时,安装目录就是仓库根,服务端会拒绝(防止删掉 src/)。
@@ -81,10 +91,25 @@ const argv = process.argv.slice(2);
 let doBuild = true;
 let outDir = PROJECT;
 let append = '';
+let backend = 'node';
 for (let i = 0; i < argv.length; i++) {
   const a = argv[i];
   if (a === '--no-build') doBuild = false;
   else if (a === '--build') doBuild = true;
+  else if (a === '--backend') {
+    const v = argv[++i];
+    if (v !== 'node' && v !== 'rust' && v !== 'moonbit') {
+      fail(`--backend 只支持 node / rust / moonbit(收到 "${v}")`);
+    }
+    backend = v;
+  }
+  else if (a.startsWith('--backend=')) {
+    const v = a.slice('--backend='.length);
+    if (v !== 'node' && v !== 'rust' && v !== 'moonbit') {
+      fail(`--backend 只支持 node / rust / moonbit(收到 "${v}")`);
+    }
+    backend = v;
+  }
   else if (a === '--append') {
     const v = argv[++i];
     if (!v) fail('--append 需要跟一个后缀,如 --append local.1');
@@ -113,6 +138,24 @@ if (!/^\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?(?:\+[0-9A-Za-z.-]+)?$/.test(version)) {
   fail(`版本号 ${version} 不是合法 semver,无法打包`);
 }
 
+/** 运行时探测本机 target-triple(与 moonbit-release.yml 的 6 目标对齐)。
+ *  Rust/MoonBit 后端的资产名由此拼出;对不上 Release 资产名自更新就匹配不到。 */
+function detectTargetTriple() {
+  const plat = process.platform;
+  const arch = process.arch;
+  if (plat === 'darwin') return arch === 'arm64' ? 'aarch64-apple-darwin' : 'x86_64-apple-darwin';
+  if (plat === 'win32') return arch === 'arm64' ? 'aarch64-pc-windows-msvc' : 'x86_64-pc-windows-msvc';
+  if (plat === 'linux') return arch === 'arm64' ? 'aarch64-unknown-linux-gnu' : 'x86_64-unknown-linux-gnu';
+  fail(`无法识别的平台 ${plat}/${arch}:Rust/MoonBit 打包只支持 darwin/linux/windows`);
+}
+
+if (backend === 'node') {
+  packNode();
+} else {
+  packBackend();
+}
+
+function packNode() {
 if (doBuild) {
   log('构建产物(npm run build)…');
   run(NPM, ['run', 'build']);
@@ -159,4 +202,71 @@ try {
   log(`   npm i -g --prefix ~/.syncx-test ${target}`);
 } finally {
   rmSync(staging, { recursive: true, force: true });
+}
+}
+
+/** Rust / MoonBit 后端:按发布 workflow 的资产命名打「本机目标」的包。
+ *  产物结构与 GitHub Release 资产一致(顶层目录 + 固定二进制名),是真实
+ *  Release 的本地替身 —— 用于在多台设备上验证自更新的下载/校验/换入链路。 */
+function packBackend() {
+  const triple = detectTargetTriple();
+  const isRust = backend === 'rust';
+  const binName = isRust ? 'syncx-rs' : 'syncx-mb';
+  let binPath;
+  if (isRust) {
+    if (doBuild) {
+      log('构建 Rust 后端(build:web + cargo build --release)…');
+      run(NPM, ['run', 'build:rust']);
+    }
+    binPath = join(PROJECT, 'rust', 'target', 'release', IS_WIN ? 'syncx-rs.exe' : 'syncx-rs');
+  } else {
+    if (doBuild) {
+      log('构建 MoonBit 后端(build:web + moon build --release)…');
+      run(NPM, ['run', 'build:moonbit']);
+    }
+    binPath = join(PROJECT, 'moonbit', '_build', 'native', 'release', 'build', 'cli', 'cli.exe');
+  }
+  if (!existsSync(binPath)) {
+    fail(`构建产物不存在:${binPath}(请先构建,或去掉 --no-build)`);
+  }
+
+  const staging = mkdtempSync(join(tmpdir(), 'syncx-pack-backend-'));
+  try {
+    // 资产名带后端标识(syncx-rs / syncx-mbt),与各 Release workflow 一致:
+    // 两个后端的产物不会互相覆盖,自更新按名匹配也只会命中自己的后端。
+    const prefix = isRust ? 'syncx-rs' : 'syncx-mbt';
+    const stage = `${prefix}-v${version}-${triple}`;
+    const pkgOut = join(staging, stage);
+    mkdirSync(pkgOut, { recursive: true });
+    copyFileSync(binPath, join(pkgOut, IS_WIN ? `${binName}.exe` : binName));
+    if (!IS_WIN) chmodSync(join(pkgOut, binName), 0o755);
+    for (const extra of ['README.md', 'LICENSE']) {
+      if (existsSync(join(PROJECT, extra))) copyFileSync(join(PROJECT, extra), join(pkgOut, extra));
+    }
+
+    const ext = IS_WIN ? 'zip' : 'tar.gz';
+    const archive = `${stage}.${ext}`;
+    log(`打包(${ext},资产名与 Release 对齐)…`);
+    if (IS_WIN) {
+      // 与 workflow 同款:Compress-Archive(解压端 Expand-Archive 配套)
+      run('powershell', ['-NoProfile', '-Command', `Compress-Archive -Path "${pkgOut}" -DestinationPath "${join(staging, archive)}"`], { cwd: staging });
+    } else {
+      run('tar', ['-czf', archive, stage], { cwd: staging });
+    }
+
+    const target = join(outDir, archive);
+    copyFileSync(join(staging, archive), target);
+
+    const size = statSync(target).size;
+    const sha256 = createHash('sha256').update(readFileSync(target)).digest('hex');
+
+    log(`✅ 打包完成:${target}`);
+    log(`   后端 ${backend} · 目标 ${triple} · ${(size / 1024).toFixed(0)} KB · sha256 ${sha256.slice(0, 16)}…`);
+    log('');
+    log(`注意:checksums.txt 的两空格格式自更新端会解析,喂给自更新流程时请按`);
+    log(`  ${sha256}  ${archive}`);
+    log('  的格式生成(与 GitHub Release 的 checksums.txt 一致)。');
+  } finally {
+    rmSync(staging, { recursive: true, force: true });
+  }
 }

@@ -1,0 +1,20 @@
+supported_targets = "native"
+
+options(
+  "native-stub": [ "crypto.c", "mdns.c" ],
+)
+
+import {
+  "cc06b/mooncry/lib",
+  "moonbitlang/core/buffer",
+  "moonbitlang/core/debug",
+  "moonbitlang/core/encoding/base64",
+  "moonbitlang/core/encoding/hex",
+  "moonbitlang/core/encoding/utf8",
+  "moonbitlang/core/json",
+  "moonbitlang/async",
+  "moonbitlang/async/http",
+  "moonbitlang/async/socket",
+  "moonbitlang/async/websocket",
+  "wangmingfa/syncx/core",
+}

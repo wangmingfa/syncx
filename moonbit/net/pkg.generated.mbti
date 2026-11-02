@@ -1,0 +1,335 @@
+// Generated using `moon info`, DON'T EDIT IT
+package "wangmingfa/syncx/net"
+
+import {
+  "moonbitlang/async/http",
+  "moonbitlang/async/websocket",
+  "moonbitlang/core/debug",
+}
+
+// Values
+pub const CAP_BINARY1 : String = "binary1"
+
+pub const MAX_MESSAGE_BYTES : Int64 = 67108864
+
+pub const MAX_PEER_CONNECTIONS : Int32 = 64
+
+pub const PEER_HANDSHAKE_TIMEOUT_MS : Int64 = 10_000
+
+pub const PEER_WS_PATH : String = "/peer"
+
+pub const X25519_SPKI_DER_LEN : Int32 = 44
+
+pub fn advertise(Int32, String) -> Discovery raise DiscoveryError
+
+pub fn build_announce_packet(Int32, String, String, Bytes) -> Int32
+
+pub fn build_kx_message(X25519KeyPair, DeviceIdentity, Int32?, Array[String]) -> KxMessage raise HandshakeError
+
+pub async fn connect_peer(PeerHandshakeMode, String, listen_port? : Int32?) -> PeerClient raise PeerError
+
+pub fn decode_index(String) -> Array[WireEntry] raise WireError
+
+pub fn decode_kx_message(String) -> KxMessage raise HandshakeError
+
+pub fn decode_wire_message(String) -> WireMessage raise WireError
+
+pub fn derive_device_id(String) -> String
+
+pub fn derive_session_key(X25519KeyPair, Bytes) -> Bytes raise HandshakeError
+
+pub fn encode_index(Array[WireEntry]) -> String
+
+pub fn encode_kx_message(KxMessage) -> String
+
+pub fn encode_wire_message(WireMessage) -> String
+
+pub fn extract_device_id_from_txt(String) -> String?
+
+pub fn is_device_id(String) -> Bool
+
+pub fn make_hello(String, String?, String?) -> ControlMessage
+
+pub fn mtime_ms(Double) -> Int64
+
+pub fn parse_public_key_pem(String) -> Bytes raise IdentityError
+
+pub fn parse_x25519_der(Bytes) -> Bytes raise HandshakeError
+
+pub fn peer_caps() -> Array[String]
+
+pub fn pem_encode_public_key(Bytes) -> String raise IdentityError
+
+pub fn sha256(Bytes) -> Bytes
+
+pub fn sign_challenge(DeviceIdentity, Bytes) -> Bytes raise IdentityError
+
+pub async fn start_peer_server(PeerHandshakeMode, PeerServerHandlers, options? : PeerServerOptions) -> PeerServer raise PeerError
+
+pub fn verify_announce_packet(Bytes, Int32, Int32, String, String) -> Bool
+
+pub fn verify_challenge(String, Bytes, Bytes) -> Bool raise IdentityError
+
+pub fn verify_kx_message(KxMessage, String) -> Bytes raise HandshakeError
+
+pub fn x25519_scalarmult(Bytes, Bytes) -> Bytes raise HandshakeError
+
+// Errors
+pub(all) suberror DiscoveryError {
+  StartupFailed(String)
+  InvalidDeviceId(String)
+}
+pub fn DiscoveryError::to_text(Self) -> String
+
+pub(all) suberror HandshakeError {
+  Malformed(String)
+  BadSignature
+}
+pub fn HandshakeError::to_text(Self) -> String
+
+pub(all) suberror IdentityError {
+  InvalidKey(String)
+}
+pub fn IdentityError::to_text(Self) -> String
+
+pub(all) suberror PeerError {
+  Transport(String)
+  Handshake(String)
+  Closed
+  TooLarge(String)
+  NotConnected(String)
+}
+pub fn PeerError::to_text(Self) -> String
+
+pub(all) suberror WireError {
+  Malformed(String)
+}
+pub fn WireError::to_text(Self) -> String
+
+// Types and methods
+type ConnState
+
+pub(all) enum ControlMessage {
+  FolderInvitation(offer_id~ : String, from_device_id~ : String, folder_id~ : String, folder_name~ : String, version~ : String?, hostname~ : String?, platform~ : String?)
+  FolderInvitationAck(offer_id~ : String, from_device_id~ : String, accepted~ : Bool, version~ : String?, hostname~ : String?, platform~ : String?)
+  PairingRequest(offer_id~ : String, from_device_id~ : String, version~ : String?, hostname~ : String?, platform~ : String?)
+  PairingAck(offer_id~ : String, from_device_id~ : String, accepted~ : Bool, version~ : String?, hostname~ : String?, platform~ : String?)
+  OfferReceipt(offer_id~ : String, from_device_id~ : String, version~ : String?, hostname~ : String?, platform~ : String?)
+  FolderSyncList(from_device_id~ : String, folder_ids~ : Array[String], pending_folder_ids~ : Array[String]?, version~ : String?, hostname~ : String?, platform~ : String?)
+  Hello(from_device_id~ : String, version~ : String, hostname~ : String?, platform~ : String?)
+  SelfBinaryRequest(request_id~ : String, from_device_id~ : String, version~ : String?, hostname~ : String?, platform~ : String?)
+  SelfBinaryResponse(request_id~ : String, from_device_id~ : String, version~ : String, sha256~ : String, data~ : String?, hostname~ : String?, platform~ : String?)
+  FolderIndexRequest(request_id~ : String, from_device_id~ : String, folder_id~ : String, version~ : String?, hostname~ : String?, platform~ : String?)
+  FolderIndexSnapshot(request_id~ : String, from_device_id~ : String, folder_id~ : String, seq~ : Int64, total~ : Int64, entries~ : String?, error~ : String?, ignore_lines~ : Array[String]?, progress~ : Json?, version~ : String?, hostname~ : String?, platform~ : String?)
+  FileContentRequest(request_id~ : String, from_device_id~ : String, folder_id~ : String, path~ : String, version~ : String?, hostname~ : String?, platform~ : String?)
+  FileContentResponse(request_id~ : String, from_device_id~ : String, folder_id~ : String, path~ : String, data~ : String?, size~ : Int64?, entry_version~ : Array[(String, Int64)]?, error~ : String?, version~ : String?, hostname~ : String?, platform~ : String?)
+  FileContentWrite(request_id~ : String, from_device_id~ : String, folder_id~ : String, path~ : String, data~ : String, entry_version~ : Array[(String, Int64)], version~ : String?, hostname~ : String?, platform~ : String?)
+  FileContentWriteResult(request_id~ : String, from_device_id~ : String, folder_id~ : String, path~ : String, ok~ : Bool, error~ : String?, version~ : String?, hostname~ : String?, platform~ : String?)
+  GitCommitNotify(from_device_id~ : String, folder_id~ : String, commit_hash~ : String, commit_message~ : String, changed_files~ : Array[String], diff_stat~ : String?, commit_subjects~ : Array[String]?, parent_hash~ : String, version~ : String?, hostname~ : String?, platform~ : String?)
+  GitCommitAck(from_device_id~ : String, folder_id~ : String, commit_hash~ : String, version~ : String?, hostname~ : String?, platform~ : String?)
+} derive(Eq, @debug.Debug)
+pub fn ControlMessage::equal(Self, Self) -> Bool
+pub fn ControlMessage::from_json(Json) -> Self raise WireError
+pub fn ControlMessage::not_equal(Self, Self) -> Bool
+pub fn ControlMessage::to_json(Self) -> Json
+pub fn ControlMessage::to_repr(Self) -> @debug.Repr
+
+pub(all) struct DeviceIdentity {
+  device_id : String
+  public_key_pem : String
+  private_key_pem : String
+} derive(Eq, @debug.Debug)
+pub fn DeviceIdentity::equal(Self, Self) -> Bool
+pub fn DeviceIdentity::from_json(Json) -> Self raise IdentityError
+pub fn DeviceIdentity::from_key_pems(String, String) -> Self raise IdentityError
+pub fn DeviceIdentity::from_secret_bytes(Bytes) -> Self raise IdentityError
+pub fn DeviceIdentity::generate() -> Self raise IdentityError
+pub fn DeviceIdentity::not_equal(Self, Self) -> Bool
+pub fn DeviceIdentity::to_json(Self) -> Json
+pub fn DeviceIdentity::to_repr(Self) -> @debug.Repr
+
+pub(all) struct DiscoveredPeer {
+  device_id : String
+  host : String
+  port : Int32
+  address : String
+} derive(Eq, @debug.Debug)
+pub fn DiscoveredPeer::equal(Self, Self) -> Bool
+pub fn DiscoveredPeer::not_equal(Self, Self) -> Bool
+pub fn DiscoveredPeer::to_repr(Self) -> @debug.Repr
+
+pub(all) struct Discovery {
+  mut handle : Int64
+  device_id : String
+  mut seen : Map[String, String]
+}
+pub fn Discovery::browse(Self, (DiscoveredPeer) -> Unit) -> Unit
+pub fn Discovery::browse_wait(Self, Int32) -> DiscoveredPeer? raise DiscoveryError
+pub fn Discovery::kick(Self) -> Unit
+pub fn Discovery::stop(Self) -> Unit
+
+pub(all) struct KxMessage {
+  kind : String
+  x25519 : String
+  sig : String
+  listen_port : Int32?
+  caps : Array[String]?
+} derive(Eq, @debug.Debug)
+pub fn KxMessage::equal(Self, Self) -> Bool
+pub fn KxMessage::from_json(Json) -> Self raise HandshakeError
+pub fn KxMessage::not_equal(Self, Self) -> Bool
+pub fn KxMessage::supports_binary(Self) -> Bool
+pub fn KxMessage::to_json(Self) -> Json
+pub fn KxMessage::to_repr(Self) -> @debug.Repr
+
+pub struct PeerClient {
+  conn : @websocket.Conn
+  peer_device_id : String?
+  session_key : Bytes?
+  caps : Array[String]?
+  listen_port : Int32?
+}
+pub fn PeerClient::close(Self) -> Unit
+pub async fn PeerClient::ping(Self) -> Unit raise PeerError
+pub async fn PeerClient::recv_frame(Self) -> PeerFrame raise PeerError
+pub async fn PeerClient::recv_message(Self) -> WireMessage raise PeerError
+pub fn PeerClient::remote_device_id(Self) -> String?
+pub async fn PeerClient::run(Self, PeerClientHandlers) -> Unit
+pub async fn PeerClient::send_binary(Self, Bytes) -> Unit raise PeerError
+pub async fn PeerClient::send_message(Self, WireMessage) -> Unit raise PeerError
+pub async fn PeerClient::send_text(Self, String) -> Unit raise PeerError
+pub fn PeerClient::session_key(Self) -> Bytes?
+pub fn PeerClient::supports_binary(Self) -> Bool
+
+pub(all) struct PeerClientHandlers {
+  on_message : (WireMessage) -> Unit
+  on_binary : (Bytes) -> Unit
+  on_error : (String) -> Unit
+  on_close : () -> Unit
+}
+
+pub(all) struct PeerConnectionInfo {
+  device_id : String
+  listen_port : Int32?
+  caps : Array[String]?
+  session_key : Bytes?
+}
+
+pub(all) enum PeerFrame {
+  Text(String)
+  Binary(Bytes)
+}
+
+pub(all) enum PeerHandshakeMode {
+  Secure(DeviceIdentity)
+  Plain
+}
+
+pub struct PeerServer {
+  bound : Int32
+  identity : DeviceIdentity?
+  handlers : PeerServerHandlers
+  server : @http.Server
+  conns : Map[String, ConnState]
+  registry : Map[String, String]
+  max_connections : Int32
+  handshake_timeout_ms : Int64
+  mut next_conn_id : Int32
+}
+pub fn PeerServer::bound_port(Self) -> Int32
+pub fn PeerServer::close(Self) -> Unit
+pub fn PeerServer::connected_devices(Self) -> Array[String]
+pub fn PeerServer::connection(Self, String) -> PeerConnectionInfo?
+pub fn PeerServer::connection_count(Self) -> Int32
+pub async fn PeerServer::listen(Self) -> Unit
+pub fn PeerServer::send_binary(Self, String, Bytes) -> Unit raise PeerError
+pub fn PeerServer::send_message(Self, String, WireMessage) -> Unit raise PeerError
+pub fn PeerServer::send_text(Self, String, String) -> Unit raise PeerError
+
+pub(all) struct PeerServerHandlers {
+  on_connect : (String) -> Unit
+  on_message : (String, WireMessage) -> Unit
+  on_binary : (String, Bytes) -> Unit
+  on_disconnect : (String) -> Unit
+  on_error : (String) -> Unit
+}
+
+pub(all) struct PeerServerOptions {
+  bind_host : String
+  port : Int32
+  max_connections : Int32
+  handshake_timeout_ms : Int64
+}
+pub fn PeerServerOptions::new(bind_host? : String, port? : Int32, max_connections? : Int32, handshake_timeout_ms? : Int64) -> Self
+
+pub(all) struct WireBlockRequest {
+  device_id : String
+  path : String
+  block_index : Int64
+  hash : String
+  priority : Bool?
+  cdc : Bool?
+} derive(Eq, @debug.Debug)
+pub fn WireBlockRequest::equal(Self, Self) -> Bool
+pub fn WireBlockRequest::from_json(Json) -> Self raise WireError
+pub fn WireBlockRequest::not_equal(Self, Self) -> Bool
+pub fn WireBlockRequest::to_json(Self) -> Json
+pub fn WireBlockRequest::to_repr(Self) -> @debug.Repr
+
+pub(all) struct WireBlockResponse {
+  device_id : String
+  path : String
+  block_index : Int64
+  hash : String
+  data : String
+  cdc : Bool?
+} derive(Eq, @debug.Debug)
+pub fn WireBlockResponse::equal(Self, Self) -> Bool
+pub fn WireBlockResponse::from_json(Json) -> Self raise WireError
+pub fn WireBlockResponse::not_equal(Self, Self) -> Bool
+pub fn WireBlockResponse::to_json(Self) -> Json
+pub fn WireBlockResponse::to_repr(Self) -> @debug.Repr
+
+pub(all) struct WireEntry {
+  path : String
+  version : Array[(String, Int64)]
+  size : Int64
+  deleted : Bool
+  blocks : Array[String]
+  mtime : Double
+  cdh : Array[String]?
+  clens : Array[Int64]?
+} derive(Eq, @debug.Debug)
+pub fn WireEntry::cdc_view(Self) -> (Array[String]?, Array[Int64]?)
+pub fn WireEntry::equal(Self, Self) -> Bool
+pub fn WireEntry::from_json(Json) -> Self raise WireError
+pub fn WireEntry::has_cdc_view(Self) -> Bool
+pub fn WireEntry::not_equal(Self, Self) -> Bool
+pub fn WireEntry::to_json(Self) -> Json
+pub fn WireEntry::to_repr(Self) -> @debug.Repr
+
+pub(all) enum WireMessage {
+  Index(folder~ : String, payload~ : String, full~ : Bool?, relayed~ : Bool?)
+  IndexFingerprint(folder~ : String, fingerprint~ : String)
+  IndexAck(folder~ : String)
+  IndexRequest(folder~ : String)
+  BlockRequest(folder~ : String, payload~ : WireBlockRequest)
+  BlockResponse(folder~ : String, payload~ : WireBlockResponse)
+  Control(payload~ : ControlMessage)
+} derive(Eq, @debug.Debug)
+pub fn WireMessage::equal(Self, Self) -> Bool
+pub fn WireMessage::from_json(Json) -> Self raise WireError
+pub fn WireMessage::is_full_index(Self) -> Bool
+pub fn WireMessage::not_equal(Self, Self) -> Bool
+pub fn WireMessage::to_json(Self) -> Json
+pub fn WireMessage::to_repr(Self) -> @debug.Repr
+
+pub(all) struct X25519KeyPair {
+  secret : Bytes
+  public_der : Bytes
+}
+pub fn X25519KeyPair::generate() -> Self raise HandshakeError
+
+// Type aliases
+
+// Traits

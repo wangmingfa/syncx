@@ -172,6 +172,10 @@ export interface StatusData {
   folderErrors?: FolderErrorItem[];
   /** npm 检查到的可用更新(打包态且发现更高版本时才有值)。 */
   updateAvailable?: { latest: string; current: string } | null;
+  /** 后端运行时形态(ADR-0025;缺省 = 旧后端,视作 node)。 */
+  runtime?: 'node' | 'rust' | 'moonbit';
+  /** 自更新来源:node 形态走 npm,rust 形态走 GitHub Releases(缺省 = npm)。 */
+  updateSource?: 'npm' | 'github';
   /** 最近的中转活动(ADR-0014):本机把来源设备的目录变更转发给其他对端时记录。无中转则缺省。 */
   relayActivity?: RelayActivity[];
   /** 每目录残留冲突副本数(键 = 目录 id ?? path);缺省/空 = 都没有冲突。 */

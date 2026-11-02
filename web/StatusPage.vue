@@ -133,11 +133,8 @@ function openSettings(): void {
  * 先 openUpload(会把上一轮的选包状态清干净)再选包,顺序不能颠倒。
  */
 function onPackageDrop(file: File): void {
-  if (isDev) {
-    showToast('开发模式下不支持拖入升级包（运行态为 dev，无单文件运行时可替换）', 'alert');
-    return;
-  }
-  openUpload();
+  // dev / rust 形态统一在 openUpload 内拦截并弹 toast,这里只看是否放行
+  if (!openUpload()) return;
   void selectUploadFile(file);
 }
 

@@ -2,7 +2,8 @@ import type { ParsedArgs } from './args.js';
 import { basename, dirname, join, resolve } from 'node:path';
 import { homedir, hostname as osHostname } from 'node:os';
 import { loadOrCreateIdentity } from './identity.js';
-import { loadConfig, saveConfig, mutateConfig, folderTrashPath, folderVersionsPath } from './config.js';
+import { loadConfig, saveConfig, mutateConfig, folderTrashPath, folderVersionsPath, assertFormatVersion, FormatVersionError } from './config.js';
+import { packageVersion } from './usage.js';
 import { readFolderIdentity, removeLegacyFolderMarker } from './folder-identity.js';
 import { migrateLegacyTrash } from './trash.js';
 import { openIndexStore } from './indexstore.js';
@@ -49,7 +50,7 @@ import { runUpgrade } from './upgrade.js';
 import { compareVersions } from './upgrade.js';
 import { consumeUpdateDoneFile, inspectPackage, isBundledRuntime, runSelfUpdate, runtimeVersion } from './selfupdate.js';
 import { createUpdateChecker, downloadTarball } from './update-check.js';
-import { loadOrCreateToken, daemonStatusLines, stopDaemon, listenControl, pauseDaemon, pidFilePath, type PidRecord } from './daemon.js';
+import { loadOrCreateToken, daemonStatusLines, stopDaemon, listenControl, pauseDaemon, pidFilePath, describePidHolder, type PidRecord } from './daemon.js';
 import { SyncSessionManager, type FolderDiffResult } from './session-manager.js';
 import { formatFolderDiff } from './diff-text.js';
 
@@ -218,6 +219,18 @@ export async function run(args: ParsedArgs): Promise<void> {
 
   const identity = loadOrCreateIdentity(configDir);
   const config = loadConfig(configPath);
+  // 落盘格式闸门:必须在打开任何 index-*.db、写任何数据文件**之前**(见 docs/adr/0025)。
+  // Node 与 Rust 共用同一数据目录,库里的代数高于本端支持 = 旧代码要读新结构,
+  // 降级读取会静默读坏,所以宁可拒绝启动并让用户升级。
+  try {
+    assertFormatVersion(config);
+  } catch (error) {
+    if (error instanceof FormatVersionError) {
+      console.error(`[fatal] ${error.message}`);
+      process.exit(1);
+    }
+    throw error;
+  }
   // 首次运行(如 dev 未指定 --config,默认 ~/.syncx/config.json):若配置文件不存在,
   // 先写出默认配置,否则下方 fs.watch 在 Windows 上对不存在的路径会同步抛出 ENOENT,
   // 未捕获将导致 daemon 进程崩溃(control server 无法监听,Web UI 代理 502/ECONNREFUSED)。
@@ -1201,7 +1214,9 @@ export async function run(args: ParsedArgs): Promise<void> {
   const control = createControlServer(controlDeps);
   // 绑定控制端口:失败(EACCES/EADDRINUSE 等)在 listenControl 内打印根因与修复指引后
   // 直接退出进程;成功才继续往下走,启动日志见下批输出
-  await listenControl(control, controlPort, controlHost, (msg) => logger.error(msg));
+  await listenControl(control, controlPort, controlHost, (msg) => logger.error(msg), () =>
+    describePidHolder(configDir),
+  );
 
   // --- 端口绑定成功,输出启动信息 ---
   logger.info(`control UI (token in ${join(configDir, 'control.token')}):`);
@@ -1229,7 +1244,7 @@ export async function run(args: ParsedArgs): Promise<void> {
 
   // 记录 pid 与控制端口,供 syncx stop 定位目标(优雅关闭时删除)
   try {
-    const pidRecord: PidRecord = { pid: process.pid, controlPort };
+    const pidRecord: PidRecord = { pid: process.pid, controlPort, backend: 'node', version: packageVersion() };
     writeFileSync(pidFilePath(configDir), JSON.stringify(pidRecord), { mode: 0o600 });
   } catch (e) {
     logger.warn(`cannot write pid file (syncx stop will fall back to signal): ${String(e)}`);

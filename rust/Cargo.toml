@@ -1,0 +1,44 @@
+[workspace]
+resolver = "2"
+members = [
+  "crates/syncx-core",
+  "crates/syncx-net",
+  "crates/syncx-daemon",
+  "crates/syncx-api",
+  "crates/syncx-cli",
+]
+
+[workspace.package]
+# 用户可见的版本号只有一个来源:仓库根目录 package.json 的 version。
+# crates/syncx-cli/build.rs 读它并注入 SYNCX_VERSION,`syncx-rs --version` 用的就是那个值。
+# 这里的 version 只服务于 cargo 的依赖解算,**不是**对外版本号——写成真实版本会让它
+# 与 package.json 变成两处需要同步维护的事实,早晚漂移(见 docs/adr/0025 第 3 节)。
+version = "0.0.0"
+edition = "2021"
+license = "MIT"
+rust-version = "1.85"
+
+[workspace.dependencies]
+tokio = { version = "1", features = [
+  "rt-multi-thread",
+  "macros",
+  "net",
+  "signal",
+  "fs",
+  "io-util",
+  "sync",
+  "time",
+] }
+axum = "0.8"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+rust-embed = "8"
+clap = { version = "4", features = ["derive"] }
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+
+[profile.release]
+# 单文件分发是这套方案的卖点之一(见 docs/adr/0025):体积与启动时间优先于编译时间。
+lto = "thin"
+codegen-units = 1
+strip = true

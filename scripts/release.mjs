@@ -64,6 +64,9 @@
  *   --registry <url>   发布到指定 registry(默认沿用当前 npm 配置;若当前不是
  *                      registry.npmjs.org 且未指定本项,会拒绝执行以避免误发镜像源)。
  *   --no-check         跳过 typecheck + vitest(等价于 --no-typecheck --no-test)。
+ *   --no-backends      跳过 Rust/MoonBit 后端预检(仅 GitHub 通道;默认推 tag 前本地预编,
+ *                      防止 Release 缺资产 —— 同一个 v* tag 会同时触发 npm/rust/moonbit
+ *                      三条发布 workflow)。
  *   --no-build         跳过 npm run build(产物 dist/syncx.js 必须已存在)。
  *   --no-smoke         跳过「打包 → 临时 --prefix 全局安装 → syncx status」验证。
  *   --fast / --skip-checks  跳过全部发布前检查(等价于 --no-check --no-build --no-smoke):
@@ -809,6 +812,7 @@ const opts = {
   doBuild: true, // 构建单文件产物
   doSmoke: true, // 打包 + 临时全局安装(status 冒烟)
   doGit: true,
+  doBackends: true, // GitHub 通道:tag 会同时触发 rust/moonbit 两条发布 workflow,先本地预编
   dryRun: false,
   fast: false, // --fast / --skip-checks:跳过 typecheck/test/build/模拟安装 全套发布前检查
   via: undefined, // 发布方式:github(GitHub Actions + Trusted Publishing 自动发布) | local(本地 npm publish)
@@ -817,6 +821,7 @@ const opts = {
 };
 for (const a of argv) {
   if (a === '--no-check') { opts.doTypecheck = false; opts.doTest = false; }
+  else if (a === '--no-backends') opts.doBackends = false;
   else if (a === '--no-build') opts.doBuild = false;
   else if (a === '--no-smoke') opts.doSmoke = false;
   else if (a === '--no-git') opts.doGit = false;
@@ -1121,6 +1126,9 @@ if (opts.via === 'github') {
   opts.doBuild = false;
   opts.doSmoke = false;
   log('GitHub 发布:跳过发布前检查项(build + test 由 Actions 在 publish 前执行,失败即中止发布)');
+  if (opts.doBackends) {
+    log('后端预检开启:tag 会同时触发 rust-release.yml 与 moonbit-release.yml,推 tag 前先本地编译验证(用 --no-backends 跳过)');
+  }
 } else if (isInteractive() && !opts.fast) {
   const checkChoices = [
     { value: 'typecheck', label: 'typecheck', hint: 'tsc + vue-tsc 类型检查' },
@@ -1154,6 +1162,7 @@ if (!opts.dryRun) {
     steps.push(parts.join(' + '));
   }
   if (opts.doBuild) steps.push('build');
+  if (opts.via === 'github' && opts.doBackends) steps.push('后端预检(Rust + MoonBit)');
   steps.push(opts.doSmoke ? '冒烟 + 模拟安装验证' : '冒烟(本地 status)');
   steps.push(`npm version ${target}`);
   if (opts.via === 'github') {
@@ -1190,6 +1199,31 @@ if (opts.doTypecheck) {
 if (opts.doTest) {
   log('运行测试(vitest)…');
   await npm(['test'], { inherit: true });
+}
+
+/* ---------- 1.2 后端预检(仅 GitHub 通道) ----------
+ * 同一个 v* tag 会并行触发 publish.yml / rust-release.yml / moonbit-release.yml。
+ * 其中 rust/moonbit 两条在 CI 上没有任何前置测试 —— 推完 tag 才发现编不过,
+ * Release 就缺了对应资产,自更新端按资产名匹配不到会一直停在旧版本。
+ * 所以推 tag 前在本地把两个后端各预编一遍;工具链不在就 warn 跳过(不阻塞发版,
+ * 由 Actions 的真实构建结果兜底)。cargo 用 check 而非 build:预检只关心「能不能编」,
+ * 产物由 CI 自己构建。 */
+if (opts.via === 'github' && opts.doBackends && !opts.dryRun) {
+  try {
+    await exec('cargo', ['--version'], { forward: false });
+    log('预检 Rust 后端(cargo check)…');
+    await exec('cargo', ['check', '--release', '--manifest-path', join(ROOT, 'rust', 'Cargo.toml')], { forward: true });
+  } catch {
+    warn('未找到 cargo,跳过 Rust 后端预检(rust-release.yml 仍会由 tag 触发,若编译失败该平台资产会缺失)');
+  }
+  try {
+    await exec('moon', ['--version'], { forward: false });
+    log('预检 MoonBit 后端(moon check + test)…');
+    await exec('moon', ['check', '--deny-warn'], { cwd: join(ROOT, 'moonbit'), forward: true });
+    await exec('moon', ['test'], { cwd: join(ROOT, 'moonbit'), forward: true });
+  } catch {
+    warn('未找到 moon,跳过 MoonBit 后端预检(moonbit-release.yml 仍会由 tag 触发,若构建失败该平台资产会缺失)');
+  }
 }
 
 /* ---------- 2. 构建 ---------- */

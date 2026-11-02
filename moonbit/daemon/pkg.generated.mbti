@@ -1,0 +1,381 @@
+// Generated using `moon info`, DON'T EDIT IT
+package "wangmingfa/syncx/daemon"
+
+import {
+  "moonbitlang/async",
+  "moonbitlang/async/aqueue",
+  "moonbitlang/core/debug",
+  "wangmingfa/syncx/core",
+  "wangmingfa/syncx/net",
+  "wangmingfa/syncx/sqlite",
+}
+
+// Values
+pub const BLOCK_REQUEST_TIMEOUT_MS : Int64 = 5_000
+
+pub const DEFAULT_VERSIONS_PER_PATH : Int32 = 10
+
+pub const DEFERRED_MAX : Int32 = 4096
+
+pub const GIT_PUSH_TIMEOUT_MS : Int32 = 120_000
+
+pub const GIT_UNPUSHED_LIMIT : Int32 = 50
+
+pub const MAX_BLOCK_RETRIES : Int32 = 3
+
+pub const MTIME_TOLERANCE_MS : Int64 = 2000
+
+pub const PARTIAL_SUFFIX : String = ".syncx-partial"
+
+pub const PARTIAL_TMP_SUFFIX : String = ".syncx-tmp"
+
+pub const PARTIAL_TTL_MS : Int64 = 604800000
+
+pub const POLL_TICK_MS : Int32 = 500
+
+pub const SEND_WINDOW_BYTES : Int32 = 67108864
+
+pub const SERVE_LEASE_MS : Int64 = 15_000
+
+pub async fn auto_commit(String, String) -> AutoCommitResult
+
+pub async fn auto_commit_if_dirty(String, String) -> AutoCommitResult
+
+pub fn base36(Int64) -> String
+
+pub async fn blocks_match_on_disk(String, Array[String]) -> Bool
+
+pub fn compose_mirror_commit_message(String, Array[String]) -> String
+
+pub async fn count_unpushed_commits(String) -> Int32?
+
+pub fn entry_fingerprint(Entry) -> String
+
+pub async fn get_commit_info(String, String, String) -> CommitInfo?
+
+pub async fn get_last_commit_hash(String) -> String?
+
+pub async fn git_push(String, timeout_ms? : Int32) -> GitPushResult
+
+pub fn git_sync_mode_of(String?) -> GitSyncMode
+
+pub fn git_sync_plan(GitSyncMode) -> GitSyncPlan
+
+pub async fn has_uncommitted_changes(String) -> Bool
+
+pub async fn hash_file_views(String) -> @core.FileViews
+
+pub fn index_fingerprint(Array[Entry]) -> String
+
+pub async fn is_git_repo(String) -> Bool
+
+pub async fn list_unpushed_commits(String, limit? : Int32) -> Array[GitCommitEntry]?
+
+pub async fn mtime_ms(String) -> Int64?
+
+pub fn new_session_actor(String, Array[FolderSpec]) -> SessionActor raise IndexStoreError
+
+pub fn normalize_path(String) -> String
+
+pub fn now_ms() -> Int64
+
+pub fn partial_paths(String) -> PartialPaths
+
+pub async fn prune_scratch_file(String, String, now? : Int64) -> Bool
+
+pub async fn read_manifest(String, fingerprint~ : String, cdc~ : Bool, slots~ : Int32) -> PartialManifest?
+
+pub async fn remove_partial(String) -> Unit
+
+pub async fn resolve_share_path(String, String, Bool) -> String
+
+pub async fn run_git(String, String, Array[String]) -> (Int32, String, String) raise GitError
+
+pub async fn scan_folder(String, IndexStore, @core.IgnoreRuleset, String, Array[String]) -> ScanDiff
+
+pub fn set_send_window_bytes(Int32) -> Int32
+
+pub fn split_ext(String) -> (String, String)
+
+pub fn start_session_actor(@async.TaskGroup[Unit], String, Array[FolderSpec]) -> ActorHandle raise IndexStoreError
+
+pub fn tombstone_of(Entry, String) -> Entry
+
+pub async fn write_manifest(String, PartialManifest) -> Unit raise PartialError
+
+// Errors
+pub(all) suberror ExecutorError {
+  Io(String)
+  Store(IndexStoreError)
+  UnsafePath(String)
+  HardIgnored(String)
+  Incomplete(String)
+  ContentMismatch(String)
+  FileNotFound(String)
+}
+
+pub(all) suberror GitError {
+  SpawnFailed(String)
+  GitFailed(String)
+}
+
+pub(all) suberror IndexStoreError {
+  Sqlite(@sqlite.SqliteError)
+  Corrupt(String)
+}
+pub fn IndexStoreError::to_text(Self) -> String
+
+pub(all) suberror PartialError {
+  IoFailed(String)
+  CorruptState(String)
+  UnsafeTarget(String)
+  BlockMismatch(String)
+} derive(@debug.Debug)
+pub fn PartialError::to_repr(Self) -> @debug.Repr
+
+// Types and methods
+pub struct ActorHandle {
+  // private fields
+}
+pub fn ActorHandle::send(Self, Cmd) -> Bool
+pub fn ActorHandle::snapshot(Self) -> StatusSnapshot
+pub async fn ActorHandle::sync_snapshot(Self) -> StatusSnapshot
+
+pub(all) struct AutoCommitResult {
+  success : Bool
+  skipped : Bool
+  hash : String?
+  error : String?
+}
+
+pub(all) enum Cmd {
+  ScanFolder(String)
+  ApplyPlan(String)
+  PeerOpen(folder~ : String, remote_device_id~ : String, sink~ : @aqueue.Queue[Outbound])
+  PeerMessage(folder~ : String, remote_device_id~ : String, message~ : @net.WireMessage)
+  PeerClose(folder~ : String, remote_device_id~ : String)
+  Snapshot(reply~ : @aqueue.Queue[StatusSnapshot])
+  DrainEvents(folder~ : String, reply~ : @aqueue.Queue[Array[SyncEventRecord]])
+  PollTimeouts(now~ : Int64)
+  BlockSent(folder~ : String, remote_device_id~ : String, bytes~ : Int32)
+  Shutdown
+}
+
+pub(all) struct CommitInfo {
+  hash : String
+  parent_hash : String
+  message : String
+  full_message : String
+  changed_files : Array[String]
+  diff_stat : String?
+  commit_subjects : Array[String]
+}
+
+pub(all) enum ConflictPolicy {
+  KeepBoth
+  LocalWins
+  NewestWins
+}
+
+pub(all) struct Entry {
+  path : String
+  version : Map[String, Int64]
+  size : Int64
+  deleted : Bool
+  blocks : Array[String]
+  cdh : Array[String]?
+  clens : Array[Int64]?
+  mtime : Int64?
+  placeholder : Bool
+}
+pub fn Entry::is_unchanged(Self, Int64, Int64) -> Bool
+
+pub(all) struct FolderSpec {
+  id : String
+  root : String
+  index_path : String
+  trash_dir : String
+  versions_dir : String?
+  versions_per_path : Int32?
+  rules : @core.IgnoreRuleset
+  receive_only : Bool
+  conflict_policy : ConflictPolicy
+  paused : Bool
+  paused_files : Array[String]
+  baseline_pending : Bool
+  max_bandwidth_kbps : Int32?
+}
+
+pub(all) struct FolderStatus {
+  id : String
+  path : String
+  paused : Bool
+  receive_only : Bool
+  peers : Int32
+  entries : Int64
+  tombstones : Int64
+  conflicts : Int32
+}
+
+pub(all) struct GitCommitEntry {
+  hash : String
+  author : String
+  date : String
+  refs : String
+  subject : String
+  body : String
+}
+
+pub(all) struct GitPushResult {
+  ok : Bool
+  error : String?
+}
+
+pub(all) enum GitSyncMode {
+  Off
+  Send
+  Receive
+  Full
+} derive(Eq)
+pub fn GitSyncMode::equal(Self, Self) -> Bool
+pub fn GitSyncMode::not_equal(Self, Self) -> Bool
+pub fn GitSyncMode::receives(Self) -> Bool
+pub fn GitSyncMode::sends(Self) -> Bool
+
+pub(all) struct GitSyncPlan {
+  watch_local : Bool
+  auto_commit_remote : Bool
+  relay : Bool
+} derive(Eq)
+pub fn GitSyncPlan::equal(Self, Self) -> Bool
+pub fn GitSyncPlan::not_equal(Self, Self) -> Bool
+
+pub(all) struct GitWatcher {
+  root : String
+  mode : GitSyncMode
+  mut last_hash : String?
+}
+pub async fn GitWatcher::check_new_commit(Self) -> CommitInfo?
+pub fn GitWatcher::new(String, GitSyncMode) -> Self
+
+pub struct IndexCounts {
+  entries : Int64
+  tombstones : Int64
+}
+
+pub(all) enum IndexMode {
+  Full
+  Delta
+}
+
+pub struct IndexStore {
+  db : @sqlite.Db
+}
+pub fn IndexStore::close(Self) -> Unit
+pub fn IndexStore::count_entries(Self) -> IndexCounts raise IndexStoreError
+pub fn IndexStore::get_entry(Self, String) -> Entry? raise IndexStoreError
+pub fn IndexStore::list_entries(Self) -> Array[Entry] raise IndexStoreError
+pub fn IndexStore::open(String) -> Self raise IndexStoreError
+pub fn IndexStore::remove_entry(Self, String) -> Unit raise IndexStoreError
+pub fn IndexStore::save_entries(Self, Array[Entry]) -> Unit raise IndexStoreError
+pub fn IndexStore::save_entry(Self, Entry) -> Unit raise IndexStoreError
+
+pub(all) struct LocalExecutor {
+  root : String
+  trash_dir : String
+  versions_dir : String?
+  versions_per_path : Int32
+}
+pub async fn LocalExecutor::apply_conflict(Self, IndexStore, String, Entry, Entry, Bytes, String) -> Entry
+pub fn LocalExecutor::apply_conflict_keep_local(Self, IndexStore, Entry, Entry) -> Entry raise ExecutorError
+pub async fn LocalExecutor::apply_delete(Self, IndexStore, String, Entry) -> Unit
+pub async fn LocalExecutor::apply_file(Self, IndexStore, Entry, Bytes) -> Unit
+pub fn LocalExecutor::apply_placeholder(Self, IndexStore, Entry) -> Unit raise ExecutorError
+pub async fn LocalExecutor::apply_send(Self, IndexStore, String, String) -> Entry
+pub fn LocalExecutor::new(String, String, versions_dir? : String, versions_per_path? : Int32) -> Self
+pub async fn LocalExecutor::preserve_local_as_conflict(Self, String, String) -> Bool
+pub async fn LocalExecutor::resolve_path(Self, String) -> String
+
+pub(all) enum Outbound {
+  Entries(entries~ : Array[@net.WireEntry], full~ : Bool, relayed~ : Bool)
+  BlockRequest(@net.WireBlockRequest)
+  BlockResponse(@net.WireBlockResponse)
+  IndexFingerprint(String)
+  IndexAck
+  IndexRequest
+}
+
+pub(all) struct PartialManifest {
+  v : Int32
+  fingerprint : String
+  cdc : Bool
+  slots : Int32
+  bitmap : String
+  started_at : Int64
+  updated_at : Int64
+}
+
+pub(all) struct PartialPaths {
+  tmp : String
+  manifest : String
+}
+
+pub struct PartialStore {
+  // private fields
+}
+pub async fn PartialStore::abort(Self, keep_partial~ : Bool) -> Unit
+pub async fn PartialStore::append(Self, Int32, Bytes) -> Unit raise PartialError
+pub async fn PartialStore::begin(String, Entry, Bool) -> Self raise PartialError
+pub fn PartialStore::count(Self) -> Int32
+pub fn PartialStore::has(Self, Int32) -> Bool
+pub fn PartialStore::is_full(Self) -> Bool
+pub fn PartialStore::missing_slots(Self) -> Array[Int32]
+pub async fn PartialStore::read_content(Self) -> Bytes raise PartialError
+pub fn PartialStore::received_bytes(Self) -> Int64
+pub fn PartialStore::target_path(Self) -> String
+
+pub(all) struct ScanDiff {
+  changed : Array[String]
+  tombstones : Array[Entry]
+  files_seen : Int32
+  conflict_count : Int32
+}
+
+pub struct SessionActor {
+  // private fields
+}
+pub fn SessionActor::handle(Self) -> ActorHandle
+pub async fn SessionActor::run(Self) -> Unit
+
+pub struct SlotBitmap {
+  // private fields
+}
+pub fn SlotBitmap::clear(Self, Int32) -> Unit
+pub fn SlotBitmap::count(Self) -> Int32
+pub fn SlotBitmap::from_base64(Int32, String) -> Self raise PartialError
+pub fn SlotBitmap::full(Self) -> Bool
+pub fn SlotBitmap::has(Self, Int32) -> Bool
+pub fn SlotBitmap::new(Int32) -> Self
+pub fn SlotBitmap::set(Self, Int32) -> Unit
+pub fn SlotBitmap::to_base64(Self) -> String
+
+pub struct SnapshotCell {
+  mut value : StatusSnapshot
+}
+pub fn SnapshotCell::snapshot(Self) -> StatusSnapshot
+
+pub(all) struct StatusSnapshot {
+  folders : Array[FolderStatus]
+  total_entries : Int64
+  total_tombstones : Int64
+}
+
+pub(all) struct SyncEventRecord {
+  path : String
+  direction : String
+  action : String
+}
+
+// Type aliases
+
+// Traits

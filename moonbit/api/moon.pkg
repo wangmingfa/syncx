@@ -1,0 +1,32 @@
+import {
+  "wangmingfa/syncx/core",
+  "wangmingfa/syncx/daemon",
+  "cc06b/mooncry/lib",
+  "oboard/mocket",
+  "oboard/mocket/static_file",
+  "moonbitlang/async",
+  "moonbitlang/async/fs",
+  "moonbitlang/async/http",
+  "moonbitlang/async/io",
+  "moonbitlang/async/socket",
+  "moonbitlang/async/websocket",
+  "moonbitlang/core/encoding/utf8",
+  "moonbitlang/core/env",
+  "moonbitlang/core/json",
+}
+
+import {
+  "cc06b/mooncry/lib",
+  "wangmingfa/syncx/core",
+  "wangmingfa/syncx/daemon",
+  "wangmingfa/syncx/net",
+  "moonbitlang/async/fs",
+  "moonbitlang/async/http",
+  "moonbitlang/async/socket",
+  "moonbitlang/async/websocket",
+  "moonbitlang/core/encoding/base64",
+  "moonbitlang/core/encoding/utf8",
+  "moonbitlang/core/json",
+} for "test"
+
+supported_targets = "native"

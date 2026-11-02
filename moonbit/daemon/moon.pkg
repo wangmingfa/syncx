@@ -1,0 +1,16 @@
+import {
+  "wangmingfa/syncx/sqlite",
+  "wangmingfa/syncx/core",
+  "wangmingfa/syncx/net",
+  "moonbitlang/core/json",
+  "moonbitlang/core/encoding/utf8",
+  "moonbitlang/async",
+  "moonbitlang/async/fs",
+  "moonbitlang/async/process",
+  "moonbitlang/core/string",
+  "moonbitlang/core/buffer",
+  "moonbitlang/core/debug",
+  "moonbitlang/core/encoding/base64",
+}
+
+supported_targets = "native"

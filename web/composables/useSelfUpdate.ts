@@ -16,7 +16,7 @@ export function useSelfUpdate(deps: CoreDeps): {
   askSelfUpdate: (u: { latest: string; current: string }) => void;
   checkForUpdate: () => Promise<void>;
   uploadOpen: Ref<boolean>;
-  openUpload: () => void;
+  openUpload: () => boolean;
   closeUpload: () => void;
   uploadFile: Ref<File | null>;
   uploadInfo: Ref<UploadPackageInfo | null>;
@@ -28,6 +28,9 @@ export function useSelfUpdate(deps: CoreDeps): {
   logout: () => Promise<void>;
 } {
   const { status, busy, isDev, refreshStatus, askConfirm } = deps;
+
+  /** 非 node 形态(单二进制)没有 npm 安装包可传,上传弹窗整体不适用(ADR-0025/0026)。 */
+  const NON_NODE_UPLOAD_BLOCKED = '单二进制后端不支持上传 npm 安包（自更新走 GitHub Releases）';
   const { showToast } = useToast();
 
   /** dev 运行态下自更新不可用:原因统一在此说明,各入口拦截后原样透出。 */
@@ -55,13 +58,19 @@ export function useSelfUpdate(deps: CoreDeps): {
     uploadInspecting.value = false;
   }
 
-  function openUpload(): void {
+  /** 返回是否真的打开了弹窗:被 dev/rust 拦下时调用方(页面级拖入)不应继续预检。 */
+  function openUpload(): boolean {
     if (isDev) {
       showToast(DEV_UPDATE_BLOCKED, 'alert');
-      return;
+      return false;
+    }
+    if (status.value.runtime !== 'node') {
+      showToast(NON_NODE_UPLOAD_BLOCKED, 'alert');
+      return false;
     }
     resetUpload(); // 每次打开都从干净态开始,不残留上一轮的包与结论
     uploadOpen.value = true;
+    return true;
   }
 
   function closeUpload(): void {
@@ -98,7 +107,7 @@ export function useSelfUpdate(deps: CoreDeps): {
     }
     askConfirm({
       title: `升级到 ${u.latest}?`,
-      message: `将从 npm 下载官方安装包,校验通过后自动重启服务(当前 ${u.current})。重启期间页面会短暂失去连接,完成后自动刷新。`,
+      message: `${status.value.updateSource === 'github' ? '将从 GitHub Releases 下载对应平台的安装包' : '将从 npm 下载官方安装包'},校验通过后自动重启服务(当前 ${u.current})。重启期间页面会短暂失去连接,完成后自动刷新。`,
       confirmText: '开始升级',
       action: () => doSelfUpdate(u.latest),
     });

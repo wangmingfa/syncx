@@ -1,0 +1,43 @@
+[package]
+name = "syncx-api"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+syncx-core = { path = "../syncx-core" }
+syncx-net = { path = "../syncx-net" }
+syncx-daemon = { path = "../syncx-daemon" }
+axum = { workspace = true, features = ["ws", "macros"] }
+rust-embed.workspace = true
+tokio.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+tracing.workspace = true
+# 账号口令派生:Node 侧用 node:crypto 的 scrypt(N=16384,r=8,p=1)。
+# 参数必须逐项一致,否则同一份 auth.json 在两端互不认账。
+scrypt = { version = "0.11", default-features = false }
+# 常量时间比较:口令与 token 校验不能靠 ==(长度相同即逐字节短路)
+subtle = "2"
+hmac = "0.12"
+sha2 = "0.10"
+sha1 = "0.10"
+hex = "0.4"
+base64 = "0.22"
+rand = "0.8"
+# 时段/日历的墙上时间只在 API 层解释(Core 里刻意不碰时区)。
+chrono = { version = "0.4", default-features = false, features = ["clock", "std"] }
+form_urlencoded = "1"
+percent-encoding = "2"
+# 局域网地址枚举(顶栏本机 chip / 配对码)。mdns-sd 已经间接依赖它,不引入新树。
+if-addrs = "0.13"
+# 前端文件浏览测试器与配置页的正则校验(Node 侧用字面量正则,这里预先编译一次)。
+regex = "1"
+# fleet 代理:服务端向另一台 daemon 转发白名单里的三个端点。
+# rustls + json + blocking 三件:不引入系统 OpenSSL,也不需要 async 客户端
+# (阻塞版自带运行时,不会在 axum 工作线程里踩 block_on 嵌套)。
+reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "json", "blocking"] }
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["full"] }

@@ -1,0 +1,99 @@
+{
+  "cases": [
+    {
+      "path": "a.png",
+      "mime": "image/png",
+      "limit": 8388608
+    },
+    {
+      "path": "a.PNG",
+      "mime": "image/png",
+      "limit": 8388608
+    },
+    {
+      "path": "dir/a.jpg",
+      "mime": "image/jpeg",
+      "limit": 8388608
+    },
+    {
+      "path": "a.jpeg",
+      "mime": "image/jpeg",
+      "limit": 8388608
+    },
+    {
+      "path": "a.gif",
+      "mime": "image/gif",
+      "limit": 8388608
+    },
+    {
+      "path": "a.webp",
+      "mime": "image/webp",
+      "limit": 8388608
+    },
+    {
+      "path": "a.bmp",
+      "mime": "image/bmp",
+      "limit": 8388608
+    },
+    {
+      "path": "a.ico",
+      "mime": "image/x-icon",
+      "limit": 8388608
+    },
+    {
+      "path": "a.avif",
+      "mime": "image/avif",
+      "limit": 8388608
+    },
+    {
+      "path": "a.svg",
+      "mime": "image/svg+xml",
+      "limit": 8388608
+    },
+    {
+      "path": "a.tiff",
+      "mime": null,
+      "limit": 2097152
+    },
+    {
+      "path": "a.txt",
+      "mime": null,
+      "limit": 2097152
+    },
+    {
+      "path": "a",
+      "mime": null,
+      "limit": 2097152
+    },
+    {
+      "path": ".env",
+      "mime": null,
+      "limit": 2097152
+    },
+    {
+      "path": ".hidden.png",
+      "mime": "image/png",
+      "limit": 8388608
+    },
+    {
+      "path": "dir.d/file",
+      "mime": null,
+      "limit": 2097152
+    },
+    {
+      "path": "noext/dir.name/file",
+      "mime": null,
+      "limit": 2097152
+    },
+    {
+      "path": "a.tar.gz",
+      "mime": null,
+      "limit": 2097152
+    },
+    {
+      "path": "",
+      "mime": null,
+      "limit": 2097152
+    }
+  ]
+}

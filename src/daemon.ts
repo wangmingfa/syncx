@@ -24,12 +24,49 @@ export function loadOrCreateToken(configDir: string): string {
 
 /* ---------- stop:查找并停止运行中的 daemon ---------- */
 
-/** pid 文件名与内容:start 时写入 {pid, controlPort},优雅关闭时删除。 */
+/** pid 文件名与内容:start 时写入 {pid, controlPort, backend},优雅关闭时删除。 */
 export const PID_FILE = 'syncx.pid';
 
 export interface PidRecord {
   pid?: number;
   controlPort?: number;
+  /**
+   * 持有该数据目录的后端实现。Node 与 Rust 共用同一 configDir(见 docs/adr/0025),
+   * 同一时刻只允许一个后端运行;第二个启动时报错要指明对方身份,用户才知道该用
+   * `syncx stop` 还是 `syncx-rs stop`。
+   *
+   * 缺省(本字段引入前的 pid 文件)= 'node':那时只有 Node 实现,判成 node 是对的。
+   */
+  backend?: 'node' | 'rust';
+  /** 持有者的软件版本,仅用于报错时给出足够信息。 */
+  version?: string;
+}
+
+/** 后端实现的命令名:报错文案据此告诉用户该用哪条命令关掉对方。 */
+export function backendStopHint(backend: 'node' | 'rust' | undefined): string {
+  return backend === 'rust' ? 'syncx-rs stop' : 'syncx stop';
+}
+
+/**
+ * 把「这个数据目录正被谁占着」渲染成一句可执行的中文提示;没有占用者时返回 undefined。
+ *
+ * 判定口径:pid 存在且进程存活才算占用。pid 文件缺失/损坏/进程已退都是「没人」——
+ * 与 stop / status 的既有判定保持一致(见 isProcessAlive 的调用点)。
+ */
+export function describePidHolder(configDir: string): string | undefined {
+  const file = pidFilePath(configDir);
+  if (!existsSync(file)) return undefined;
+  let info: PidRecord;
+  try {
+    info = JSON.parse(readFileSync(file, 'utf8')) as PidRecord;
+  } catch {
+    return undefined; // 损坏的 pid 文件:交给通用排查文案,这里不猜
+  }
+  const pid = info.pid;
+  if (typeof pid !== 'number' || !isProcessAlive(pid)) return undefined;
+  const backend = info.backend ?? 'node'; // 缺省 = 本字段引入前只有 Node 实现
+  const ver = info.version ? `, version=${info.version}` : '';
+  return `backend=${backend}, pid=${pid}${ver};请先执行 \`${backendStopHint(info.backend)}\` 再启动本版本`;
 }
 
 export function pidFilePath(configDir: string): string {
@@ -282,7 +319,13 @@ export function eaccessHints(port: number): string[] {
  *    process.exit(1);调用方把启动日志全部放在 await 之后,失败时一句多余日志都没有。
  *  - 监听成功 → 换挂常驻 error 处理,运行期错误只记日志,不再崩溃。
  */
-export function listenControl(server: HttpServer, port: number, host: string, logError: (msg: string) => void): Promise<void> {
+export function listenControl(
+  server: HttpServer,
+  port: number,
+  host: string,
+  logError: (msg: string) => void,
+  hintOf?: () => string | undefined,
+): Promise<void> {
   return new Promise((resolve) => {
     let listening = false;
     server.on('error', (err: NodeJS.ErrnoException) => {
@@ -293,6 +336,13 @@ export function listenControl(server: HttpServer, port: number, host: string, lo
           console.error(`  或换端口启动:syncx start --control-port <其他端口>`);
         } else if (err.code === 'EADDRINUSE') {
           console.error(`[fatal] 控制端口已被占用(EADDRINUSE): ${host}:${port}`);
+          // 同一个数据目录可能被另一个后端(Rust)占着(见 docs/adr/0025)。只报
+          // 「已被占用」用户不知道该停哪条命令;pid 文件里记着对方的身份,据此给出
+          // 可执行的提示。读不到 pid 文件(别的程序占了端口)则退回泛指文案。
+          const holder = hintOf?.();
+          if (holder) {
+            console.error(`另一个后端正在运行:${holder}`);
+          }
           console.error('可能已有 syncx daemon 在运行(先执行 syncx status / syncx stop),或其他程序占用了该端口;也可用 --control-port 换端口。');
         } else {
           console.error(`[fatal] 控制端口绑定失败: ${host}:${port} (${err.code ?? '未知错误'}) ${err.message}`);

@@ -1,0 +1,292 @@
+///|
+/// 目录/设备/暂停/关闭四组路由的行为测试(黑盒,dispatch_http 全链路)。
+/// 配置一律指向临时目录,断言「写操作落盘 + 读操作回读」。
+
+///|
+/// 临时配置目录:每个用例独享,config.json 初始为空(不存在)。
+async fn test_config_dir(tag : String) -> String {
+  @fs.tmpdir(prefix="syncx-mb-api-\{tag}")
+}
+
+///|
+fn options_with(_tag : String, dir : String) -> @api.ApiOptions {
+  @api.ApiOptions::new(
+    device_id="TESTDEVICE01",
+    control_token="test-token",
+    config_file=Some("\{dir}/config.json"),
+  )
+}
+
+///|
+async test "POST /api/folders:新目录 201 落盘,重复路径合并设备" {
+  let dir = test_config_dir("folders")
+  let options = options_with("folders", dir)
+  let app = @api.build_app(options)
+  let secret = @api.session_secret("test-token")
+  let ticket = @api.sign_session(
+    { via: "token", sub: "token", exp: @api.now_ms() + 60_000L, },
+    secret,
+  )
+  let headers : Map[@http.CaseInsensitiveString, StringView] = {
+    "Cookie": "syncx_session=\{ticket}",
+  }
+  // 新目录:201 + created:true
+  let response = @mocket.dispatch_http(
+    app, "POST", "/api/folders", headers, b"{\"path\":\"/tmp/syncx-mb-api-photos\",\"devices\":[\"DEV2\",\"DEV3\"],\"receiveOnly\":true}",
+  )
+  assert_eq(response.status_code.to_int(), 201)
+  let body : Json = response.read_body()
+  match body {
+    Object(obj) => {
+      assert_true(obj.get("ok") is Some(True))
+      assert_true(obj.get("created") is Some(True))
+    }
+    _ => fail("响应应为对象")
+  }
+  // config.json:字段名与 Node/Rust 逐字对齐
+  let raw = @fs.read_file("\{dir}/config.json").text()
+  let config = @json.parse(raw)
+  assert_true(config is Object(_))
+  let saved = @api.load_config("\{dir}/config.json")
+  assert_eq(saved.shared_folders.length(), 1)
+  let folder = saved.shared_folders[0]
+  assert_eq(folder.path, "/tmp/syncx-mb-api-photos")
+  assert_eq(folder.devices, ["DEV2", "DEV3"])
+  assert_true(folder.receive_only is Some(true))
+  // id 自动生成且非空
+  assert_true(folder.id is Some(_))
+  // generatedBy / formatVersion 戳
+  assert_true(saved.generated_by is Some(_))
+  assert_eq(saved.format_version, @core.FORMAT_VERSION)
+  // 同路径再提交:created:false,设备合并去重
+  let response = @mocket.dispatch_http(
+    app, "POST", "/api/folders", headers, b"{\"path\":\"/tmp/syncx-mb-api-photos\",\"devices\":[\"DEV3\",\"DEV4\"]}",
+  )
+  assert_eq(response.status_code.to_int(), 201)
+  let body : Json = response.read_body()
+  match body {
+    Object(obj) => assert_true(obj.get("created") is Some(False))
+    _ => fail("响应应为对象")
+  }
+  let merged = @api.load_config("\{dir}/config.json")
+  assert_eq(merged.shared_folders.length(), 1)
+  assert_eq(merged.shared_folders[0].devices, ["DEV2", "DEV3", "DEV4"])
+  // 同路径不同 id:矛盾请求拒绝
+  let response = @mocket.dispatch_http(
+    app, "POST", "/api/folders", headers, b"{\"path\":\"/tmp/syncx-mb-api-photos\",\"id\":\"another-id\"}",
+  )
+  assert_eq(response.status_code.to_int(), 400)
+}
+
+///|
+async test "POST /api/folders:缺 path 与非法 JSON 回 400" {
+  let dir = test_config_dir("folders-bad")
+  let app = @api.build_app(options_with("folders-bad", dir))
+  let secret = @api.session_secret("test-token")
+  let ticket = @api.sign_session(
+    { via: "token", sub: "token", exp: @api.now_ms() + 60_000L, },
+    secret,
+  )
+  let headers : Map[@http.CaseInsensitiveString, StringView] = {
+    "Cookie": "syncx_session=\{ticket}",
+  }
+  // 缺 path
+  let response = @mocket.dispatch_http(
+    app, "POST", "/api/folders", headers, b"{}",
+  )
+  assert_eq(response.status_code.to_int(), 400)
+  let body : Json = response.read_body()
+  match body {
+    Object(obj) =>
+      assert_true(obj.get("error") is Some(String("path is required")))
+    _ => fail("响应应为对象")
+  }
+  // 非法 JSON
+  let response = @mocket.dispatch_http(
+    app, "POST", "/api/folders", headers, b"not-json",
+  )
+  assert_eq(response.status_code.to_int(), 400)
+}
+
+///|
+async test "GET /api/folders:回读目录列表,字段与 config.json 一致" {
+  let dir = test_config_dir("folders-get")
+  // 直接铺一份带未知键的 config.json(未知键必须原样保留)
+  @fs.write_file(
+    "\{dir}/config.json",
+    "{\"sharedFolders\":[{\"path\":\"/tmp/syncx-mb-api-docs\",\"id\":\"docs\",\"futureKey\":42}],\"formatVersion\":1}",
+    create_mode=CreateOrTruncate,
+  )
+  let app = @api.build_app(options_with("folders-get", dir))
+  let secret = @api.session_secret("test-token")
+  let ticket = @api.sign_session(
+    { via: "token", sub: "token", exp: @api.now_ms() + 60_000L, },
+    secret,
+  )
+  let response = @mocket.dispatch_http(
+    app,
+    "GET",
+    "/api/folders",
+    { "Cookie": "syncx_session=\{ticket}" },
+    b"",
+  )
+  assert_eq(response.status_code.to_int(), 200)
+  let body : Json = response.read_body()
+  match body {
+    Object(obj) => {
+      assert_true(obj.get("ok") is Some(True))
+      match obj.get("folders") {
+        Some(Array(items)) => {
+          assert_eq(items.length(), 1)
+          match items[0] {
+            Object(folder) => {
+              assert_true(
+                folder.get("path") is Some(String("/tmp/syncx-mb-api-docs")),
+              )
+              // 未知键原样透出
+              assert_true(folder.get("futureKey") is Some(Number(42.0, ..)))
+            }
+            _ => fail("folders[0] 应为对象")
+          }
+        }
+        _ => fail("folders 应为数组")
+      }
+    }
+    _ => fail("响应应为对象")
+  }
+}
+
+///|
+async test "POST /api/pause:一律落盘字面量(取消写 false 不删键)" {
+  let dir = test_config_dir("pause")
+  let app = @api.build_app(options_with("pause", dir))
+  let secret = @api.session_secret("test-token")
+  let ticket = @api.sign_session(
+    { via: "token", sub: "token", exp: @api.now_ms() + 60_000L, },
+    secret,
+  )
+  let headers : Map[@http.CaseInsensitiveString, StringView] = {
+    "Cookie": "syncx_session=\{ticket}",
+  }
+  // 暂停:写 true
+  let response = @mocket.dispatch_http(
+    app, "POST", "/api/pause", headers, b"{\"paused\":true}",
+  )
+  assert_eq(response.status_code.to_int(), 200)
+  let paused = @api.load_config("\{dir}/config.json")
+  assert_true(paused.paused is Some(true))
+  // 恢复:写 false(不是删键)
+  let response = @mocket.dispatch_http(
+    app, "POST", "/api/pause", headers, b"{\"paused\":false}",
+  )
+  assert_eq(response.status_code.to_int(), 200)
+  // 落盘的是字面量 false(core 的内存模型只保留 true,这里直接看盘面)
+  let resumed = @json.parse(@fs.read_file("\{dir}/config.json").text())
+  match resumed {
+    Object(obj) => assert_true(obj.get("paused") is Some(False))
+    _ => fail("config.json 应为对象")
+  }
+  // 缺 paused:按 false 处理(Node `=== true` 同口径)
+  let response = @mocket.dispatch_http(
+    app, "POST", "/api/pause", headers, b"{}",
+  )
+  assert_eq(response.status_code.to_int(), 200)
+}
+
+///|
+async test "GET /api/devices:回读 knownDevices" {
+  let dir = test_config_dir("devices")
+  @fs.write_file(
+    "\{dir}/config.json",
+    "{\"knownDevices\":[{\"id\":\"DEV2\",\"name\":\"laptop\",\"futureKey\":true}],\"formatVersion\":1}",
+    create_mode=CreateOrTruncate,
+  )
+  let app = @api.build_app(options_with("devices", dir))
+  let secret = @api.session_secret("test-token")
+  let ticket = @api.sign_session(
+    { via: "token", sub: "token", exp: @api.now_ms() + 60_000L, },
+    secret,
+  )
+  let response = @mocket.dispatch_http(
+    app,
+    "GET",
+    "/api/devices",
+    { "Cookie": "syncx_session=\{ticket}" },
+    b"",
+  )
+  assert_eq(response.status_code.to_int(), 200)
+  let body : Json = response.read_body()
+  match body {
+    Object(obj) => {
+      assert_true(obj.get("ok") is Some(True))
+      match obj.get("devices") {
+        Some(Array(items)) => {
+          assert_eq(items.length(), 1)
+          match items[0] {
+            Object(device) => {
+              assert_true(device.get("id") is Some(String("DEV2")))
+              assert_true(device.get("name") is Some(String("laptop")))
+              assert_true(device.get("futureKey") is Some(True))
+            }
+            _ => fail("devices[0] 应为对象")
+          }
+        }
+        _ => fail("devices 应为数组")
+      }
+    }
+    _ => fail("响应应为对象")
+  }
+}
+
+///|
+async test "POST /api/shutdown:有回调回 ok,无回调回 503" {
+  // 无回调:503 + Node 同款文案
+  let dir = test_config_dir("shutdown-none")
+  let app = @api.build_app(options_with("shutdown-none", dir))
+  let secret = @api.session_secret("test-token")
+  let ticket = @api.sign_session(
+    { via: "token", sub: "token", exp: @api.now_ms() + 60_000L, },
+    secret,
+  )
+  let response = @mocket.dispatch_http(
+    app,
+    "POST",
+    "/api/shutdown",
+    { "Cookie": "syncx_session=\{ticket}" },
+    b"",
+  )
+  assert_eq(response.status_code.to_int(), 503)
+  let body : Json = response.read_body()
+  match body {
+    Object(obj) =>
+      assert_true(obj.get("error") is Some(String("shutdown not available")))
+    _ => fail("响应应为对象")
+  }
+  // 有回调:ok:true + msg,且回调确实被调
+  let dir = test_config_dir("shutdown")
+  let flags : Array[Bool] = []
+  let options = @api.ApiOptions::new(
+    device_id="TESTDEVICE01",
+    control_token="test-token",
+    config_file=Some("\{dir}/config.json"),
+    on_shutdown=Some(fn() { flags.push(true) }),
+  )
+  let app = @api.build_app(options)
+  let response = @mocket.dispatch_http(
+    app,
+    "POST",
+    "/api/shutdown",
+    { "Cookie": "syncx_session=\{ticket}" },
+    b"",
+  )
+  assert_eq(response.status_code.to_int(), 200)
+  let body : Json = response.read_body()
+  match body {
+    Object(obj) => {
+      assert_true(obj.get("ok") is Some(True))
+      assert_true(obj.get("msg") is Some(String("shutting down")))
+    }
+    _ => fail("响应应为对象")
+  }
+  assert_eq(flags.length(), 1)
+}

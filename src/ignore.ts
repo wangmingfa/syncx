@@ -1,4 +1,4 @@
-import { readFileSync, writeFileSync } from 'node:fs';
+import { readFileSync, readdirSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 
 import type { IndexEntry } from './index.js';
@@ -139,7 +139,18 @@ function ruleMatches(rule: IgnoreRule, relPath: string, isDir: boolean): boolean
   const matchFull = (p: string): boolean =>
     fullPathMode ? re.test(p) : splitSegments(p).some((segment) => re.test(segment));
 
-  if (!dirOnly) return matchFull(relPath);
+  if (!dirOnly) {
+    if (!fullPathMode) return matchFull(relPath);
+    // 含斜杠/锚定的非目录规则同样要「命中目录即忽略其下全部内容」:git 里
+    // `a/b` 表示这个路径上的文件**或目录**,是目录时其下所有内容一并忽略。
+    // 只比完整路径会漏掉 `a/b/c`(子目录里的 .gitignore 改写出来的模式多是
+    // 这种带斜杠形态,如 `/target` → `rust/target`)。逐级比较前缀即可。
+    const segs = splitSegments(relPath);
+    for (let i = 1; i <= segs.length; i++) {
+      if (re.test(segs.slice(0, i).join('/'))) return true;
+    }
+    return false;
+  }
 
   /**
    * 目录规则:gitignore 里「忽略一个目录」等价于「忽略它下面的全部内容」,
@@ -323,12 +334,134 @@ export function isIgnoredPath(rules: IgnoreRule[], relPath: string, isDir: boole
   return isHardIgnored(relPath) || isIgnored(rules, relPath, isDir);
 }
 
+/** 读某个 `.gitignore` 的原始行;不存在/不可读返回空数组(目录可能刚创建)。 */
+function readGitignoreLines(dir: string): string[] {
+  try {
+    return readFileSync(join(dir, '.gitignore'), 'utf8').split('\n');
+  } catch {
+    return [];
+  }
+}
+
+/**
+ * 把子目录 `.gitignore` 里的一行改写成**相对共享根**的有效模式。
+ *
+ * 为什么需要改写成根相对:规则的使用方(`isIgnored` / `scanner` / `peer` / 快照里
+ * 传给对端的 `ignoreLines`)都只接受一条「相对共享根」的字符串,而 git 的语义是
+ * 相对该 `.gitignore` 所在目录。改写后的模式由既有 matcher 原样处理,匹配器不必
+ * 关心规则来自哪一层。
+ *
+ * 映射规则(与 git 一致):
+ *  - `/x`   → `<dir>/x`      锚定在该目录
+ *  - `a/b`  → `<dir>/a/b`    含斜杠即相对该目录
+ *  - `x`    → `<dir>/** /x`  不含斜杠 = 该目录下**任意层级**(见下方实际写法)
+ *  - 目录规则的结尾 `/` 保留;`!` 前缀保留(负向规则的优先级由行序决定)
+ *
+ * 注释与空行原样返回:解析侧本来就会忽略它们,保留原文能让 `ignoreLines` 在界面上
+ * 仍是一份可读的规则清单。
+ */
+function rewriteNestedPattern(relDir: string, raw: string): string {
+  const line = raw.trim();
+  if (line === '' || line.startsWith('#')) return raw;
+  const negated = line.startsWith('!');
+  const body = negated ? line.slice(1) : line;
+  if (body === '') return raw;
+  const dirOnly = body.endsWith('/');
+  const core = dirOnly ? body.slice(0, -1) : body;
+  if (core === '') return raw;
+
+  let rewritten: string;
+  if (core === '**') {
+    rewritten = `${relDir}/**`;
+  } else if (core.startsWith('/')) {
+    // 锚定在该 .gitignore 所在目录:去掉前导斜杠、补上目录前缀
+    rewritten = `${relDir}/${core.slice(1)}`;
+  } else if (core.includes('/')) {
+    // 含斜杠(含开头的 `**/`):相对该 .gitignore 所在目录
+    rewritten = `${relDir}/${core}`;
+  } else {
+    // 不含斜杠:该目录下的任意层级,用 `**/` 表达「中间可有零到多层」
+    rewritten = `${relDir}/**/${core}`;
+  }
+  return `${negated ? '!' : ''}${rewritten}${dirOnly ? '/' : ''}`;
+}
+
+/**
+ * 目录路径里是否含**无法用规则文本表达**的字符。
+ *
+ * 规则最终是一串交给 gitignore 语义 matcher 的模式,而 matcher 的转义集合里没有
+ * `\` 的「还原」语义(它把 `\` 本身当字面量),`*` / `?` / `[` 也没有字面量写法。
+ * 因此含这些字符的目录名无法被安全地放进根相对模式:强行拼进去会变成通配符,
+ * 把**别的真实路径**误忽略。这类目录整棵跳过(不读它的 .gitignore、也不往下走,
+ * 免得拼出更深的错模式),代价是这种目录里的规则不生效 —— 宁可少忽略,不可多忽略。
+ */
+const UNSAFE_DIR_CHARS = /[*?[\]\\]/;
+
+function dirPathExpressible(relDir: string): boolean {
+  return !UNSAFE_DIR_CHARS.test(relDir);
+}
+
+/**
+ * 遍历共享目录树,收集**子目录**里的 `.gitignore` 行并改写成根相对模式
+ * (根目录那份由 composeIgnoreLines 自己读,保持既有优先级顺序)。
+ *
+ * 三个 git 语义要点:
+ *  - **优先级按层级**:更深目录的规则覆盖更浅的 —— BFS 恰好产出「层浅在前」的
+ *    行序,而 matcher 是 last-match-wins,行序即优先级;
+ *  - **不进入被忽略的目录**:git 不读被忽略目录里的 `.gitignore`,这里同样在
+ *    「这条目录路径是否已被忽略」成立时整棵跳过 —— 顺带把这一走法变成性能优势
+ *    (`rust/target` 被上一层规则挡住后不再 readdir)。
+ *  - 只走目录、不跟随符号链接(`withFileTypes()` 下符号链接不是 isDirectory)。
+ *
+ * 每轮扫描都会重跑(忽略规则改动即时生效,见 session-manager 的 scanOnce),
+ * 成本是一次目录遍历;被忽略的大目录在遍历中被剪掉,因此代价只跟「参与同步的
+ * 目录数」成正比。
+ */
+function readNestedGitignoreLines(folderPath: string, rootRules: IgnoreRule[]): string[] {
+  const rules: IgnoreRule[] = [...rootRules];
+  const out: string[] = [];
+  const dirs: Array<{ abs: string; rel: string }> = [{ abs: folderPath, rel: '' }];
+  // 病态目录树的兜底:不跟随符号链接已排除成环,这里只防「上百万个目录」把一轮
+  // 扫描拖成全盘遍历。超限后只是少读更深层 .gitignore,不会误忽略(规则变少 = 放行)。
+  const MAX_DIRS = 50_000;
+  for (let i = 0; i < dirs.length && i < MAX_DIRS; i++) {
+    const dir = dirs[i]!;
+    if (dir.rel !== '') {
+      const lines = readGitignoreLines(dir.abs);
+      if (lines.length > 0) {
+        const rewritten = lines.map((line) => rewriteNestedPattern(dir.rel, line));
+        out.push(...rewritten);
+        rules.push(...parseIgnoreRules(rewritten));
+      }
+    }
+    let entries;
+    try {
+      entries = readdirSync(dir.abs, { withFileTypes: true });
+    } catch {
+      continue; // 目录不可读:跳过,不影响其余部分
+    }
+    for (const entry of entries) {
+      if (!entry.isDirectory()) continue;
+      const rel = dir.rel === '' ? entry.name : `${dir.rel}/${entry.name}`;
+      // 已被忽略的目录不进入(git 同此);硬忽略(.git 等)本来也不会被扫描
+      if (isIgnoredPath(rules, rel, true)) continue;
+      // 含无法表达的字符的目录整棵跳过(见 dirPathExpressible):不读它的
+      // .gitignore,也不往下走,免得拼出「看起来是通配符」的更深的模式
+      if (!dirPathExpressible(rel)) continue;
+      dirs.push({ abs: join(dir.abs, entry.name), rel });
+    }
+  }
+  return out;
+}
+
 /**
  * 读取一个共享目录的忽略规则行(按优先级从低到高排列,后读的规则可覆盖先读的):
  * 0. 内置默认忽略(见 BUILTIN_IGNORE_LINES,永不抛错、始终并入)
- * 1. `.gitignore` — 仅当 useGitignore 为 true(目录配置缺省即开启)时并入
- * 2. `.syncxignore` — syncx 自己的忽略文件,优先级最高,可用 `!` 负向规则覆盖前两者
- * 两个文件都不存在或不可读时仅返回内置默认忽略,不抛错(目录可能刚创建)。
+ * 1. 根 `.gitignore` — 仅当 useGitignore 为 true(目录配置缺省即开启)时并入
+ * 2. 子目录 `.gitignore` — 同样受 useGitignore 控制,按层级由浅到深并入
+ *    (更深的规则优先级更高,见 readNestedGitignoreLines);模式改写成根相对形式
+ * 3. `.syncxignore` — syncx 自己的忽略文件,优先级最高,可用 `!` 负向规则覆盖前几者
+ * 文件不存在或不可读时跳过,不抛错(目录可能刚创建)。
  *
  * 注意:这里返回的只是**规则文本**,负向规则在文本层面确实能覆盖内置行;真正参与
  * 同步判定时必须走 isIgnoredPath(含硬忽略闸门),否则 `!.git` 会把 .git 重新放开。
@@ -338,18 +471,18 @@ export function readFolderIgnoreLines(folderPath: string, useGitignore: boolean)
 }
 
 /**
- * 组装完整规则文本:内置默认 + `.gitignore`(按配置)+ 给定的 `.syncxignore` 行。
+ * 组装完整规则文本:内置默认 + 根 `.gitignore`(按配置)+ 子目录 `.gitignore`
+ * (按配置)+ 给定的 `.syncxignore` 行。
  * 与 readFolderIgnoreLines 同一优先级顺序(后者覆盖前者),供「忽略规则编辑器」
  * 用**未保存的草稿行**预测生效结果,而不是必须先落盘。
  */
 export function composeIgnoreLines(folderPath: string, useGitignore: boolean, syncxLines: string[]): string[] {
   const lines: string[] = [...BUILTIN_IGNORE_LINES];
   if (useGitignore) {
-    try {
-      lines.push(...readFileSync(join(folderPath, '.gitignore'), 'utf8').split('\n'));
-    } catch {
-      // 无 .gitignore
-    }
+    const rootLines = readGitignoreLines(folderPath);
+    lines.push(...rootLines);
+    // 子目录规则依赖根 `+` 内置来判断哪些目录不必进入,故把已读到的规则一并传入
+    lines.push(...readNestedGitignoreLines(folderPath, parseIgnoreRules([...lines])));
   }
   lines.push(...syncxLines);
   return lines;

@@ -549,7 +549,7 @@ node dist/syncx.js start
 
 排除不需要同步的内容有两种来源,语法都与 **gitignore 一致**:
 
-1. **`.gitignore`(默认启用)** — 目录里已有的 `.gitignore` 自动生效:其中命中的文件/目录不参与同步。每个目录卡片上有「**忽略 .gitignore 中的文件**」开关,默认勾选;取消勾选后 `.gitignore` 仅保留给 git 用,syncx 会同步其中列出的文件。
+1. **`.gitignore`(默认启用)** — 目录里已有的 `.gitignore` 自动生效:其中命中的文件/目录不参与同步。**子目录里的 `.gitignore` 同样生效**,规则按 git 语义相对该子目录定位、深层覆盖浅层(monorepo 里 `rust/.gitignore`、`moonbit/.gitignore` 这类写法不必再搬到根目录)。每个目录卡片上有「**忽略 .gitignore 中的文件**」开关,默认勾选;取消勾选后 `.gitignore` 仅保留给 git 用,syncx 会同步其中列出的文件。
 2. **`.syncxignore`** — syncx 专属的忽略文件,优先级**高于** `.gitignore`(后读的规则可覆盖先读的),适合写同步专属规则或用 `!` 负向规则豁免 `.gitignore` 里命中的文件。
 
 在共享目录根下放一个 `.syncxignore` 文件即可排除不需要同步的内容。

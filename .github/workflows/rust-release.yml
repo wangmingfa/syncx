@@ -1,0 +1,197 @@
+# 构建 Rust 后端多平台二进制并上传到 GitHub Release
+#
+# 触发:与 publish.yml 同一个 tag(`v*`)。两个 workflow 并行跑,互不依赖 ——
+# npm 包与 GitHub Release 资产必须永远是同一个版本号(ADR-0025 第 3 节)。
+#
+# 产物(6 个目标):
+#   syncx-rs-v{version}-x86_64-unknown-linux-musl.tar.gz
+#   syncx-rs-v{version}-aarch64-unknown-linux-musl.tar.gz
+#   syncx-rs-v{version}-x86_64-apple-darwin.tar.gz
+#   syncx-rs-v{version}-aarch64-apple-darwin.tar.gz
+#   syncx-rs-v{version}-x86_64-pc-windows-msvc.zip
+#   syncx-rs-v{version}-aarch64-pc-windows-msvc.zip
+#
+# 外加 checksums.txt(全部资产的 SHA-256)。文件名与 `syncx-rs` 的自更新逻辑
+# 严格对应:它按编译期 TARGET 拼这个名字**精确匹配**,不做模糊匹配,
+# 所以这里少一个字符就等于那台机器永远升不了级。改名字要同时改
+# `rust/crates/syncx-cli/update.rs` 的 `asset_name`。
+#
+# Linux 用 musl 而不是 glibc:静态链接才能在任意发行版上跑,不受目标机 glibc 版本限制。
+
+name: Release Rust Binaries
+
+on:
+  push:
+    tags:
+      - 'v*'
+
+# contents: write 用于创建 Release 并上传资产。
+permissions:
+  contents: write
+
+env:
+  # 前端产物会被 rust-embed 编进二进制;build.rs 在它缺失时直接 panic,
+  # 所以所有 Rust 构建步骤之前必须先 build:web。
+  CARGO_TERM_COLOR: always
+  CARGO_INCREMENTAL: '0'
+
+jobs:
+  build:
+    name: build ${{ matrix.target }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      # 一个目标失败不该让其余平台白跑一轮:先各自传完,最后再统一建 Release。
+      fail-fast: false
+      matrix:
+        include:
+          - target: x86_64-unknown-linux-musl
+            os: ubuntu-latest
+          - target: aarch64-unknown-linux-musl
+            os: ubuntu-latest
+          - target: x86_64-apple-darwin
+            os: macos-latest
+          - target: aarch64-apple-darwin
+            os: macos-latest
+          - target: x86_64-pc-windows-msvc
+            os: windows-latest
+          - target: aarch64-pc-windows-msvc
+            os: windows-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+
+      - name: Setup Node
+        uses: actions/setup-node@v7
+        with:
+          node-version: '24'
+          cache: npm
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Build web UI
+        # 只编前端(dist/web/client.js),不跑 build:single —— 那个产出是给 npm 载体用的
+        run: npm run build:web
+
+      - name: Sync version from tag
+        # package.json 是版本号唯一来源:build.rs 读它注入 SYNCX_VERSION,
+        # 资产名也取自它。tag 与文件不一致会让自更新比较失效,所以先对齐。
+        shell: bash
+        run: |
+          VERSION="${GITHUB_REF_NAME#v}"
+          npm version "$VERSION" --no-git-tag-version --allow-same-version
+
+      - name: Setup Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: rust -> target
+          key: ${{ matrix.target }}
+
+      # aarch64 的 musl 目标没有现成的发行版交叉 gcc(`musl-gcc` 只编 x86_64),
+      # 这里装一套完整工具链并配好 CC/AR/linker。不用 Docker 方案(cross):
+      # 它只挂载工作区 `rust/`,而 build.rs 必须读仓库根的 package.json 与
+      # dist/web,容器里看不到就会直接 panic。
+      - name: Setup cross toolchain
+        if: contains(matrix.target, 'linux-musl')
+        uses: taiki-e/setup-cross-toolchain-action@v1
+        with:
+          target: ${{ matrix.target }}
+
+      # windows-latest 是 x64 宿主,编 aarch64 时 rustc 默认仍会去找 x64 的
+      # MSVC 链接器与库目录,结果是 ld 找不到入口符号。显式切到 ARM64 环境。
+      - name: Setup MSVC arm64
+        if: matrix.target == 'aarch64-pc-windows-msvc'
+        uses: ilammy/msvc-dev-cmd@v1
+        with:
+          arch: arm64
+
+      - name: Build
+        working-directory: rust
+        shell: bash
+        run: cargo build --release --locked --target ${{ matrix.target }} -p syncx-cli
+
+      - name: Package(unix)
+        if: ${{ !contains(matrix.target, 'windows') }}
+        shell: bash
+        run: |
+          VERSION="${GITHUB_REF_NAME#v}"
+          # 二进制名固定为 syncx-rs:解压端只按文件名查找,不信归档内的目录结构
+          BIN="rust/target/${{ matrix.target }}/release/syncx-rs"
+          STAGE="syncx-rs-v${VERSION}-${{ matrix.target }}"
+          mkdir -p "dist/$STAGE"
+          cp "$BIN" "dist/$STAGE/syncx-rs"
+          cp README.md "dist/$STAGE/" 2>/dev/null || true
+          # tar.gz 内保留顶层目录,便于用户解压时不会把文件撒进当前目录
+          tar -czf "dist/${STAGE}.tar.gz" -C dist "$STAGE"
+
+      - name: Package(windows)
+        if: contains(matrix.target, 'windows')
+        # 用 pwsh 的 Compress-Archive 而不是 7z:7z 不在 runner 的 PATH 上,
+        # 而 Compress-Archive 与解压端的 Expand-Archive 是配套的原生实现。
+        shell: pwsh
+        run: |
+          $version = $env:GITHUB_REF_NAME -replace '^v', ''
+          $stage = "syncx-rs-v$version-${{ matrix.target }}"
+          New-Item -ItemType Directory -Force "dist/$stage" | Out-Null
+          Copy-Item "rust/target/${{ matrix.target }}/release/syncx-rs.exe" "dist/$stage/syncx-rs.exe"
+          if (Test-Path README.md) { Copy-Item README.md "dist/$stage/" }
+          Compress-Archive -Path "dist/$stage" -DestinationPath "dist/$stage.zip"
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: syncx-${{ matrix.target }}
+          path: |
+            dist/*.tar.gz
+            dist/*.zip
+          if-no-files-found: error
+
+  release:
+    name: create release
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - name: Download artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+
+      - name: Generate checksums
+        shell: bash
+        run: |
+          cd dist
+          # 固定 `sha256sum` 的两空格分隔格式:自更新端按 `<hash>  <filename>` 解析,
+          # 格式一变就会「找不到该资产的条目」而拒绝换入。
+          sha256sum * > checksums.txt
+          echo "--- checksums.txt ---"
+          cat checksums.txt
+
+      - name: Create release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: bash
+        run: |
+          # beta/alpha 通道按预发布发布:`latest` 通道的自更新只取正式版,
+          # 若把预发布标成 latest,那台机器会停在预发布版本上不动了。
+          VERSION="${GITHUB_REF_NAME#v}"
+          PRERELEASE=""
+          case "$VERSION" in
+            *-*) PRERELEASE="--prerelease" ;;
+          esac
+
+          # 已存在则覆盖资产(--clobber),支持 release.mjs 的重发流程
+          if gh release view "$GITHUB_REF_NAME" >/dev/null 2>&1; then
+            gh release upload "$GITHUB_REF_NAME" dist/* --clobber
+          else
+            gh release create "$GITHUB_REF_NAME" dist/* \
+              --title "syncx $VERSION" \
+              --generate-notes \
+              $PRERELEASE
+          fi

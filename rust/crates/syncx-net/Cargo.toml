@@ -1,0 +1,27 @@
+[package]
+name = "syncx-net"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+syncx-core = { path = "../syncx-core" }
+tokio.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+aes-gcm = "0.10"
+ed25519-dalek = { version = "2", features = ["pkcs8", "pem", "rand_core"] }
+x25519-dalek = { version = "2", features = ["static_secrets"] }
+sha2 = "0.10"
+base64 = "0.22"
+rand = "0.8"
+thiserror = "2"
+tracing.workspace = true
+tokio-tungstenite = "0.24"
+futures-util = "0.3"
+mdns-sd = "0.11"
+hostname = "0.4"
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["full"] }

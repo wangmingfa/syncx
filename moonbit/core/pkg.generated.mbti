@@ -1,0 +1,324 @@
+// Generated using `moon info`, DON'T EDIT IT
+package "wangmingfa/syncx/core"
+
+// Values
+pub const BLOCK_SIZE : Int32 = 1048576
+
+pub const CDC_MAX_CHUNK : Int32 = 4194304
+
+pub const CDC_MIN_CHUNK : Int32 = 262144
+
+pub const CONFLICT_COPY_PATTERN : String = "^(.+)\\.sync-conflict-[0-9a-z]+(?:-[0-9a-z]+)?-([A-Z2-7]{10})(\\.[^./]*)?$"
+
+pub const FORMAT_VERSION : Int32 = 1
+
+pub const IMAGE_PREVIEW_MAX_BYTES : Int64 = 8388608
+
+pub const MINUTES_PER_DAY : Int32 = 1440
+
+pub const SCHEDULE_MAX_RULES : Int32 = 8
+
+pub const SCHEDULE_MAX_WINDOWS : Int32 = 8
+
+pub const TEXT_COMPARE_MAX_BYTES : Int64 = 2097152
+
+pub const VERSION : String = "0.4.1"
+
+pub fn assert_format_version(Int32) -> Unit raise FormatVersionError
+
+pub fn build_delta_plan(Map[String, IndexEntry], Map[String, IndexEntry]) -> Array[PlanAction]
+
+pub fn build_plan(Map[String, IndexEntry], Map[String, IndexEntry]) -> Array[PlanAction]
+
+pub fn chunk_ranges(Bytes) -> Array[(Int32, Int32)]
+
+pub fn civil_from_days(Int64) -> (Int32, Int32, Int32)
+
+pub fn compare_content_limit(String) -> Int64
+
+pub fn compare_file_state(IndexEntry?, IndexEntry?) -> FileStateRelation
+
+pub fn compare_versions(Map[String, Int64], Map[String, Int64]) -> VersionRelation
+
+pub fn days_from_civil(Int32, Int32, Int32) -> Int64
+
+pub fn format_schedule_summary(Array[ScheduleRule]?) -> String
+
+pub fn hard_ignore_names() -> Array[String]
+
+pub fn hash_block(Bytes) -> String
+
+pub fn image_mime_of(String) -> String?
+
+pub fn increment_version(Map[String, Int64], String) -> Map[String, Int64]
+
+pub fn is_conflict_copy_name(String) -> Bool
+
+pub fn is_hard_ignored(String) -> Bool
+
+pub fn is_scratch_segment(String) -> Bool
+
+pub fn merge_versions(Map[String, Int64], Map[String, Int64]) -> Map[String, Int64]
+
+pub fn next_schedule_change(Array[ScheduleRule]?, CivilMoment, (Int32, Int32, Int32) -> Bool) -> CivilMoment?
+
+pub fn normalize_peer_list(Array[String]) -> Array[String]
+
+pub fn normalize_peer_url(String) -> String
+
+pub fn normalize_schedule(Json) -> Array[ScheduleRule]?
+
+pub fn parse_config(String) -> Config
+
+pub fn parse_conflict_copy_name(String) -> (String, String)?
+
+pub fn parse_ignore_rules(Array[String]) -> Array[IgnoreRule]
+
+pub fn plan_path(String, IndexEntry?, IndexEntry?) -> PlanAction?
+
+pub fn schedule_is_unbounded(Array[ScheduleRule]?) -> Bool
+
+pub fn scratch_suffixes() -> Array[String]
+
+pub fn split_ranges(Int32) -> Array[(Int32, Int32)]
+
+pub fn vectors_equal(Map[String, Int64], Map[String, Int64]) -> Bool
+
+pub fn within_schedule(Array[ScheduleRule]?, CivilMoment, (Int32, Int32, Int32) -> Bool) -> Bool
+
+pub fn within_window(ScheduleWindow, Int32) -> Bool
+
+// Errors
+pub(all) suberror FormatVersionError {
+  Found(Int32, Int32)
+}
+pub fn FormatVersionError::to_text(Self) -> String
+
+// Types and methods
+pub(all) struct CivilMoment {
+  year : Int32
+  month : Int32
+  day : Int32
+  minutes : Int32
+} derive(Eq)
+pub fn CivilMoment::at(Int32, Int32, Int32, Int32, Int32) -> Self
+pub fn CivilMoment::day_of_week(Self) -> Int32
+pub fn CivilMoment::equal(Self, Self) -> Bool
+pub fn CivilMoment::new(Int32, Int32, Int32, Int32) -> Self
+pub fn CivilMoment::not_equal(Self, Self) -> Bool
+
+type CompiledRule
+
+pub(all) struct Config {
+  mut shared_folders : Array[SharedFolder]
+  mut peers : Array[String]
+  mut known_devices : Array[DeviceConfig]
+  mut pending_offers : Array[PendingOffer]
+  mut paused : Bool?
+  mut share_enabled : Bool?
+  mut shares : Array[ShareRecord]?
+  mut max_send_kbps : Int32?
+  mut versions_per_path : Int32?
+  mut history_max_events : Int32?
+  mut webhook_url : String?
+  mut webhook_secret : String?
+  mut pause_on_metered_network : Bool?
+  mut pause_on_low_battery : Bool?
+  mut battery_pause_threshold : Int32?
+  mut sync_schedule : Json?
+  mut schedule_override_until : Int32?
+  mut holiday_auto_fetch : Bool?
+  mut holiday_source_url : String?
+  mut calendar_overrides : Map[String, String]?
+  mut format_version : Int32
+  mut generated_by : String?
+  mut extra : Map[String, Json]
+}
+pub fn Config::battery_pause_threshold(Self) -> Int32
+pub fn Config::history_max_events(Self) -> Int32
+pub fn Config::is_paused(Self) -> Bool
+pub fn Config::new() -> Self
+pub fn Config::share_enabled(Self) -> Bool
+pub fn Config::to_json(Self) -> Json
+pub fn Config::versions_per_path(Self) -> Int32
+
+pub(all) enum DayPredicate {
+  Any
+  Workday
+  Offday
+  Dow(Array[Int32])
+} derive(Eq)
+pub fn DayPredicate::equal(Self, Self) -> Bool
+pub fn DayPredicate::not_equal(Self, Self) -> Bool
+
+pub(all) struct DeviceConfig {
+  id : String
+  name : String?
+  mut extra : Map[String, Json]
+}
+
+pub(all) enum FileStateRelation {
+  Equal
+  LocalNewer
+  RemoteNewer
+  Conflict
+} derive(Eq)
+pub fn FileStateRelation::equal(Self, Self) -> Bool
+pub fn FileStateRelation::not_equal(Self, Self) -> Bool
+
+pub(all) struct FileViews {
+  size : Int64
+  blocks : Array[String]
+  cdh : Array[String]
+  clens : Array[Int64]
+}
+
+pub(all) struct IgnoreRule {
+  pattern : String
+  negated : Bool
+} derive(Eq)
+pub fn IgnoreRule::equal(Self, Self) -> Bool
+pub fn IgnoreRule::not_equal(Self, Self) -> Bool
+
+pub(all) struct IgnoreRuleset {
+  rules : Array[CompiledRule]
+}
+pub fn IgnoreRuleset::explain(Self, String, Bool) -> IgnoreVerdict
+pub fn IgnoreRuleset::from_lines(Array[String]) -> Self
+pub fn IgnoreRuleset::is_ignored(Self, String, Bool) -> Bool
+pub fn IgnoreRuleset::last_matched(Self, String, Bool) -> IgnoreRule?
+
+pub(all) struct IgnoreVerdict {
+  ignored : Bool
+  hard : Bool
+  rule : String?
+  negated_rule : String?
+} derive(Eq)
+pub fn IgnoreVerdict::equal(Self, Self) -> Bool
+pub fn IgnoreVerdict::not_equal(Self, Self) -> Bool
+
+pub(all) struct IndexEntry {
+  path : String
+  version : Map[String, Int64]
+  size : Int64
+  deleted : Bool
+  blocks : Array[String]
+  cdh : Array[String]?
+  clens : Array[Int64]?
+}
+pub fn IndexEntry::has_cdc_view(Self) -> Bool
+
+pub(all) struct PendingOffer {
+  id : String
+  kind : String
+  from_device_id : String
+  folder_id : String?
+  folder_name : String?
+  from_hostname : String?
+  from_ip : String?
+  status : String
+  created_at : Int32
+  mut extra : Map[String, Json]
+}
+
+pub(all) enum PlanAction {
+  Send(path~ : String, entry~ : IndexEntry)
+  Receive(path~ : String, entry~ : IndexEntry)
+  Delete(path~ : String)
+  Conflict(path~ : String, local_entry~ : IndexEntry, remote_entry~ : IndexEntry)
+}
+pub fn PlanAction::kind(Self) -> String
+pub fn PlanAction::path(Self) -> String
+
+type RollingFingerprint
+
+pub(all) struct ScheduleRule {
+  days : DayPredicate
+  windows : Array[ScheduleWindow]
+} derive(Eq)
+pub fn ScheduleRule::equal(Self, Self) -> Bool
+pub fn ScheduleRule::not_equal(Self, Self) -> Bool
+
+pub(all) struct ScheduleWindow {
+  from : Int32
+  to : Int32
+} derive(Eq)
+pub fn ScheduleWindow::equal(Self, Self) -> Bool
+pub fn ScheduleWindow::not_equal(Self, Self) -> Bool
+
+type Sha256
+
+pub(all) struct ShareRecord {
+  id : String
+  folder_id : String
+  path : String
+  created_at : Int32
+  expires_at : Int32
+  downloads : Int32?
+  last_download_at : Int32?
+}
+
+pub(all) struct SharedFolder {
+  path : String
+  devices : Array[String]
+  id : String?
+  max_bandwidth_kbps : Int32?
+  use_gitignore : Bool?
+  remote : Bool?
+  receive_only : Bool?
+  instance_id : String?
+  mut paused : Bool?
+  schedule : Json?
+  git_sync : String?
+  conflict_policy : String?
+  on_demand : Bool?
+  on_demand_dirs : Array[String]?
+  paused_files : Array[String]?
+  folder_identity : Json?
+  marker_checked : Bool?
+  git_last_commit_hash : String?
+  git_relay_pending : Json?
+  git_broadcast_pending : Json?
+  e2e_key : Json?
+  e2e_untrusted : Array[String]?
+  mut extra : Map[String, Json]
+}
+pub fn SharedFolder::folder_id(Self) -> String
+pub fn SharedFolder::index_key(Self) -> String
+pub fn SharedFolder::is_paused(Self) -> Bool
+pub fn SharedFolder::is_receive_only(Self) -> Bool
+pub fn SharedFolder::to_json(Self) -> Json
+pub fn SharedFolder::use_gitignore_enabled(Self) -> Bool
+
+pub(all) enum VersionRelation {
+  Equal
+  ANewer
+  BNewer
+  Concurrent
+} derive(Eq)
+pub fn VersionRelation::equal(Self, Self) -> Bool
+pub fn VersionRelation::not_equal(Self, Self) -> Bool
+
+pub(all) struct ViewHasher {
+  buz : RollingFingerprint
+  partial : FixedArray[Byte]
+  mut partial_len : Int32
+  blocks : Array[String]
+  cdh : Array[String]
+  clens : Array[Int64]
+  mut size : Int32
+  mut chunk_start : Int32
+  chunk_hash : Sha256
+}
+pub fn ViewHasher::finish(Self) -> FileViews
+pub fn ViewHasher::new() -> Self
+pub fn ViewHasher::push(Self, Bytes) -> Unit
+
+// Type aliases
+pub type IsWorkday = (Int32, Int32, Int32) -> Bool
+
+pub type Schedule = Array[ScheduleRule]
+
+pub type VersionVector = Map[String, Int64]
+
+// Traits

@@ -24,11 +24,13 @@ interface WireEntry {
   clens?: number[];
 }
 
-export function encodeIndex(entries: IndexEntry[]): Buffer {
-  // 按需同步的占位条目永不出线(唯一收口):盘上没有实体文件,宣告出去等于
-  // 谎称「我供得出这块内容」——对端会来拉块而永远拿不到(见 IndexEntry.placeholder)。
-  // 占位的传播由真正持有内容的设备负责;本机落地(materialize)后自然恢复宣告。
-  const wire: WireEntry[] = entries.filter((e) => !e.placeholder).map((e) => ({
+/**
+ * 索引条目 → 线上形态。占位条目在这里统一挡掉:盘上没有实体文件,宣告出去等于
+ * 谎称「我供得出这块内容」,对端会来拉块而永远拿不到(见 IndexEntry.placeholder)。
+ * 占位的传播由真正持有内容的设备负责;本机落地(materialize)后自然恢复宣告。
+ */
+function toWireEntry(e: IndexEntry): WireEntry {
+  return {
     path: e.path,
     version: [...e.version.entries()],
     size: e.size,
@@ -39,8 +41,50 @@ export function encodeIndex(entries: IndexEntry[]): Buffer {
     // CDC 视图随条目出线(纯附加,旧对端忽略,见 WireEntry.cdh)
     cdh: e.cdh,
     clens: e.clens,
-  }));
+  };
+}
+
+export function encodeIndex(entries: IndexEntry[]): Buffer {
+  const wire: WireEntry[] = entries.filter((e) => !e.placeholder).map(toWireEntry);
   return Buffer.from(JSON.stringify(wire), 'utf8');
+}
+
+/**
+ * 把索引切成若干「编码后不超过 maxBytes」的片(分片索引交换用,见 ADR-0027)。
+ *
+ * 为什么按**编码后的字节**切而不是按条数:条目体积差异极大(一个几万块的大文件
+ * 有一条几百 KB 的 blocks/cdh 列表,小文件只有几十字节),按条数切仍可能让某一片
+ * 顶破 ws 的 maxPayload(64MB)—— 超限帧会被**静默丢弃**,表现为「同步永远起不来
+ * 且日志没有任何错误」。
+ *
+ * 单条自身就超过 maxBytes 的情况无法再切:它与其余条目分开成片,由调用方照常发送,
+ * 代价是这个超大条目可能仍撞上限 —— 那是数据形态问题,不是分片能解决的。
+ */
+export function encodeIndexChunks(entries: IndexEntry[], maxBytes: number): Buffer[] {
+  // 每条只 JSON 一次:既用于量体积,也直接作为该片的成员(避免两次 stringify)
+  const parts: Array<{ json: string; bytes: number }> = [];
+  for (const entry of entries) {
+    if (entry.placeholder) continue;
+    const json = JSON.stringify(toWireEntry(entry));
+    // +1 是数组里的逗号
+    parts.push({ json, bytes: Buffer.byteLength(json) + 1 });
+  }
+
+  const chunks: Buffer[] = [];
+  let members: string[] = [];
+  let bytes = 2; // "[" + "]"
+  for (const part of parts) {
+    if (members.length > 0 && bytes + part.bytes > maxBytes) {
+      chunks.push(Buffer.from(`[${members.join(',')}]`, 'utf8'));
+      members = [];
+      bytes = 2;
+    }
+    members.push(part.json);
+    bytes += part.bytes;
+  }
+  // 末尾一片照发(可能是空数组:空索引也是一次真实声明,full 语义依赖它)
+  chunks.push(Buffer.from(`[${members.join(',')}]`, 'utf8'));
+  return chunks;
 }
 
 export function decodeIndex(buffer: Buffer): IndexEntry[] {

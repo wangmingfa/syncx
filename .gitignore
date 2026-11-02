@@ -33,6 +33,11 @@ ehthumbs.db
 # npm 打包临时产物（npm pack / scripts/release.mjs）
 *.tgz
 
+# pack:local 的后端产物（scripts/pack-local.mjs --backend rust|moonbit，
+# .tar.gz / .zip 不匹配上面的 *.tgz）
+syncx-rs-v*
+syncx-mbt-v*
+
 # syncx 同步指纹缓存（由 scripts/sync.sh 生成，内容未变化时跳过同步）
 .syncx-fingerprint
 

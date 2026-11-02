@@ -1,0 +1,149 @@
+// Generated using `moon info`, DON'T EDIT IT
+package "wangmingfa/syncx/cli"
+
+import {
+  "wangmingfa/syncx/core",
+}
+
+// Values
+pub const BINARY_NAME : String = "syncx-mb"
+
+pub const CONFIG_LOCK_STALE_MS : Int64 = 30_000
+
+pub const CONFIG_LOCK_TIMEOUT_MS : Int64 = 5_000
+
+pub const DEFAULT_CONTROL_PORT : Int32 = 8384
+
+pub const DEFAULT_PEER_PORT : Int32 = 22000
+
+pub const DEFAULT_UPGRADE_TAG : String = "latest"
+
+pub const GITHUB_REPO : String = "wangmingfa/syncx"
+
+pub const HEALTH_MARKER_TIMEOUT_MS : Int64 = 30_000
+
+pub const OLD_EXIT_WAIT_MS : Int64 = 120_000
+
+pub const UPDATE_MARKER_ENV : String = "SYNCX_UPDATE_MARKER"
+
+pub fn asset_name(String, String) -> String
+
+pub async fn check_for_update() -> UpdateInfo
+
+pub fn compare_semver(String, String) -> Int32
+
+pub fn default_config_path() -> String
+
+pub fn detect_target() -> String raise UpdateError
+
+pub async fn fetch_release(String?) -> ReleaseAsset
+
+pub async fn install_from_release(String?, UpdateRestart?) -> String
+
+pub fn is_dev_mode(StartArgs, Bool) -> Bool
+
+pub let known_commands : Array[String]
+
+pub async fn load_config_file(String) -> @core.Config
+
+pub let loopback_hosts : Array[String]
+
+pub async fn mutate_config(String, (@core.Config) -> Bool) -> Result[Unit, String]
+
+pub fn normalize_upgrade_tag(String?) -> String raise UpdateError
+
+pub fn parent_dir_of(String) -> String
+
+pub fn parse_checksums(String, String) -> String?
+
+pub fn parse_start_args(Array[String]) -> Result[StartArgs, String]
+
+pub fn pick_mode(Array[String]) -> Result[CliMode, String]
+
+pub fn pick_release(Array[Json], String?) -> ReleaseAsset?
+
+pub fn resolve_config_path(StartArgs) -> String
+
+pub async fn run_start(StartArgs) -> Unit
+
+pub async fn run_update_swap(String) -> Int32
+
+pub async fn save_config_atomic(String, @core.Config) -> Unit raise CliError
+
+pub fn sibling_with_suffix(String, String) -> String
+
+pub fn target_triple(String, String) -> String?
+
+// Errors
+pub(all) suberror CliError {
+  Fatal(String)
+}
+pub fn CliError::to_text(Self) -> String
+
+pub(all) suberror UpdateError {
+  InvalidTag(String)
+  Http(String)
+  NoRelease(String)
+  ChecksumFailed(String)
+  Unsupported(String)
+  Io(String)
+}
+pub fn UpdateError::to_text(Self) -> String
+
+// Types and methods
+pub(all) enum CliMode {
+  UpdateSwap(String)
+  Start(StartArgs)
+  Version
+}
+
+pub(all) struct ReleaseAsset {
+  version : String
+  url : String
+  checksums_url : String?
+}
+
+pub(all) struct StartArgs {
+  mut config_path : String?
+  mut config_dir : String?
+  mut host : String?
+  mut port : Int32?
+  mut control_port : Int32?
+  mut log_file : String?
+  mut dev_vite_url : String?
+  mut expose_control : Bool
+  positionals : Array[String]
+}
+
+pub(all) struct UpdateInfo {
+  latest : String
+  current : String
+  tarball_url : String
+}
+
+pub(all) struct UpdateJob {
+  parent_pid : Int32
+  staging : String
+  exe : String
+  old_exe : String
+  marker : String
+  done : String
+  restart_args : Array[String]?
+  restart_cwd : String?
+  log_file : String?
+  wait_ms : Int64
+  verify_ms : Int64
+  version : String
+}
+pub fn UpdateJob::from_json(Json) -> Self?
+pub fn UpdateJob::to_json(Self) -> Json
+
+pub(all) struct UpdateRestart {
+  args : Array[String]
+  cwd : String?
+  log_file : String?
+}
+
+// Type aliases
+
+// Traits
