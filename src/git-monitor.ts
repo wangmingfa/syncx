@@ -168,8 +168,15 @@ export interface GitCommitEntry {
   refs: string;
 }
 
-/** 弹窗默认展示的提交条数:20 条足够扫一眼最近动向,再多用户也不会读。 */
+/**
+ * 「Git 提交历史」弹窗一页的条数(也是首次打开时的条数)。超出部分由界面底部
+ * 「查看更多」按页续读:20 条一屏扫最近动向,再多要考虑点一次。
+ *
+ * 上限(见 MAX_GIT_LOG_LIMIT)不是分页的一部分,而是**单次请求**的保护:接口对
+ * limit 做 clamp,防止手写请求一次拉十万条提交把 git 输出读爆。
+ */
 export const GIT_LOG_LIMIT = 20;
+export const MAX_GIT_LOG_LIMIT = 100;
 
 /**
  * git log 的机器可读记录格式:字段以 0x1f 分隔,记录以 NUL 分隔(配 -z)。
@@ -201,7 +208,8 @@ function parseCommitRecords(out: string): GitCommitEntry[] {
 }
 
 /**
- * 读取最近 N 条提交(默认 20)。返回 null = 不是 git 仓库,调用方据此隐藏入口。
+ * 读取最近 N 条提交(默认 20),可跳过最前面的 skip 条(分页续读用)。
+ * 返回 null = 不是 git 仓库,调用方据此隐藏入口。
  *
  * 为什么不用行解析:提交**正文是多行的**,`--format` 逐行读会在正文第二行处错位
  * (getCommitInfo 靠 ---SYNCX-END--- 哨兵绕开这个,是因为正文里理论上可能出现哨兵字符串;
@@ -218,12 +226,19 @@ function parseCommitRecords(out: string): GitCommitEntry[] {
  *    不破坏解析;`--no-color` 与 `--no-show-signature` 抵御 color.ui=always / log.showSignature
  *    两个会往输出里插入 ANSI 转义或验签信息(混进字段里就是脏数据)的配置。
  */
-export function listRecentCommits(folderPath: string, limit = GIT_LOG_LIMIT): GitCommitEntry[] | null {
+export function listRecentCommits(
+  folderPath: string,
+  limit = GIT_LOG_LIMIT,
+  skip = 0,
+): GitCommitEntry[] | null {
   if (!isGitRepo(folderPath)) return null;
 
+  // --skip 与 -n 都是 git log 自己的分页参数,不在这里切数组:让 git 只读需要的
+  // 区间,续读几十页也不会把整条历史读进内存。skip <= 0 时不带该参数(旧行为)。
+  const skipArgs = skip > 0 ? ['--skip', String(skip)] : [];
   let out: string;
   try {
-    out = execFileSync('git', ['log', '-n', String(limit), '-z', '--no-color', '--no-show-signature', `--format=${GIT_LOG_FORMAT}`], {
+    out = execFileSync('git', ['log', '-n', String(limit), ...skipArgs, '-z', '--no-color', '--no-show-signature', `--format=${GIT_LOG_FORMAT}`], {
       cwd: folderPath,
       encoding: 'utf8',
       stdio: ['ignore', 'pipe', 'pipe'],

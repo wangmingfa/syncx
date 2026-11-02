@@ -3928,11 +3928,14 @@ export class SyncSessionManager {
 
   /**
    * 最近提交历史(「Git 提交历史」弹窗数据源)。返回 null = 目录不是 git 仓库。
+   *
+   * limit/skip 是「查看更多」的分页参数(默认第一页 20 条):由 git log 自己截取,
+   * 不在这里读全量再切。范围校验交给调用方(路由),非法值转 400 而不是静默当全量。
    */
-  listGitLog(folderId: string): GitCommitEntry[] | null {
+  listGitLog(folderId: string, limit?: number, skip?: number): GitCommitEntry[] | null {
     const folder = this.folderStates.find((f) => f.id === folderId);
     if (!folder) throw new Error('共享目录不存在(可能刚被移除)');
-    return listRecentCommits(folder.path);
+    return listRecentCommits(folder.path, limit, skip);
   }
 
   /**

@@ -894,8 +894,8 @@ export async function run(args: ParsedArgs): Promise<void> {
     // 「Git 改动」弹窗:工作区未提交变更清单(现查 git status)+ 单文件 HEAD vs 当前
     listGitChanges: (folderId) => manager.listGitChanges(folderId),
     readGitDiff: (folderId, path) => manager.readGitDiff(folderId, path),
-    // 「Git 提交历史」弹窗:最近 20 条提交(现跑 git log)
-    listGitLog: (folderId) => manager.listGitLog(folderId),
+    // 「Git 提交历史」弹窗:提交历史一页(现跑 git log;limit/skip 供「查看更多」续读)
+    listGitLog: (folderId, limit, skip) => manager.listGitLog(folderId, limit, skip),
     // 提交展开:某笔提交的文件清单 + 单文件「上一版(父提交) → 该提交」对比(现跑 git)
     listGitCommitFiles: (folderId, hash) => manager.listGitCommitFiles(folderId, hash),
     readGitCommitDiff: (folderId, hash, path, origPath) => manager.readGitCommitDiff(folderId, hash, path, origPath),

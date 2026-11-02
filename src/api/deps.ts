@@ -162,8 +162,11 @@ export interface ControlServerDeps {
   deleteGitIndexLock?: (folderId: string) => unknown;
   /** 手动重试自动提交:清零退避后立即结算,返回 { ok, hash?, error?, attempts }。 */
   retryGitAutoCommit?: (folderId: string) => unknown;
-  /** 最近提交历史(「Git 提交历史」弹窗):现跑 git log,非 git 仓库返回 null。 */
-  listGitLog?: (folderId: string) => unknown;
+  /**
+   * 提交历史一页(「Git 提交历史」弹窗):现跑 git log,非 git 仓库返回 null。
+   * limit/skip 是「查看更多」的分页参数;缺省 = 第一页(GIT_LOG_LIMIT 条)。
+   */
+  listGitLog?: (folderId: string, limit?: number, skip?: number) => unknown;
   /** 某笔提交动了哪些文件(提交展开的文件清单)。非 git 仓库返回 null。 */
   listGitCommitFiles?: (folderId: string, hash: string) => unknown;
   /** 某笔提交里某文件的「上一版 → 该提交」对比(提交展开双击文件)。 */

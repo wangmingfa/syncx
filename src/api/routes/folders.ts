@@ -3,6 +3,7 @@ import type { ControlServerDeps } from '../deps.js';
 import type { SyncAction, SyncDirection, SyncHistoryFilter } from '../../history.js';
 import { getHistoryMaxEvents } from '../../history.js';
 import { EMPTY_DIRS_MAX } from '../../empty-dirs.js';
+import { GIT_LOG_LIMIT, MAX_GIT_LOG_LIMIT } from '../../git-monitor.js';
 import { pathname, readBody, redirect, sendJson } from '../helpers.js';
 
 /** fallback 版本页的 HTML 转义(与 ui-fallback 的 escapeHtml 同款)。 */
@@ -1051,7 +1052,10 @@ export async function tryFolderRoutes(
     return true;
   }
 
-  // GET /api/folders/git-log?folderId=xxx : 最近 20 条提交(「Git 提交历史」弹窗)。只读。
+  // GET /api/folders/git-log?folderId=xxx[&limit=&skip=] : 提交历史一页(「Git 提交历史」弹窗)。
+  // limit 缺省 20,连续「查看更多」时带 skip 递增;limit 上限 clamp 到 MAX_GIT_LOG_LIMIT,
+  // 防止手写请求一次读十万条。非法 limit/skip 回 400 而不是静默当默认值 —— 参数打错时
+  // 静默等于「分页永远停在第一页」,比报错更难查。只读。
   if (req.method === 'GET' && req.url && path === '/api/folders/git-log' && listGitLog) {
     const url = new URL(req.url, 'http://localhost');
     const folderId = url.searchParams.get('folderId');
@@ -1059,8 +1063,16 @@ export async function tryFolderRoutes(
       sendJson(res, 400, { error: 'folderId is required' });
       return true;
     }
+    const rawLimit = url.searchParams.get('limit');
+    const rawSkip = url.searchParams.get('skip');
+    const limit = rawLimit === null || rawLimit === '' ? GIT_LOG_LIMIT : Number(rawLimit);
+    const skip = rawSkip === null || rawSkip === '' ? 0 : Number(rawSkip);
+    if (!Number.isFinite(limit) || limit < 1 || !Number.isFinite(skip) || skip < 0) {
+      sendJson(res, 400, { error: 'limit must be a positive integer and skip a non-negative integer' });
+      return true;
+    }
     try {
-      const commits = listGitLog(folderId);
+      const commits = listGitLog(folderId, Math.min(Math.floor(limit), MAX_GIT_LOG_LIMIT), Math.floor(skip));
       // null = 不是 git 仓库:与 git-changes 同一约定,如实告诉前端
       sendJson(res, 200, commits === null ? { commits: [], gitRepo: false } : { commits, gitRepo: true });
     } catch (e) {

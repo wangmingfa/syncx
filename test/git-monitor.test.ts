@@ -490,6 +490,36 @@ describe('recent commit list', () => {
     }
   });
 
+  it.skipIf(!HAS_GIT)('pages with skip exactly like git log --skip does', () => {
+    const repo = tempGitRepo();
+    try {
+      for (let i = 0; i < 25; i += 1) {
+        writeFileSync(join(repo, `p${i}.txt`), String(i));
+        commitAll(repo, `分页 ${i}`);
+      }
+
+      // 三页拼起来 = 全部,且与 git 自己的 --skip/-n 输出逐条相同(不跟实现里的
+      // 分页算术对,直接拿 git 当尺子)
+      const page1 = listRecentCommits(repo, 20, 0)!;
+      const page2 = listRecentCommits(repo, 20, 20)!;
+      expect(page1).toHaveLength(20);
+      expect(page2).toHaveLength(5);
+      expect([...page1, ...page2].map((c) => c.subject)).toEqual(
+        git(repo, ['log', '--format=%s']).trim().split(/\r?\n/),
+      );
+      expect(page2[0]!.subject).toBe('分页 4');
+
+      // 越过历史末尾 = 空页(前端据此收起「查看更多」),不是报错也不是重复最后一页
+      expect(listRecentCommits(repo, 20, 25)).toEqual([]);
+      expect(listRecentCommits(repo, 20, 500)).toEqual([]);
+      // skip 的边界:0 与负数都等于「从头开始」(不把 -1 传给 git 的选项解析)
+      expect(listRecentCommits(repo, 2, 0)!.map((c) => c.subject)).toEqual(['分页 24', '分页 23']);
+      expect(listRecentCommits(repo, 2, -5)!.map((c) => c.subject)).toEqual(['分页 24', '分页 23']);
+    } finally {
+      rmDir(repo);
+    }
+  });
+
   it.skipIf(!HAS_GIT)('honors a custom limit and keeps multi-line bodies verbatim', () => {
     const repo = tempGitRepo();
     try {

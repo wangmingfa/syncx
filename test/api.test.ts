@@ -405,13 +405,13 @@ describe('control api git log and empty dirs', () => {
         refs: 'HEAD -> main',
       },
     ];
-    const seen: string[] = [];
+    const seenArgs: Array<[string, number | undefined, number | undefined]> = [];
     let isRepo = true;
     const server = createControlServer({
       token: 'secret',
       getStatus: () => ({}),
-      listGitLog: (folderId) => {
-        seen.push(folderId);
+      listGitLog: (folderId, limit, skip) => {
+        seenArgs.push([folderId, limit, skip]);
         return isRepo ? commits : null;
       },
     });
@@ -422,6 +422,24 @@ describe('control api git log and empty dirs', () => {
     const repo = await fetchJson(port, '/api/folders/git-log?folderId=f1', 'secret');
     expect(repo.status).toBe(200);
     expect(repo.body).toEqual({ commits, gitRepo: true });
+    // 缺省分页:limit 用 GIT_LOG_LIMIT,skip 用 0
+    expect(seenArgs).toEqual([['f1', 20, 0]]);
+
+    // 「查看更多」:skip 原样透传,limit 照给
+    await fetchJson(port, '/api/folders/git-log?folderId=f1&limit=20&skip=20', 'secret');
+    expect(seenArgs.at(-1)).toEqual(['f1', 20, 20]);
+
+    // limit 上限 clamp:手写请求一次拉十万条不生效
+    await fetchJson(port, '/api/folders/git-log?folderId=f1&limit=100000', 'secret');
+    expect(seenArgs.at(-1)).toEqual(['f1', 100, 0]);
+
+    // 非法参数回 400 而不是静默当默认值(静默 = 分页永远停在第一页)
+    const badLimit = await fetchJson(port, '/api/folders/git-log?folderId=f1&limit=0', 'secret');
+    expect(badLimit.status).toBe(400);
+    const badSkip = await fetchJson(port, '/api/folders/git-log?folderId=f1&skip=-1', 'secret');
+    expect(badSkip.status).toBe(400);
+    const notNumber = await fetchJson(port, '/api/folders/git-log?folderId=f1&limit=abc', 'secret');
+    expect(notNumber.status).toBe(400);
 
     // null = 不是 git 仓库:200 + gitRepo:false,而不是错误(前端据此给解释文案)
     isRepo = false;
@@ -431,7 +449,9 @@ describe('control api git log and empty dirs', () => {
 
     const missing = await fetchJson(port, '/api/folders/git-log', 'secret');
     expect(missing.status).toBe(400);
-    expect(seen).toEqual(['f1', 'f2']);
+    // 缺 folderId 的请求不该到达数据源(合法调用:2 次 f1 + 各一次 f2;上面前两个
+    // 非法参数也不该透传)
+    expect(seenArgs.map((a) => a[0])).toEqual(['f1', 'f1', 'f1', 'f2']);
 
     server.close();
   });

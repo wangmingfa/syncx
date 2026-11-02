@@ -34,10 +34,26 @@ interface FilesState {
 /** 每笔提交的文件清单状态(按哈希):加载中 / 失败(可重试)/ 已缓存。 */
 const filesBy = ref<Record<string, FilesState>>({});
 
-// 宿主弹窗换目录或重查时整块重置:展开状态与清单缓存属于「那次打开」的上下文。
+/**
+ * 宿主弹窗换目录或重查时整块重置:展开状态与清单缓存属于「那次打开」的上下文。
+ *
+ * 判据不是「commits 换了身份」而是「新列表是不是旧列表的前缀延伸」:宿主的
+ * 「查看更多」把下一页**追加**进来(必然是新数组),那种情况下用户刚展开的提交
+ * 与已加载的文件清单必须留住 —— 否则滚到第 30 条展开一笔、再续读,全被收起。
+ * 换目录 / 刷新 / 历史被重写(前缀对不上)才重置。
+ */
 watch(
   () => [props.folder, props.commits] as const,
-  () => {
+  ([folder, commits], prev) => {
+    const [prevFolder, prevCommits] = prev ?? [undefined, undefined];
+    const sameFolder =
+      (folder?.id ?? folder?.path ?? null) === (prevFolder?.id ?? prevFolder?.path ?? null);
+    const appended =
+      sameFolder &&
+      prevCommits !== undefined &&
+      commits.length >= prevCommits.length &&
+      prevCommits.every((c, i) => c.hash === commits[i]?.hash);
+    if (appended) return;
     expanded.value = new Set();
     filesBy.value = {};
   },

@@ -394,7 +394,7 @@ function folderActions(f: FolderInfo): RailAction[] {
           icon: 'commit',
           menuLabel: '提交历史',
           disabled: b,
-          tooltip: '提交历史:查看该仓库最近的 20 个提交,可展开提交正文',
+          tooltip: '提交历史:查看该仓库的提交记录(一页 20 条,可继续加载),可展开提交正文',
           onClick: () => openGitLog(f),
         } satisfies RailAction]
       : []),
