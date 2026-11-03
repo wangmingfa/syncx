@@ -30,3 +30,7 @@ import {
 } for "test"
 
 supported_targets = "native"
+
+options(
+  "native-stub": [ "platform.c" ],
+)

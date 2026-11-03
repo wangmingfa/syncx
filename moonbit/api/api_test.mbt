@@ -80,9 +80,13 @@ async test "GET /api/status 已认证回最小 camelCase 载荷" {
   assert_true(obj.get("version") is Some(String(@core.VERSION)))
   assert_true(obj.get("runtime") is Some(String("moonbit")))
   assert_true(obj.get("updateSource") is Some(String("github")))
-  // 缺省字段不上线:完整版状态(platform/folders/devices/...)不得出现
-  assert_eq(obj.length(), 4)
-  assert_true(obj.get("platform") is None)
+  // 前端 StatusData 的必填字段必须有缺省值(空数组/0),
+  // 否则前端 status.offers.filter 之类会直接抛错;platform 取编译目标 OS
+  assert_eq(obj.length(), 11)
+  assert_true(obj.get("offers") is Some(Array([])))
+  assert_true(obj.get("devices") is Some(Array([])))
+  assert_true(obj.get("syncProgress") is Some(Array([])))
+  assert_true(obj.get("platform") is Some(String(_)))
 }
 
 ///|

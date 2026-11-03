@@ -83,12 +83,27 @@ pub fn health_json() -> Json {
 ///   - 接了 actor 时叠加目录/统计域(folders/entries/tombstones/
 ///     conflictCounts,camelCase 对齐前端 `StatusData`);未接则缺省不上线,
 ///     其余字段(platform/devices/...)仍是后续里程碑。
+///|
+/// 编译目标 OS(见 platform.c;与 cli 的 syncx_os_name 是两套取值口径)。
+extern "C" fn c_status_platform() -> String = "syncx_status_platform"
+
+///|
 pub fn status_json(options : ApiOptions) -> Json {
   let map : Map[String, Json] = Map([])
   map.set("deviceId", Json::string(options.device_id))
   map.set("version", Json::string(@core.VERSION))
   map.set("runtime", Json::string("moonbit"))
   map.set("updateSource", Json::string("github"))
+  // 前端 StatusData 的必填字段先给缺省值,接了 actor 再覆盖
+  // (缺字段会让前端 status.offers.filter 直接抛错,见 useNotifications)
+  map.set("entries", Json::number(0))
+  map.set("tombstones", Json::number(0))
+  map.set("folders", Json::array([]))
+  map.set("devices", Json::array([]))
+  map.set("syncProgress", Json::array([]))
+  map.set("offers", Json::array([]))
+  // 编译目标 OS,口径对齐 Node 的 process.platform(前端 osIconKind 只认 darwin/win32/linux)
+  map.set("platform", Json::string(c_status_platform()))
   match options.actor {
     Some(actor) => {
       let snapshot = actor.snapshot()
@@ -105,6 +120,9 @@ pub fn status_json(options : ApiOptions) -> Json {
         item.set("peers", Json::number(folder.peers.to_double()))
         item.set("entries", Json::number(folder.entries.to_double()))
         item.set("tombstones", Json::number(folder.tombstones.to_double()))
+        // 前端 FolderInfo.devices 是必填数组(目录卡 folderActions 直接 .length),
+        // 对端清单尚未接入 actor 统计,先缺省空数组
+        item.set("devices", Json::array([]))
         folders.push(Json::object(item))
         // 目录卡冲突徽标(键 = 目录 id,对齐前端 conflictCounts)
         conflicts.set(folder.id, Json::number(folder.conflicts.to_double()))
