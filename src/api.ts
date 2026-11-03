@@ -1,6 +1,8 @@
 import { createServer, type Server } from 'node:http';
+import { performance } from 'node:perf_hooks';
 import { WebSocketServer } from 'ws';
 import { type ControlServerDeps } from './api/deps.js';
+import { instrumentRequest, pickSink } from './api/perf.js';
 import { createSessionAuth } from './api/session.js';
 import { isControlRoute, devViteTarget, pathname, readToken, redirect, sendJson, RequestBodyTooLargeError, EVENTS_PATH, ELEVATE_COOKIE, readCookie } from './api/helpers.js';
 import { tryPreAuthRoutes } from './api/routes/public.js';
@@ -39,8 +41,13 @@ export type { ControlServerDeps } from './api/deps.js';
  */
 export function createControlServer(deps: ControlServerDeps): Server {
   const auth = createSessionAuth(deps.token, deps.authFile);
+  // 性能探针:慢请求(阈值见 api/perf.ts)恒记,SYNCX_PERF_LOG=1 时全量记。
+  // Termux 等低端机排查「接口卡」用;未注入 perfLog 且未开环境变量时完全静默。
+  const perfSink = pickSink(deps.perfLog);
 
   const server = createServer((req, res) => {
+    const perfStart = performance.now();
+    instrumentRequest(perfSink, req, res, req.url ? pathname(req.url) : '/', perfStart);
     void (async () => {
       try {
         // 探活与图标:公开资源,必须在认证与 dev 重定向之前处理

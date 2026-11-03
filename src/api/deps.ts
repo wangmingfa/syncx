@@ -6,6 +6,12 @@ import type { Schedule } from '../schedule.js';
 export interface ControlServerDeps {
   token: string;
   /**
+   * 性能日志落点(daemon 传 --log-file 的 logger;测试/最小 deps 不传则静默,
+   * 仅 SYNCX_PERF_LOG=1 时退回 console)。慢请求与事件循环卡顿都走这条线,
+   * 用于 Termux 等低端机排查「接口很卡」。
+   */
+  perfLog?: (line: string) => void;
+  /**
    * 数据目录(--config-dir / --config 的解析结果,cli 传 configPath 所在目录)。
    * GET /api/auth 会把它带给登录页:令牌输入框的路径提示据此动态生成,
    * 数据目录隔离(dev .syncx-dev / 自定义 --config)时不再误导用户去 ~/.syncx 找。
