@@ -72,9 +72,11 @@ const trafficText = computed<string>(() => {
   return `↑${formatBytes(t.sent)} · ↓${formatBytes(t.received)}`;
 });
 
-/** 本机网络信息(主机名 + 局域网地址)。 */
+/** 本机网络信息(主机名 + 局域网地址 + WS 端口)。 */
 const ips = computed<string[]>(() => status.value.localAddresses ?? []);
-const hasLocalInfo = computed<boolean>(() => !!status.value.hostname || ips.value.length > 0);
+const hasLocalInfo = computed<boolean>(
+  () => !!status.value.hostname || ips.value.length > 0 || !!status.value.peerPort,
+);
 
 /**
  * 本机 chip 的图标同时说两件事:
@@ -296,6 +298,10 @@ function runChipRow(row: ChipRow): void {
           <div v-for="ip in ips" :key="ip" class="chip-info-row">
             <span class="chip-info-label">IPv4</span>
             <button type="button" class="chip-copy mono" title="点击复制" @click="copy(ip)">{{ ip }}</button>
+          </div>
+          <div v-if="status.peerPort" class="chip-info-row">
+            <span class="chip-info-label">WS 端口</span>
+            <button type="button" class="chip-copy mono" title="点击复制" @click="copy(String(status.peerPort!))">{{ status.peerPort }}</button>
           </div>
         </div>
         <div v-if="hasLocalInfo" class="chip-divider"></div>

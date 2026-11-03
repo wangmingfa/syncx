@@ -39,6 +39,13 @@ describe('status aggregation', () => {
     expect(status.updateSource).toBe('npm');
   });
 
+  it('extras 透传顶栏 chip 字段:peerPort 有值上线,0/缺省不上线', () => {
+    const args = [IDENTITY, { sharedFolders: [], peers: [], knownDevices: [], pendingOffers: [] }, { entries: 0, tombstones: 0 }] as const;
+    expect(buildStatus(...args).peerPort).toBeUndefined();
+    const withPort = buildStatus(...args, [], [], [], [], 'test', undefined, [], { peerPort: 22000 });
+    expect(withPort.peerPort).toBe(22000);
+  });
+
   it('folders 的 gitRepo 是实时探测:仓库为 true,普通目录/不存在路径为 false', () => {
     const base = mkdtempSync(join(tmpdir(), 'syncx-status-gitrepo-'));
     try {

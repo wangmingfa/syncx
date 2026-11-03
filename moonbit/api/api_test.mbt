@@ -82,11 +82,19 @@ async test "GET /api/status 已认证回最小 camelCase 载荷" {
   assert_true(obj.get("updateSource") is Some(String("github")))
   // 前端 StatusData 的必填字段必须有缺省值(空数组/0),
   // 否则前端 status.offers.filter 之类会直接抛错;platform 取编译目标 OS
-  assert_eq(obj.length(), 11)
   assert_true(obj.get("offers") is Some(Array([])))
   assert_true(obj.get("devices") is Some(Array([])))
   assert_true(obj.get("syncProgress") is Some(Array([])))
   assert_true(obj.get("platform") is Some(String(_)))
+  // hostname/localAddresses 依赖宿主机环境(取得到才上线),键数按双口径折算
+  let mut expected = 11
+  if obj.get("hostname") is Some(_) {
+    expected = expected + 1
+  }
+  if obj.get("localAddresses") is Some(_) {
+    expected = expected + 1
+  }
+  assert_eq(obj.length(), expected)
 }
 
 ///|
@@ -247,4 +255,80 @@ test "settings_json:缺省值口径(监听开、兜底 600s)" {
     Some(Number(n, ..)) => assert_eq(n, 600.0)
     _ => panic()
   }
+}
+
+///|
+/// 点分 IPv4 字面量校验(localAddresses 形态断言用;四段、纯数字、每段 ≤3 位)。
+fn is_ipv4_literal(text : String) -> Bool {
+  let parts : Array[StringView] = text.split(".").collect()
+  if parts.length() != 4 {
+    return false
+  }
+  for part in parts {
+    if part.char_length() == 0 || part.char_length() > 3 {
+      return false
+    }
+    for c in part {
+      if c < '0' || c > '9' {
+        return false
+      }
+    }
+  }
+  true
+}
+
+///|
+test "status_json:本机信息三字段(注入 peerPort 必上线,主机名/局域网按环境双口径)" {
+  let obj = require_object(
+    @api.status_json(
+      @api.ApiOptions::new(
+        device_id="TESTDEVICE01",
+        control_token="test-token",
+        peer_port=Some(23456),
+      ),
+    ),
+  )
+  // peerPort 是装配参数:注入后必须上线且为数值
+  match obj.get("peerPort") {
+    Some(Number(n, ..)) => assert_eq(n, 23456.0)
+    _ => panic()
+  }
+  // hostname:本机取得到则断言非空字符串;取不到(CI/沙箱)则必须缺省不上线
+  match obj.get("hostname") {
+    Some(String(h)) => assert_true(h != "")
+    Some(_) => panic()
+    None => ()
+  }
+  // localAddresses:取到则每条都是点分 IPv4;一条都没有则缺省不上线
+  match obj.get("localAddresses") {
+    Some(Array(items)) =>
+      for item in items {
+        match item {
+          String(addr) => assert_true(is_ipv4_literal(addr))
+          _ => panic()
+        }
+      }
+    Some(_) => panic()
+    None => ()
+  }
+}
+
+///|
+test "status_json:未注入 peerPort 则字段不上线" {
+  let obj = require_object(
+    @api.status_json(@api.ApiOptions::new(device_id="D", control_token="test-token")),
+  )
+  assert_true(obj.get("peerPort") is None)
+}
+
+///|
+test "parse_lan_addresses:合法数组逐条收,非字符串与畸形输入丢弃" {
+  assert_eq(@api.parse_lan_addresses("[\"192.168.1.5\",\"10.0.0.2\"]").length(), 2)
+  assert_true(@api.parse_lan_addresses("[]").length() == 0)
+  // 畸形 JSON:解析失败视作取不到
+  assert_true(@api.parse_lan_addresses("not json").length() == 0)
+  // 非字符串元素忽略(C 侧已保证不会出现,防御性兜底)
+  let mixed = @api.parse_lan_addresses("[1,\"10.0.0.9\",null]")
+  assert_eq(mixed.length(), 1)
+  assert_eq(mixed[0], "10.0.0.9")
 }

@@ -13,15 +13,19 @@
 use std::path::Path;
 use std::sync::{Arc, Mutex};
 
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use syncx_core::schedule::{format_schedule_summary, Schedule};
 use syncx_daemon::actor::StatusSnapshot;
 
 use crate::config::Config;
 
+/// 数据面默认端口(与 Node `args.port ?? 22000` 同值)。CLI 装配层的同名常量
+/// 委托到这份,端口字面量只此一处。
+pub const DEFAULT_PEER_PORT: u16 = 22_000;
+
 /// 局域网内 mDNS 发现、但尚未配对的设备。
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct DiscoveredDevice {
     #[serde(rename = "deviceId")]
     pub device_id: String,
@@ -34,7 +38,7 @@ pub struct DiscoveredDevice {
 }
 
 /// 一个已配置对端的当前状态。
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct DeviceStatus {
     #[serde(rename = "deviceId")]
     pub device_id: String,
@@ -62,7 +66,7 @@ pub struct DeviceStatus {
 }
 
 /// 单个文件的传输进度。
-#[derive(Debug, Clone, PartialEq, Serialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct TransferFile {
     pub path: String,
     /// `"send"` / `"receive"`
@@ -75,7 +79,7 @@ pub struct TransferFile {
     pub priority: Option<bool>,
 }
 
-#[derive(Debug, Clone, PartialEq, Serialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct SyncProgress {
     pub folder: String,
     pub pending: usize,
@@ -92,7 +96,7 @@ pub struct SyncProgress {
 }
 
 /// 某共享目录最近一次同步错误。
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct FolderError {
     pub folder: String,
     pub message: String,
@@ -101,14 +105,14 @@ pub struct FolderError {
     pub kind: Option<String>,
 }
 
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct TrafficSample {
     pub at: i64,
     pub sent: u64,
     pub received: u64,
 }
 
-#[derive(Debug, Clone, Default, Serialize)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct TrafficStats {
     pub sent: u64,
     pub received: u64,
@@ -116,7 +120,7 @@ pub struct TrafficStats {
 }
 
 /// 全局同步设置当前值(设置弹窗展示用;与 config 顶层字段同形)。
-#[derive(Debug, Clone, Default, Serialize)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct GlobalSettings {
     #[serde(rename = "maxSendKbps", skip_serializing_if = "Option::is_none")]
     pub max_send_kbps: Option<u64>,
@@ -175,7 +179,7 @@ impl GlobalSettings {
 }
 
 /// 单个目录此刻的时段结论。**后端算,前端只渲染** —— 两份判定实现必然漂。
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ScheduleState {
     pub inside: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -189,7 +193,7 @@ pub struct ScheduleState {
 }
 
 /// 顶部横幅:是否该提示「当前不在同步时段」。
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ScheduleBanner {
     pub visible: bool,
     #[serde(rename = "blockedBySchedule")]
@@ -201,7 +205,7 @@ pub struct ScheduleBanner {
     pub override_until: Option<i64>,
 }
 
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CalendarStatus {
     pub year: i32,
     pub fetched: bool,
@@ -222,6 +226,9 @@ pub struct StatusExtras {
     pub traffic: Option<TrafficStats>,
     pub hostname: Option<String>,
     pub local_addresses: Option<Vec<String>>,
+    /// 数据面监听端口。真实运行里恒有值(装配层先起 peer server 再建运行体),
+    /// `None` 只出现在纯 API / 测试场景;转成载荷时回落 [`DEFAULT_PEER_PORT`]。
+    pub peer_port: Option<u16>,
     pub config_dir: Option<String>,
     pub settings: Option<GlobalSettings>,
     pub discovered: Option<Vec<DiscoveredDevice>>,
@@ -233,19 +240,20 @@ pub struct StatusExtras {
 }
 
 /// `/api/status` 的完整载荷。字段顺序刻意与 Node 一致,便于肉眼 diff。
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct StatusPayload {
     #[serde(rename = "deviceId")]
     pub device_id: String,
     pub version: String,
     pub platform: String,
     /// 后端身份(ADR-0025 第 3 节):`node` / `rust`。前端据此切换文案与按钮,
-    /// 不维护两套 UI。旧后端缺省 = node。
+    /// 不维护两套 UI。旧后端缺省 = node。用 `String` 而非 `&'static str`:
+    /// 载荷要支持 serde 往返(测试防 camelCase 键名漂),借用串无法反序列化。
     #[serde(rename = "runtime", skip_serializing_if = "Option::is_none")]
-    pub runtime: Option<&'static str>,
+    pub runtime: Option<String>,
     /// 更新来源:`npm` / `github`。Rust 形态只走 GitHub Releases。
     #[serde(rename = "updateSource", skip_serializing_if = "Option::is_none")]
-    pub update_source: Option<&'static str>,
+    pub update_source: Option<String>,
     pub folders: Vec<Value>,
     pub paused: bool,
     pub entries: u64,
@@ -272,6 +280,11 @@ pub struct StatusPayload {
     pub hostname: Option<String>,
     #[serde(rename = "localAddresses", skip_serializing_if = "Option::is_none")]
     pub local_addresses: Option<Vec<String>>,
+    /// 数据面监听端口(顶栏本机信息浮层展示)。契约上是必有键的数字:peer 端口
+    /// 理论上不会取不到,所以不做成 Option;extras 缺省时按 Node 口径
+    /// (`args.port ?? 22000`)回落 [`DEFAULT_PEER_PORT`]。
+    #[serde(rename = "peerPort")]
+    pub peer_port: u16,
     #[serde(rename = "configDir", skip_serializing_if = "Option::is_none")]
     pub config_dir: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -367,8 +380,8 @@ pub fn build_status(
         device_id: device_id.to_string(),
         version: self_version.to_string(),
         platform: platform_name().to_string(),
-        runtime: Some("rust"),
-        update_source: Some("github"),
+        runtime: Some("rust".to_string()),
+        update_source: Some("github".to_string()),
         folders,
         paused: config.is_paused(),
         entries: snapshot.total_entries,
@@ -388,6 +401,7 @@ pub fn build_status(
             .or_else(|| std::env::var("HOSTNAME").ok())
             .or_else(current_hostname),
         local_addresses: Some(extras.local_addresses.unwrap_or_else(lan_addresses)),
+        peer_port: extras.peer_port.unwrap_or(DEFAULT_PEER_PORT),
         config_dir: extras.config_dir,
         settings: extras.settings,
         discovered: extras.discovered,
@@ -551,5 +565,30 @@ mod tests {
         let payload = build_status(&config, None, "d", "1", vec![], vec![], StatusExtras::default());
         assert_eq!(payload.offers.len(), 1);
         assert_eq!(payload.offers[0]["id"], "a");
+    }
+
+    #[test]
+    fn peer_port_roundtrips_as_number() {
+        let mut extras = StatusExtras::default();
+        extras.peer_port = Some(4711);
+        let payload = build_status(&Config::new(), None, "d", "1", vec![], vec![], extras);
+
+        // 键名必须是 camelCase 的 peerPort,值是数字而不是字符串
+        let text = serde_json::to_string(&payload).unwrap();
+        assert!(text.contains("\"peerPort\":4711"), "{text}");
+        assert_eq!(
+            serde_json::to_value(&payload).unwrap()["peerPort"],
+            Value::from(4711)
+        );
+
+        // 往返:反序列化回结构体,值与类型都不走样(防键名 rename 漂移)
+        let back: StatusPayload = serde_json::from_str(&text).unwrap();
+        assert_eq!(back.peer_port, 4711);
+
+        // extras 缺省(纯 API 进程)也必须给出数字键:按 Node 口径回落默认端口
+        let payload =
+            build_status(&Config::new(), None, "d", "1", vec![], vec![], StatusExtras::default());
+        let text = serde_json::to_string(&payload).unwrap();
+        assert!(text.contains("\"peerPort\":22000"), "{text}");
     }
 }

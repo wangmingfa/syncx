@@ -285,6 +285,8 @@ pub async fn run_start(args : StartArgs) -> Unit {
       // 全局设置快照(/api/status.settings;设置弹窗读取。MoonBit 尚无配置
       // 热重载,当前值为启动时折算 —— 与 actor 目录参数同一份 config)
       settings=Some(@api.settings_json(config)),
+      // peer 数据面监听端口(/api/status.peerPort;启动参数折算,缺省 22000)
+      peer_port=Some(peer_port),
       web_dist~,
       on_shutdown=Some(() => {
         // TODO(cli):优雅关闭(关 peer 连接、收尾索引);当前直接退出

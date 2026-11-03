@@ -35,6 +35,9 @@ pub(all) struct ApiOptions {
   /// `/api/status.settings` 全局设置段(装配层启动时从 config.json 折算注入;
   /// None = 不上线该段。MoonBit 尚无配置热重载,当前值为启动时快照)。
   settings : Json?
+  /// peer 数据面监听端口(`/api/status.peerPort`,顶栏本机信息浮层用;
+  /// cli 装配时从启动参数注入,缺省 22000;None = 未注入,不上线该字段)。
+  peer_port : Int32?
 }
 
 ///|
@@ -53,6 +56,7 @@ pub fn ApiOptions::new(
   upload_inspect~ : UploadInspectFn? = None,
   upload_swap~ : UploadSwapFn? = None,
   settings~ : Json? = None,
+  peer_port~ : Int32? = None,
 ) -> ApiOptions {
   let web_dist = match web_dist {
     Some(dist) => Some(dist)
@@ -70,6 +74,7 @@ pub fn ApiOptions::new(
     upload_inspect,
     upload_swap,
     settings,
+    peer_port,
   }
 }
 
@@ -92,6 +97,34 @@ pub fn health_json() -> Json {
 ///|
 /// 编译目标 OS(见 platform.c;与 cli 的 syncx_os_name 是两套取值口径)。
 extern "C" fn c_status_platform() -> String = "syncx_status_platform"
+
+///|
+/// 本机主机名(gethostname;失败/空 = 空串,见 platform.c 注释)。
+extern "C" fn c_status_hostname() -> String = "syncx_status_hostname"
+
+///|
+/// 局域网 IPv4 列表(JSON 数组字符串,如 ["192.168.1.5"];取不到 = "[]")。
+extern "C" fn c_status_lan_addresses() -> String = "syncx_status_lan_addresses"
+
+///|
+/// 解析 C 侧返回的局域网地址 JSON 数组字符串。C 侧已按「IPv4 + 非回环 +
+/// 非链路本地」过滤(Node getLanAddresses 同口径),这里只负责拆包:
+/// 非字符串元素与畸形输入一律忽略,解析失败视作取不到(空列表 → 不上线)。
+/// pub 仅为让 *_test 包(独立编译)可对解析口径做单测。
+pub fn parse_lan_addresses(text : String) -> Array[String] {
+  let parsed : Json? = Some(@json.parse(text)) catch { _ => None }
+  let addresses : Array[String] = []
+  match parsed {
+    Some(Array(items)) =>
+      for item in items {
+        if item is String(addr) {
+          addresses.push(addr)
+        }
+      }
+    _ => ()
+  }
+  addresses
+}
 
 ///|
 /// `/api/status.settings` 全局设置段(设置弹窗读取;键名与 config.json 顶层
@@ -125,6 +158,27 @@ pub fn status_json(options : ApiOptions) -> Json {
   map.set("offers", Json::array([]))
   // 编译目标 OS,口径对齐 Node 的 process.platform(前端 osIconKind 只认 darwin/win32/linux)
   map.set("platform", Json::string(c_status_platform()))
+  // 本机主机名(顶栏本机信息浮层):C FFI gethostname;取不到(失败/空串)
+  // = 旧后端口径,不上线该字段
+  let hostname = c_status_hostname()
+  if hostname != "" {
+    map.set("hostname", Json::string(hostname))
+  }
+  // 局域网 IPv4 列表(顶栏本机信息浮层):C 侧 getifaddrs 遍历后以 JSON
+  // 数组字符串交回,一条都取不到则不上线
+  let addresses = parse_lan_addresses(c_status_lan_addresses())
+  if addresses.length() > 0 {
+    let items : Array[Json] = []
+    for addr in addresses {
+      items.push(Json::string(addr))
+    }
+    map.set("localAddresses", Json::array(items))
+  }
+  // peer 数据面监听端口(启动参数注入;未注入 = 不上线,与「缺字段 = 旧后端」口径一致)
+  match options.peer_port {
+    Some(port) => map.set("peerPort", Json::number(port.to_double()))
+    None => ()
+  }
   // 全局设置当前值(装配层注入;未注入 = 旧装配形态,整段不上线)
   match options.settings {
     Some(settings) => map.set("settings", settings)

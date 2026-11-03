@@ -57,8 +57,9 @@ use crate::args;
 use crate::terminal::TerminalHub;
 use crate::update;
 
-/// 数据面默认端口(与 Node `args.port ?? 22000` 同值)。
-pub const DEFAULT_PEER_PORT: u16 = 22000;
+/// 数据面默认端口(与 Node `args.port ?? 22000` 同值)。字面量在
+/// [`syncx_api::status::DEFAULT_PEER_PORT`] 一处维护,这里委托过去。
+pub const DEFAULT_PEER_PORT: u16 = syncx_api::status::DEFAULT_PEER_PORT;
 
 /// 扫描间隔的默认值(可用 `SYNCX_SCAN_INTERVAL_MS` 覆盖)。
 pub const DEFAULT_SCAN_INTERVAL_MS: u64 = 5_000;
@@ -485,6 +486,12 @@ fn calendar_status(
 
 /* ============================ 状态载荷 ============================ */
 
+/// 状态载荷的数据面端口:上报真实监听端口;peer server 没起或绑定失败时
+/// 按 Node 口径(`args.port ?? 22000`)回落默认端口,绝不报 0 或缺键。
+fn status_peer_port(peer_port: Option<u16>) -> u16 {
+    peer_port.unwrap_or(DEFAULT_PEER_PORT)
+}
+
 /// `1.2.3` 这样的真实版本。`dev` / 空 / 非数字开头都不算 —— 跨形态不做自更新。
 fn is_real_version(version: &str) -> bool {
     let mut parts = version.split('.');
@@ -599,6 +606,7 @@ pub fn get_status(runtime_ops: &RuntimeOps, extras: &Extras) -> Value {
             .ok()
             .and_then(|name| name.into_string().ok()),
         local_addresses: Some(syncx_api::status::lan_addresses()),
+        peer_port: Some(status_peer_port(runtime_ops.peer_port)),
         config_dir: Some(runtime_ops.config_dir.display().to_string()),
         settings: Some(GlobalSettings::from_config(&config)),
         discovered: Some(discovered_list(&config, extras, now_ms)),
@@ -1859,5 +1867,19 @@ mod tests {
             ..Default::default()
         };
         assert!(watch_specs(&disabled).is_empty());
+    }
+
+    #[test]
+    fn status_extras_carries_assembly_peer_port() {
+        // 正常路径:peer server 绑定后的真实端口(可能是内核分配的)原样上报
+        assert_eq!(status_peer_port(Some(4711)), 4711);
+        // peer server 没起/绑定失败:按 Node 口径回落默认端口,绝不报 0 或缺键
+        assert_eq!(status_peer_port(None), DEFAULT_PEER_PORT);
+
+        // 装配出的 extras 落到载荷里键名与值都正确
+        let mut extras = StatusExtras::default();
+        extras.peer_port = Some(status_peer_port(Some(4711)));
+        let payload = build_status(&Config::new(), None, "d", "1", vec![], vec![], extras);
+        assert_eq!(serde_json::to_value(&payload).unwrap()["peerPort"], 4711);
     }
 }

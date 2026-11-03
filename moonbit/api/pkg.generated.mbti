@@ -73,6 +73,8 @@ pub fn new_status_hub(ApiOptions, @daemon.ActorHandle) -> StatusHub
 
 pub fn now_ms() -> Int64
 
+pub fn parse_lan_addresses(String) -> Array[String]
+
 pub fn ping_frame(Int64) -> String
 
 pub fn safe_equal(String, String) -> Bool
@@ -123,8 +125,9 @@ pub(all) struct ApiOptions {
   upload_inspect : (async (Bytes) -> Result[InspectedPackage, String])?
   upload_swap : (async (Bytes) -> Result[String, String])?
   settings : Json?
+  peer_port : Int32?
 }
-pub fn ApiOptions::new(device_id~ : String, control_token? : String, auth_file? : String?, config_file? : String?, actor? : @daemon.ActorHandle?, web_dist? : String?, on_shutdown? : (() -> Unit)?, dev_mode? : Bool, upload_inspect? : (async (Bytes) -> Result[InspectedPackage, String])?, upload_swap? : (async (Bytes) -> Result[String, String])?, settings? : Json?) -> Self
+pub fn ApiOptions::new(device_id~ : String, control_token? : String, auth_file? : String?, config_file? : String?, actor? : @daemon.ActorHandle?, web_dist? : String?, on_shutdown? : (() -> Unit)?, dev_mode? : Bool, upload_inspect? : (async (Bytes) -> Result[InspectedPackage, String])?, upload_swap? : (async (Bytes) -> Result[String, String])?, settings? : Json?, peer_port? : Int32?) -> Self
 
 type DistProvider
 pub async fn DistProvider::get_contents(Self, StringView) -> &@mocket.Responder

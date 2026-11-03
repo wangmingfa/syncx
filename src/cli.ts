@@ -705,6 +705,8 @@ export async function run(args: ParsedArgs): Promise<void> {
           traffic: manager.getTrafficStats(),
           hostname: osHostname(),
           localAddresses: getLanAddresses().map((a) => a.address),
+          // peer 数据面端口(0 = 尚未监听,不上线):顶栏 chip 一并展示
+          peerPort: peerPort || undefined,
           // 全局设置当前值:设置弹窗预填(historyMaxEvents 取运行期生效值,含默认兜底)
           settings: {
             maxSendKbps: config.maxSendKbps,
