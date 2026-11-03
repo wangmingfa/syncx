@@ -51,7 +51,7 @@ export function useFolders(deps: CoreDeps): {
   ignoreFolder: Ref<FolderInfo | null>;
   /** 非空 = 打开该目录的端到端加密设置弹窗。 */
   e2eFolder: Ref<FolderInfo | null>;
-  saveEditDevices: (payload: { path: string; devices: string[]; gitignore: boolean; schedule: Schedule | null; gitSync: GitSyncMode; conflictPolicy: ConflictPolicy; onDemand: boolean }) => Promise<void>;
+  saveEditDevices: (payload: { path: string; devices: string[]; gitignore: boolean; schedule: Schedule | null; gitSync: GitSyncMode; conflictPolicy: ConflictPolicy; onDemand: boolean; gitStripCoAuthored: boolean }) => Promise<void>;
   /** 临时放行时段约束(横幅上的「开 N 分钟」);minutes ≤ 0 = 取消。 */
   setScheduleOverride: (minutes: number) => Promise<void>;
   /** 「优先同步」:把该目录某个在传文件的块请求插到对端发送队列最前(幂等)。 */
@@ -181,8 +181,8 @@ export function useFolders(deps: CoreDeps): {
     editDevicesOpen.value = true;
   }
 
-  /** 弹窗「保存」:设备指派、.gitignore 开关、同步时段、git 同步模式与冲突策略一起提交,真正的写操作只有这里。 */
-  async function saveEditDevices(payload: { path: string; devices: string[]; gitignore: boolean; schedule: Schedule | null; gitSync: GitSyncMode; conflictPolicy: ConflictPolicy; onDemand: boolean }): Promise<void> {
+  /** 弹窗「保存」:设备指派、.gitignore 开关、同步时段、git 同步模式、冲突策略与 Co-Authored-By 剔除开关一起提交,真正的写操作只有这里。 */
+  async function saveEditDevices(payload: { path: string; devices: string[]; gitignore: boolean; schedule: Schedule | null; gitSync: GitSyncMode; conflictPolicy: ConflictPolicy; onDemand: boolean; gitStripCoAuthored: boolean }): Promise<void> {
     await commitFolderDevices(payload.path, payload.devices);
     // refreshStatus 后按最新 folders 找回该目录,开关/时段/git 模式/冲突策略有变化才额外发请求
     const f = status.value.folders.find((x) => x.path === payload.path);
@@ -202,7 +202,25 @@ export function useFolders(deps: CoreDeps): {
     if (f && (f.onDemand ?? false) !== payload.onDemand) {
       await saveFolderOnDemand(f, payload.onDemand);
     }
+    if (f && (f.gitStripCoAuthored ?? false) !== payload.gitStripCoAuthored) {
+      await saveFolderGitStripCoAuthored(f, payload.gitStripCoAuthored);
+    }
     editDevicesOpen.value = false;
+  }
+
+  /** 提交某目录的「镜像提交剔除 Co-Authored-By」开关;失败回读后端真实状态。 */
+  async function saveFolderGitStripCoAuthored(f: FolderInfo, on: boolean): Promise<void> {
+    try {
+      await apiJson('/api/folders/git-strip-co-authored', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ folderId: f.id ?? f.path, on }),
+      });
+      showToast(on ? '已开启:镜像提交信息将剔除 Co-Authored-By 行' : '已关闭:镜像提交信息沿用对端原文');
+    } catch (e) {
+      showToast(errText(e, '设置 Co-Authored-By 剔除失败'), 'alert');
+    }
+    await refreshStatus();
   }
 
   /** 提交某目录的按需同步开关;失败回读后端真实状态。 */

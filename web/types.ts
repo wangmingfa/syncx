@@ -44,6 +44,8 @@ export interface FolderInfo {
   scheduleState?: ScheduleState;
   /** git 提交同步模式;缺省 = 'off'(未启用)。仅当目录本身是 git 仓库时才有实际作用。 */
   gitSync?: GitSyncMode;
+  /** 镜像自动提交时是否从提交信息中剔除 Co-Authored-By 行;缺省 = false(原样沿用)。 */
+  gitStripCoAuthored?: boolean;
   /** 该目录当前是否为 git 仓库(daemon 每轮状态实时探测,与同步闸门同口径);
    *  缺省 = 旧后端未提供,前端不展示「不会生效」警告。 */
   gitRepo?: boolean;

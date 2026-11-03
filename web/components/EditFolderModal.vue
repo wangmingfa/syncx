@@ -14,8 +14,8 @@ const props = defineProps<{
 }>();
 const emit = defineEmits<{
   close: [];
-  /** 「保存」:设备指派、.gitignore 开关、同步时段、git 同步模式与冲突策略一起提交给父级,真正的写操作只有父级那一处。 */
-  save: [payload: { path: string; devices: string[]; gitignore: boolean; schedule: Schedule | null; gitSync: GitSyncMode; conflictPolicy: ConflictPolicy; onDemand: boolean }];
+  /** 「保存」:设备指派、.gitignore 开关、同步时段、git 同步模式、冲突策略与 Co-Authored-By 剔除开关一起提交给父级,真正的写操作只有父级那一处。 */
+  save: [payload: { path: string; devices: string[]; gitignore: boolean; schedule: Schedule | null; gitSync: GitSyncMode; conflictPolicy: ConflictPolicy; onDemand: boolean; gitStripCoAuthored: boolean }];
 }>();
 
 const path = ref('');
@@ -26,6 +26,7 @@ const schedule = ref<Schedule | undefined>(undefined);
 const gitSync = ref<GitSyncMode>('off');
 const conflictPolicy = ref<ConflictPolicy>('keep-both');
 const onDemand = ref(false);
+const gitStripCoAuthored = ref(false);
 
 const GIT_SYNC_OPTIONS: { label: string; value: GitSyncMode }[] = [
   { label: '关闭', value: 'off' },
@@ -51,12 +52,13 @@ watch(
     gitSync.value = f.gitSync ?? 'off';
     conflictPolicy.value = f.conflictPolicy ?? 'keep-both';
     onDemand.value = f.onDemand === true;
+    gitStripCoAuthored.value = f.gitStripCoAuthored === true;
   },
 );
 
 function onSave(): void {
   if (props.busy || !props.folder) return;
-  emit('save', { path: path.value, devices: [...selected.value], gitignore: gitignore.value, schedule: schedule.value ?? null, gitSync: gitSync.value, conflictPolicy: conflictPolicy.value, onDemand: onDemand.value });
+  emit('save', { path: path.value, devices: [...selected.value], gitignore: gitignore.value, schedule: schedule.value ?? null, gitSync: gitSync.value, conflictPolicy: conflictPolicy.value, onDemand: onDemand.value, gitStripCoAuthored: gitStripCoAuthored.value });
 }
 
 // 地址(host:port)与主机名合并成一行,在设备 ID 之外提供可辨认的信息;两者都可能缺失
@@ -116,6 +118,13 @@ function deviceAddrLine(p: DeviceInfo): string {
       commit(<code>git add -A</code>)并沿用相同提交信息,无需每台设备手动提交;本机无待提交内容时跳过。
       提交会一跳一跳中继:自动提交成功的设备会把同一条通知转给它的其他对端,所以只与中间设备配对的机器也能收到提交。
       首次启用只记录当前 HEAD 作为基线,不会重放历史提交。
+    </p>
+    <n-checkbox v-model:checked="gitStripCoAuthored" :disabled="busy">
+      镜像提交信息剔除 Co-Authored-By 行
+    </n-checkbox>
+    <p class="confirm-note-extra">
+      对端提交信息常带 AI 工具生成的 Co-Authored-By 尾注;开启后,自动提交前会把提交信息里
+      所有含 Co-Authored-By 的行删掉再落盘(仅影响本机镜像提交,不改动对端仓库)。仅接收/双向模式生效。
     </p>
 
     <div class="edit-section-label">冲突处理</div>
