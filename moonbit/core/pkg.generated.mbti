@@ -138,12 +138,15 @@ pub(all) struct Config {
   mut generated_by : String?
   mut extra : Map[String, Json]
 }
+pub fn Config::add_known_device(Self, String) -> Bool
+pub fn Config::add_peer(Self, String) -> Bool
 pub fn Config::battery_pause_threshold(Self) -> Int32
 pub fn Config::fs_watch_enabled(Self) -> Bool
 pub fn Config::fs_watch_fallback_scan_secs(Self) -> Int32
 pub fn Config::history_max_events(Self) -> Int32
 pub fn Config::is_paused(Self) -> Bool
 pub fn Config::new() -> Self
+pub fn Config::remove_known_device(Self, String) -> Bool
 pub fn Config::share_enabled(Self) -> Bool
 pub fn Config::to_json(Self) -> Json
 pub fn Config::versions_per_path(Self) -> Int32

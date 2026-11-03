@@ -239,6 +239,139 @@ async test "GET /api/devices:回读 knownDevices" {
 }
 
 ///|
+async test "POST /api/devices:400 校验、201 登记、幂等、地址登记口径" {
+  let dir = test_config_dir("devices-post")
+  let app = @api.build_app(options_with("devices-post", dir))
+  let secret = @api.session_secret("test-token")
+  let ticket = @api.sign_session(
+    { via: "token", sub: "token", exp: @api.now_ms() + 60_000L, },
+    secret,
+  )
+  let headers : Map[@http.CaseInsensitiveString, StringView] = {
+    "Cookie": "syncx_session=\{ticket}",
+  }
+  // 未认证:认证门拦截
+  let response = @mocket.dispatch_http(app, "POST", "/api/devices", {}, b"{}")
+  assert_eq(response.status_code.to_int(), 401)
+  // 缺 deviceId → 400 + Node 同款文案
+  let response = @mocket.dispatch_http(
+    app, "POST", "/api/devices", headers, b"{}",
+  )
+  assert_eq(response.status_code.to_int(), 400)
+  let body : Json = response.read_body()
+  match body {
+    Object(obj) =>
+      assert_true(obj.get("error") is Some(String("deviceId is required")))
+    _ => fail("响应应为对象")
+  }
+  // deviceId 非字符串 → 同样 400
+  let response = @mocket.dispatch_http(
+    app, "POST", "/api/devices", headers, b"{\"deviceId\":42}",
+  )
+  assert_eq(response.status_code.to_int(), 400)
+  // 成功:201 + ok:true,列表出现该设备
+  let response = @mocket.dispatch_http(
+    app, "POST", "/api/devices", headers, b"{\"deviceId\":\"DEV2\"}",
+  )
+  assert_eq(response.status_code.to_int(), 201)
+  let body : Json = response.read_body()
+  match body {
+    Object(obj) => assert_true(obj.get("ok") is Some(True))
+    _ => fail("响应应为对象")
+  }
+  let saved = @api.load_config("\{dir}/config.json")
+  assert_eq(saved.known_devices.length(), 1)
+  assert_eq(saved.known_devices[0].id, "DEV2")
+  // 再 POST 同一设备:幂等不重复
+  let response = @mocket.dispatch_http(
+    app, "POST", "/api/devices", headers, b"{\"deviceId\":\"DEV2\"}",
+  )
+  assert_eq(response.status_code.to_int(), 201)
+  let idempotent = @api.load_config("\{dir}/config.json")
+  assert_eq(idempotent.known_devices.length(), 1)
+  // 非法 address(缺 ws:// 前缀):响应仍 201,peers 不变
+  let response = @mocket.dispatch_http(
+    app, "POST", "/api/devices", headers,
+    b"{\"deviceId\":\"DEV3\",\"address\":\"10.0.0.9:22000\"}",
+  )
+  assert_eq(response.status_code.to_int(), 201)
+  let no_peer = @api.load_config("\{dir}/config.json")
+  assert_eq(no_peer.known_devices.length(), 2)
+  assert_eq(no_peer.peers.length(), 0)
+  // 合法 ws:// address:落进 peers,且 ::ffff: 前缀被规范化剥离
+  let response = @mocket.dispatch_http(
+    app, "POST", "/api/devices", headers,
+    b"{\"deviceId\":\"DEV3\",\"address\":\"ws://[::ffff:10.0.0.9]:22000\"}",
+  )
+  assert_eq(response.status_code.to_int(), 201)
+  let with_peer = @api.load_config("\{dir}/config.json")
+  assert_eq(with_peer.peers, ["ws://10.0.0.9:22000"])
+  // 再登记同地址(大小写不敏感前缀 + host 小写):幂等,peers 不重复
+  let response = @mocket.dispatch_http(
+    app, "POST", "/api/devices", headers,
+    b"{\"deviceId\":\"DEV4\",\"address\":\"WS://10.0.0.9:22000\"}",
+  )
+  assert_eq(response.status_code.to_int(), 201)
+  let deduped = @api.load_config("\{dir}/config.json")
+  assert_eq(deduped.peers, ["ws://10.0.0.9:22000"])
+}
+
+///|
+async test "DELETE /api/devices:knownDevices 与目录 devices 联动摘除,幂等" {
+  let dir = test_config_dir("devices-delete")
+  // 预置:两个已知设备;目录 A 的 devices 含目标设备,目录 B 不含
+  @fs.write_file(
+    "\{dir}/config.json",
+    "{\"knownDevices\":[{\"id\":\"DEV2\"},{\"id\":\"DEV3\"}],\"sharedFolders\":[{\"path\":\"/data/a\",\"id\":\"a\",\"devices\":[\"DEV2\",\"DEV3\",\"DEV9\"]},{\"path\":\"/data/b\",\"id\":\"b\",\"devices\":[\"DEV3\"]}],\"formatVersion\":1}",
+    create_mode=CreateOrTruncate,
+  )
+  let app = @api.build_app(options_with("devices-delete", dir))
+  let secret = @api.session_secret("test-token")
+  let ticket = @api.sign_session(
+    { via: "token", sub: "token", exp: @api.now_ms() + 60_000L, },
+    secret,
+  )
+  let headers : Map[@http.CaseInsensitiveString, StringView] = {
+    "Cookie": "syncx_session=\{ticket}",
+  }
+  // 缺参 → 400 + Node 同款文案
+  let response = @mocket.dispatch_http(app, "DELETE", "/api/devices", headers, b"")
+  assert_eq(response.status_code.to_int(), 400)
+  let body : Json = response.read_body()
+  match body {
+    Object(obj) =>
+      assert_true(obj.get("error") is Some(String("deviceId is required")))
+    _ => fail("响应应为对象")
+  }
+  // 空串参数同样 400(Node `if (!deviceId)` 同口径)
+  let response = @mocket.dispatch_http(
+    app, "DELETE", "/api/devices?deviceId=", headers, b"",
+  )
+  assert_eq(response.status_code.to_int(), 400)
+  // 正常移除:200 + ok:true
+  let response = @mocket.dispatch_http(
+    app, "DELETE", "/api/devices?deviceId=DEV2", headers, b"",
+  )
+  assert_eq(response.status_code.to_int(), 200)
+  let body : Json = response.read_body()
+  match body {
+    Object(obj) => assert_true(obj.get("ok") is Some(True))
+    _ => fail("响应应为对象")
+  }
+  // 联动断言:knownDevices 摘除,目录 A 的 devices 同步摘除,目录 B 不受影响
+  let saved = @api.load_config("\{dir}/config.json")
+  assert_eq(saved.known_devices.length(), 1)
+  assert_eq(saved.known_devices[0].id, "DEV3")
+  assert_eq(saved.shared_folders[0].devices, ["DEV3", "DEV9"])
+  assert_eq(saved.shared_folders[1].devices, ["DEV3"])
+  // 设备已不存在:仍 200(幂等)
+  let response = @mocket.dispatch_http(
+    app, "DELETE", "/api/devices?deviceId=DEV2", headers, b"",
+  )
+  assert_eq(response.status_code.to_int(), 200)
+}
+
+///|
 async test "POST /api/shutdown:有回调回 ok,无回调回 503" {
   // 无回调:503 + Node 同款文案
   let dir = test_config_dir("shutdown-none")

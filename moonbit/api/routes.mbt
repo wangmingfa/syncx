@@ -261,6 +261,78 @@ pub async fn handle_list_devices(
 }
 
 ///|
+/// POST /api/devices:添加一个已知对端设备(Node addDevice 同款)。
+/// body { deviceId, address? }:deviceId 缺失(非字符串/空)→ 400
+/// `{"error":"deviceId is required"}`;成功 → 201 `{ok:true}`。address 非空时
+/// 尝试登记对端地址:仅接受 ws:// 前缀(core add_peer 校验),非法地址只
+/// 忽略不上线、响应仍成功(与 Node addDevice 的 try/catch warn 同口径)。
+pub async fn handle_add_device(
+  options : ApiOptions,
+  event : @mocket.MocketEvent,
+) -> &Responder {
+  let body = match parse_json_body(event) {
+    Some(body) => body
+    None => return json_error(@mocket.BadRequest, "invalid json body")
+  }
+  let obj = match body {
+    Object(obj) => obj
+    _ => return json_error(@mocket.BadRequest, "invalid json body")
+  }
+  let device_id = match non_empty_string(obj, "deviceId") {
+    Some(id) => id
+    None => return json_error(@mocket.BadRequest, "deviceId is required")
+  }
+  let config = load_config(options.config_file)
+  // 幂等登记:已存在不重复(core add_known_device 内部去重)
+  let _ = config.add_known_device(device_id)
+  match non_empty_string(obj, "address") {
+    Some(address) => {
+      // warn 只对非法前缀(Node addPeer 的 throw 点);幂等重复走 add_peer
+      // 的 false 分支,静默即可
+      let ws_ok = address.to_lower().strip_prefix("ws://") is Some(_)
+      let _ = config.add_peer(address)
+      if !ws_ok {
+        println("[warn] invalid peer address ignored: \{address}")
+      }
+    }
+    None => ()
+  }
+  save_config(options.config_file, config) catch {
+    _ => return json_error(@mocket.BadRequest, "invalid json body")
+  }
+  // TODO(daemon):设备登记后通知 daemon 立即建连/补发配对请求
+  // (Node 侧 manager.notifyPairingIntent 同职责),当前落盘即止
+  @mocket.HttpResponse(@mocket.Created).json(ok_true())
+}
+
+///|
+/// DELETE /api/devices?deviceId=xxx:移除一个已知对端设备(Node removeDevice
+/// 同款)。缺参 → 400;移除联动:knownDevices 摘除之外,同时从每个
+/// sharedFolders 的 devices 列表摘掉该设备(Node removeKnownDevice 同口径);
+/// 设备不存在也 200 `{ok:true}`(幂等)。
+pub async fn handle_remove_device(
+  options : ApiOptions,
+  event : @mocket.MocketEvent,
+) -> &Responder {
+  let device_id = match event.req.query().get("deviceId") {
+    Some(id) => if id != "" { id } else { "" }
+    None => ""
+  }
+  // Node `if (!deviceId)` 同口径:缺失与空串一律 400
+  if device_id == "" {
+    return json_error(@mocket.BadRequest, "deviceId is required")
+  }
+  let config = load_config(options.config_file)
+  let _ = config.remove_known_device(device_id)
+  save_config(options.config_file, config) catch {
+    _ => return json_error(@mocket.BadRequest, "invalid json body")
+  }
+  // TODO(daemon):设备移除后通知 daemon 断开既有会话、清理学习到的
+  // 对端地址并重算状态推送(Node 侧 forgetAndCloseSessions 同职责)
+  @mocket.HttpResponse(@mocket.OK).json(ok_true())
+}
+
+///|
 /// POST /api/shutdown:优雅关闭。先让响应冲出内核缓冲,再走关闭链路
 /// (Node 同款 50ms 延迟);装配层未注入回调时回 503。
 pub async fn handle_shutdown(

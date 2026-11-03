@@ -438,6 +438,9 @@ pub fn build_app(options : ApiOptions) -> @mocket.App {
     handle_folder_git_strip_co_authored(options, event)
   })
   app.get("/api/devices", event => handle_list_devices(options, event))
+  // 设备增删(前端添加/移除设备;POST 走 body,DELETE 走 ?deviceId= 查询参数)
+  app.post("/api/devices", event => handle_add_device(options, event))
+  app.delete("/api/devices", event => handle_remove_device(options, event))
   app.post("/api/shutdown", event => handle_shutdown(options, event))
   // 上传安装包换入(预检只读;换入成功后旧进程由看门狗请退,见 upload.mbt)
   app.post("/api/self-update/upload/inspect", event => {

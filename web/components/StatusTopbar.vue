@@ -281,7 +281,8 @@ function runChipRow(row: ChipRow): void {
                不去色 —— 本机后端形态与有没有对端在线无关(系统图标的灰/彩表达的是
                「有没有对端连上」,这枚要是跟着变灰,会被读成「后端掉了」)。 -->
           <BackendIcon :runtime="status.runtime" :hint="chipBackendHint" />
-          <span class="mono">{{ status.deviceId }}</span>
+          <!-- 设备 ID 直接点击复制:复用浮层 chip-copy 的 hover 口径 -->
+          <button type="button" class="chip-copy mono" title="点击复制" @click="copy(status.deviceId)">{{ status.deviceId }}</button>
           <span v-if="status.version" class="chip-version">{{ status.version === 'dev' ? status.version : `v${status.version}` }}</span>
           <svg class="chip-caret" viewBox="0 0 24 24" width="10" height="10" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
             <path d="m6 9 6 6 6-6" />

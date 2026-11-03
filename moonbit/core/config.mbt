@@ -1004,3 +1004,76 @@ pub fn normalize_peer_list(list : Array[String]) -> Array[String] {
   }
   out
 }
+
+// ---- 已知设备与对端地址的增删(HTTP 设备路由共用;对齐 src/devices.ts) ----
+
+///|
+/// 添加一个已知设备 ID(对齐 Node addKnownDevice:已存在则幂等不重复)。
+/// 返回 true = 本次新增,false = 已存在跳过。空 ID 由调用方(HTTP 层回
+/// 400)拦截,这里不再校验。
+pub fn Config::add_known_device(self : Config, device_id : String) -> Bool {
+  for device in self.known_devices {
+    if device.id == device_id {
+      return false
+    }
+  }
+  self.known_devices.push({ id: device_id, name: None, extra: Map([]) })
+  true
+}
+
+///|
+/// 移除已知设备(对齐 Node removeKnownDevice):从 knownDevices 摘除之外,
+/// **同时**从每个 sharedFolders 的 devices 列表摘掉该设备 —— 目录指派是
+/// 「哪些设备同步这个目录」的持久授权,漏摘会让被移除设备继续出现在
+/// 目录设备列表里。设备本就不存在时静默返回(幂等)。
+/// 返回 true = 有变更,false = 本就不存在且任何目录都没有该设备。
+pub fn Config::remove_known_device(self : Config, device_id : String) -> Bool {
+  let mut changed = false
+  let kept : Array[DeviceConfig] = []
+  for device in self.known_devices {
+    if device.id == device_id {
+      changed = true
+    } else {
+      kept.push(device)
+    }
+  }
+  self.known_devices = kept
+  // SharedFolder 字段不可变:整体拷贝替换(devices 字段换新数组)
+  for i, folder in self.shared_folders {
+    let devices : Array[String] = []
+    let mut hit = false
+    for id in folder.devices {
+      if id == device_id {
+        hit = true
+      } else {
+        devices.push(id)
+      }
+    }
+    if hit {
+      changed = true
+      self.shared_folders[i] = { ..folder, devices }
+    }
+  }
+  changed
+}
+
+///|
+/// 添加一个手动配置的对端地址(对齐 Node addPeer):仅接受 ws:// 开头
+/// 的地址;入库前经 normalize_peer_url 规范化(::ffff: 剥离、host 小写,
+/// 使 [::ffff:10.0.0.2]:22000 与 10.0.0.2:22000 视为同一条),已存在幂等。
+/// 返回 true = 新增;false = 非法地址(不上线)或已存在(幂等)。
+pub fn Config::add_peer(self : Config, address : String) -> Bool {
+  // normalize_peer_url 对非 ws:// 前缀原样返回,ws:// 校验必须在这里显式做
+  // (Node 同款 `/^ws:\/\//i`,大小写不敏感)
+  if address.to_lower().strip_prefix("ws://") is None {
+    return false
+  }
+  let normalized = normalize_peer_url(address)
+  for peer in self.peers {
+    if peer == normalized {
+      return false
+    }
+  }
+  self.peers.push(normalized)
+  true
+}
