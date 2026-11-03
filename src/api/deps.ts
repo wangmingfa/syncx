@@ -129,6 +129,10 @@ export interface ControlServerDeps {
     holidayAutoFetch?: boolean | null;
     /** 节假日源地址模板({year} 占位);null/空串 = 回默认源。 */
     holidaySourceUrl?: string | null;
+    /** 文件系统监听驱动扫描总开关;false = 退回纯定时全量扫描(原节奏);null/true = 开。 */
+    fsWatchEnabled?: boolean | null;
+    /** 兜底全量扫描间隔(秒,watcher 正常时生效);null = 回默认 600。 */
+    fsWatchFallbackScanSecs?: number | null;
   }) => void;
   /** 临时放行时段约束(minutes ≤ 0 = 取消);返回到期时刻(ms)。 */
   setScheduleOverride?: (minutes: number) => number | undefined;

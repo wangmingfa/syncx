@@ -124,6 +124,11 @@ async fn deleted_folder_is_rebuilt_and_rescanned_on_reappearance() {
     let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
     let hub = FsWatchHub::spawn(WINDOW, SWEEP, tx);
     hub.sync(vec![spec("f1", root.path())]);
+    // 等监听真正挂上再产事件:sync 是异步处理的,紧接着写文件会输给挂载时机
+    assert!(
+        wait_until(|| hub.health().healthy(), Duration::from_secs(5)).await,
+        "watcher 启动后应健康"
+    );
     std::fs::write(root.path().join("a.txt"), "x").unwrap();
     let initial = next_matching(&mut rx, |r| r.reason == RescanReason::Watch).await;
     assert!(initial.is_some(), "正常监听应收到事件触发的重扫");
@@ -157,11 +162,13 @@ async fn watcher_creation_failure_degrades_until_folder_appears() {
     let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
     let hub = FsWatchHub::spawn(WINDOW, SWEEP, tx);
 
-    // 指向不存在的目录:创建失败 → 降级,健康度翻红(warn 只发一次)
+    // 指向不存在的目录:创建失败 → 降级(warn 只发一次)。先让出运行时,确保
+    // hub 在目录仍缺失时处理过这条 sync —— 否则建档就成功了,测不到降级。
     hub.sync(vec![spec("f1", &missing)]);
+    tokio::time::sleep(WINDOW * 2).await;
     assert!(
-        wait_until(|| !hub.health().healthy(), Duration::from_secs(5)).await,
-        "创建失败的 watcher 应让健康度翻红"
+        !hub.health().healthy(),
+        "指向缺失目录的 watcher 应处于降级状态"
     );
 
     // 目录出现:巡检自动建档 + 立即补扫
@@ -185,6 +192,11 @@ async fn sync_with_empty_specs_drops_all_watchers() {
     let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
     let hub = FsWatchHub::spawn(WINDOW, SWEEP, tx);
     hub.sync(vec![spec("f1", root.path())]);
+    // 等监听挂上再产事件(理由同 rebuild 用例)
+    assert!(
+        wait_until(|| hub.health().healthy(), Duration::from_secs(5)).await,
+        "watcher 启动后应健康"
+    );
     std::fs::write(root.path().join("a.txt"), "x").unwrap();
     assert!(
         next_matching(&mut rx, |r| r.reason == RescanReason::Watch)

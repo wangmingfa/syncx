@@ -81,7 +81,7 @@ export async function tryDeviceRoutes(
       const raw = await readBody(req);
       const body = raw === '' ? {} : JSON.parse(raw) as Record<string, unknown>;
       // 数字字段逐一校验:非有限数字一律拒绝,不静默吞掉
-      for (const key of ['maxSendKbps', 'versionsPerPath', 'historyMaxEvents', 'batteryPauseThreshold'] as const) {
+      for (const key of ['maxSendKbps', 'versionsPerPath', 'historyMaxEvents', 'batteryPauseThreshold', 'fsWatchFallbackScanSecs'] as const) {
         if (!(key in body)) continue;
         const v = body[key];
         if (v !== null && !Number.isFinite(Number(v))) {
@@ -90,7 +90,7 @@ export async function tryDeviceRoutes(
         }
       }
       // 电源守卫/分享开关是布尔(null = 关闭);范围校验在 devices.setGlobalSettings
-      for (const key of ['pauseOnMeteredNetwork', 'pauseOnLowBattery', 'shareEnabled'] as const) {
+      for (const key of ['pauseOnMeteredNetwork', 'pauseOnLowBattery', 'shareEnabled', 'fsWatchEnabled'] as const) {
         if (!(key in body)) continue;
         const v = body[key];
         if (v !== null && typeof v !== 'boolean') {
@@ -138,6 +138,9 @@ export async function tryDeviceRoutes(
           : {}),
         ...(('holidayAutoFetch' in body) ? { holidayAutoFetch: body.holidayAutoFetch === null ? null : body.holidayAutoFetch !== false } : {}),
         ...(('holidaySourceUrl' in body) ? { holidaySourceUrl: body.holidaySourceUrl === null ? null : String(body.holidaySourceUrl) } : {}),
+        // 文件系统监听:开关布尔(null = 开,缺省即开);间隔数字(null = 回默认 600)
+        ...(('fsWatchEnabled' in body) ? { fsWatchEnabled: body.fsWatchEnabled === null ? null : Boolean(body.fsWatchEnabled) } : {}),
+        ...(('fsWatchFallbackScanSecs' in body) ? { fsWatchFallbackScanSecs: body.fsWatchFallbackScanSecs === null ? null : Number(body.fsWatchFallbackScanSecs) } : {}),
       });
       sendJson(res, 200, { ok: true });
     } catch (e) {

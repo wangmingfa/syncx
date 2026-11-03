@@ -569,6 +569,13 @@ export interface GlobalSettingsPatch {
   holidayAutoFetch?: boolean | null;
   /** 节假日源地址模板(`{year}` 占位);null/空 = 回默认源。 */
   holidaySourceUrl?: string | null;
+  /**
+   * 文件系统监听驱动扫描的总开关;false = 退回纯定时全量扫描(原扫描节奏);
+   * null/true = 开(缺省即开,故 null 落 undefined)。
+   */
+  fsWatchEnabled?: boolean | null;
+  /** 兜底全量扫描间隔(秒,watcher 正常时生效);null = 回默认 600。 */
+  fsWatchFallbackScanSecs?: number | null;
 }
 
 /** 校验并收敛一个设置值:null → undefined(清除);负数/非整数拒绝(设置页的输入必须可解释)。 */
@@ -645,6 +652,14 @@ export function setGlobalSettings(configPath: string, patch: GlobalSettingsPatch
       }
       if (v.length > 300) throw new Error('节假日源地址过长(最多 300 字符)');
       config.holidaySourceUrl = v === '' ? undefined : v;
+    }
+    if ('fsWatchEnabled' in patch) {
+      // 仅 false 落盘(缺省即开,config 不留 true 值),与 holidayAutoFetch 同一口径
+      config.fsWatchEnabled = patch.fsWatchEnabled === false ? false : undefined;
+    }
+    if ('fsWatchFallbackScanSecs' in patch) {
+      // null/undefined = 回默认 600(config 不留值,运行期按缺省兜底)
+      config.fsWatchFallbackScanSecs = sanitizeSetting(patch.fsWatchFallbackScanSecs, 1, '兜底扫描间隔');
     }
   });
 }

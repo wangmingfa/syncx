@@ -1143,12 +1143,17 @@ fn spawn_rescan_forwarder(
 /// `SYNCX_SCAN_INTERVAL_MS` 设置时钳住它:该变量的语义是「至少这么频繁地扫」,
 /// 不能因为 watcher 健康就把测试/开发钩子放大到 600 秒。
 fn fallback_interval(fallback_secs: u64) -> Duration {
-    let configured = Duration::from_secs(fallback_secs.max(1));
-    match std::env::var("SYNCX_SCAN_INTERVAL_MS")
+    let env_ms = std::env::var("SYNCX_SCAN_INTERVAL_MS")
         .ok()
         .and_then(|raw| raw.trim().parse::<u64>().ok())
-        .filter(|ms| *ms > 0)
-    {
+        .filter(|ms| *ms > 0);
+    clamp_fallback(fallback_secs, env_ms)
+}
+
+/// 纯决策(环境读取在外面,测试不碰进程级环境变量):钩子只做下限钳制。
+fn clamp_fallback(fallback_secs: u64, env_ms: Option<u64>) -> Duration {
+    let configured = Duration::from_secs(fallback_secs.max(1));
+    match env_ms {
         Some(ms) => configured.min(Duration::from_millis(ms)),
         None => configured,
     }
@@ -1788,15 +1793,12 @@ mod tests {
 
     #[test]
     fn fallback_interval_respects_env_hook() {
-        // SYNCX_SCAN_INTERVAL_MS 的语义是「至少这么频繁地扫」:健康 watcher 不能把它放大
-        std::env::set_var("SYNCX_SCAN_INTERVAL_MS", "150");
-        assert_eq!(fallback_interval(600), Duration::from_millis(150));
-        // 反向不放大
-        std::env::set_var("SYNCX_SCAN_INTERVAL_MS", "999999");
-        assert_eq!(fallback_interval(600), Duration::from_secs(600));
-        // 不设则按配置
-        std::env::remove_var("SYNCX_SCAN_INTERVAL_MS");
-        assert_eq!(fallback_interval(600), Duration::from_secs(600));
+        // SYNCX_SCAN_INTERVAL_MS 的语义是「至少这么频繁地扫」:健康 watcher 不能把它放大。
+        // 只测纯决策函数 —— 进程级环境变量在并行测试里是共享状态,不能碰。
+        assert_eq!(clamp_fallback(600, Some(150)), Duration::from_millis(150));
+        assert_eq!(clamp_fallback(600, Some(999_999)), Duration::from_secs(600));
+        assert_eq!(clamp_fallback(600, None), Duration::from_secs(600));
+        assert_eq!(clamp_fallback(0, None), Duration::from_secs(1));
     }
 
     /// 一个测试结束才删除的临时共享目录(身份判定要对真实路径做 stat)。

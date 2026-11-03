@@ -19,6 +19,8 @@ pub const DEFERRED_MAX : Int32 = 4096
 
 pub const DEGRADED_SCAN_INTERVAL_MS : Int32 = 30_000
 
+pub const FS_WATCH_ALIVE_PROBE_MS : Int32 = 1000
+
 pub const FS_WATCH_DEBOUNCE_MAX_MS : Int32 = 4000
 
 pub const FS_WATCH_DEBOUNCE_MS : Int32 = 2000
@@ -238,6 +240,7 @@ pub(all) struct FsWatchOptions {
   fallback_scan_ms : Int32
   debounce_ms : Int32
   debounce_max_ms : Int32
+  alive_probe_ms : Int32
   degraded_scan_ms : Int32
 }
 pub fn FsWatchOptions::from_config(@core.Config) -> Self

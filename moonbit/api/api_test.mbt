@@ -207,3 +207,44 @@ async test "真实 HTTP:随机端口起服务,/health 与 /api/status 可达" {
     assert_true(probe_http("\{base}/api/status") is Some(401))
   }
 }
+
+///|
+test "/api/status.settings 透出 fsWatch 全局设置" {
+  // 装配层注入(config.json 启动时快照)→ settings 段按 camelCase 上线
+  let config = @core.parse_config(
+    "{\"fsWatchEnabled\":false,\"fsWatchFallbackScanSecs\":900}",
+  )
+  let options = @api.ApiOptions::new(
+    device_id="TESTDEVICE01",
+    control_token="test-token",
+    settings=Some(@api.settings_json(config)),
+  )
+  let obj = require_object(@api.status_json(options))
+  match obj.get("settings") {
+    Some(Object(settings)) => {
+      assert_true(settings.get("fsWatchEnabled") is Some(False))
+      match settings.get("fsWatchFallbackScanSecs") {
+        Some(Number(n, ..)) => assert_eq(n, 900.0)
+        _ => panic()
+      }
+    }
+    _ => panic()
+  }
+  // 未注入 = 整段不上线(旧装配形态,与「缺字段 = 旧后端」口径一致)
+  let bare = require_object(
+    @api.status_json(
+      @api.ApiOptions::new(device_id="D", control_token="test-token"),
+    ),
+  )
+  assert_true(bare.get("settings") is None)
+}
+
+///|
+test "settings_json:缺省值口径(监听开、兜底 600s)" {
+  let settings = require_object(@api.settings_json(@core.parse_config("{}")))
+  assert_true(settings.get("fsWatchEnabled") is Some(True))
+  match settings.get("fsWatchFallbackScanSecs") {
+    Some(Number(n, ..)) => assert_eq(n, 600.0)
+    _ => panic()
+  }
+}

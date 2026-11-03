@@ -454,6 +454,17 @@ export async function run(args: ParsedArgs): Promise<void> {
   void holidays.refresh();
   const holidayRefresh = setInterval(() => void holidays.refresh(), 24 * 60 * 60_000);
   holidayRefresh.unref?.();
+  // 兜底全量扫描定时器:间隔动态取 manager.fallbackScanIntervalMs()(watcher 正常 =
+  // fsWatchFallbackScanSecs,缺省 600s;watcher 不可用/被配置关闭 = 原扫描节奏),
+  // watcher 降级或设置变更时经 manager 的回调重挂,即刻生效。函数声明前置:
+  // manager 构造期间理论上也可能触发回调(降级),闭包引用必须在之前可解析。
+  let scanTimer: NodeJS.Timeout | undefined;
+  function armScanTimer(): void {
+    if (scanTimer) clearInterval(scanTimer);
+    scanTimer = setInterval(() => {
+      void manager.runScan();
+    }, manager.fallbackScanIntervalMs());
+  }
   const manager = new SyncSessionManager(
     {
       identity,
@@ -478,9 +489,16 @@ export async function run(args: ParsedArgs): Promise<void> {
       // 扫描耗时探针与慢请求/事件循环卡顿共用同一条 perfLog 线(见 api/perf.ts),
       // 随 --log-file 持久化,Termux 等低端机排查「扫描吃掉主线程」用
       perfLog: (line) => logger.info(line),
+      // watcher 降级 / fs-watch 设置变更:重挂兜底定时器让新间隔即刻生效
+      onFallbackScanIntervalChanged: () => armScanTimer(),
     },
     config.sharedFolders,
   );
+  // 文件系统监听:每个未暂停且身份校验通过的共享目录建一个递归 fs.watch,事件经防抖
+  // 聚合后驱动「单目录按需重扫」(见 fs-watcher.ts)。定时全扫自此退化为兜底。
+  // 必须在首次 armScanTimer 之前启动:启动期降级(平台不支持递归 watch)要立即反映
+  // 到兜底间隔上。单元测试不调用它,行为保持与旧架构一致。
+  manager.startFolderWatchers();
   // 无目录提示也延迟到端口绑定成功后输出(与其它启动日志同批)
   const noFoldersAtBoot = manager.folderStates.length === 0;
 
@@ -1356,12 +1374,11 @@ export async function run(args: ParsedArgs): Promise<void> {
     logger.info(`  ws://${formatHost(lan.address, lan.family)}:${server.port}`);
   }
 
-  // 本地变更检测:周期扫描所有共享目录,把变化(新增/修改/删除)传播给已连接对端。
-  // 集成测试用 SYNCX_SCAN_INTERVAL_MS 调快节奏(250ms),生产默认 5s。
-  const SCAN_INTERVAL_MS = Number(process.env.SYNCX_SCAN_INTERVAL_MS) || 5000;
-  const scanTimer = setInterval(() => {
-    void manager.runScan();
-  }, SCAN_INTERVAL_MS);
+  // 本地变更检测兜底:watch 事件驱动的按需重扫为主(见上方 startFolderWatchers),
+  // 定时全扫只做兜底。间隔经 manager.fallbackScanIntervalMs() 动态决定 ——
+  // 集成测试用 SYNCX_SCAN_INTERVAL_MS 调快节奏(250ms,显式注入时优先);
+  // 生产:watcher 正常 = fsWatchFallbackScanSecs(缺省 600s),不可用 = 5s 原节奏。
+  armScanTimer();
 
   // 配置热重载:监听配置文件所在目录,过滤文件名命中 config.json 再触发重载。
   // 注意:**不能**直接 watch(configPath) 本身——saveConfig 用 renameSync 原子写,
@@ -1398,6 +1415,8 @@ export async function run(args: ParsedArgs): Promise<void> {
       // 也必须跟着热重载生效(loadConfig 每次返回含全部键的规范化对象,被删掉的设置会以
       // undefined 覆盖掉旧值,不会残留)。config 是 const,故用 Object.assign 而非重新赋值。
       Object.assign(config, newConfig);
+      // 手改的 fs-watch 字段可能改变兜底扫描间隔:重挂定时器即刻生效(没变则原样重挂)
+      armScanTimer();
     } catch (error) {
       logger.error(`config reload failed: ${error instanceof Error ? error.message : String(error)}`);
     }

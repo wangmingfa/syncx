@@ -19,7 +19,8 @@ import { randomBytes } from 'node:crypto';
 import type { Logger } from 'pino';
 import { WebSocket } from 'ws';
 
-import { loadConfig, mutateConfig, folderIdFor, folderIndexKey, folderIndexPath, folderTrashPath, folderVersionsPath, purgeFolderIndex, isUnderDirPrefix, type FolderIdentity, type GitCommitPendingRecord, type SharedFolderConfig, type GitSyncMode, type ConflictPolicy } from './config.js';
+import { loadConfig, mutateConfig, folderIdFor, folderIndexKey, folderIndexPath, folderTrashPath, folderVersionsPath, purgeFolderIndex, isUnderDirPrefix, DEFAULT_FS_WATCH_FALLBACK_SCAN_SECS, type FolderIdentity, type GitCommitPendingRecord, type SharedFolderConfig, type GitSyncMode, type ConflictPolicy } from './config.js';
+import { FolderWatchHub, DEFAULT_FS_WATCH_DEBOUNCE_MS, type WatchableFolder } from './fs-watcher.js';
 import { nextScheduleChangeAt, withinSchedule, formatScheduleSummary, type Schedule } from './schedule.js';
 import type { HolidayStore } from './holidays.js';
 import { acceptedDevs, checkFolderIdentity, describeIdentityChange, readFolderIdentity, withAcceptedDev, type IdentityChange } from './folder-identity.js';
@@ -630,6 +631,12 @@ export interface SessionManagerDeps {
    * 缺省(测试/最小 deps)不接,扫描计时完全静默。
    */
   perfLog?: (line: string) => void;
+  /**
+   * 兜底全量扫描间隔变化回调(watch 降级 / fsWatch 设置变更时触发):cli 据此重挂
+   * 兜底定时器,让「watcher 正常 = 分钟级兜底、不可用 = 原扫描节奏」即时生效。
+   * 缺省不接(测试/最小 deps 静默);当前值也可随时经 fallbackScanIntervalMs() 查询。
+   */
+  onFallbackScanIntervalChanged?: (intervalMs: number) => void;
 }
 
 export class SyncSessionManager {
@@ -651,6 +658,8 @@ export class SyncSessionManager {
   private readonly onNetworkRecovered?: () => void;
   /** 性能探针落点(见 SessionManagerDeps.perfLog);缺省不接,扫描计时静默。 */
   private readonly perfLog?: (line: string) => void;
+  /** 兜底扫描间隔变化回调(见 SessionManagerDeps.onFallbackScanIntervalChanged);缺省不接。 */
+  private readonly onFallbackScanIntervalChanged?: (intervalMs: number) => void;
   /**
    * 当前是否在网(无非回环可用接口 = 离线)。驱动三件事:重连退避拉长、mDNS
    * 广播门控、恢复时立即补拨。**不影响**扫描与心跳 —— 扫描照跑才能把本地改动
@@ -799,6 +808,11 @@ export class SyncSessionManager {
   /** 扫描进行中新收到的触发不丢弃,合并成「本轮跑完补跑一轮」(见 runScan)。 */
   private scanQueued = false;
   /**
+   * 扫描进行中排队补跑请求的口径:undefined = 全扫;Set = 只扫这些脏目录。
+   * 多个排队请求合并时脏目录取并集,一旦混入全扫请求即整体退化为全扫(见 runScan)。
+   */
+  private queuedDirtyFolders?: Set<string>;
+  /**
    * drift 哨兵本地巡检的两个旋钮(抽样条数 / 最小间隔),构造时读一次 —— 与 peer 侧
    * 「建管线时读」同一口径(见 drift.ts 的 readDriftKnobs)。`sampleN === 0` 整道关掉。
    */
@@ -810,6 +824,22 @@ export class SyncSessionManager {
    * 存在 folder.config 上,两者任一生效即视为暂停(见 folderPausedNow)。
    */
   private globalPaused = false;
+  /**
+   * 文件系统监听驱动扫描总开关(config.fsWatchEnabled 的内存镜像,缺省 true):
+   * false = 不建任何 watcher,扫描退回纯定时节奏。
+   */
+  private fsWatchEnabled = true;
+  /**
+   * 兜底全量扫描间隔(秒,config.fsWatchFallbackScanSecs 的内存镜像,缺省 600):
+   * watcher 正常工作时定时全扫只做兜底;watcher 不可用时本值不生效(退回原节奏)。
+   */
+  private fsWatchFallbackScanSecs = DEFAULT_FS_WATCH_FALLBACK_SCAN_SECS;
+  /**
+   * 文件系统监听 hub(见 fs-watcher.ts)。惰性创建:由 daemon 装配点 startFolderWatchers()
+   * 显式启动(cli 在 manager 就绪后调用);单元测试不调用则完全不建 watcher,行为与
+   * 旧架构一致。此后每轮扫描 / 暂停翻转 / 配置热重载都会经 syncWatchers 对账集合。
+   */
+  private watchHub?: FolderWatchHub;
   /**
    * 电源守卫(powerguard.ts)上报的挂起原因:非空时所有目录数据面视同暂停,
    * 与 globalPaused 独立叠加(恢复守卫不影响用户手动暂停,反之亦然)。
@@ -880,6 +910,7 @@ export class SyncSessionManager {
     this.onNetworkRecovered = deps.onNetworkRecovered;
     this.holidays = deps.holidays;
     this.perfLog = deps.perfLog;
+    this.onFallbackScanIntervalChanged = deps.onFallbackScanIntervalChanged;
     // drift 哨兵本地巡检的旋钮:构造时读一次,与 peer 侧建管线时读的是同一对环境变量
     const driftKnobs = readDriftKnobs();
     this.driftSampleN = driftKnobs.sampleN;
@@ -889,6 +920,8 @@ export class SyncSessionManager {
     this.globalPaused = bootConfig.paused === true;
     this.maxSendKbps = bootConfig.maxSendKbps;
     this.versionsPerPath = bootConfig.versionsPerPath;
+    this.fsWatchEnabled = bootConfig.fsWatchEnabled !== false;
+    this.fsWatchFallbackScanSecs = bootConfig.fsWatchFallbackScanSecs ?? DEFAULT_FS_WATCH_FALLBACK_SCAN_SECS;
     this.syncSchedule = bootConfig.syncSchedule;
     this.scheduleOverrideUntil = bootConfig.scheduleOverrideUntil;
     setHistoryMaxEvents(bootConfig.historyMaxEvents);
@@ -1475,7 +1508,10 @@ export class SyncSessionManager {
   /* ==================== 本地变更扫描 ==================== */
 
   /**
-   * 手动触发一轮扫描:与定时扫描逻辑一致。
+   * 触发一轮扫描。dirtyFolders 省略 = 全扫兜底(定时器 / 手动触发 / 暂停恢复等路径);
+   * 给定脏目录 id 列表 = watch 事件驱动的按需重扫,本轮只扫这些目录(scanOnce 里
+   * 判定引擎/diff/墓碑管线全复用,不改)。
+   *
    * 慢设备上大目录的单轮扫描可能超过定时间隔,若允许并发重入,两轮 scanFolder
    * 会在对方 applySend 写回索引之前各自对同一文件检出变更 → 同一次编辑产生两条
    * 记录 + 两次版本递增 + 两次广播。因此同一时刻只允许一轮扫描在跑。
@@ -1483,18 +1519,32 @@ export class SyncSessionManager {
    * 但「在跑就丢弃」会造成另一种丢失:冲突处理/版本恢复等动作写盘后追的这次
    * 触发若撞上定时扫描窗口,磁盘变化要等下一个定时周期才被索引看见(目录卡
    * 冲突徽标迟迟不减)。改为排队合并:扫描中收到新触发只记一次 scanQueued,
-   * 本轮收尾后补跑一轮 —— 多次触发塌缩成一轮,既有界又不漏。
+   * 本轮收尾后补跑一轮 —— 多次触发塌缩成一轮,既有界又不漏。补跑口径取排队
+   * 请求的并集:脏目录合并进 queuedDirtyFolders,一旦混入全扫请求即整体退化为全扫。
    */
-  async runScan(): Promise<void> {
+  async runScan(dirtyFolders?: Iterable<string>): Promise<void> {
     if (this.scanning) {
+      if (dirtyFolders === undefined) {
+        this.queuedDirtyFolders = undefined;
+      } else if (this.queuedDirtyFolders !== undefined) {
+        for (const id of dirtyFolders) this.queuedDirtyFolders.add(id);
+      } else {
+        this.queuedDirtyFolders = new Set(dirtyFolders);
+      }
       this.scanQueued = true;
       return;
     }
     this.scanning = true;
     try {
+      let batch: ReadonlySet<string> | undefined = dirtyFolders === undefined ? undefined : new Set(dirtyFolders);
       do {
         this.scanQueued = false;
-        await this.scanOnce();
+        await this.scanOnce(batch);
+        // 本次触发期间若有新请求排队:补跑一轮,口径换成排队请求的合并结果
+        if (this.scanQueued) {
+          batch = this.queuedDirtyFolders;
+          this.queuedDirtyFolders = undefined;
+        }
       } while (this.scanQueued);
     } finally {
       this.scanning = false;
@@ -1504,15 +1554,27 @@ export class SyncSessionManager {
     }
   }
 
-  private async scanOnce(): Promise<void> {
+  /**
+   * 一轮扫描本体。onlyFolders 给定时只扫这些目录(watch 事件驱动的按需重扫);
+   * 省略 = 全扫兜底。轮尾的 git 提交检测/通知结算**不**随 onlyFolders 收窄:
+   * 重试台账的补投节奏原本就挂在扫描轮上,watch 架构下轮次变疏,收窄会让
+   * 「内容同步了、提交却少一笔」的补投饿死到下一个兜底周期。
+   */
+  private async scanOnce(onlyFolders?: ReadonlySet<string>): Promise<void> {
     // 整轮计时:见函数尾部的 [perf] 扫描整轮 日志(Termux 排查「扫描吃掉主线程」用)
     const roundStart = performance.now();
     // 本轮真正走到扫描的目录数(被暂停/身份门禁挡住的不计,它们几乎不耗时)
     let roundScannedFolders = 0;
+    // watcher 集合对账兜在每轮开头:目录恢复挂载/身份重采后自动补建监听,
+    // 目录消失后自动摘除(见 syncWatchers)。一次对账只有每目录两次 stat 的成本。
+    this.syncWatchers();
     // 其它共享目录的归一化根路径:扫描某目录时,命中这些路径的子目录视为嵌套共享根,不重复索引
     // (含 baselinePending 的新建目录——父目录在其基线扫描期间也不应重复索引子目录文件)
     const otherRoots = this.folderStates.map((f) => resolve(f.path));
     for (const folder of this.folderStates) {
+      // 只扫指定目录(watch 事件驱动的按需重扫):不在脏名单的目录本轮跳过;
+      // onlyFolders 省略 = 全扫兜底,照旧走全部目录。
+      if (onlyFolders && !onlyFolders.has(folder.id)) continue;
       // 暂停的目录(目录级或全局):数据面整体停摆 —— 不扫描、不广播、不应用变更。
       // 控制面照常(连接保持在线),恢复后由下一轮扫描 / reconcile 继续同步。
       if (this.folderPausedNow(folder)) continue;
@@ -1711,6 +1773,74 @@ export class SyncSessionManager {
     if (this.perfLog && roundMs >= slowRequestMs()) {
       this.perfLog(`[perf] 扫描整轮 ${Math.round(roundMs)}ms(${roundScannedFolders} 个目录)`);
     }
+  }
+
+  /* ==================== 文件系统监听(事件驱动的按需重扫) ==================== */
+
+  /**
+   * 启动文件系统监听(daemon 装配点:cli 在 manager 就绪后调用一次;测试可不调用 ——
+   * 不调用则完全不建 watcher,扫描行为与旧架构一致)。每个「未暂停且身份校验通过」
+   * 的共享目录建一个递归 fs.watch;事件经防抖聚合后驱动该目录的单目录重扫。
+   * 平台不支持递归 watch 时 hub 内部降级并回调 onFallbackScanIntervalChanged,
+   * cli 据此把兜底定时器退回原扫描节奏(warn 只打一次,见 fs-watcher.ts)。
+   */
+  startFolderWatchers(): void {
+    if (this.watchHub || this.closed) return;
+    this.watchHub = new FolderWatchHub({
+      // 防抖窗口:生产 2s;测试经环境变量注入短窗口避免慢测试
+      debounceMs: Number(process.env.SYNCX_FS_WATCH_DEBOUNCE_MS) || DEFAULT_FS_WATCH_DEBOUNCE_MS,
+      onScanDirty: (folderIds) => void this.runScan(folderIds),
+      onDegraded: () => this.notifyFallbackIntervalChanged(),
+      log: (level, line) => this.logger[level](line),
+    });
+    this.syncWatchers();
+  }
+
+  /**
+   * watcher 集合对账:为每个「未暂停且身份校验通过」的目录保持一个监听。
+   * 调用时机:启动、每轮扫描开头(自愈:目录恢复挂载/身份重采后自动补建)、
+   * 暂停状态翻转、配置热重载。暂停目录不建 watcher(恢复时由本函数再建)。
+   */
+  private syncWatchers(): void {
+    if (!this.watchHub) return;
+    const watchables: WatchableFolder[] = [];
+    if (this.fsWatchEnabled) {
+      for (const folder of this.folderStates) {
+        if (this.folderPausedNow(folder)) continue;
+        // 与扫描门禁同口径:身份校验失败(missing/changed/remounted)不建 watcher,
+        // 防止对「可能被换掉的盘」的事件反复触发重扫(重扫本身有门禁,这里省掉无谓 IO)
+        const verdict = checkFolderIdentity(folder.path, folder.config.folderIdentity);
+        if (verdict === 'missing' || verdict === 'changed' || verdict === 'remounted') continue;
+        watchables.push({ id: folder.id, path: folder.path });
+      }
+    }
+    this.watchHub.syncFolders(watchables);
+  }
+
+  /**
+   * 兜底全量扫描的当前间隔(毫秒):
+   *  - 集成测试显式注入 SYNCX_SCAN_INTERVAL_MS 时以它为准(测试钩子,保留原节奏);
+   *  - watcher 正常工作(fsWatchEnabled 且未降级)= fsWatchFallbackScanSecs(缺省 600s);
+   *  - watcher 不可用(未启动 / 被配置关闭 / 平台降级)= 原扫描节奏(5s 或环境变量)。
+   */
+  fallbackScanIntervalMs(): number {
+    const legacy = Number(process.env.SYNCX_SCAN_INTERVAL_MS) || 5000;
+    if (process.env.SYNCX_SCAN_INTERVAL_MS !== undefined && process.env.SYNCX_SCAN_INTERVAL_MS !== '') {
+      return legacy;
+    }
+    if (!this.fsWatchEnabled) return legacy;
+    if (!this.watchHub || !this.watchHub.healthy) return legacy;
+    return this.fsWatchFallbackScanSecs * 1000;
+  }
+
+  /** 兜底扫描间隔变化时通知装配方(cli 重挂定时器);间隔没变不打扰。 */
+  private notifyFallbackIntervalChanged(): void {
+    this.onFallbackScanIntervalChanged?.(this.fallbackScanIntervalMs());
+  }
+
+  /** 观测:某目录当前是否挂着 fs.watch(测试用;运行期仅供诊断)。 */
+  isFolderWatched(folderId: string): boolean {
+    return this.watchHub?.hasWatcher(folderId) ?? false;
   }
 
   /* ==================== Git 提交同步 ==================== */
@@ -4304,6 +4434,8 @@ export class SyncSessionManager {
     for (const session of this.activeSessions) {
       this.reconcileSessionFolders(session);
     }
+    // 暂停集合变了,watcher 集合跟着对账:暂停目录摘监听,恢复目录重建(见 syncWatchers)
+    this.syncWatchers();
     this.notifyStatus();
   }
 
@@ -4314,6 +4446,10 @@ export class SyncSessionManager {
     if (folder) folder.config.paused = paused;
     this.applyPausedState();
     this.logger.info(`folder sync ${paused ? 'paused' : 'resumed'}: ${folderId}`);
+    // 恢复时立即补一轮:watch 架构下停摆期间没有短周期定时心跳兜底(兜底间隔是
+    // 分钟级),停摆期间的本机改动要在恢复这一刻尽快扫出来 —— 此前由 5s 定时
+    // 扫描顺带完成,现在必须显式触发(watcher 也是恢复这一刻才重建的)
+    if (!paused) void this.runScan();
   }
 
   /**
@@ -4398,6 +4534,8 @@ export class SyncSessionManager {
     this.globalPaused = paused;
     this.applyPausedState();
     this.logger.info(`global sync ${paused ? 'paused' : 'resumed'}`);
+    // 恢复时立即补一轮,理由同 setFolderPaused(watch 架构下停摆期没有短周期兜底)
+    if (!paused) void this.runScan();
   }
 
   /**
@@ -4407,8 +4545,11 @@ export class SyncSessionManager {
    */
   setPowerGuardReason(reason: string | null): void {
     if (reason === this.powerGuardReason) return;
+    const prev = this.powerGuardReason;
     this.powerGuardReason = reason;
     this.applyPausedState();
+    // 解除挂起后立即补扫,理由同 setFolderPaused(停摆期间没有短周期兜底心跳)
+    if (prev !== null && reason === null) void this.runScan();
   }
 
   /** 当前电源守卫挂起原因(buildStatus 徽标用;未启用恒为 null)。 */
@@ -4722,16 +4863,23 @@ export class SyncSessionManager {
     persistGlobalSettings(this.configPath, patch);
     const prevMaxSendKbps = this.maxSendKbps;
     const prevVersionsPerPath = this.versionsPerPath;
+    const prevFallbackInterval = this.fallbackScanIntervalMs();
     const next = loadConfig(this.configPath);
     this.maxSendKbps = next.maxSendKbps;
     this.versionsPerPath = next.versionsPerPath;
     this.syncSchedule = next.syncSchedule;
     this.scheduleOverrideUntil = next.scheduleOverrideUntil;
     setHistoryMaxEvents(next.historyMaxEvents);
+    // fs-watch 镜像同步:开关关 = 摘除全部监听退回纯定时;间隔变化 = 兜底节奏跟着变
+    this.fsWatchEnabled = next.fsWatchEnabled !== false;
+    this.fsWatchFallbackScanSecs = next.fsWatchFallbackScanSecs ?? DEFAULT_FS_WATCH_FALLBACK_SCAN_SECS;
+    if (this.watchHub) this.syncWatchers();
     if (prevMaxSendKbps !== this.maxSendKbps) this.rebuildRateLimitedTransports();
     if (prevVersionsPerPath !== this.versionsPerPath) this.rebuildExecutors();
     // 全局时段改了要立刻重算:改了设置的人期待的是「现在就生效」,不是下一分钟
     this.checkScheduleTransitions();
+    // 兜底扫描间隔变了就通知装配方重挂定时器(设置弹窗改完即刻生效)
+    if (this.fallbackScanIntervalMs() !== prevFallbackInterval) this.notifyFallbackIntervalChanged();
     this.notifyStatus();
     this.logger.info(`global settings updated: ${JSON.stringify(patch)}`);
   }
@@ -4780,8 +4928,11 @@ export class SyncSessionManager {
       // 全局设置镜像随重载同步(手改 config.json 的路径):生效方式与 setGlobalSettings 一致
       const prevMaxSendKbps = this.maxSendKbps;
       const prevVersionsPerPath = this.versionsPerPath;
+      const prevFallbackInterval = this.fallbackScanIntervalMs();
       this.maxSendKbps = newConfig.maxSendKbps;
       this.versionsPerPath = newConfig.versionsPerPath;
+      this.fsWatchEnabled = newConfig.fsWatchEnabled !== false;
+      this.fsWatchFallbackScanSecs = newConfig.fsWatchFallbackScanSecs ?? DEFAULT_FS_WATCH_FALLBACK_SCAN_SECS;
       this.syncSchedule = newConfig.syncSchedule;
       this.scheduleOverrideUntil = newConfig.scheduleOverrideUntil;
       setHistoryMaxEvents(newConfig.historyMaxEvents);
@@ -4920,6 +5071,10 @@ export class SyncSessionManager {
       for (const session of this.activeSessions) {
         this.pushFolderSyncList(session.remoteDeviceId);
       }
+      // 目录增删/改路径/暂停状态随配置变化后,watcher 集合跟着对账
+      if (this.watchHub) this.syncWatchers();
+      // 兜底扫描间隔变了就通知装配方重挂定时器(手改 config.json 也能即刻生效)
+      if (this.fallbackScanIntervalMs() !== prevFallbackInterval) this.notifyFallbackIntervalChanged();
       // 目录增删/改路径/改接收模式都会改变状态接口的下发内容
       this.notifyStatus();
       return newConfig;
@@ -4977,6 +5132,8 @@ export class SyncSessionManager {
       }
     }
     this.peerSockets.clear();
+    // 文件系统监听:关定时器与全部 watcher,不留悬挂句柄
+    this.watchHub?.close();
     for (const folder of this.folderStates) {
       folder.index.close();
     }

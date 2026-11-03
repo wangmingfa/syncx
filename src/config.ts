@@ -461,6 +461,17 @@ export interface Config {
   /** 每目录保留的同步记录条数上限(超出轮转,见 history.ts)。缺省 2000。 */
   historyMaxEvents?: number;
   /**
+   * 文件系统监听驱动扫描的总开关(缺省 true):每个共享目录挂一个递归 fs.watch,
+   * 事件经防抖聚合后驱动该目录的单目录按需重扫(见 fs-watcher.ts);
+   * false = 退回纯定时全量扫描(原扫描节奏)。
+   */
+  fsWatchEnabled?: boolean;
+  /**
+   * 兜底全量扫描间隔(秒):watcher 正常工作时定时全扫只做兜底,缺省 600;
+   * watcher 不可用(平台降级 / fsWatchEnabled=false)时退回原扫描间隔,本值不生效。
+   */
+  fsWatchFallbackScanSecs?: number;
+  /**
    * 同步事件 Webhook 地址(见 webhook.ts):完成 / 冲突 / 错误三类事件 POST 到这里。
    * 飞书群机器人地址自动按飞书格式加签。缺省/空 = 关闭。
    */
@@ -535,6 +546,9 @@ export const DEFAULT_CONFIG: Config = {
   pendingOffers: [],
   formatVersion: FORMAT_VERSION,
 };
+
+/** 兜底全量扫描间隔缺省值(秒):watcher 正常工作时,定时全扫只做兜底(见 fs-watcher.ts)。 */
+export const DEFAULT_FS_WATCH_FALLBACK_SCAN_SECS = 600;
 
 /** 数据目录由更新版本生成时抛出的错误;CLI 捕获后打印指引并以非零码退出。 */
 export class FormatVersionError extends Error {
@@ -643,6 +657,9 @@ export function loadConfig(configPath: string): Config {
     maxSendKbps: sanitizeCount(parsed.maxSendKbps, 0),
     versionsPerPath: sanitizeCount(parsed.versionsPerPath, 1),
     historyMaxEvents: sanitizeCount(parsed.historyMaxEvents, 1),
+    // 文件系统监听:开关只认 false(缺省 true,与 holidayAutoFetch 同一口径);间隔非法丢弃回默认 600
+    fsWatchEnabled: parsed.fsWatchEnabled === false ? false : undefined,
+    fsWatchFallbackScanSecs: sanitizeCount(parsed.fsWatchFallbackScanSecs, 1),
     // Webhook:手改 config.json 填了非字符串/空串时丢弃,与全局设置同一套「坏值回退」口径
     webhookUrl: normalizeWebhookString(parsed.webhookUrl, 500),
     webhookSecret: normalizeWebhookString(parsed.webhookSecret, 200),

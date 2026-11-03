@@ -187,23 +187,44 @@ async test "fsWatch:目录被删后 watcher 失效重建,恢复事件驱动扫�
       watch_poll_entries(handle, 1L, timeout_ms=5_000),
       msg="存量文件应由首轮兜底扫描入索引",
     )
-    // 整树删除:a.txt 的删除事件会让 watcher 报一批 Remove,随后根目录
-    // 消失使 wait 抛错(目录树扫描 ENOENT)→ 失效重建分支
+    // 等 watcher 真正盯着**原目录**再动手:否则删除可能发生在建 watcher
+    // 之前,后面的「失效重建」就无从谈起
+    assert_true(
+      watch_poll(() => stats.start_count() >= 1, timeout_ms=5_000),
+      msg="watcher 应在删除前已启动",
+    )
+    // 整树删除,并让缺席状态保持到探针观测到为止:wait 对「根目录被删」的
+    // 行为平台相关(macOS kqueue 可能既不报错也不再来事件),存活探针会在
+    // 超时片发现根目录没了 → 失效重建分支;缺席期间重建尝试失败 → 降级
     @fs.rmdir(root, recursive=true)
-    // 原地重建:重建重试(或降级期重试)建出新 watcher
+    assert_true(
+      watch_poll(() => stats.rebuild_count() >= 1, timeout_ms=10_000),
+      msg="目录缺席应被探针发现并计入重建统计",
+    )
+    // 原地重建:降级期的周期重试应建出新 watcher 接管
     @fs.mkdir(root, recursive=true, allow_exist=true)
     assert_true(
       watch_poll(() => stats.start_count() >= 2, timeout_ms=10_000),
       msg="目录重建后 watcher 应重建(启动次数 ≥ 2)",
     )
-    assert_true(
-      watch_poll(() => stats.rebuild_count() >= 1, timeout_ms=2_000),
-      msg="失效应计入重建统计",
-    )
     @fs.write_file("\{root}/b.txt", "beta", create_mode=CreateOrTruncate)
+    // 收敛态:缺席期的周期扫描已把 a.txt 落成墓碑(deleted=1 不计 entries),
+    // b.txt 经事件扫描入索引 → entries==1 且墓碑 ≥ 1。中间态可能短暂出现
+    // entries==2(b.txt 先于 a.txt 墓碑被扫到),收敛判定与竞争顺序无关
     assert_true(
-      watch_poll_entries(handle, 2L, timeout_ms=1_500),
-      msg="重建后写入的文件应经事件触发扫描入索引",
+      watch_poll(
+        () => {
+          let snapshot = handle.snapshot()
+          for folder in snapshot.folders {
+            if folder.entries == 1L && folder.tombstones >= 1L {
+              return true
+            }
+          }
+          false
+        },
+        timeout_ms=3_000,
+      ),
+      msg="重建后 b.txt 应经事件扫描入索引,a.txt 应已落墓碑",
     )
   })
 }

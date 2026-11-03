@@ -235,57 +235,52 @@ fn sweep(
         // `&state.watcher` 当判据会让不可变借用贯穿整个 match,分支体没法赋值。
         let watched = state.watcher.is_some();
         let current = folder_stam(&state.root);
-        match (watched, current) {
+        // Some(原因) = 需要(重)建监听并立即补扫。目录消失与「身份已变(原位重建)」
+        // 都把旧监听关掉 —— 按 inode 的监听已死,统一走同一条重建路径。
+        let rebuild: Option<&'static str> = match (watched, current) {
             // 活着且身份未变:健康,无事可做
-            (true, Some(stam)) if state.stam == Some(stam) => {}
-            // 身份变了(目录被删后原位重建):旧监听按 inode 已经死了,关闭重建
+            (true, Some(stam)) if state.stam == Some(stam) => None,
+            // 身份变了(目录被删后原位重建)
             (true, Some(_)) => {
-                tracing::info!(folder = %state.id, "共享目录身份已变,重建 watcher 并立即触发一轮扫描");
                 state.watcher = None;
                 state.stam = None;
-                if let Err(error) = try_watch(state, window, raw_tx) {
-                    state.degraded = true;
-                    tracing::warn!(folder = %state.id, %error, "watcher 重建失败,该目录退回定时扫描");
-                }
-                let _ = rescan_tx.send(RescanRequest {
-                    folder: state.id.clone(),
-                    events: 0,
-                    reason: RescanReason::Rebuild,
-                });
+                Some("身份已变,重建")
             }
             // 目录消失:只关不建,期间不崩;恢复交给下一轮巡检
             (true, None) => {
                 tracing::debug!(folder = %state.id, "共享目录消失,关闭 watcher 等待重建");
                 state.watcher = None;
                 state.stam = None;
+                None
             }
-            // 曾失效、目录回来了:重建 + 立即补扫
-            (false, Some(_)) => {
-                match try_watch(state, window, raw_tx) {
-                    Ok(()) => {
-                        tracing::info!(folder = %state.id, "共享目录恢复,watcher 重建,立即触发一轮扫描");
-                        state.degraded = false;
-                        state.degrade_warned = false;
-                    }
-                    Err(error) => {
-                        if !state.degrade_warned {
-                            tracing::warn!(folder = %state.id, %error, "watcher 创建失败,该目录退回定时扫描");
-                            state.degrade_warned = true;
-                        }
-                        state.degraded = true;
-                    }
-                }
-                // 只有真重建成功才补扫;失败的目录由兜底定时器覆盖
-                if state.watcher.is_some() {
-                    let _ = rescan_tx.send(RescanRequest {
-                        folder: state.id.clone(),
-                        events: 0,
-                        reason: RescanReason::Rebuild,
-                    });
-                }
-            }
+            // 曾失效、目录回来了
+            (false, Some(_)) => Some("恢复,"),
             // 仍不存在:等
-            (false, None) => {}
+            (false, None) => None,
+        };
+        let Some(why) = rebuild else { continue };
+        match try_watch(state, window, raw_tx) {
+            Ok(()) => {
+                tracing::info!(folder = %state.id, "共享目录{why}watcher 重建,立即触发一轮扫描");
+                state.degraded = false;
+                state.degrade_warned = false;
+            }
+            Err(error) => {
+                // 降级 warn 只发一次,直到成功为止(不刷屏)
+                if !state.degrade_warned {
+                    tracing::warn!(folder = %state.id, %error, "watcher 创建失败,该目录退回定时扫描");
+                    state.degrade_warned = true;
+                }
+                state.degraded = true;
+            }
+        }
+        // 只有真重建成功才补扫;失败的目录由兜底定时器覆盖
+        if state.watcher.is_some() {
+            let _ = rescan_tx.send(RescanRequest {
+                folder: state.id.clone(),
+                events: 0,
+                reason: RescanReason::Rebuild,
+            });
         }
     }
 }
