@@ -31,6 +31,21 @@ export function pickSink(perfLog?: PerfLog): PerfLog | null {
   return logAllRequests() ? (line) => console.log(line) : null;
 }
 
+// ---- 进程级共享探针(供不带 deps 的模块使用:git-monitor / executor 等) ----
+// daemon 启动时注入一次;测试/工具不注入则静默(规则与 pickSink 相同)。
+
+let processSink: PerfLog | null = null;
+
+/** daemon 装配时注入进程级落点;传 null 撤销。 */
+export function setProcessPerfSink(sink: PerfLog | null): void {
+  processSink = sink;
+}
+
+/** 取当前生效的进程级落点:显式注入优先,否则仅在 SYNCX_PERF_LOG=1 时走 console。 */
+export function processPerfSink(): PerfLog | null {
+  return processSink ?? (logAllRequests() ? (line) => console.log(line) : null);
+}
+
 /**
  * 包装控制服务的请求处理器:响应结束时按阈值记一笔耗时。
  * method/path/status 一起带上,慢请求一眼定位到端点;duration 含响应体写完

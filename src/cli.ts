@@ -34,7 +34,7 @@ import { createWebhookNotifier } from './webhook.js';
 import { createPowerGuard } from './powerguard.js';
 import { execFile } from 'node:child_process';
 import { createTerminalHub } from './api/terminal.js';
-import { startLoopLagSampler } from './api/perf.js';
+import { startLoopLagSampler, setProcessPerfSink } from './api/perf.js';
 import { listDirectory, resolveFolderSubpath, deleteFolderEntry } from './filebrowser.js';
 import { createShare, listShares, noteShareDownload, revokeShare, verifyShare } from './share.js';
 import { buildStatus, type DeviceStatus, type SyncProgress, type FolderErrorStatus } from './status.js';
@@ -1270,6 +1270,8 @@ export async function run(args: ParsedArgs): Promise<void> {
   // 事件循环卡顿采样:接口本身很快但 UI 依然卡时,只能是同步任务饿死主线程,
   // 这个采样器是唯一能逮住它的探针(阈值与慢请求同源,默认 300ms)
   startLoopLagSampler((line) => logger.warn(line));
+  // 进程级探针落点:git 同步调用 / executor fsync 等无 deps 模块经此记 [perf] 日志
+  setProcessPerfSink((line) => logger.info(line));
 
   // --- 端口绑定成功,输出启动信息 ---
   logger.info(`control UI (token in ${join(configDir, 'control.token')}):`);

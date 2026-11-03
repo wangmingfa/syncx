@@ -8,6 +8,8 @@ import { isUnchanged } from './scanner.js';
 import { mergeVersions, incrementVersion, createVersionVector } from './version.js';
 import { entryFingerprint, partialPaths, readManifest, removePartial, writeManifest, SlotBitmap, type PartialManifest } from './partial-store.js';
 import type { SlotSample, SlotVerdict } from './drift.js';
+import { performance } from 'node:perf_hooks';
+import { processPerfSink, slowRequestMs } from './api/perf.js';
 
 /**
  * 一个在途接收的落盘句柄:块到达即按最终偏移写进 `<target>.syncx-tmp`,
@@ -459,7 +461,18 @@ export function createLocalExecutor(
     /** 把「哪些槽位已在盘上」交代给磁盘:先 fsync 字节,再写位图(见 PARTIAL_COMMIT_SLOTS)。 */
     function commit(): void {
       if (dirty === 0 || fd === undefined) return;
-      fsyncSync(fd);
+      // fsync 在慢存储(Android/Termux)上单次可达秒级,接收高峰期是接口卡顿的另一嫌疑;
+      // 超阈值记一笔,归因用(阈值与慢请求同源,未注入探针时零开销)
+      const sink = processPerfSink();
+      const syncStart = performance.now();
+      try {
+        fsyncSync(fd);
+      } finally {
+        if (sink) {
+          const ms = performance.now() - syncStart;
+          if (ms >= slowRequestMs()) sink(`[perf] fsync ${entry.path} ${Math.round(ms)}ms`);
+        }
+      }
       const m: PartialManifest = {
         v: 1,
         fingerprint,

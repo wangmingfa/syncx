@@ -21,8 +21,33 @@
  */
 import { existsSync, statSync, unlinkSync } from 'node:fs';
 import { basename, join, resolve } from 'node:path';
-import { execFile, execFileSync } from 'node:child_process';
+import { execFile, execFileSync, type ExecFileSyncOptions } from 'node:child_process';
+import { performance } from 'node:perf_hooks';
 import { SCRATCH_SUFFIXES } from './ignore.js';
+import { processPerfSink, slowRequestMs } from './api/perf.js';
+
+/**
+ * 所有同步 git 调用统一走这里:子进程执行期间霸占主线程,慢设备(Termux/Android)
+ * 上一条 git 就能把全部接口拖住(实测 ETIMEDOUT、数十秒级卡顿均源于此)。超过
+ * 慢请求阈值(SYNCX_SLOW_REQ_MS 同源,缺省 300ms)记一笔 `[perf] git ...`,
+ * 定位「卡在哪个仓库的哪条命令」;未注入探针且未开 SYNCX_PERF_LOG 时零开销。
+ */
+export function gitSync<T extends ExecFileSyncOptions>(args: string[], opts: T): T extends { encoding: 'utf8' } ? string : Buffer {
+  const sink = processPerfSink();
+  const start = performance.now();
+  try {
+    return execFileSync('git', args, opts) as never;
+  } finally {
+    if (sink) {
+      const ms = performance.now() - start;
+      if (ms >= slowRequestMs()) {
+        const cmd = args.slice(0, 2).join(' ');
+        const repo = basename(String(opts.cwd ?? '.'));
+        sink(`[perf] git ${cmd}(${repo}) ${Math.round(ms)}ms`);
+      }
+    }
+  }
+}
 
 export interface CommitInfo {
   /** 新提交的完整哈希 */
@@ -53,7 +78,7 @@ export function isGitRepo(folderPath: string): boolean {
 /** 获取 HEAD 当前的提交哈希;无提交(空仓库)返回 null */
 export function getLastCommitHash(folderPath: string): string | null {
   try {
-    const hash = execFileSync('git', ['rev-parse', 'HEAD'], {
+    const hash = gitSync(['rev-parse', 'HEAD'], {
       cwd: folderPath,
       encoding: 'utf8',
       stdio: ['ignore', 'pipe', 'ignore'],
@@ -74,8 +99,7 @@ export function getLastCommitHash(folderPath: string): string | null {
 export function getCommitInfo(folderPath: string, fromHash: string, toHash: string): CommitInfo | null {
   try {
     // 获取提交消息:首行 subject + body
-    const logOutput = execFileSync(
-      'git',
+    const logOutput = gitSync(
       ['log', '--format=%H%n%P%n%s%n%b%n---SYNCX-END---', `${fromHash}..${toHash}`],
       {
         cwd: folderPath,
@@ -113,8 +137,7 @@ export function getCommitInfo(folderPath: string, fromHash: string, toHash: stri
     const fullMessage = lines.slice(2).join('\n').trim();
 
     // 获取变更文件列表
-    const diffNameOnly = execFileSync(
-      'git',
+    const diffNameOnly = gitSync(
       ['diff', '--name-only', `${fromHash}..${toHash}`],
       {
         cwd: folderPath,
@@ -130,8 +153,7 @@ export function getCommitInfo(folderPath: string, fromHash: string, toHash: stri
     // 获取 diff stat(可选,信息展示用)
     let diffStat: string | undefined;
     try {
-      diffStat = execFileSync(
-        'git',
+      diffStat = gitSync(
         ['diff', '--stat', `${fromHash}..${toHash}`],
         {
           cwd: folderPath,
@@ -238,7 +260,7 @@ export function listRecentCommits(
   const skipArgs = skip > 0 ? ['--skip', String(skip)] : [];
   let out: string;
   try {
-    out = execFileSync('git', ['log', '-n', String(limit), ...skipArgs, '-z', '--no-color', '--no-show-signature', `--format=${GIT_LOG_FORMAT}`], {
+    out = gitSync(['log', '-n', String(limit), ...skipArgs, '-z', '--no-color', '--no-show-signature', `--format=${GIT_LOG_FORMAT}`], {
       cwd: folderPath,
       encoding: 'utf8',
       stdio: ['ignore', 'pipe', 'pipe'],
@@ -297,8 +319,7 @@ export function isCommitHash(hash: string): boolean {
 export function listCommitFiles(folderPath: string, hash: string): GitCommitFileEntry[] {
   if (!isCommitHash(hash)) throw new Error('非法的提交哈希');
 
-  const out = execFileSync(
-    'git',
+  const out = gitSync(
     ['show', '--format=', '--name-status', '-z', '-M', '--no-color', hash],
     {
       cwd: folderPath,
@@ -342,7 +363,7 @@ export function listCommitFiles(folderPath: string, hash: string): GitCommitFile
 export function getCommitParents(folderPath: string, hash: string): string[] {
   if (!isCommitHash(hash)) throw new Error('非法的提交哈希');
 
-  const out = execFileSync('git', ['rev-list', '--parents', '-n', '1', hash], {
+  const out = gitSync(['rev-list', '--parents', '-n', '1', hash], {
     cwd: folderPath,
     encoding: 'utf8',
     stdio: ['ignore', 'pipe', 'pipe'],
@@ -376,7 +397,7 @@ const SCRATCH_PATHSPECS = SCRATCH_SUFFIXES.flatMap((suffix) => [`:(exclude)*${su
  */
 export function hasUncommittedChanges(folderPath: string): boolean {
   try {
-    const status = execFileSync('git', ['status', '--porcelain', '--', ...SCRATCH_PATHSPECS], {
+    const status = gitSync(['status', '--porcelain', '--', ...SCRATCH_PATHSPECS], {
       cwd: folderPath,
       encoding: 'utf8',
       stdio: ['ignore', 'pipe', 'ignore'],
@@ -421,7 +442,7 @@ export const GIT_CHANGES_MAX = 2000;
 export function getUncommittedChanges(folderPath: string): { entries: GitChangeEntry[]; truncated: boolean } | null {
   if (!isGitRepo(folderPath)) return null;
   try {
-    const out = execFileSync('git', ['status', '--porcelain', '-z', '--', ...SCRATCH_PATHSPECS], {
+    const out = gitSync(['status', '--porcelain', '-z', '--', ...SCRATCH_PATHSPECS], {
       cwd: folderPath,
       encoding: 'utf8',
       stdio: ['ignore', 'pipe', 'ignore'],
@@ -488,7 +509,7 @@ export function readFileAt(folderPath: string, rev: string, relPath: string): He
   try {
     return {
       kind: 'bytes',
-      bytes: execFileSync('git', ['show', `${rev}:${relPath}`], {
+      bytes: gitSync(['show', `${rev}:${relPath}`], {
         cwd: folderPath,
         encoding: 'buffer',
         stdio: ['ignore', 'pipe', 'pipe'],
@@ -530,7 +551,7 @@ export interface AutoCommitResult {
 export function autoCommit(folderPath: string, message: string): AutoCommitResult {
   try {
     // 先 stage 所有变更(含删除、新增),但把 syncx 的在途中间态挡在外面(见 SCRATCH_PATHSPECS)
-    execFileSync('git', ['add', '-A', '--', ...SCRATCH_PATHSPECS], {
+    gitSync(['add', '-A', '--', ...SCRATCH_PATHSPECS], {
       cwd: folderPath,
       stdio: ['ignore', 'ignore', 'pipe'],
       windowsHide: true,
@@ -538,7 +559,7 @@ export function autoCommit(folderPath: string, message: string): AutoCommitResul
     });
 
     // 提交:使用参数数组形式避免 shell 注入
-    execFileSync('git', ['commit', '-m', message, '--allow-empty'], {
+    gitSync(['commit', '-m', message, '--allow-empty'], {
       cwd: folderPath,
       stdio: ['ignore', 'ignore', 'pipe'],
       windowsHide: true,
@@ -577,7 +598,7 @@ export interface GitIndexLockRemoveResult {
 
 /** 向 git 要 index.lock 的绝对路径(worktree 的 .git 是文件,不能拼 join(folder, '.git')）。 */
 function gitIndexLockPath(folderPath: string): string {
-  const out = execFileSync('git', ['rev-parse', '--git-path', 'index.lock'], {
+  const out = gitSync(['rev-parse', '--git-path', 'index.lock'], {
     cwd: folderPath,
     encoding: 'utf8',
     stdio: ['ignore', 'pipe', 'ignore'],
@@ -647,7 +668,7 @@ export function countUnpushedCommits(folderPath: string): number | null {
   // 会让 git 向上回溯、数到外层仓库的提交 —— 那与本函数「非仓库回 null」的契约不符。
   if (!isGitRepo(folderPath)) return null;
   try {
-    const out = execFileSync('git', ['rev-list', '--count', '@{upstream}..HEAD'], {
+    const out = gitSync(['rev-list', '--count', '@{upstream}..HEAD'], {
       cwd: folderPath,
       encoding: 'utf8',
       stdio: ['ignore', 'pipe', 'ignore'],
@@ -678,8 +699,7 @@ export function listUnpushedCommits(folderPath: string, limit = GIT_UNPUSHED_LIM
   if (!isGitRepo(folderPath)) return null;
   let out: string;
   try {
-    out = execFileSync(
-      'git',
+    out = gitSync(
       ['log', '-n', String(limit), '-z', '--no-color', '--no-show-signature', `--format=${GIT_LOG_FORMAT}`, '@{upstream}..HEAD'],
       {
         cwd: folderPath,
@@ -751,7 +771,7 @@ export function gitPush(folderPath: string, timeoutMs = GIT_PUSH_TIMEOUT_MS): Pr
  */
 export function getUpstreamCommitHash(folderPath: string): string | null {
   try {
-    const out = execFileSync('git', ['rev-parse', '--verify', '@{upstream}'], {
+    const out = gitSync(['rev-parse', '--verify', '@{upstream}'], {
       cwd: folderPath,
       encoding: 'utf8',
       stdio: ['ignore', 'pipe', 'ignore'],
@@ -775,8 +795,7 @@ export function getUpstreamCommitHash(folderPath: string): string | null {
 export function listRawCommitMessages(folderPath: string, range: string): string[] | null {
   let out: string;
   try {
-    out = execFileSync(
-      'git',
+    out = gitSync(
       ['log', '-z', '--no-color', '--no-show-signature', '--format=%B', range],
       {
         cwd: folderPath,
