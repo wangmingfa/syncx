@@ -475,6 +475,9 @@ export async function run(args: ParsedArgs): Promise<void> {
       // 节假日日历:时段规则里的「工作日/休息日」据此判定。判定路径只读内存/盘上缓存,
       // 永不触网(拉取是下面的后台动作),所以无网/拉取失败都只是数据不新鲜,不影响放行。
       holidays,
+      // 扫描耗时探针与慢请求/事件循环卡顿共用同一条 perfLog 线(见 api/perf.ts),
+      // 随 --log-file 持久化,Termux 等低端机排查「扫描吃掉主线程」用
+      perfLog: (line) => logger.info(line),
     },
     config.sharedFolders,
   );

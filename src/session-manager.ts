@@ -41,7 +41,8 @@ import {
 import type { WebhookEvent } from './webhook.js';
 import { createSyncPeer, type DriftState, type PeerTransport, type ReceiveClaim, type SyncPeer } from './peer.js';
 import { freeBytesAt, DISK_GUARD_MIN_FREE_BYTES } from './disk.js';
-import { scanFolder } from './scanner.js';
+import { scanFolderAsync } from './scanner.js';
+import { slowRequestMs } from './api/perf.js';
 import type { IndexEntry } from './index.js';
 import { hashBlock, splitIntoBlocks, readBlockAt, chunkHashes, readChunkAt } from './blockstore.js';
 import { createVersionVector, incrementVersion, mergeVersions, type VersionVector } from './version.js';
@@ -623,6 +624,12 @@ export interface SessionManagerDeps {
    * 不注入 = 按星期几退化。判定路径只在内存里查,永不触网。
    */
   holidays?: HolidayStore;
+  /**
+   * 性能探针落点(与 api/perf.ts 的 PerfLog 同形):扫描耗时探针经它与慢请求、
+   * 事件循环卡顿走同一条日志线(--log-file 持久化)。cli 注入 logger.info;
+   * 缺省(测试/最小 deps)不接,扫描计时完全静默。
+   */
+  perfLog?: (line: string) => void;
 }
 
 export class SyncSessionManager {
@@ -642,6 +649,8 @@ export class SyncSessionManager {
   private readonly probeNetwork: () => boolean;
   /** 网络恢复回调(见 SessionManagerDeps.onNetworkRecovered)。 */
   private readonly onNetworkRecovered?: () => void;
+  /** 性能探针落点(见 SessionManagerDeps.perfLog);缺省不接,扫描计时静默。 */
+  private readonly perfLog?: (line: string) => void;
   /**
    * 当前是否在网(无非回环可用接口 = 离线)。驱动三件事:重连退避拉长、mDNS
    * 广播门控、恢复时立即补拨。**不影响**扫描与心跳 —— 扫描照跑才能把本地改动
@@ -656,6 +665,13 @@ export class SyncSessionManager {
   private readonly folderWasTransferring = new Map<string, boolean>();
   /** 目录错误 → webhook 的去重:同一目录同一条错误只外推一次(扫描会反复记同一错误)。 */
   private readonly lastWebhookError = new Map<string, string>();
+  /**
+   * folder-sync-list 日志降噪:记每个对端最近一条 info 日志的「消息内容指纹 + 时刻」。
+   * 会话建立/重连会让对端在 1 秒内重播同一份宣告 6-10 条(生产日志实证),内容没变
+   * 就是纯噪声 —— 重复期间降 debug,内容指纹(含 pendingFolderIds)变了才回到 info。
+   * 状态更新(remoteFolders / notifyStatus)不受降噪影响,永远照常执行。
+   */
+  private readonly lastFolderSyncListSig = new Map<string, { sig: string; atMs: number }>();
 
   // --- 目录级同步错误采集(Web UI 目录卡上的错误提示) ---
   // 记录每个目录最近一次同步失败的错误信息(内存态,不落盘);同一目录再次出错覆盖,
@@ -863,6 +879,7 @@ export class SyncSessionManager {
     this.probeNetwork = deps.probeNetwork ?? hasRoutableInterface;
     this.onNetworkRecovered = deps.onNetworkRecovered;
     this.holidays = deps.holidays;
+    this.perfLog = deps.perfLog;
     // drift 哨兵本地巡检的旋钮:构造时读一次,与 peer 侧建管线时读的是同一对环境变量
     const driftKnobs = readDriftKnobs();
     this.driftSampleN = driftKnobs.sampleN;
@@ -1488,6 +1505,10 @@ export class SyncSessionManager {
   }
 
   private async scanOnce(): Promise<void> {
+    // 整轮计时:见函数尾部的 [perf] 扫描整轮 日志(Termux 排查「扫描吃掉主线程」用)
+    const roundStart = performance.now();
+    // 本轮真正走到扫描的目录数(被暂停/身份门禁挡住的不计,它们几乎不耗时)
+    let roundScannedFolders = 0;
     // 其它共享目录的归一化根路径:扫描某目录时,命中这些路径的子目录视为嵌套共享根,不重复索引
     // (含 baselinePending 的新建目录——父目录在其基线扫描期间也不应重复索引子目录文件)
     const otherRoots = this.folderStates.map((f) => resolve(f.path));
@@ -1548,12 +1569,20 @@ export class SyncSessionManager {
         continue;
       }
       // 每轮扫描重读忽略文件:.gitignore(按目录配置可关)+ .syncxignore,改动即生效
+      // 扫描耗时探针:与慢请求/事件循环卡顿共用同一条 perfLog 线与同一阈值
+      // (SYNCX_SLOW_REQ_MS,缺省 300ms)。异步扫描已让出主线程,但慢目录本身仍是
+      // 一轮里最大的耗时项,把它点名出来(仅 ≥ 阈值才记,平时零噪声)。
+      const scanStart = performance.now();
+      roundScannedFolders += 1;
       let diff;
       try {
         folder.ignoreLines = readFolderIgnoreLines(folder.path, folder.config.useGitignore !== false);
         // 嵌套共享根:排除自身,其余共享根传入扫描器,使父目录不再重复索引子目录文件
         const nestedRoots = otherRoots.filter((r) => r !== resolve(folder.path));
-        diff = scanFolder(
+        // 异步扫描(scanFolderAsync):遍历语义与同步版 scanFolder 完全一致,
+        // 但 readdir/stat 之间定期让出主线程,Termux 等慢存储上不再把事件循环饿死。
+        // 同步版保留给测试/工具路径。
+        diff = await scanFolderAsync(
           folder.path,
           folder.index,
           parseIgnoreRules(folder.ignoreLines),
@@ -1564,6 +1593,10 @@ export class SyncSessionManager {
         // 扫描本身失败(如目录读取权限异常):记录到目录卡,下一轮扫描重试
         this.recordFolderError(folder.id, error, '扫描失败');
         continue;
+      }
+      const scanMs = performance.now() - scanStart;
+      if (this.perfLog && scanMs >= slowRequestMs()) {
+        this.perfLog(`[perf] 扫描 ${folder.path} ${Math.round(scanMs)}ms(${diff.filesSeen} 条目)`);
       }
       // 徽标计数源:副本已硬忽略不进索引,取扫描顺带盘点的结果(零额外 IO)
       folder.conflictCount = diff.conflictCount;
@@ -1671,6 +1704,13 @@ export class SyncSessionManager {
     }
     // 扫描完成后检查 git 提交(若有目录启用了 gitSync)
     await this.checkGitCommits();
+    // 整轮耗时探针:含各目录落库/广播与 git 提交盘点 —— 这是 5s 周期 tick 实际
+    // 占用主线程的总量(Termux 实证「~5s 卡顿 / 6s 周期」时,这条日志直接回答
+    // 「一轮扫描整体吃掉多少」;阈值与单目录口径同源)。
+    const roundMs = performance.now() - roundStart;
+    if (this.perfLog && roundMs >= slowRequestMs()) {
+      this.perfLog(`[perf] 扫描整轮 ${Math.round(roundMs)}ms(${roundScannedFolders} 个目录)`);
+    }
   }
 
   /* ==================== Git 提交同步 ==================== */
@@ -3597,7 +3637,20 @@ export class SyncSessionManager {
         if (pruned > 0) {
           this.logger.info(`pruned ${pruned} revoked folder invitation(s) from ${remoteDeviceId}`);
         }
-        this.logger.info(`folder sync list from ${remoteDeviceId}: ${message.folderIds.length} folder(s)`);
+        // 同秒重复宣告降噪:内容与上一条 info 相同且间隔 <1s → 降 debug;
+        // 内容变了(目录集合或待确认集合变化)才回到 info。时刻锚点只在实际打
+        // info 时更新,持续重播下大约每秒最多一条 info,不会永久静默。
+        const syncListSig = `${message.folderIds.join(',')}|${(message.pendingFolderIds ?? []).join(',')}`;
+        const prevSyncListSig = this.lastFolderSyncListSig.get(remoteDeviceId);
+        const nowMs = Date.now();
+        if (prevSyncListSig && prevSyncListSig.sig === syncListSig && nowMs - prevSyncListSig.atMs < 1000) {
+          this.logger.debug(
+            `folder sync list from ${remoteDeviceId}: ${message.folderIds.length} folder(s)(同秒重复宣告,降噪)`,
+          );
+        } else {
+          this.logger.info(`folder sync list from ${remoteDeviceId}: ${message.folderIds.length} folder(s)`);
+          this.lastFolderSyncListSig.set(remoteDeviceId, { sig: syncListSig, atMs: nowMs });
+        }
         // 设备卡上的「已停止共享 / 待对方确认」判定完全依赖这份清单,且对方可能在
         // 本端重连后立刻重播 —— 立即通知,避免界面停留在过期的共享状态
         this.notifyStatus();
