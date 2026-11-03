@@ -19,6 +19,13 @@ rusqlite = { version = "0.40", features = ["bundled"] }
 sha2 = "0.10"
 base64 = "0.22"
 thiserror = "2"
+# 文件系统监听(ADR-0025 第 5 节原本「有意不引入」,已按新决策推翻:轮询扫描保留为
+# 定时兜底)。跨平台(inotify / FSEvents / ReadDirectoryChangesW)由 notify 保证。
+# 配 notify-debouncer-full 而非 mini:full 带 FileIdMap,能把重命名成对事件缝合并剔除
+# 重复 create —— 事件只当触发器,误报越少越好(扫描管线本身不便宜)。
+# 两者版本必须配对:debouncer-full 0.7 依赖 notify 8.2,这里显式声明同源版本。
+notify = "8.2"
+notify-debouncer-full = "0.7"
 
 [dev-dependencies]
 # 端到端示例(`examples/rust_peer.rs`)要能被 Node 测试观察:开启 RUST_LOG 才有输出。

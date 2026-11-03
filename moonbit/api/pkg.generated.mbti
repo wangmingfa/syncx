@@ -87,6 +87,8 @@ pub async fn session_cookie_value(SessionPayload, String, String?) -> String
 
 pub fn session_secret(String) -> String
 
+pub fn settings_json(@core.Config) -> Json
+
 pub fn sign_session(SessionPayload, String) -> String
 
 pub fn status_frame(Json) -> String
@@ -120,8 +122,9 @@ pub(all) struct ApiOptions {
   dev_mode : Bool
   upload_inspect : (async (Bytes) -> Result[InspectedPackage, String])?
   upload_swap : (async (Bytes) -> Result[String, String])?
+  settings : Json?
 }
-pub fn ApiOptions::new(device_id~ : String, control_token? : String, auth_file? : String?, config_file? : String?, actor? : @daemon.ActorHandle?, web_dist? : String?, on_shutdown? : (() -> Unit)?, dev_mode? : Bool, upload_inspect? : (async (Bytes) -> Result[InspectedPackage, String])?, upload_swap? : (async (Bytes) -> Result[String, String])?) -> Self
+pub fn ApiOptions::new(device_id~ : String, control_token? : String, auth_file? : String?, config_file? : String?, actor? : @daemon.ActorHandle?, web_dist? : String?, on_shutdown? : (() -> Unit)?, dev_mode? : Bool, upload_inspect? : (async (Bytes) -> Result[InspectedPackage, String])?, upload_swap? : (async (Bytes) -> Result[String, String])?, settings? : Json?) -> Self
 
 type DistProvider
 pub async fn DistProvider::get_contents(Self, StringView) -> &@mocket.Responder

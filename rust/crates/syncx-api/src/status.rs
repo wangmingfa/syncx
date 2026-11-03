@@ -145,6 +145,10 @@ pub struct GlobalSettings {
     pub holiday_auto_fetch: Option<bool>,
     #[serde(rename = "holidaySourceUrl", skip_serializing_if = "Option::is_none")]
     pub holiday_source_url: Option<String>,
+    #[serde(rename = "fsWatchEnabled", skip_serializing_if = "Option::is_none")]
+    pub fs_watch_enabled: Option<bool>,
+    #[serde(rename = "fsWatchFallbackScanSecs", skip_serializing_if = "Option::is_none")]
+    pub fs_watch_fallback_scan_secs: Option<u64>,
 }
 
 impl GlobalSettings {
@@ -164,6 +168,8 @@ impl GlobalSettings {
             schedule_override_until: config.schedule_override_until,
             holiday_auto_fetch: config.holiday_auto_fetch,
             holiday_source_url: config.holiday_source_url.clone(),
+            fs_watch_enabled: config.fs_watch_enabled,
+            fs_watch_fallback_scan_secs: config.fs_watch_fallback_scan_secs,
         }
     }
 }

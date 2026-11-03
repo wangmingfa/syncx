@@ -12,6 +12,7 @@
 //! - [`scanner`][]:共享目录扫描(含五处事故疤);
 //! - [`executor`][]:唯一动本地文件的一层 —— 落地、删除、冲突、版本;
 //! - [`peer`][]:一条对端连接上的会话层(规划应用、块请求、收齐判定);
+//! - [`watcher`][]:文件系统监听驱动的事件聚合与失效巡检(事件只当触发器);
 //! - [`actor`][]:把上述能力串成单线程状态机,对外只暴露命令与状态快照。
 
 pub mod actor;
@@ -23,6 +24,7 @@ pub mod indexstore;
 pub mod partial;
 pub mod peer;
 pub mod scanner;
+pub mod watcher;
 
 pub use entry::StoredEntry;
 pub use executor::{LocalExecutor, ReceiveHandle};

@@ -12,6 +12,8 @@ pub const CONFLICT_COPY_PATTERN : String = "^(.+)\\.sync-conflict-[0-9a-z]+(?:-[
 
 pub const FORMAT_VERSION : Int32 = 1
 
+pub const FS_WATCH_FALLBACK_SCAN_SECS : Int32 = 600
+
 pub const IMAGE_PREVIEW_MAX_BYTES : Int64 = 8388608
 
 pub const MINUTES_PER_DAY : Int32 = 1440
@@ -130,11 +132,15 @@ pub(all) struct Config {
   mut holiday_auto_fetch : Bool?
   mut holiday_source_url : String?
   mut calendar_overrides : Map[String, String]?
+  mut fs_watch_enabled : Bool?
+  mut fs_watch_fallback_scan_secs : Int32?
   mut format_version : Int32
   mut generated_by : String?
   mut extra : Map[String, Json]
 }
 pub fn Config::battery_pause_threshold(Self) -> Int32
+pub fn Config::fs_watch_enabled(Self) -> Bool
+pub fn Config::fs_watch_fallback_scan_secs(Self) -> Int32
 pub fn Config::history_max_events(Self) -> Int32
 pub fn Config::is_paused(Self) -> Bool
 pub fn Config::new() -> Self

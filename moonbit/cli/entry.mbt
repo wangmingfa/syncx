@@ -120,10 +120,6 @@ pub async fn run_start(args : StartArgs) -> Unit {
     let mut server_ref : @net.PeerServer? = None
     let session_sinks : Map[String, Map[String, @async.Queue[@daemon.Outbound]]] = Map([],
     )
-    let folder_ids : Array[String] = []
-    for folder in config.shared_folders {
-      folder_ids.push(folder.folder_id())
-    }
     let handlers : @net.PeerServerHandlers = {
       on_connect: device => {
         // 该设备被指派的每个目录各挂一条会话 + 一个出站泵
@@ -247,16 +243,25 @@ pub async fn run_start(args : StartArgs) -> Unit {
         }
       None => ()
     }
-    // 周期扫描:驱动增量外推(定时器粒度与 Node 的 watcher 不同,
-    // 无文件系统事件,以 30s 轮询近似)
-    group.spawn_bg(allow_failure=true, no_wait=true) <| () => {
-      for ;; {
-        for folder_id in folder_ids {
-          let _ = handle.send(@daemon.Cmd::ScanFolder(folder_id))
-        }
-        @async.sleep(30_000)
-      }
+    // 文件系统监听驱动的扫描 + 定时兜底全扫(daemon::start_fs_watch,三端
+    // 统一契约):每个未暂停目录一条 @fs.Watcher,事件只当触发器,判定仍走
+    // 现有扫描管线;watcher 正常时按 fsWatchFallbackScanSecs(缺省 600s)兜底
+    // 全扫,创建失败退回原扫描间隔(30s)并 warn 一次;fsWatchEnabled=false
+    // 时为纯定时全扫(行为与旧版完全一致)。
+    let watch_folders : Array[@daemon.FsWatchFolder] = []
+    for folder in config.shared_folders {
+      watch_folders.push({
+        id: folder.folder_id(),
+        root: folder.path,
+        paused: folder.is_paused(),
+      })
     }
+    let _watch_stats = @daemon.start_fs_watch(
+      group,
+      handle,
+      watch_folders,
+      @daemon.FsWatchOptions::from_config(config),
+    )
     // 启动横幅(控制端口绑定成功与否在 mocket 内部,绑定失败由 mocket 打印)
     println("syncx \{@core.VERSION} (moonbit backend) started")
     println("device: \{identity.device_id}")
@@ -277,6 +282,9 @@ pub async fn run_start(args : StartArgs) -> Unit {
       control_token=token,
       config_file=Some(config_file),
       actor=Some(handle),
+      // 全局设置快照(/api/status.settings;设置弹窗读取。MoonBit 尚无配置
+      // 热重载,当前值为启动时折算 —— 与 actor 目录参数同一份 config)
+      settings=Some(@api.settings_json(config)),
       web_dist~,
       on_shutdown=Some(() => {
         // TODO(cli):优雅关闭(关 peer 连接、收尾索引);当前直接退出

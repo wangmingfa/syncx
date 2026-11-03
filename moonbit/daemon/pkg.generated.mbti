@@ -17,6 +17,12 @@ pub const DEFAULT_VERSIONS_PER_PATH : Int32 = 10
 
 pub const DEFERRED_MAX : Int32 = 4096
 
+pub const DEGRADED_SCAN_INTERVAL_MS : Int32 = 30_000
+
+pub const FS_WATCH_DEBOUNCE_MAX_MS : Int32 = 4000
+
+pub const FS_WATCH_DEBOUNCE_MS : Int32 = 2000
+
 pub const GIT_PUSH_TIMEOUT_MS : Int32 = 120_000
 
 pub const GIT_UNPUSHED_LIMIT : Int32 = 50
@@ -96,6 +102,8 @@ pub async fn scan_folder(String, IndexStore, @core.IgnoreRuleset, String, Array[
 pub fn set_send_window_bytes(Int32) -> Int32
 
 pub fn split_ext(String) -> (String, String)
+
+pub fn start_fs_watch(@async.TaskGroup[Unit], ActorHandle, Array[FsWatchFolder], FsWatchOptions) -> WatchStats
 
 pub fn start_session_actor(@async.TaskGroup[Unit], String, Array[FolderSpec]) -> ActorHandle raise IndexStoreError
 
@@ -218,6 +226,22 @@ pub(all) struct FolderStatus {
   tombstones : Int64
   conflicts : Int32
 }
+
+pub(all) struct FsWatchFolder {
+  id : String
+  root : String
+  paused : Bool
+}
+
+pub(all) struct FsWatchOptions {
+  enabled : Bool
+  fallback_scan_ms : Int32
+  debounce_ms : Int32
+  debounce_max_ms : Int32
+  degraded_scan_ms : Int32
+}
+pub fn FsWatchOptions::from_config(@core.Config) -> Self
+pub fn FsWatchOptions::new(enabled? : Bool, fallback_scan_secs? : Int32) -> Self
 
 pub(all) struct GitCommitEntry {
   hash : String
@@ -377,6 +401,13 @@ pub(all) struct SyncEventRecord {
   direction : String
   action : String
 }
+
+pub struct WatchStats {
+  // private fields
+}
+pub fn WatchStats::degrade_count(Self) -> Int32
+pub fn WatchStats::rebuild_count(Self) -> Int32
+pub fn WatchStats::start_count(Self) -> Int32
 
 // Type aliases
 

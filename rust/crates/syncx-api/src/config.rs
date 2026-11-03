@@ -23,6 +23,10 @@ use syncx_core::FORMAT_VERSION;
 /// 两处各写一份常量早晚会漂。
 pub const SUPPORTED_FORMAT_VERSION: u64 = FORMAT_VERSION;
 
+/// 文件系统监听兜底全扫的缺省间隔(秒)。watcher 正常工作时,定时全扫退居兜底角色,
+/// 不需要 5 秒一轮;600 秒与 Node 侧约定同值。
+pub const DEFAULT_FS_WATCH_FALLBACK_SCAN_SECS: u64 = 600;
+
 /// 一条共享目录配置。
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct SharedFolder {
@@ -208,6 +212,14 @@ pub struct Config {
     pub holiday_auto_fetch: Option<bool>,
     #[serde(rename = "holidaySourceUrl", default, skip_serializing_if = "Option::is_none")]
     pub holiday_source_url: Option<String>,
+    /// 文件系统监听开关:缺省开,只有显式 `false` 才落盘为关。
+    /// 字段先就绪,设置弹窗(web 侧)另行处理。
+    #[serde(rename = "fsWatchEnabled", default, skip_serializing_if = "Option::is_none")]
+    pub fs_watch_enabled: Option<bool>,
+    /// watcher 健康时的定时兜底全扫间隔(秒);缺省 600。watcher 降级时退回原有
+    /// 扫描间隔,不走这个值。
+    #[serde(rename = "fsWatchFallbackScanSecs", default, skip_serializing_if = "Option::is_none")]
+    pub fs_watch_fallback_scan_secs: Option<u64>,
     #[serde(rename = "calendarOverrides", default, skip_serializing_if = "Option::is_none")]
     pub calendar_overrides: Option<BTreeMap<String, String>>,
     #[serde(rename = "formatVersion")]
@@ -256,6 +268,17 @@ impl Config {
 
     pub fn battery_pause_threshold(&self) -> u64 {
         self.battery_pause_threshold.unwrap_or(20)
+    }
+
+    /// 文件系统监听开关:缺省开,显式 `false` 才关(与 `holidayAutoFetch` 同口径)。
+    pub fn fs_watch_enabled(&self) -> bool {
+        self.fs_watch_enabled != Some(false)
+    }
+
+    /// watcher 健康时的定时兜底全扫间隔(秒)。
+    pub fn fs_watch_fallback_scan_secs(&self) -> u64 {
+        self.fs_watch_fallback_scan_secs
+            .unwrap_or(DEFAULT_FS_WATCH_FALLBACK_SCAN_SECS)
     }
 }
 
@@ -439,6 +462,8 @@ pub fn parse_config(raw: &str) -> Result<Config, serde_json::Error> {
     config.pause_on_low_battery = true_only(object.remove("pauseOnLowBattery"));
     // 自动拉取默认开:只有显式 false 才关
     config.holiday_auto_fetch = false_only(object.remove("holidayAutoFetch"));
+    config.fs_watch_enabled = false_only(object.remove("fsWatchEnabled"));
+    config.fs_watch_fallback_scan_secs = count_of(object.remove("fsWatchFallbackScanSecs"), 10);
     config.shares = sanitize_shares(object.remove("shares"));
     config.max_send_kbps = count_of(object.remove("maxSendKbps"), 0);
     config.versions_per_path = count_of(object.remove("versionsPerPath"), 1);
@@ -893,6 +918,28 @@ mod tests {
         assert_eq!(global.len(), 1);
         let folder = &config.shared_folders[0];
         assert!(folder.schedule.is_some());
+    }
+
+    #[test]
+    fn fs_watch_fields_default_on_with_configurable_fallback() {
+        // 缺省:监听开,兜底 600 秒
+        let config = parse_config(r#"{"formatVersion":1}"#).unwrap();
+        assert!(config.fs_watch_enabled());
+        assert_eq!(config.fs_watch_fallback_scan_secs(), 600);
+
+        // 显式 false 才关;兜底间隔接受配置值
+        let config = parse_config(
+            r#"{"formatVersion":1,"fsWatchEnabled":false,"fsWatchFallbackScanSecs":300}"#,
+        )
+        .unwrap();
+        assert!(!config.fs_watch_enabled());
+        assert_eq!(config.fs_watch_fallback_scan_secs(), 300);
+
+        // 低于下限(10s)的间隔按缺省处理:高频兜底全扫失去「兜底」本意
+        let config =
+            parse_config(r#"{"formatVersion":1,"fsWatchFallbackScanSecs":3}"#).unwrap();
+        assert_eq!(config.fs_watch_fallback_scan_secs, None);
+        assert_eq!(config.fs_watch_fallback_scan_secs(), 600);
     }
 
     #[test]

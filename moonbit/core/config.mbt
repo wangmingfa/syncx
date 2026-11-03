@@ -175,12 +175,23 @@ pub(all) struct Config {
   mut holiday_source_url : String?
   /// calendarOverrides
   mut calendar_overrides : Map[String, String]?
+  /// fsWatchEnabled:文件系统监听驱动的增量扫描(缺省开;显式 false 才关,
+  /// 与 holidayAutoFetch 同口径 —— 布尔开关只落显式痕迹,不写 true)
+  mut fs_watch_enabled : Bool?
+  /// fsWatchFallbackScanSecs:watcher 正常时的兜底全扫间隔秒(缺省 600;
+  /// watcher 创建失败/不可用时退回原扫描间隔,不走本值)
+  mut fs_watch_fallback_scan_secs : Int32?
   /// formatVersion
   mut format_version : Int32
   /// generatedBy
   mut generated_by : String?
   mut extra : Map[String, Json]
 }
+
+///|
+/// fsWatchFallbackScanSecs 的缺省值:watcher 正常工作时的兜底全扫间隔(秒)。
+/// 三端契约同值(见 docs/adr/0026 集成层与 Node/Rust 侧同名设置)。
+pub const FS_WATCH_FALLBACK_SCAN_SECS : Int32 = 600
 
 ///|
 /// 全新配置(formatVersion 已盖当前代数戳)。
@@ -206,6 +217,8 @@ pub fn Config::new() -> Config {
     holiday_auto_fetch: None,
     holiday_source_url: None,
     calendar_overrides: None,
+    fs_watch_enabled: None,
+    fs_watch_fallback_scan_secs: None,
     format_version: FORMAT_VERSION,
     generated_by: None,
     extra: Map([]),
@@ -243,6 +256,22 @@ pub fn Config::battery_pause_threshold(self : Config) -> Int32 {
   match self.battery_pause_threshold {
     Some(n) => n
     None => 20
+  }
+}
+
+///|
+/// 文件系统监听开关(缺省开;只有显式 false 才关)。
+pub fn Config::fs_watch_enabled(self : Config) -> Bool {
+  self.fs_watch_enabled != Some(false)
+}
+
+///|
+/// 兜底全扫间隔秒(watcher 正常时;缺省 600)。清洗(count_of min=1)已保证
+/// 显式值 ≥ 1,这里不必再兜底。
+pub fn Config::fs_watch_fallback_scan_secs(self : Config) -> Int32 {
+  match self.fs_watch_fallback_scan_secs {
+    Some(n) => n
+    None => FS_WATCH_FALLBACK_SCAN_SECS
   }
 }
 
@@ -423,6 +452,12 @@ fn parse_config_object(obj : Map[String, Json]) -> Config {
   config.pause_on_low_battery = true_only(take(obj, "pauseOnLowBattery"))
   // 自动拉取默认开:只有显式 false 才关
   config.holiday_auto_fetch = false_only(take(obj, "holidayAutoFetch"))
+  // 文件系统监听同口径:缺省开,只有显式 false 才关;兜底秒数只认 ≥ 1 的整数
+  config.fs_watch_enabled = false_only(take(obj, "fsWatchEnabled"))
+  config.fs_watch_fallback_scan_secs = count_of(
+    take(obj, "fsWatchFallbackScanSecs"),
+    1,
+  )
   config.shares = sanitize_shares(take(obj, "shares"))
   config.max_send_kbps = count_of(take(obj, "maxSendKbps"), 0)
   config.versions_per_path = count_of(take(obj, "versionsPerPath"), 1)
@@ -884,6 +919,8 @@ pub fn Config::to_json(self : Config) -> Json {
   set_int(map, "scheduleOverrideUntil", self.schedule_override_until)
   set_bool(map, "holidayAutoFetch", self.holiday_auto_fetch)
   set_string(map, "holidaySourceUrl", self.holiday_source_url)
+  set_bool(map, "fsWatchEnabled", self.fs_watch_enabled)
+  set_int(map, "fsWatchFallbackScanSecs", self.fs_watch_fallback_scan_secs)
   match self.calendar_overrides {
     Some(overrides) => {
       let cm : Map[String, Json] = Map([])

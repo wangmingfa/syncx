@@ -133,3 +133,33 @@ test "gitStripCoAuthored:旧 JSON 无字段兼容 + 清洗往返" {
   assert_eq(junk.shared_folders[0].git_sync, Some("send"))
   assert_false(junk.to_json().stringify().contains("gitStripCoAuthored"))
 }
+
+///|
+test "fsWatch 配置:缺省值、清洗与往返" {
+  // 旧配置没有这两个字段:缺省开 + 600s,序列化不新增键(与 holidayAutoFetch 同口径)
+  let legacy = @core.parse_config("{}")
+  assert_true(legacy.fs_watch_enabled())
+  assert_eq(legacy.fs_watch_fallback_scan_secs(), 600)
+  assert_false(legacy.to_json().stringify().contains("fsWatch"))
+  // 显式关闭与合法秒数:原样保留并往返落盘
+  let custom = @core.parse_config(
+    "{\"fsWatchEnabled\":false,\"fsWatchFallbackScanSecs\":900}",
+  )
+  assert_false(custom.fs_watch_enabled())
+  assert_eq(custom.fs_watch_fallback_scan_secs(), 900)
+  let text = custom.to_json().stringify()
+  assert_true(text.contains("\"fsWatchEnabled\":false"))
+  assert_true(text.contains("\"fsWatchFallbackScanSecs\":900"))
+  // 坏字段只影响自己:开关非显式 false 视同缺省,秒数非法(< 1 / 非数)回缺省
+  let bad = @core.parse_config(
+    "{\"fsWatchEnabled\":\"yes\",\"fsWatchFallbackScanSecs\":-5}",
+  )
+  assert_true(bad.fs_watch_enabled())
+  assert_eq(bad.fs_watch_fallback_scan_secs(), 600)
+  // 未知字段保留规则不受影响
+  let with_extra = @core.parse_config(
+    "{\"fsWatchEnabled\":false,\"futureSetting\":42}",
+  )
+  assert_false(with_extra.fs_watch_enabled())
+  assert_true(with_extra.to_json().stringify().contains("futureSetting"))
+}

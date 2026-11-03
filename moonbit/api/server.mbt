@@ -32,6 +32,9 @@ pub(all) struct ApiOptions {
   upload_inspect : UploadInspectFn?
   /// 上传包换入回调(None = POST /api/self-update/upload 回 503)。
   upload_swap : UploadSwapFn?
+  /// `/api/status.settings` 全局设置段(装配层启动时从 config.json 折算注入;
+  /// None = 不上线该段。MoonBit 尚无配置热重载,当前值为启动时快照)。
+  settings : Json?
 }
 
 ///|
@@ -49,6 +52,7 @@ pub fn ApiOptions::new(
   dev_mode~ : Bool = false,
   upload_inspect~ : UploadInspectFn? = None,
   upload_swap~ : UploadSwapFn? = None,
+  settings~ : Json? = None,
 ) -> ApiOptions {
   let web_dist = match web_dist {
     Some(dist) => Some(dist)
@@ -65,6 +69,7 @@ pub fn ApiOptions::new(
     dev_mode,
     upload_inspect,
     upload_swap,
+    settings,
   }
 }
 
@@ -89,6 +94,21 @@ pub fn health_json() -> Json {
 extern "C" fn c_status_platform() -> String = "syncx_status_platform"
 
 ///|
+/// `/api/status.settings` 全局设置段(设置弹窗读取;键名与 config.json 顶层
+/// 字段逐字一致,camelCase 对齐 Node 的 GlobalSettingsStatus)。本里程碑只
+/// 透出 fsWatch 两键,其余全局设置随各自里程碑补齐;字段缺省不上线与既有
+/// 「缺字段 = 旧后端」口径一致。
+pub fn settings_json(config : @core.Config) -> Json {
+  let map : Map[String, Json] = Map([])
+  map.set("fsWatchEnabled", Json::boolean(config.fs_watch_enabled()))
+  map.set(
+    "fsWatchFallbackScanSecs",
+    Json::number(config.fs_watch_fallback_scan_secs().to_double()),
+  )
+  Json::object(map)
+}
+
+///|
 pub fn status_json(options : ApiOptions) -> Json {
   let map : Map[String, Json] = Map([])
   map.set("deviceId", Json::string(options.device_id))
@@ -105,6 +125,11 @@ pub fn status_json(options : ApiOptions) -> Json {
   map.set("offers", Json::array([]))
   // 编译目标 OS,口径对齐 Node 的 process.platform(前端 osIconKind 只认 darwin/win32/linux)
   map.set("platform", Json::string(c_status_platform()))
+  // 全局设置当前值(装配层注入;未注入 = 旧装配形态,整段不上线)
+  match options.settings {
+    Some(settings) => map.set("settings", settings)
+    None => ()
+  }
   match options.actor {
     Some(actor) => {
       let snapshot = actor.snapshot()

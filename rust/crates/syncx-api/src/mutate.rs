@@ -770,6 +770,23 @@ pub fn set_global_settings(store: &ConfigStore, patch: &serde_json::Map<String, 
                 None
             };
         }
+        if let Some(value) = patch.get("fsWatchEnabled") {
+            // 缺省开:补丁里只有显式 false 才落盘为关;true/null 都归回默认开
+            config.fs_watch_enabled = if value.as_bool() == Some(false) {
+                Some(false)
+            } else {
+                None
+            };
+        }
+        if let Some(value) = patch.get("fsWatchFallbackScanSecs") {
+            match sanitize_number(value, 10, "兜底全扫间隔(秒)") {
+                Err(message) => {
+                    validation_error = Some(message);
+                    return Ok(false);
+                }
+                Ok(v) => config.fs_watch_fallback_scan_secs = v,
+            }
+        }
         if let Some(value) = patch.get("holidaySourceUrl") {
             let text = value.as_str().unwrap_or("").trim().to_string();
             if !text.is_empty() && !text.contains("{year}") {
@@ -1164,6 +1181,39 @@ mod tests {
         share.insert("shareEnabled".into(), serde_json::json!(false));
         set_global_settings(&store, &share).unwrap();
         assert_eq!(store.load().share_enabled, None);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn fs_watch_settings_validation() {
+        // 关闭监听:只有显式 false 落盘
+        let (store, dir) = temp_store("fs-watch");
+        let mut off = serde_json::Map::new();
+        off.insert("fsWatchEnabled".into(), serde_json::json!(false));
+        set_global_settings(&store, &off).unwrap();
+        assert_eq!(store.load().fs_watch_enabled, Some(false));
+        assert!(!store.load().fs_watch_enabled());
+
+        // true / null 归回默认开(不落盘)
+        let mut on = serde_json::Map::new();
+        on.insert("fsWatchEnabled".into(), serde_json::json!(true));
+        set_global_settings(&store, &on).unwrap();
+        assert_eq!(store.load().fs_watch_enabled, None);
+        assert!(store.load().fs_watch_enabled());
+
+        // 兜底间隔:合法值落盘;低于下限拒绝;null 回默认
+        let mut secs = serde_json::Map::new();
+        secs.insert("fsWatchFallbackScanSecs".into(), serde_json::json!(300));
+        set_global_settings(&store, &secs).unwrap();
+        assert_eq!(store.load().fs_watch_fallback_scan_secs, Some(300));
+        let mut tiny = serde_json::Map::new();
+        tiny.insert("fsWatchFallbackScanSecs".into(), serde_json::json!(3));
+        assert!(set_global_settings(&store, &tiny).is_err(), "低于下限必须报错而非静默吞掉");
+        let mut clear = serde_json::Map::new();
+        clear.insert("fsWatchFallbackScanSecs".into(), serde_json::json!(null));
+        set_global_settings(&store, &clear).unwrap();
+        assert_eq!(store.load().fs_watch_fallback_scan_secs, None);
+        assert_eq!(store.load().fs_watch_fallback_scan_secs(), 600);
         let _ = std::fs::remove_dir_all(&dir);
     }
 

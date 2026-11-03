@@ -293,6 +293,11 @@ impl Folder {
 pub enum Cmd {
     /// 扫描某个目录(定时器驱动)。
     Scan,
+    /// 只扫一个目录(watcher 事件触发;定时兜底全扫仍走 [`Cmd::Scan`])。
+    ///
+    /// 判定与 [`Cmd::Scan`] 完全同管线,只是范围收窄到该目录。目录不存在时为空操作:
+    /// watcher 的请求与 actor 的状态之间没有事务,目录可能在请求排队期间被移除。
+    ScanFolder { folder: String },
     /// 对端索引到达。
     PeerIndex {
         folder: String,
@@ -493,7 +498,8 @@ impl SessionActor {
     pub fn handle(&mut self, cmd: Cmd) -> bool {
         match cmd {
             Cmd::Shutdown => return false,
-            Cmd::Scan => self.scan_all(),
+            Cmd::Scan => self.scan_subset(None),
+            Cmd::ScanFolder { folder } => self.scan_subset(Some(&folder)),
             Cmd::Poll => self.poll_all(),
             Cmd::PeerIndex {
                 folder,
@@ -632,8 +638,13 @@ impl SessionActor {
         }
     }
 
-    /// 扫一轮全部目录。嵌套共享根由其它目录的绝对根换算而来。
-    fn scan_all(&mut self) {
+    /// 扫一轮。`only` 为 `Some` 时只扫指定目录(watcher 触发的单目录重扫)。
+    ///
+    /// 重入闸与现状一致:所有命令在本线程串行处理,同一时刻至多一轮扫描;排队的
+    /// 重扫请求在前一轮结束后依次执行,不做合并 —— 聚合层(watcher 模块)已把同一
+    /// 目录的请求压到每窗口一条,这里的队列不会堆积。嵌套共享根仍由全部目录的绝对
+    /// 根换算而来,与全扫同一口径。
+    fn scan_subset(&mut self, only: Option<&str>) {
         let roots: Vec<PathBuf> = self
             .folders
             .iter()
@@ -641,6 +652,11 @@ impl SessionActor {
             .collect();
         let device_id = self.device_id.clone();
         for index in 0..self.folders.len() {
+            if let Some(only) = only {
+                if self.folders[index].id != only {
+                    continue;
+                }
+            }
             let mine = roots[index].clone();
             let nested: Vec<PathBuf> = roots.iter().filter(|r| **r != mine).cloned().collect();
             let folder = &mut self.folders[index];
@@ -1090,5 +1106,62 @@ mod tests {
         for rx in rxs.iter_mut() {
             assert!(take_entries(rx).is_empty());
         }
+    }
+
+    /// watcher 触发的单目录重扫:`Cmd::ScanFolder` 只落指定目录,不波及别的目录。
+    /// 判定与全扫同管线(这里直接验证索引产出)。
+    #[test]
+    fn scan_folder_command_scans_only_that_folder() {
+        let dir = TempDir::new("scan-one");
+        let root_a = dir.path().join("a");
+        let root_b = dir.path().join("b");
+        std::fs::create_dir_all(&root_a).unwrap();
+        std::fs::create_dir_all(&root_b).unwrap();
+        let mut actor = SessionActor::new(
+            "dev",
+            Arc::new(Mutex::new(StatusSnapshot::default())),
+        );
+        actor
+            .add_folder(
+                build_folder("f-a", &root_a, dir.path(), IgnoreRuleset::from_lines(&[])).unwrap(),
+            )
+            .unwrap();
+        actor
+            .add_folder(
+                build_folder("f-b", &root_b, dir.path(), IgnoreRuleset::from_lines(&[])).unwrap(),
+            )
+            .unwrap();
+        let indexed = |actor: &SessionActor, id: &str| -> Vec<String> {
+            actor
+                .folder(id)
+                .unwrap()
+                .index
+                .list_entries()
+                .unwrap()
+                .into_iter()
+                .map(|entry| entry.path)
+                .collect()
+        };
+
+        // 两个目录各落一个文件,但只点名扫 f-b
+        std::fs::write(root_a.join("only-in-a.txt"), "x").unwrap();
+        std::fs::write(root_b.join("only-in-b.txt"), "x").unwrap();
+        assert!(actor.handle(Cmd::ScanFolder { folder: "f-b".to_string() }));
+        assert!(
+            indexed(&actor, "f-b").contains(&"only-in-b.txt".to_string()),
+            "点名的目录应被扫描入索引"
+        );
+        assert!(
+            indexed(&actor, "f-a").is_empty(),
+            "单目录重扫不得波及其它目录"
+        );
+
+        // 再点名 f-a:它自己的文件入索引,f-b 不受影响
+        assert!(actor.handle(Cmd::ScanFolder { folder: "f-a".to_string() }));
+        assert!(indexed(&actor, "f-a").contains(&"only-in-a.txt".to_string()));
+        assert_eq!(indexed(&actor, "f-b").len(), 1);
+
+        // 点名不存在的目录:空操作,不崩
+        assert!(actor.handle(Cmd::ScanFolder { folder: "gone".to_string() }));
     }
 }

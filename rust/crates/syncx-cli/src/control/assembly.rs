@@ -30,6 +30,7 @@ use tokio::sync::mpsc::UnboundedSender;
 use tokio::sync::oneshot;
 
 use syncx_api::calendar;
+use syncx_api::mutate;
 use syncx_api::config::{
     folder_index_path, folder_trash_path, folder_versions_path, Config, ConfigStore, SharedFolder,
 };
@@ -45,6 +46,9 @@ use syncx_core::schedule::{
 use syncx_daemon::actor::{spawn_actor, ActorHandle, Cmd, FolderSpec, SessionActor};
 use syncx_daemon::driver::{self, ControlHooks};
 use syncx_daemon::peer::ConflictPolicy;
+use syncx_daemon::watcher::{
+    FsWatchHub, RescanRequest, WatchFolderSpec, WatchHealth, FS_WATCH_SWEEP, FS_WATCH_WINDOW,
+};
 use syncx_net::wire::ControlMessage;
 use syncx_net::{connect_peer, start_discovery, start_peer_server, DeviceIdentity, Discovery};
 
@@ -67,7 +71,7 @@ pub const DISCOVERY_TTL_MS: i64 = 3 * 60_000;
 /// 拖到 5 秒会让一次块丢失的恢复看起来像「卡住了」。
 const DRAIN_INTERVAL: Duration = Duration::from_millis(500);
 
-/// 配置热重载的轮询间隔。没有 `notify` 依赖,只能比对 mtime + 长度。
+/// 配置热重载的轮询间隔。配置文件用 mtime + 长度比对(共享目录才用 notify 监听)。
 const CONFIG_POLL_INTERVAL: Duration = Duration::from_secs(1);
 
 /// 出站拨号的调度节拍。
@@ -123,6 +127,8 @@ pub struct Runtime {
     pub ops: Arc<RuntimeOps>,
     pub hub: StatusHub,
     pub extras: Arc<Extras>,
+    /// 文件系统监听中枢:事件只当触发器,判定走现有扫描管线(见 `syncx_daemon::watcher`)。
+    pub watch: FsWatchHub,
 }
 
 /// 启动参数。字段与 Node 的 `ParsedArgs` 一一对应,缺省值在 [`RunOptions::new`] 里补。
@@ -694,7 +700,20 @@ pub fn build_runtime(
         git_state: Mutex::new(super::GitState::default()),
     });
     let _ = cell.set(Arc::clone(&ops));
-    Runtime { ops, hub, extras }
+
+    // 文件系统监听:重扫请求接到 actor 的单目录扫描;目录清单按当前配置对齐一次,
+    // 之后由配置热重载(sync_fs_watcher)跟进。hub 的重建/降级由它自己的巡检负责。
+    let (rescan_tx, rescan_rx) = tokio::sync::mpsc::unbounded_channel();
+    let watch = FsWatchHub::spawn(FS_WATCH_WINDOW, FS_WATCH_SWEEP, rescan_tx);
+    spawn_rescan_forwarder(Arc::clone(&ops), rescan_rx);
+    sync_fs_watcher(&ops, &watch);
+
+    Runtime {
+        ops,
+        hub,
+        extras,
+        watch,
+    }
 }
 
 /// 建 actor。目录规格随后由 [`reload_actor`] 送进去 —— 这样「加目录」只有一条路径。
@@ -1065,16 +1084,106 @@ fn action_name(action: syncx_daemon::peer::SyncAction) -> &'static str {
     }
 }
 
+/* ============================ 文件系统监听 ============================ */
+
+/// 待监听目录清单:未暂停且身份校验通过的共享目录才有 watcher。
+///
+/// 资格判据与 git 自动提交的身份闸(control/mod.rs)同一口径:身份结论为
+/// `missing` / `changed` / `remounted` 的目录不监听 —— 根目录读不到或已被换掉,
+/// 监听没有意义;恢复后的重建由巡检完成。`unknown`(存量未采集)与
+/// `remounted-known` 放行,扫描管线的结构守卫照常兜底。目录级暂停已足够:
+/// 全局暂停时既有扫描管线照常运行(watcher 只是触发器,语义不需要额外收窄)。
+fn watch_specs(config: &Config) -> Vec<WatchFolderSpec> {
+    if !config.fs_watch_enabled() {
+        return Vec::new();
+    }
+    config
+        .shared_folders
+        .iter()
+        .filter(|folder| {
+            !folder.is_paused()
+                && !matches!(
+                    mutate::folder_identity_verdict(folder),
+                    "missing" | "changed" | "remounted"
+                )
+        })
+        .map(|folder| WatchFolderSpec {
+            id: folder.folder_id(),
+            root: PathBuf::from(&folder.path),
+        })
+        .collect()
+}
+
+/// 把当前配置里的待监听目录交给监听中枢。配置热重载与启动装配各调一次。
+fn sync_fs_watcher(ops: &RuntimeOps, watch: &FsWatchHub) {
+    watch.sync(watch_specs(&ops.store.load()));
+}
+
+/// watcher 触发的重扫请求 → actor 单目录扫描。聚合层已保证同一目录一个窗口至多
+/// 一条请求;actor 退出(发送失败)即停。
+fn spawn_rescan_forwarder(
+    ops: Arc<RuntimeOps>,
+    mut rescan_rx: tokio::sync::mpsc::UnboundedReceiver<RescanRequest>,
+) {
+    tokio::spawn(async move {
+        while let Some(request) = rescan_rx.recv().await {
+            if !ops
+                .actor
+                .send(Cmd::ScanFolder { folder: request.folder })
+            {
+                break;
+            }
+        }
+        tracing::debug!("重扫转发循环退出");
+    });
+}
+
+/// watcher 健康时的兜底全扫间隔。
+///
+/// `SYNCX_SCAN_INTERVAL_MS` 设置时钳住它:该变量的语义是「至少这么频繁地扫」,
+/// 不能因为 watcher 健康就把测试/开发钩子放大到 600 秒。
+fn fallback_interval(fallback_secs: u64) -> Duration {
+    let configured = Duration::from_secs(fallback_secs.max(1));
+    match std::env::var("SYNCX_SCAN_INTERVAL_MS")
+        .ok()
+        .and_then(|raw| raw.trim().parse::<u64>().ok())
+        .filter(|ms| *ms > 0)
+    {
+        Some(ms) => configured.min(Duration::from_millis(ms)),
+        None => configured,
+    }
+}
+
+/// 扫描循环的节拍决策。
+///
+/// - 配置关闭监听 → 纯定时:退回原有扫描间隔(`scan_interval`)。
+/// - watcher 全部健康 → 兜底全扫间隔(`fsWatchFallbackScanSecs`,缺省 600 秒)。
+/// - 任一目录降级 → 退回原有扫描间隔(warn 由 watcher 模块发,每目录一次)。
+fn scan_tick_secs(fallback_secs: u64, watch_enabled: bool, watch_healthy: bool) -> Duration {
+    if watch_enabled && watch_healthy {
+        fallback_interval(fallback_secs)
+    } else {
+        scan_interval()
+    }
+}
+
 /// 扫描循环:定期让 actor 扫盘。**必须**由装配层驱动 —— actor 自己不排定时器,
 /// 它只响应命令,这样「扫描」与「收帧」在同一个线程上串行,不会出现边扫边改索引。
-fn spawn_scan_loop(ops: Arc<RuntimeOps>) {
-    let interval = scan_interval();
+///
+/// 间隔不再固定:每轮按「监听开关 + watcher 健康度」重算(见 [`scan_tick_secs`]),
+/// 所以用 sleep 循环而不是 `tokio::time::interval`。配置每次现读 —— 间隔是全局
+/// 设置,热重载后下一轮就该生效,不该等重启。
+fn spawn_scan_loop(ops: Arc<RuntimeOps>, health: Arc<WatchHealth>) {
     tokio::spawn(async move {
-        let mut tick = tokio::time::interval(interval);
-        tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
-        tick.tick().await; // 第一次立即完成,启动时已扫过一轮
+        // 启动时已扫过一轮(reload_actor 里的 Cmd::Scan),这里直接进入等待
         loop {
-            tick.tick().await;
+            let config = ops.store.load();
+            let interval = scan_tick_secs(
+                config.fs_watch_fallback_scan_secs(),
+                config.fs_watch_enabled(),
+                health.healthy(),
+            );
+            tokio::time::sleep(interval).await;
             if !ops.actor.send(Cmd::Scan) {
                 break;
             }
@@ -1186,8 +1295,10 @@ fn spawn_git_counts_loop(ops: Arc<RuntimeOps>, extras: Arc<Extras>) {
 
 /// 配置热重载:轮询 `config.json` 的 mtime + 长度。
 ///
-/// 没有 `notify` 依赖(见 Cargo.toml),只能轮询。1 秒粒度对「改设置后多久生效」
-/// 完全够用,而代价是一秒一次 `metadata` 系统调用 —— 比常驻的 inotify 线程省得多。
+/// `notify` 依赖如今有(共享目录的监听在用),但配置文件仍轮询:热重载需要的是
+/// 「变了就重读」这一件事,mtime + 长度比对零歧义,1 秒粒度对「改设置后多久生效」
+/// 完全够用;而代价是一秒一次 `metadata` 系统调用 —— 比常驻监听回调再串一次
+/// 读盘便宜得多。
 fn spawn_config_watch(runtime: Arc<Runtime>) {
     tokio::spawn(async move {
         fn stamp(path: &Path) -> Option<(std::time::SystemTime, u64)> {
@@ -1206,6 +1317,8 @@ fn spawn_config_watch(runtime: Arc<Runtime>) {
             last = current;
             // 落盘可能还写到一半(rename 前),等一个节拍再读;这里只做「变了就重载」
             reload_actor(&runtime.ops);
+            // 目录集合/暂停/身份资格变了,watcher 清单跟进(fsWatch 开关也在这里生效)
+            sync_fs_watcher(&runtime.ops, &runtime.watch);
             runtime.ops.notify_hub();
         }
     });
@@ -1563,7 +1676,7 @@ pub async fn run(options: RunOptions) -> Result<(), String> {
         // 6) 后台循环。先把重启前没送达的两份台账还原进内存,再让排空节拍接手补投:
         //    否则上一轮进程里已广播未回执的提交会彻底丢失(对端再也收不到那一笔)。
         runtime.ops.restore_git_ledgers(&runtime.ops.store.load());
-        spawn_scan_loop(Arc::clone(&runtime.ops));
+        spawn_scan_loop(Arc::clone(&runtime.ops), runtime.watch.health());
         spawn_drain_loop(Arc::clone(&runtime.ops));
         spawn_git_counts_loop(Arc::clone(&runtime.ops), Arc::clone(&runtime.extras));
         spawn_config_watch(Arc::clone(&runtime));
@@ -1653,4 +1766,96 @@ fn api_state(runtime: &Arc<Runtime>, options: &RunOptions) -> Arc<syncx_api::dep
             >)
     };
     Arc::new(syncx_api::deps::AppState::new(deps))
+}
+
+#[cfg(test)]
+mod tests {
+    //! 文件系统监听的装配决策:节拍选择、环境变量钳制、目录资格。
+
+    use super::*;
+
+    #[test]
+    fn scan_tick_selects_interval_by_watch_state() {
+        // 关闭监听 → 纯定时:退回原有扫描间隔
+        assert_eq!(scan_tick_secs(600, false, true), scan_interval());
+        // 开着但降级 → 同样退回
+        assert_eq!(scan_tick_secs(600, true, false), scan_interval());
+        // 开着且健康 → 兜底全扫间隔
+        assert_eq!(scan_tick_secs(600, true, true), Duration::from_secs(600));
+        // 非法配置(0 秒)夹到 1 秒,不产生忙转
+        assert_eq!(scan_tick_secs(0, true, true), Duration::from_secs(1));
+    }
+
+    #[test]
+    fn fallback_interval_respects_env_hook() {
+        // SYNCX_SCAN_INTERVAL_MS 的语义是「至少这么频繁地扫」:健康 watcher 不能把它放大
+        std::env::set_var("SYNCX_SCAN_INTERVAL_MS", "150");
+        assert_eq!(fallback_interval(600), Duration::from_millis(150));
+        // 反向不放大
+        std::env::set_var("SYNCX_SCAN_INTERVAL_MS", "999999");
+        assert_eq!(fallback_interval(600), Duration::from_secs(600));
+        // 不设则按配置
+        std::env::remove_var("SYNCX_SCAN_INTERVAL_MS");
+        assert_eq!(fallback_interval(600), Duration::from_secs(600));
+    }
+
+    /// 一个测试结束才删除的临时共享目录(身份判定要对真实路径做 stat)。
+    struct TempRoot(PathBuf);
+
+    impl TempRoot {
+        fn new(tag: &str) -> Self {
+            let path = std::env::temp_dir().join(format!(
+                "syncx-watch-specs-{}-{tag}",
+                std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .unwrap()
+                    .as_nanos()
+            ));
+            std::fs::create_dir_all(&path).unwrap();
+            Self(path)
+        }
+    }
+
+    impl Drop for TempRoot {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.0);
+        }
+    }
+
+    #[test]
+    fn watch_specs_filters_paused_and_bad_identity() {
+        let root = TempRoot::new("filter");
+        let config = Config {
+            shared_folders: vec![
+                // 存量未采集身份(unknown)→ 放行;结构守卫由扫描管线兜底
+                SharedFolder {
+                    path: root.0.display().to_string(),
+                    ..Default::default()
+                },
+                // 暂停 → 不监听
+                SharedFolder {
+                    path: root.0.display().to_string(),
+                    paused: Some(true),
+                    ..Default::default()
+                },
+                // 根目录读不到(missing)→ 不监听,恢复后由巡检重建
+                SharedFolder {
+                    path: root.0.join("不存在").display().to_string(),
+                    ..Default::default()
+                },
+            ],
+            ..Default::default()
+        };
+        let specs = watch_specs(&config);
+        assert_eq!(specs.len(), 1, "只放行「未暂停且身份可用」的目录");
+        assert_eq!(specs[0].root, root.0);
+
+        // 关掉开关 → 空表(hub 清空全部监听,扫描循环按纯定时走)
+        let disabled = Config {
+            fs_watch_enabled: Some(false),
+            shared_folders: config.shared_folders.clone(),
+            ..Default::default()
+        };
+        assert!(watch_specs(&disabled).is_empty());
+    }
 }
