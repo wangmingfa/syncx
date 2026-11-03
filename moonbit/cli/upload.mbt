@@ -377,6 +377,228 @@ async fn inspect_backend_package(
 }
 
 ///|
+/// 上传换入主流程:识别 → 按包类型分流。npm tgz 走「npm 覆盖 + 看门狗
+/// 拉起 node 入口」(install_node_package);后端二进制包走「解包到
+/// <configDir>/bin/ + 看门狗 exec」(install_backend_binary + 交接)。
+///
+/// 成功返回将要换入的版本号;此时看门狗已经 detached 拉起,本进程会在
+/// 宽限期后被 SIGTERM(见 update.mbt 的 kill_parent_ms)。dev 运行态一律
+/// 拒绝(与 api 层的 dev 门同一文案,双保险)。
+pub async fn perform_upload_swap(
+  bytes : Bytes,
+  config_dir : String,
+  min_bytes~ : Int32 = MIN_UPLOAD_PACKAGE_BYTES,
+  npm_cmd~ : String = "npm",
+) -> Result[String, String] {
+  if @core.VERSION == "dev" {
+    return Err(
+      "开发模式下不支持升级功能（运行态为 dev，无单文件运行时可替换）",
+    )
+  }
+  let pkg = match extract_package(bytes, min_bytes~) {
+    Ok(pkg) => pkg
+    Err(message) => return Err(message)
+  }
+  if pkg.backend == "node" {
+    // node 包:npm install -g 覆盖安装,看门狗拉起新装的 node 入口
+    let version = pkg.version
+    @fs.rmdir(pkg.work_dir, recursive=true) catch {
+      _ => ()
+    }
+    return install_node_package(bytes, config_dir, version, npm_cmd~)
+  }
+  let dest = match install_backend_binary(pkg, config_dir) {
+    Ok(dest) => dest
+    Err(message) => {
+      @fs.rmdir(pkg.work_dir, recursive=true) catch {
+        _ => ()
+      }
+      return Err(message)
+    }
+  }
+  let version = pkg.version
+  // 解包产物已用不上(二进制已拷进 bin/),清掉临时目录
+  @fs.rmdir(pkg.work_dir, recursive=true) catch {
+    _ => ()
+  }
+  let current_exe = c_current_exec_path()
+  if current_exe == "" {
+    return Err("找不到当前可执行文件路径,已放弃换入")
+  }
+  spawn_upload_swap(
+    current_exe,
+    dest,
+    version,
+    build_update_restart(@env.args()),
+  ) catch {
+    e => return Err(UpdateError::to_text(e))
+  }
+  Ok(version)
+}
+
+///|
+/// npm 命令的跨平台调用参数:Windows 上 npm 是 npm.cmd,须经 cmd /C
+/// (与 Rust 端 install_tarball 同策略)。
+fn npm_argv(
+  windows : Bool,
+  npm_cmd : String,
+  args : Array[String],
+) -> (String, Array[String]) {
+  if windows {
+    let argv : Array[String] = ["/C", npm_cmd]
+    for arg in args {
+      argv.push(arg)
+    }
+    ("cmd", argv)
+  } else {
+    (npm_cmd, args)
+  }
+}
+
+///|
+/// 用系统 npm 覆盖安装本地 tgz(`npm install -g <tgz>`):它同时更新
+/// 安装目录与 bin 链接,是从 MoonBit 切回 Node 的最稳通道(与 Rust 端
+/// install_tarball 同一做法)。npm 缺失/失败时明确报错,不半途换入。
+pub async fn npm_install_global(
+  tgz_path : String,
+  npm_cmd~ : String = "npm",
+) -> Result[Unit, String] {
+  let (program, args) = npm_argv(c_os_name() == "windows", npm_cmd, [
+    "install", "-g", tgz_path,
+  ])
+  let code = @process.run(program, args, inherit_env=true) catch {
+    e =>
+      return Err(
+        "npm install -g 失败(无法启动 npm,本机可能未安装 Node.js/npm):\{e}",
+      )
+  }
+  if code != 0 {
+    return Err("npm install -g 失败(退出码 \{code})")
+  }
+  Ok(())
+}
+
+///|
+/// 定位 npm 全局安装后的 syncx 入口:`npm root -g` →
+/// `<root>/@wangmingfa/syncx/dist/syncx.js`。启动时由看门狗以
+/// `node <入口> <原参数>` 拉起,不依赖 bin 链接的形态(Windows 的
+/// .cmd 无法直接 exec)。
+pub async fn resolve_global_syncx_entry(
+  npm_cmd~ : String = "npm",
+) -> Result[String, String] {
+  let (program, args) = npm_argv(c_os_name() == "windows", npm_cmd, [
+    "root", "-g",
+  ])
+  let (code, out) = @process.collect_stdout(program, args, inherit_env=true) catch {
+    e =>
+      return Err(
+        "定位全局安装目录失败(npm root -g 无法执行,本机可能未安装 Node.js/npm):\{e}",
+      )
+  }
+  if code != 0 {
+    return Err("定位全局安装目录失败(npm root -g 退出码 \{code})")
+  }
+  let text = out.text() catch { _ => return Err("npm root -g 输出异常") }
+  let root = text.trim().to_owned()
+  if root == "" {
+    return Err("npm root -g 输出为空")
+  }
+  let entry = "\{root}/@wangmingfa/syncx/dist/syncx.js"
+  if !(@fs.exists(entry) catch { _ => false }) {
+    return Err(
+      "npm 安装完成但找不到入口 \{entry},已放弃切换(请检查 npm 全局 prefix)",
+    )
+  }
+  Ok(entry)
+}
+
+///|
+/// 从原启动参数里解析控制端口(--control-port,缺省 8384),拼出健康
+/// 判定地址:node 后端不写健康标记,看门狗轮询 /health 判活。
+pub fn control_port_of_args(args : Array[String]) -> Int32 {
+  let mut i = 0
+  while i + 1 < args.length() {
+    if args[i] == "--control-port" {
+      let port = @string.parse_int(args[i + 1]) catch { _ => -1 }
+      if port >= 1 && port <= 65535 {
+        return port
+      }
+    }
+    i += 1
+  }
+  DEFAULT_CONTROL_PORT
+}
+
+///|
+pub fn health_url_of_args(args : Array[String]) -> String {
+  "http://127.0.0.1:\{control_port_of_args(args)}/health"
+}
+
+///|
+/// npm tgz 换入(切回 Node):tgz 落盘到 `<configDir>/update/` →
+/// `npm install -g` → 定位新装的 dist/syncx.js → 看门狗拉起
+/// `node <入口> <原参数>`(健康判定走 /health 轮询,超时回滚原
+/// MoonBit 二进制)。npm 不可用/安装失败时直接报错,不写交接作业。
+async fn install_node_package(
+  bytes : Bytes,
+  config_dir : String,
+  version : String,
+  npm_cmd~ : String = "npm",
+) -> Result[String, String] {
+  // 1) tgz 落盘(npm 只吃文件路径;放数据目录 update/ 下,与 Rust 同布局)
+  let update_dir = "\{config_dir}/update"
+  @fs.mkdir(update_dir, recursive=true, allow_exist=true) catch {
+    e => return Err("创建目录失败(\{update_dir}):\{e}")
+  }
+  let tgz_path = "\{update_dir}/\{@async.now()}.tgz"
+  @fs.write_file(tgz_path, bytes) catch {
+    e => return Err("写入安装包失败(\{tgz_path}):\{e}")
+  }
+  // 2) npm 覆盖安装(缺 npm 时在这里明确报错,不半途换入)
+  match npm_install_global(tgz_path, npm_cmd~) {
+    Ok(_) => ()
+    Err(message) => return Err(message)
+  }
+  // 3) 定位新装的 node 入口
+  let entry = match resolve_global_syncx_entry(npm_cmd~) {
+    Ok(entry) => entry
+    Err(message) => return Err(message)
+  }
+  // 4) 交接看门狗:拉起 `node <入口> <原参数>`,健康判定轮询 /health
+  let current_exe = c_current_exec_path()
+  if current_exe == "" {
+    return Err("找不到当前可执行文件路径,已放弃切换")
+  }
+  let base_args : Array[String] = if argv_has_program() {
+    let argv = @env.args()
+    argv[1:].to_owned()
+  } else {
+    []
+  }
+  let restart_args : Array[String] = [entry]
+  for arg in base_args {
+    restart_args.push(arg)
+  }
+  spawn_upload_swap(
+    current_exe,
+    "node",
+    version,
+    { args: restart_args, cwd: None, log_file: log_file_of_args(base_args), },
+    health_url=Some(health_url_of_args(base_args)),
+  ) catch {
+    e => return Err(UpdateError::to_text(e))
+  }
+  Ok(version)
+}
+
+///|
+/// 本进程 argv 是否带程序名(@env.args 的口径:第一个元素是程序名)。
+fn argv_has_program() -> Bool {
+  let argv = @env.args()
+  argv.length() > 0
+}
+
+///|
 /// 后端对应的二进制名(Windows 带 .exe;与发布 workflow / pack-local 一致)。
 fn backend_binary_name(backend : String) -> String {
   let base = if backend == "rust" { "syncx-rs" } else { "syncx-mb" }
@@ -488,62 +710,4 @@ fn log_file_of_args(args : Array[String]) -> String? {
     i += 1
   }
   None
-}
-
-///|
-/// 上传换入主流程:识别 → 安装到 bin/ → 交接看门狗。
-///
-/// 成功返回将要换入的版本号;此时看门狗已经 detached 拉起,本进程会在
-/// 宽限期后被 SIGTERM(见 update.mbt 的 kill_parent_ms)。dev 运行态一律
-/// 拒绝(与 api 层的 dev 门同一文案,双保险)。
-pub async fn perform_upload_swap(
-  bytes : Bytes,
-  config_dir : String,
-  min_bytes~ : Int32 = MIN_UPLOAD_PACKAGE_BYTES,
-) -> Result[String, String] {
-  if @core.VERSION == "dev" {
-    return Err(
-      "开发模式下不支持升级功能（运行态为 dev，无单文件运行时可替换）",
-    )
-  }
-  let pkg = match extract_package(bytes, min_bytes~) {
-    Ok(pkg) => pkg
-    Err(message) => return Err(message)
-  }
-  if pkg.backend == "node" {
-    // node 包没有可 exec 的单二进制,MoonBit 后端不携带 node 运行时
-    @fs.rmdir(pkg.work_dir, recursive=true) catch {
-      _ => ()
-    }
-    return Err(
-      "Node 后端安装包不能从 MoonBit 后端换入:请上传 syncx-rs / syncx-mbt 安装包,或直接在 Node 后端上升级",
-    )
-  }
-  let dest = match install_backend_binary(pkg, config_dir) {
-    Ok(dest) => dest
-    Err(message) => {
-      @fs.rmdir(pkg.work_dir, recursive=true) catch {
-        _ => ()
-      }
-      return Err(message)
-    }
-  }
-  let version = pkg.version
-  // 解包产物已用不上(二进制已拷进 bin/),清掉临时目录
-  @fs.rmdir(pkg.work_dir, recursive=true) catch {
-    _ => ()
-  }
-  let current_exe = c_current_exec_path()
-  if current_exe == "" {
-    return Err("找不到当前可执行文件路径,已放弃换入")
-  }
-  spawn_upload_swap(
-    current_exe,
-    dest,
-    version,
-    build_update_restart(@env.args()),
-  ) catch {
-    e => return Err(UpdateError::to_text(e))
-  }
-  Ok(version)
 }

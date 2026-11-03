@@ -947,7 +947,14 @@ pub fn ControlMessage::to_json(self : ControlMessage) -> Json {
       set_self_info(map, version, hostname, platform, runtime)
       Json::object(map)
     }
-    PairingRequest(offer_id~, from_device_id~, version~, hostname~, platform~, runtime~) => {
+    PairingRequest(
+      offer_id~,
+      from_device_id~,
+      version~,
+      hostname~,
+      platform~,
+      runtime~
+    ) => {
       let map : Map[String, Json] = Map([])
       set_str(map, "kind", "pairing-request")
       set_str(map, "offerId", offer_id)
@@ -972,7 +979,14 @@ pub fn ControlMessage::to_json(self : ControlMessage) -> Json {
       set_self_info(map, version, hostname, platform, runtime)
       Json::object(map)
     }
-    OfferReceipt(offer_id~, from_device_id~, version~, hostname~, platform~, runtime~) => {
+    OfferReceipt(
+      offer_id~,
+      from_device_id~,
+      version~,
+      hostname~,
+      platform~,
+      runtime~
+    ) => {
       let map : Map[String, Json] = Map([])
       set_str(map, "kind", "offer-receipt")
       set_str(map, "offerId", offer_id)

@@ -785,6 +785,10 @@ pub(all) struct UpdateJob {
   /// (上传换入路径用:旧进程响应完 HTTP 后没有别的退出机制;
   ///  0 = 不发,发布路径不变 —— CLI 升级由用户自己重启)。
   kill_parent_ms : Int64
+  /// 跨后端拉起 node 时的健康判定地址(Node 侧没有 SYNCX_UPDATE_MARKER
+  /// 约定,改轮询控制端口 /health;轮询开始前旧进程已退出,能应答的
+  /// 一定是新进程)。None = 同后端语义,等 marker 文件。
+  health_url : String?
 }
 
 ///|
@@ -823,6 +827,10 @@ pub fn UpdateJob::to_json(self : UpdateJob) -> Json {
   }
   map.set("no_swap", Json::boolean(self.no_swap))
   map.set("kill_parent_ms", Json::number(self.kill_parent_ms.to_double()))
+  match self.health_url {
+    Some(url) => map.set("health_url", Json::string(url))
+    None => map.set("health_url", Json::null())
+  }
   Json::object(map)
 }
 
@@ -914,6 +922,7 @@ pub fn UpdateJob::from_json(value : Json) -> UpdateJob? {
     restart_exe: job_opt_str(map, "restart_exe"),
     no_swap: map.get("no_swap") is Some(True),
     kill_parent_ms: job_num(map, "kill_parent_ms").to_int64(),
+    health_url: job_opt_str(map, "health_url"),
   })
 }
 
@@ -964,6 +973,7 @@ async fn spawn_update_swap(
     restart_exe: None,
     no_swap: false,
     kill_parent_ms: 0L,
+    health_url: None,
   }
   let job_path = "\{work}/job.json"
   write_job_and_spawn_watchdog(job, job_path, exe)
@@ -993,16 +1003,26 @@ async fn write_job_and_spawn_watchdog(
 }
 
 ///|
+/// 探活一个 http(s) 地址(跨后端拉起 node 时的健康判定):2xx/3xx 即健康,
+/// 连不上/超时/非 2xx 都按未健康处理,不影响看门狗继续等。
+async fn health_endpoint_ok(url : String) -> Bool {
+  let (res, _data) = @http.get(url) catch { _ => return false }
+  res.code >= 200 && res.code < 300
+}
+
+///|
 /// 上传换入的交接(跨后端):不替换任何文件 —— 新二进制已在数据目录
 /// `<configDir>/bin/` 下(`new_exe`),看门狗等本进程退出后直接从它
 /// 拉起新后端;超时未写健康标记则重新拉起本进程(原 exe 原封未动,
 /// 回滚零成本)。`kill_parent_ms` 负责在 HTTP 响应冲出内核缓冲之后
-/// 请本进程让位。
+/// 请本进程让位。`health_url` 供拉起 node 时轮询 /health(Node 侧没有
+/// 健康标记约定);None = 走 marker 文件(同后端语义)。
 pub async fn spawn_upload_swap(
   current_exe : String,
   new_exe : String,
   version : String,
   restart : UpdateRestart,
+  health_url~ : String? = None,
 ) -> Unit raise UpdateError {
   let work = @fs.tmpdir(prefix="syncx-update") catch {
     e => raise Io("创建作业目录失败:\{e}")
@@ -1023,6 +1043,7 @@ pub async fn spawn_upload_swap(
     restart_exe: Some(new_exe),
     no_swap: true,
     kill_parent_ms: UPLOAD_KILL_PARENT_GRACE_MS,
+    health_url,
   }
   let job_path = "\{work}/job.json"
   write_job_and_spawn_watchdog(job, job_path, current_exe)
@@ -1124,9 +1145,13 @@ pub async fn run_update_swap(job_path : String) -> Int32 {
     }
     Ok(_) => ()
   }
-  // 5) 等健康标记;超时说明新进程起不来,换回旧版并拉回
+  // 5) 等健康标记;超时说明新进程起不来,换回旧版并拉回。
+  //    跨后端拉起 node 时新进程不认识 SYNCX_UPDATE_MARKER(Node 侧没有
+  //    这个约定),改轮询 health_url(/health);轮询开始前旧进程已退出,
+  //    能应答的一定是新进程
   let marker_deadline = @async.now() + job.verify_ms
-  while !@fs.exists(job.marker) {
+  let mut healthy = false
+  while !healthy {
     if @async.now() >= marker_deadline {
       rollback(
         job.exe,
@@ -1141,7 +1166,7 @@ pub async fn run_update_swap(job_path : String) -> Int32 {
           write_done_rollback(
             job.done,
             Some("\{rollback_error}"),
-            "新进程未在时限内写健康标记",
+            "新进程未在时限内健康起来",
           )
           return 1
         }
@@ -1149,11 +1174,17 @@ pub async fn run_update_swap(job_path : String) -> Int32 {
       write_done_rollback(
         job.done,
         None,
-        "新进程未在时限内写健康标记",
+        "新进程未在时限内健康起来",
       )
       return 1
     }
-    @async.sleep(300)
+    match job.health_url {
+      Some(url) => if health_endpoint_ok(url) { healthy = true }
+      None => if @fs.exists(job.marker) { healthy = true }
+    }
+    if !healthy {
+      @async.sleep(300)
+    }
   }
   // 子进程是 detached 常驻进程,不 wait —— 职责到「标记已写」为止
   @fs.remove(job.marker) catch {

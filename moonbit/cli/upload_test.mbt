@@ -107,12 +107,14 @@ test "upload: UpdateJob 跨后端字段往返" {
     restart_exe: Some("/data/bin/syncx-rs"),
     no_swap: true,
     kill_parent_ms: 600L,
+    health_url: Some("http://127.0.0.1:8384/health"),
   }
   let json = @json.parse(job.to_json().stringify()) catch { _ => panic() }
   guard @cli.UpdateJob::from_json(json) is Some(back) else { panic() }
   assert_eq(back.restart_exe, Some("/data/bin/syncx-rs"))
   assert_true(back.no_swap)
   assert_eq(back.kill_parent_ms, 600L)
+  assert_eq(back.health_url, Some("http://127.0.0.1:8384/health"))
   // 旧版作业文件(发布路径写出的)没有新字段:按缺省解析
   let legacy = @json.parse(
     "{\"parent_pid\":42,\"staging\":\"/s\",\"exe\":\"/e\",\"old_exe\":\"/o\",\"marker\":\"/m\",\"done\":\"/d\",\"restart_args\":null,\"restart_cwd\":null,\"log_file\":null,\"wait_ms\":1,\"verify_ms\":1,\"version\":\"0\"}",
@@ -392,16 +394,53 @@ async test "upload: 安装二进制到 bin/ 并校验版本" {
 }
 
 ///|
-async test "upload: node 包拒绝换入(不触碰看门狗)" {
+/// node 包换入的纯逻辑:控制端口/健康地址解析(npm 安装与看门狗拉起
+/// 涉及真实系统状态,不做 e2e)。
+test "upload: node 健康判定地址解析" {
+  // 显式 --control-port
+  assert_eq(
+    @cli.control_port_of_args([
+      "start", "--config", "/x/config.json", "--control-port", "9527",
+    ]),
+    9527,
+  )
+  // 缺省 8384;非法端口值回落缺省
+  assert_eq(
+    @cli.control_port_of_args(["start", "--config", "/x/config.json"]),
+    8384,
+  )
+  assert_eq(@cli.control_port_of_args(["start", "--control-port", "abc"]), 8384)
+  assert_eq(@cli.health_url_of_args(["start"]), "http://127.0.0.1:8384/health")
+  assert_eq(
+    @cli.health_url_of_args(["start", "--control-port", "9527"]),
+    "http://127.0.0.1:9527/health",
+  )
+}
+
+///|
+async test "upload: node 包在 npm 不可用时明确报错,不半途换入" {
   guard make_node_pkg("@wangmingfa/syncx", "0.4.1") is Some(bytes) else {
     panic()
   }
   let config_dir = @fs.tmpdir(prefix="syncx-mb-upload-node") catch {
     _ => panic()
   }
-  match @cli.perform_upload_swap(bytes, config_dir, min_bytes=1) {
-    Ok(_) => fail("node 包不应能从 moonbit 后端换入")
-    Err(e) => assert_true(e.contains("Node 后端安装包"))
+  // npm 指向不存在的命令:启动即失败,必须给出「本机可能未安装」的明确
+  // 文案,而不是换到一半
+  match
+    @cli.perform_upload_swap(
+      bytes,
+      config_dir,
+      min_bytes=1,
+      npm_cmd="/nonexistent/syncx-test-npm",
+    ) {
+    Ok(_) => fail("npm 不可用时不应换入成功")
+    Err(e) => {
+      assert_true(e.contains("npm install -g 失败"))
+      assert_true(e.contains("无法启动 npm"))
+    }
   }
+  // 失败后不应写任何看门狗交接痕迹(数据目录里只有 update/ 下的 tgz)
+  assert_true(!(@fs.exists("\{config_dir}/bin") catch { _ => false }))
   cleanup(config_dir)
 }

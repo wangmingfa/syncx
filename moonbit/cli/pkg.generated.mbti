@@ -41,6 +41,8 @@ pub async fn check_for_update() -> UpdateInfo
 
 pub fn compare_semver(String, String) -> Int32
 
+pub fn control_port_of_args(Array[String]) -> Int32
+
 pub fn default_config_path() -> String
 
 pub fn detect_target() -> String raise UpdateError
@@ -48,6 +50,8 @@ pub fn detect_target() -> String raise UpdateError
 pub async fn extract_package(Bytes, min_bytes? : Int32) -> Result[UploadedPackage, String]
 
 pub async fn fetch_release(String?) -> ReleaseAsset
+
+pub fn health_url_of_args(Array[String]) -> String
 
 pub async fn inspect_uploaded_package(Bytes, min_bytes? : Int32) -> Result[@api.InspectedPackage, String]
 
@@ -69,6 +73,8 @@ pub async fn mutate_config(String, (@core.Config) -> Bool) -> Result[Unit, Strin
 
 pub fn normalize_upgrade_tag(String?) -> String raise UpdateError
 
+pub async fn npm_install_global(String, npm_cmd? : String) -> Result[Unit, String]
+
 pub fn parent_dir_of(String) -> String
 
 pub fn parse_backend_dir_name(String) -> (String, String, String)?
@@ -77,13 +83,15 @@ pub fn parse_checksums(String, String) -> String?
 
 pub fn parse_start_args(Array[String]) -> Result[StartArgs, String]
 
-pub async fn perform_upload_swap(Bytes, String, min_bytes? : Int32) -> Result[String, String]
+pub async fn perform_upload_swap(Bytes, String, min_bytes? : Int32, npm_cmd? : String) -> Result[String, String]
 
 pub fn pick_mode(Array[String]) -> Result[CliMode, String]
 
 pub fn pick_release(Array[Json], String?) -> ReleaseAsset?
 
 pub fn resolve_config_path(StartArgs) -> String
+
+pub async fn resolve_global_syncx_entry(npm_cmd? : String) -> Result[String, String]
 
 pub async fn run_start(StartArgs) -> Unit
 
@@ -93,7 +101,7 @@ pub async fn save_config_atomic(String, @core.Config) -> Unit raise CliError
 
 pub fn sibling_with_suffix(String, String) -> String
 
-pub async fn spawn_upload_swap(String, String, String, UpdateRestart) -> Unit raise UpdateError
+pub async fn spawn_upload_swap(String, String, String, UpdateRestart, health_url? : String?) -> Unit raise UpdateError
 
 pub fn target_triple(String, String) -> String?
 
@@ -162,6 +170,7 @@ pub(all) struct UpdateJob {
   restart_exe : String?
   no_swap : Bool
   kill_parent_ms : Int64
+  health_url : String?
 }
 pub fn UpdateJob::from_json(Json) -> Self?
 pub fn UpdateJob::to_json(Self) -> Json
