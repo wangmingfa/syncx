@@ -1,0 +1,16 @@
+supported_targets = "native"
+
+options(
+  "native-stub": [ "logger.c" ],
+)
+
+import {
+  "moonrockz/moon-lander-logging" @logging,
+  "moonbitlang/core/encoding/utf8",
+  "moonbitlang/core/json",
+}
+
+import {
+  "moonrockz/moon-lander-logging" @logging,
+  "wangmingfa/syncx/log",
+} for "test"
