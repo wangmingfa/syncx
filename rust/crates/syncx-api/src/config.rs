@@ -47,6 +47,11 @@ pub struct SharedFolder {
     pub schedule: Option<Schedule>,
     #[serde(rename = "gitSync", default, skip_serializing_if = "Option::is_none")]
     pub git_sync: Option<String>,
+    /// 镜像自动提交时是否剔除提交信息里的 Co-Authored-By 行。缺省 `None` = 行为
+    /// 不变(尾注原样保留);剔除只作用于本机落盘的镜像提交,转发给对端的
+    /// 通知仍带着原始消息。
+    #[serde(rename = "gitStripCoAuthored", default, skip_serializing_if = "Option::is_none")]
+    pub git_strip_co_authored: Option<bool>,
     #[serde(rename = "conflictPolicy", default, skip_serializing_if = "Option::is_none")]
     pub conflict_policy: Option<String>,
     #[serde(rename = "onDemand", default, skip_serializing_if = "Option::is_none")]
@@ -632,6 +637,7 @@ fn parse_shared_folder(value: Value) -> Option<SharedFolder> {
         paused: bool_of(object.remove("paused")),
         schedule,
         git_sync: non_empty_str(object.remove("gitSync")),
+        git_strip_co_authored: bool_of(object.remove("gitStripCoAuthored")),
         conflict_policy: non_empty_str(object.remove("conflictPolicy")),
         on_demand: bool_of(object.remove("onDemand")),
         on_demand_dirs: object.remove("onDemandDirs").map(string_array_value),
@@ -928,5 +934,46 @@ mod tests {
         };
         assert_eq!(folder.folder_id(), "share");
         assert_eq!(folder.index_key(), "inst");
+    }
+
+    #[test]
+    fn git_strip_co_authored_round_trip() {
+        // 新字段按 camelCase 序列化,true/false 都能读回来
+        let config = parse_config(
+            r#"{"formatVersion":1,"sharedFolders":[
+                {"path":"/a","gitStripCoAuthored":true},
+                {"path":"/b","gitStripCoAuthored":false}]}"#,
+        )
+        .unwrap();
+        assert_eq!(config.shared_folders[0].git_strip_co_authored, Some(true));
+        assert_eq!(config.shared_folders[1].git_strip_co_authored, Some(false));
+        let raw = serde_json::to_string(&config).unwrap();
+        assert!(raw.contains("\"gitStripCoAuthored\":true"), "{raw}");
+        assert!(raw.contains("\"gitStripCoAuthored\":false"), "{raw}");
+
+        // 旧 JSON 没有该字段:读成 None,回写时也不出现这个键(缺省 = 行为不变)
+        let config = parse_config(
+            r#"{"formatVersion":1,"sharedFolders":[{"path":"/a","devices":["d1"]}]}"#,
+        )
+        .unwrap();
+        let folder = &config.shared_folders[0];
+        assert_eq!(folder.git_strip_co_authored, None);
+        assert!(!serde_json::to_string(&config)
+            .unwrap()
+            .contains("gitStripCoAuthored"));
+    }
+
+    #[test]
+    fn git_strip_co_authored_unknown_folder_keys_survive() {
+        // 新旧两端共用 config.json:开启新开关回写时,本端不认识的旧键必须原样保留
+        let config = parse_config(
+            r#"{"formatVersion":1,"sharedFolders":[
+                {"path":"/a","gitStripCoAuthored":true,"futureFolderKnob":{"x":1}}]}"#,
+        )
+        .unwrap();
+        assert_eq!(config.shared_folders[0].git_strip_co_authored, Some(true));
+        let raw = serde_json::to_string(&config).unwrap();
+        assert!(raw.contains("futureFolderKnob"), "{raw}");
+        assert!(raw.contains("\"gitStripCoAuthored\":true"), "{raw}");
     }
 }

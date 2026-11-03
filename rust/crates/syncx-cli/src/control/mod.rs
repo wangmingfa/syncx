@@ -322,6 +322,45 @@ impl GitNotice {
     }
 }
 
+/// 判断一行是否是 Co-Authored-By 尾注:等价于正则 `/co-?authored-by/i` —— 不锚定、
+/// 大小写不敏感、`co` 与 `authored` 之间的连字符可有可无。syncx-cli 没依赖 regex,
+/// 手写「转小写后包含」匹配与既有风格一致,也省一次编译期正则。
+fn is_co_authored_line(line: &str) -> bool {
+    let lower = line.to_ascii_lowercase();
+    lower.contains("co-authored-by") || lower.contains("coauthored-by")
+}
+
+/// 剔除提交信息里的 Co-Authored-By 行(目录开关 `gitStripCoAuthored` 开启时,
+/// 镜像自动提交用它清洗最终提交消息)。三端统一契约,字段名不得改。
+///
+/// 规则:命中的**整行**剔除(不只首行);剔除留下的空档不外溢 —— 被剔除行紧前面
+/// 尚未落笔的空行一并吞掉,结尾残留的空行整体砍掉,其余空行原样保留。没有命中行时
+/// 原样返回,一个字节都不动。
+pub fn strip_co_authored_lines(message: &str) -> String {
+    if !message.lines().any(|line| is_co_authored_line(line)) {
+        return message.to_string();
+    }
+    let mut out: Vec<&str> = Vec::new();
+    // 尚未落笔的空行:遇到被剔除行就整个吞掉(这正是「不留连续空行尾巴」的一半),
+    // 遇到正文行才按原数量 flush(没被波及的空行节奏不变)。
+    let mut pending_blanks: usize = 0;
+    for line in message.lines() {
+        if is_co_authored_line(line) {
+            pending_blanks = 0;
+            continue;
+        }
+        if line.trim().is_empty() {
+            pending_blanks += 1;
+            continue;
+        }
+        out.extend(std::iter::repeat_n("", pending_blanks));
+        pending_blanks = 0;
+        out.push(line);
+    }
+    // 结尾残留的 pending 是剔除造成的空行尾巴,不落笔。
+    out.join("\n")
+}
+
 /// 控制面出站通道(与 `syncx_api::deps` 里的同名类型无关,这里是 daemon 侧的)。
 #[derive(Clone)]
 pub struct ControlLink {
@@ -720,7 +759,13 @@ impl RuntimeOps {
             return Ok(Some(Value::Object(out)));
         }
 
-        let outcome = crate::git::auto_commit(root, &notice.mirror_message());
+        // gitStripCoAuthored 开启时,镜像提交信息剔除 Co-Authored-By 行。清洗只
+        // 作用于本机落盘的这笔提交;中继/广播给对端的 notice 仍是原始消息。
+        let mut message = notice.mirror_message();
+        if folder.git_strip_co_authored == Some(true) {
+            message = strip_co_authored_lines(&message);
+        }
+        let outcome = crate::git::auto_commit(root, &message);
         let mut state = match self.git_state.lock() {
             Ok(state) => state,
             Err(_) => return Err(OpError::Failed("提交台账不可用".to_string())),
@@ -1662,5 +1707,76 @@ mod tests {
         let mut record = notice(None).to_record(&["devB".to_string()]);
         record.as_object_mut().unwrap().remove("fromDeviceId");
         assert!(GitNotice::from_record("f1", &record).is_none());
+    }
+
+    #[test]
+    fn strip_removes_trailing_trailer_block() {
+        // 最常见形态:正文 + 空行 + 尾注块。整块消失,连分隔空行一起,不留尾巴
+        assert_eq!(
+            strip_co_authored_lines("修复导航\n\nCo-authored-by: A <a@b>"),
+            "修复导航"
+        );
+        assert_eq!(
+            strip_co_authored_lines("修复导航\n\nCo-authored-by: A\nCo-authored-by: B"),
+            "修复导航"
+        );
+    }
+
+    #[test]
+    fn strip_matches_case_variants_and_optional_dash() {
+        // /co-?authored-by/i:大小写不敏感,连字符可有可无,且不限首行
+        assert_eq!(
+            strip_co_authored_lines("Fix\nCO-AUTHORED-BY: x"),
+            "Fix"
+        );
+        assert_eq!(
+            strip_co_authored_lines("Fix\nCo-Authored-By: x"),
+            "Fix"
+        );
+        assert_eq!(
+            strip_co_authored_lines("Fix\ncoauthored-by: x"),
+            "Fix"
+        );
+        // 正文中间混进一行也剔除
+        assert_eq!(
+            strip_co_authored_lines("正文一\nnot a trailer\nco-authored-by: x\n正文二"),
+            "正文一\nnot a trailer\n正文二"
+        );
+    }
+
+    #[test]
+    fn strip_without_trailer_is_byte_identical() {
+        // 无命中行:原样返回,连异常的连续空行也不动
+        assert_eq!(strip_co_authored_lines("只有一行"), "只有一行");
+        assert_eq!(strip_co_authored_lines("A\n\nB"), "A\n\nB");
+        assert_eq!(strip_co_authored_lines("A\n\n\nB"), "A\n\n\nB");
+        assert_eq!(strip_co_authored_lines(""), "");
+    }
+
+    #[test]
+    fn strip_never_leaves_blank_tail_or_double_blanks() {
+        // 尾注后面本来就跟着的空行也一并砍掉:结尾绝不留空行
+        assert_eq!(
+            strip_co_authored_lines("Fix\n\nCo-authored-by: x\n\n\n"),
+            "Fix"
+        );
+        // 尾注出现在正文中间:吞掉它前面的空档,前后正文各归各位,不出现连续空行
+        assert_eq!(
+            strip_co_authored_lines("Fix\n\nCo-authored-by: x\n\n第二段"),
+            "Fix\n\n第二段"
+        );
+        // 整条消息只有尾注:剔干净就是空串(调用方会收到 git 的空消息报错,照实透出)
+        assert_eq!(strip_co_authored_lines("Co-authored-by: x"), "");
+    }
+
+    #[test]
+    fn mirror_message_then_strip_end_to_end() {
+        // 多笔合并 + 正文自带尾注:先组装再清洗,subject 附行不受影响
+        let mut msg = notice(Some(vec!["第一笔", "第三笔:收尾"]));
+        msg.commit_message = "第三笔:收尾\n\nCo-Authored-By: Bot <bot@x>".to_string();
+        assert_eq!(
+            strip_co_authored_lines(&msg.mirror_message()),
+            "第三笔:收尾\n\n第一笔"
+        );
     }
 }

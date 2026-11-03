@@ -322,3 +322,95 @@ async test "git 不存在时优雅降级" {
   assert_true(r.success)
   assert_true(r.skipped)
 }
+
+///|
+async test "剔除 Co-Authored-By 行:尾注/大小写/连字符/尾巴" {
+  // 经典尾注:整行剔除,尾部不留空行尾巴
+  assert_eq(
+    @daemon.strip_co_authored_lines(
+      "feat: a\n\nbody\n\nCo-Authored-By: MOSS <moss@example>",
+    ),
+    "feat: a\n\nbody",
+  )
+  // 无尾注:逐字节原样返回(连结尾部的换行都不动)
+  assert_eq(
+    @daemon.strip_co_authored_lines("feat: a\n\nbody"),
+    "feat: a\n\nbody",
+  )
+  assert_eq(
+    @daemon.strip_co_authored_lines("feat: a\n\nbody\n"),
+    "feat: a\n\nbody\n",
+  )
+  // 大小写不敏感 + 连字符可有可无(/co-?authored-by/i)
+  assert_eq(
+    @daemon.strip_co_authored_lines(
+      "feat: a\n\nco-authored-by: x\n\nCO-AUTHORED-BY: Y\n\nCoAuthored-By: Z",
+    ),
+    "feat: a",
+  )
+  // 不只首行:一整组尾注全部剔除,尾巴空行一并裁掉
+  assert_eq(
+    @daemon.strip_co_authored_lines(
+      "feat: a\n\nCo-Authored-By: x\n\nCo-Authored-By: y",
+    ),
+    "feat: a",
+  )
+  // 带缩进的尾注(行内出现即命中,正则未锚定)
+  assert_eq(
+    @daemon.strip_co_authored_lines("feat: a\n  Co-Authored-By: x"),
+    "feat: a",
+  )
+  // 正文中间的尾注同样剔除;契约只裁尾巴,正文内部空行保持原样
+  assert_eq(
+    @daemon.strip_co_authored_lines("p1\n\nCo-Authored-By: x\n\np2"),
+    "p1\n\n\np2",
+  )
+  // 只剩尾注的消息:剔完为空串
+  assert_eq(@daemon.strip_co_authored_lines("Co-Authored-By: x"), "")
+  // 非 AI 尾注的普通行不动
+  assert_eq(
+    @daemon.strip_co_authored_lines(
+      "feat: a\n\nbody\n\nSigned-off-by: u <u@example>",
+    ),
+    "feat: a\n\nbody\n\nSigned-off-by: u <u@example>",
+  )
+}
+
+///|
+async test "镜像提交信息组装:strip 开关作用在最终消息上" {
+  // 开启 strip:组装出的最终消息剔除尾注(单笔,正文带 AI 尾注)
+  assert_eq(
+    @daemon.compose_mirror_commit_message(
+      "feat: a\n\nbody-a\n\nCo-Authored-By: MOSS <moss@example>",
+      ["feat: a"],
+      strip=true,
+    ),
+    "feat: a\n\nbody-a",
+  )
+  // 开启 strip 且多笔:尾注夹在 full_message 与批次脉络之间,照样剔除
+  assert_eq(
+    @daemon.compose_mirror_commit_message(
+      "feat: c\nbody-c\nCo-Authored-By: MOSS",
+      ["feat: a", "feat: b", "feat: c"],
+      strip=true,
+    ),
+    "feat: c\nbody-c\n\nfeat: a\nfeat: b",
+  )
+  // 开启 strip 但消息干净:原样返回
+  assert_eq(
+    @daemon.compose_mirror_commit_message(
+      "feat: a\n\nbody",
+      ["feat: a"],
+      strip=true,
+    ),
+    "feat: a\n\nbody",
+  )
+  // 缺省(不开 strip):行为不变,尾注原样保留
+  assert_eq(
+    @daemon.compose_mirror_commit_message(
+      "feat: a\n\nbody\n\nCo-Authored-By: MOSS",
+      ["feat: a"],
+    ),
+    "feat: a\n\nbody\n\nCo-Authored-By: MOSS",
+  )
+}

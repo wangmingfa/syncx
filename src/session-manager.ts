@@ -61,7 +61,7 @@ import { learnPeerUrl, learnPeerIp, getLanAddresses } from './net/addresses.js';
 import { e2eKeyForPeer, wrapTransportBlind } from './e2e.js';
 import { hostname as osHostname } from 'node:os';
 import { RateLimiter } from './ratelimit.js';
-import { isPeerAllowed, addPeer, removePeer, setFolderPaused, setGlobalPaused, setFolderSchedule as persistFolderSchedule, setFolderGitSync as persistFolderGitSync, setFolderConflictPolicy as persistFolderConflictPolicy, setFolderOnDemand as persistFolderOnDemand, setFolderOnDemandDir as persistFolderOnDemandDir, setFolderPausedFile as persistFolderPausedFile, setFolderE2E as persistFolderE2E, setFolderGitLastCommitHash, setFolderGitRelayPending, setFolderGitBroadcastPending, setGlobalSettings as persistGlobalSettings, setScheduleOverride as persistScheduleOverride, setCalendarOverride as persistCalendarOverride, type GlobalSettingsPatch, type FolderE2EPatch } from './devices.js';
+import { isPeerAllowed, addPeer, removePeer, setFolderPaused, setGlobalPaused, setFolderSchedule as persistFolderSchedule, setFolderGitSync as persistFolderGitSync, setFolderConflictPolicy as persistFolderConflictPolicy, setFolderGitStripCoAuthored as persistFolderGitStripCoAuthored, setFolderOnDemand as persistFolderOnDemand, setFolderOnDemandDir as persistFolderOnDemandDir, setFolderPausedFile as persistFolderPausedFile, setFolderE2E as persistFolderE2E, setFolderGitLastCommitHash, setFolderGitRelayPending, setFolderGitBroadcastPending, setGlobalSettings as persistGlobalSettings, setScheduleOverride as persistScheduleOverride, setCalendarOverride as persistCalendarOverride, type GlobalSettingsPatch, type FolderE2EPatch } from './devices.js';
 import { receiveOffer, makeOfferId, pruneRevokedOffers } from './offers.js';
 import { OfferRetryLedger, type TrackedOffer } from './net/offer-retry.js';
 import type { DeviceIdentity } from './identity.js';
@@ -200,11 +200,42 @@ function readGitPending(folderId: string, r: GitCommitPendingRecord | undefined)
  * 提交的 subject(旧→新)附在 body —— 一笔镜像提交里保留整批提交脉络(哈希两侧
  * 本就不同,消息是唯一可对上的线索)。单笔、或通知缺 commitSubjects(旧版对端)
  * 时与原消息一致,不多冗余。
+ * 纯函数供目录开关 gitStripCoAuthored 的调用点组合使用(导出供测试)。
  */
-function composeMirrorCommitMessage(msg: GitCommitNotifyMsg): string {
+export function composeMirrorCommitMessage(msg: GitCommitNotifyMsg): string {
   const rest = (msg.commitSubjects ?? []).slice(0, -1).filter((s) => s.trim());
   if (rest.length === 0) return msg.commitMessage;
   return `${msg.commitMessage}\n\n${rest.join('\n')}`;
+}
+
+/** Co-Authored-By 尾注行的匹配:大小写不限,「co」与「authored」之间有无连字符都算。 */
+const CO_AUTHORED_BY_RE = /co-?authored-by/i;
+
+/**
+ * 从提交信息里剔除 Co-Authored-By 行(目录开关 gitStripCoAuthored 开启时,在
+ * composeMirrorCommitMessage 组装出的最终消息上应用):
+ * - 剔除**匹配整行**,不只首行 —— 一笔提交可能带多条尾注(多个协作者/多套工具);
+ * - 空行紧随被剔除行时一并丢弃,且发生过剔除后收掉消息尾部的空行 ——
+ *   否则「正文 + 空行 + 尾注」剔完会在结尾留下悬空的连续空行尾巴;
+ * - 没有命中行时原样返回(含返回同一字符串实例),调用点无需关心是否变化。
+ */
+export function stripCoAuthoredBy(message: string): string {
+  const lines = message.split('\n');
+  const kept: string[] = [];
+  let removed = false;
+  for (let i = 0; i < lines.length; i++) {
+    if (CO_AUTHORED_BY_RE.test(lines[i]!)) {
+      removed = true;
+      // 空行紧随剔除行 → 一并跳过,避免中段留下连续空行
+      while (i + 1 < lines.length && lines[i + 1]!.trim() === '') i++;
+      continue;
+    }
+    kept.push(lines[i]!);
+  }
+  if (!removed) return message;
+  // 尾注通常挂在消息末尾:剔除后把尾部空行收掉,不留尾巴
+  while (kept.length > 0 && kept[kept.length - 1]!.trim() === '') kept.pop();
+  return kept.join('\n');
 }
 
 /**
@@ -1812,7 +1843,14 @@ export class SyncSessionManager {
         `auto-committing: ${folder.id} (from ${msg.fromDeviceId}) "${msg.commitMessage.split('\n')[0]}" — ${filesDesc}`,
       );
       folder.gitAutoCommitAttempts += 1;
-      const result = autoCommit(folder.path, composeMirrorCommitMessage(msg));
+      // 目录级开关 gitStripCoAuthored:开启时在组装出的最终消息上剔除 Co-Authored-By
+      // 尾注(缺省关闭 = 行为不变)。中继给其余对端的仍是原始通知,只有本机落库的
+      // 这笔镜像提交信息被剔除。
+      const mirrorMessage = composeMirrorCommitMessage(msg);
+      const result = autoCommit(
+        folder.path,
+        folder.config.gitStripCoAuthored === true ? stripCoAuthoredBy(mirrorMessage) : mirrorMessage,
+      );
       if (result.success) {
         this.logger.info(`auto-commit success: ${folder.id} -> ${result.hash?.slice(0, 8)}`);
         this.settlePendingGitNotify(folder);
@@ -4315,6 +4353,19 @@ export class SyncSessionManager {
     const folder = this.folderStates.find((f) => f.id === folderId);
     if (folder) folder.config.conflictPolicy = policy === 'keep-both' ? undefined : policy;
     this.logger.info(`conflict policy updated: ${folderId} -> ${policy}`);
+    this.notifyStatus();
+  }
+
+  /**
+   * 设置某目录镜像提交时是否剔除 Co-Authored-By 尾注(目录设置弹窗):落盘 + 同步内存
+   * config,无需重连即生效 —— 自动提交结算(readGitDrain)经 folder.config 现读开关,
+   * 下一笔镜像提交起按新值组装提交信息。
+   */
+  setFolderGitStripCoAuthored(folderId: string, on: boolean): void {
+    persistFolderGitStripCoAuthored(this.configPath, folderId, on);
+    const folder = this.folderStates.find((f) => f.id === folderId);
+    if (folder) folder.config.gitStripCoAuthored = on ? true : undefined;
+    this.logger.info(`git strip co-authored updated: ${folderId} -> ${on ? 'on' : 'off'}`);
     this.notifyStatus();
   }
 

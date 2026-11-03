@@ -380,6 +380,19 @@ export function setFolderConflictPolicy(configPath: string, folderId: string, po
 }
 
 /**
+ * 设置某目录镜像提交时是否剔除 Co-Authored-By 尾注(目录设置弹窗;按 folderId 定位)。
+ * false 存成 undefined 而非字面量:与 onDemand 同款「默认语义由代码缺省承载」,
+ * 配置里不留关闭态的痕迹。
+ */
+export function setFolderGitStripCoAuthored(configPath: string, folderId: string, on: boolean): void {
+  mutateConfig(configPath, (config) => {
+    const existing = config.sharedFolders.find((f) => folderIdFor(f) === folderId);
+    if (!existing) throw new Error(`未找到共享目录:「${folderId}」`);
+    existing.gitStripCoAuthored = on ? true : undefined;
+  });
+}
+
+/**
  * 设置某目录的按需同步开关(稀疏文件,目录设置弹窗;按 folderId 定位)。
  * false 存成 undefined 而非字面量:与 conflictPolicy 同款「默认语义由代码缺省承载」,
  * 配置里不留关闭态的痕迹。

@@ -482,13 +482,54 @@ fn join_lines_from(lines : Array[String], start : Int32) -> String {
 }
 
 ///|
+/// 行是否匹配 /co-?authored-by/i:大小写不敏感,`co` 与 `authored` 之间的
+/// 连字符可有可无(`Co-Authored-By` / `coauthored-by` 都算)。正则未锚定,
+/// 故语义就是「行内出现即命中」—— git 尾注带缩进或署名后缀时照样剔除。
+fn is_co_authored_line(line : String) -> Bool {
+  let lower = line.to_lower()
+  lower.contains("co-authored-by") || lower.contains("coauthored-by")
+}
+
+///|
+/// 对组装出的最终镜像提交消息剔除 Co-Authored-By 行(目录设置
+/// gitStripCoAuthored 开启时启用)。规则(三端契约,与前端目录设置同名):
+///  - 匹配 /co-?authored-by/i 的**整行**剔除,不只首行 —— 对端由 AI 生成的
+///    提交可能带一整组尾注;
+///  - 剔除后不留连续空行尾巴:尾注通常成组躺在消息末尾,只删行不裁尾会留下
+///    悬空的空行结尾。正文内部的空行保持原样;
+///  - 没有命中行时原样返回(逐字节不变),不因开关开启而改写干净消息。
+pub fn strip_co_authored_lines(message : String) -> String {
+  let kept : Array[String] = []
+  let mut removed = false
+  for line in message.split("\n") {
+    let owned = line.to_owned()
+    if is_co_authored_line(owned) {
+      removed = true
+      continue
+    }
+    kept.push(owned)
+  }
+  if !removed {
+    return message
+  }
+  // 裁掉尾部连续空行(尾巴)
+  while kept.length() > 0 && kept[kept.length() - 1].trim() == "" {
+    let _ = kept.pop()
+  }
+  kept.join("\n")
+}
+
+///|
 /// 组装镜像提交的提交信息(照 Node 的 composeMirrorCommitMessage):正文用本批
 /// 最后一笔的 full_message,多于一笔时把其余提交的 subject(旧→新)附在 body ——
 /// 一笔镜像提交里保留整批提交脉络(哈希两侧本就不同,消息是唯一可对上的线索)。
 /// 单笔、或通知缺 commitSubjects(旧版对端)时与原消息一致,不多冗余。
+/// `strip~` 对应目录设置 gitStripCoAuthored(缺省 false = 行为不变):开启时对
+/// 组装完成的最终消息剔除 Co-Authored-By 尾注行(见 strip_co_authored_lines)。
 pub fn compose_mirror_commit_message(
   full_message : String,
   commit_subjects : Array[String],
+  strip~ : Bool = false,
 ) -> String {
   let rest : Array[String] = []
   if commit_subjects.length() > 1 {
@@ -499,10 +540,16 @@ pub fn compose_mirror_commit_message(
       }
     }
   }
-  if rest.is_empty() {
-    return full_message
+  let composed = if rest.is_empty() {
+    full_message
+  } else {
+    "\{full_message}\n\n\{rest.join("\n")}"
   }
-  "\{full_message}\n\n\{rest.join("\n")}"
+  if strip {
+    strip_co_authored_lines(composed)
+  } else {
+    composed
+  }
 }
 
 ///|

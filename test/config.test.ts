@@ -326,4 +326,23 @@ describe('sync schedule 的配置层(迁移与清洗)', () => {
     expect(cfg.calendarOverrides).toEqual({ '2026-10-01': 'holiday' });
     expect(cfg.holidayAutoFetch).toBe(false);
   });
+
+  it('round-trips the folder-level gitStripCoAuthored flag through loadConfig', () => {
+    // 字段清洗口径与其它目录级 boolean 可选字段同款:随「挑拣后重建」的 spread 原样保留,
+    // 只认 true 生效;缺省/非 true 按关闭处理,行为与字段引入前完全一致。
+    const withFlag = loadConfig(
+      writeConfig({ sharedFolders: [{ path: '/a', devices: [], gitStripCoAuthored: true }] }),
+    );
+    expect(withFlag.sharedFolders[0]!.gitStripCoAuthored).toBe(true);
+
+    const withoutFlag = loadConfig(
+      writeConfig({ sharedFolders: [{ path: '/a', devices: [] }] }),
+    );
+    expect(withoutFlag.sharedFolders[0]!.gitStripCoAuthored).toBeUndefined();
+
+    const offFlag = loadConfig(
+      writeConfig({ sharedFolders: [{ path: '/a', devices: [], gitStripCoAuthored: false }] }),
+    );
+    expect(offFlag.sharedFolders[0]!.gitStripCoAuthored).toBe(false);
+  });
 });

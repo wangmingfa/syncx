@@ -110,6 +110,7 @@ pub fn add_folder_to_config(
     schedule: None,
     git_sync: None,
     conflict_policy: None,
+    strip_co_authored: None,
     on_demand: None,
     on_demand_dirs: None,
     paused_files: None,

@@ -33,6 +33,8 @@ pub(all) struct SharedFolder {
   git_sync : String?
   /// conflictPolicy
   conflict_policy : String?
+  /// gitStripCoAuthored:镜像提交时剔除 Co-Authored-By 尾注行(缺省 false = 行为不变)
+  strip_co_authored : Bool?
   /// onDemand
   on_demand : Bool?
   /// onDemandDirs
@@ -479,6 +481,7 @@ fn parse_shared_folder(value : Json) -> SharedFolder? {
         schedule: take(obj, "schedule"),
         git_sync: string_of(take(obj, "gitSync")),
         conflict_policy: string_of(take(obj, "conflictPolicy")),
+        strip_co_authored: bool_of(take(obj, "gitStripCoAuthored")),
         on_demand: bool_of(take(obj, "onDemand")),
         on_demand_dirs: match take(obj, "onDemandDirs") {
           Some(v) => Some(string_array_of(Some(v)))
@@ -783,6 +786,7 @@ pub fn SharedFolder::to_json(self : SharedFolder) -> Json {
   set_json(map, "schedule", self.schedule)
   set_string(map, "gitSync", self.git_sync)
   set_string(map, "conflictPolicy", self.conflict_policy)
+  set_bool(map, "gitStripCoAuthored", self.strip_co_authored)
   set_bool(map, "onDemand", self.on_demand)
   set_string_array(map, "onDemandDirs", self.on_demand_dirs)
   set_string_array(map, "pausedFiles", self.paused_files)

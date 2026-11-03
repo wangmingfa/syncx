@@ -99,3 +99,37 @@ test "分享记录清洗:时间倒挂的条目丢弃" {
     _ => panic()
   }
 }
+
+///|
+test "gitStripCoAuthored:旧 JSON 无字段兼容 + 清洗往返" {
+  // 旧配置没有该字段:缺省 None(= 行为不变),往返不新增键
+  let legacy = @core.parse_config(
+    "{\"sharedFolders\":[{\"path\":\"/data\",\"gitSync\":\"full\"}]}",
+  )
+  let folder = legacy.shared_folders[0]
+  assert_eq(folder.git_sync, Some("full"))
+  assert_eq(folder.strip_co_authored, None)
+  let legacy_text = legacy.to_json().stringify()
+  assert_false(legacy_text.contains("gitStripCoAuthored"))
+  // 开启:Some(true),往返保留
+  let on = @core.parse_config(
+    "{\"sharedFolders\":[{\"path\":\"/data\",\"gitStripCoAuthored\":true}]}",
+  )
+  assert_eq(on.shared_folders[0].strip_co_authored, Some(true))
+  assert_true(on.to_json().stringify().contains("\"gitStripCoAuthored\":true"))
+  // 显式 false:照常保留(false 语义与缺省一致,落盘形态忠实)
+  let off = @core.parse_config(
+    "{\"sharedFolders\":[{\"path\":\"/data\",\"gitStripCoAuthored\":false}]}",
+  )
+  assert_eq(off.shared_folders[0].strip_co_authored, Some(false))
+  assert_true(
+    off.to_json().stringify().contains("\"gitStripCoAuthored\":false"),
+  )
+  // 非布尔垃圾 → 缺省(坏字段只影响它自己)
+  let junk = @core.parse_config(
+    "{\"sharedFolders\":[{\"path\":\"/data\",\"gitStripCoAuthored\":\"yes\",\"gitSync\":\"send\"}]}",
+  )
+  assert_eq(junk.shared_folders[0].strip_co_authored, None)
+  assert_eq(junk.shared_folders[0].git_sync, Some("send"))
+  assert_false(junk.to_json().stringify().contains("gitStripCoAuthored"))
+}

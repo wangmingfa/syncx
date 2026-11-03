@@ -187,6 +187,63 @@ pub async fn handle_pause(
 }
 
 ///|
+/// POST /api/folders/git-strip-co-authored:设置某目录「镜像提交剔除
+/// Co-Authored-By 行」开关(目录设置弹窗;照 /api/folders/git-sync 同款形状)。
+/// 请求体 { folderId, on }:on 必须是布尔;关闭存成缺省(不落 false 痕迹,
+/// 与 Node「false 存成 undefined」同款),缺省 false = 行为不变。
+pub async fn handle_folder_git_strip_co_authored(
+  options : ApiOptions,
+  event : @mocket.MocketEvent,
+) -> &Responder {
+  let body = match parse_json_body(event) {
+    Some(body) => body
+    None => return json_error(@mocket.BadRequest, "invalid json body")
+  }
+  let obj = match body {
+    Object(obj) => obj
+    _ => return json_error(@mocket.BadRequest, "invalid json body")
+  }
+  let folder_id = match non_empty_string(obj, "folderId") {
+    Some(id) => id
+    None => return json_error(@mocket.BadRequest, "folderId is required")
+  }
+  let on = match obj.get("on") {
+    Some(True) => true
+    Some(False) => false
+    _ => return json_error(@mocket.BadRequest, "on must be a boolean")
+  }
+  let config = load_config(options.config_file)
+  // 按 folderId 定位(id 缺省回退 path,与 Node folderIdFor 同口径)
+  let mut target = -1
+  for i, folder in config.shared_folders {
+    if folder.folder_id() == folder_id {
+      target = i
+    }
+  }
+  if target < 0 {
+    return json_error(
+      @mocket.BadRequest,
+      "未找到共享目录:「\{folder_id}」",
+    )
+  }
+  // SharedFolder 字段不可变:整体拷贝替换,extra(共享 Map)原样沿用
+  let folder = config.shared_folders[target]
+  config.shared_folders[target] = {
+    ..folder,
+    strip_co_authored: if on {
+      Some(true)
+    } else {
+      None
+    },
+  }
+  save_config(options.config_file, config) catch {
+    _ => return json_error(@mocket.BadRequest, "invalid json body")
+  }
+  // TODO(daemon):落盘后通知 daemon 重载,让下一轮镜像提交立即按新开关剔除
+  @mocket.HttpResponse(@mocket.OK).json(ok_true())
+}
+
+///|
 /// GET /api/devices:已知设备列表。
 pub async fn handle_list_devices(
   options : ApiOptions,

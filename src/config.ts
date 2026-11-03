@@ -130,6 +130,13 @@ export interface SharedFolderConfig {
    */
   gitSync?: GitSyncMode;
   /**
+   * 镜像提交时剔除 Co-Authored-By 尾注(目录设置弹窗开关):开启后,本机替对端落镜像
+   * 提交时,提交信息里匹配 /co-?authored-by/i 的整行会被剔除(对端原文照常中继,
+   * 只影响本机落库的提交信息)。仅本机使用,不进 wire。
+   * 缺省 false = 行为不变;关闭态存 undefined,与「从未设置过」同形。
+   */
+  gitStripCoAuthored?: boolean;
+  /**
    * 冲突自动处理策略(版本向量并发时,见 peer.ts 的 conflict 分支)。
    *
    * - 'keep-both'(默认,存成 undefined):现行为 —— 拉回对端内容,本地保留为

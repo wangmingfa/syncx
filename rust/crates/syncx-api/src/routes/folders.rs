@@ -412,6 +412,31 @@ pub fn try_routes(state: &AppState, ctx: &Ctx) -> Option<Response> {
         );
     }
 
+    // —— POST /api/folders/git-strip-co-authored ——
+    if ctx.method_is("POST") && path == "/api/folders/git-strip-co-authored" {
+        let Ok(body) = ctx.json() else {
+            return Some(util::error(StatusCode::BAD_REQUEST, "invalid json body"));
+        };
+        let Some(folder_id) = non_empty_string(body.get("folderId")) else {
+            return Some(util::error(StatusCode::BAD_REQUEST, "folderId is required"));
+        };
+        let Some(on) = body.get("on").and_then(|value| value.as_bool()) else {
+            return Some(util::error(
+                StatusCode::BAD_REQUEST,
+                "on must be a boolean",
+            ));
+        };
+        return Some(
+            match mutate::set_folder_git_strip_co_authored(&state.config, &folder_id, on) {
+                Ok(()) => {
+                    notify_ops(state);
+                    util::ok_true()
+                }
+                Err(error) => bad(error, "设置剔除 Co-Authored-By 失败"),
+            },
+        );
+    }
+
     // —— POST /api/folders/e2e ——
     if ctx.method_is("POST") && path == "/api/folders/e2e" {
         let Ok(body) = ctx.json() else {
@@ -1606,5 +1631,111 @@ mod tests {
             parse_history_query(&ctx, 2000).unwrap_err(),
             "invalid direction, action parameter"
         );
+    }
+
+    /// 路由层测试用的最小 AppState:临时目录 + 真实 ConfigStore,不接活会话。
+    fn temp_state(tag: &str) -> (AppState, std::path::PathBuf) {
+        let dir = std::env::temp_dir().join(format!(
+            "syncx-api-folders-route-{tag}-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let deps = crate::deps::ControlDeps::new("test-token", dir.join("config.json"));
+        let state = AppState::new(deps);
+        state.config.save(&crate::config::Config::new()).unwrap();
+        (state, dir)
+    }
+
+    fn post_ctx(path: &str, body: Value) -> Ctx {
+        Ctx {
+            method: axum::http::Method::POST,
+            path: path.into(),
+            query: String::new(),
+            headers: axum::http::HeaderMap::new(),
+            body: serde_json::to_vec(&body).unwrap(),
+            remote: String::new(),
+        }
+    }
+
+    async fn response_json(response: axum::response::Response) -> (StatusCode, Value) {
+        let status = response.status();
+        let body = axum::body::to_bytes(response.into_body(), 64 * 1024)
+            .await
+            .unwrap();
+        (status, serde_json::from_slice(&body).unwrap_or(Value::Null))
+    }
+
+    #[tokio::test]
+    async fn git_strip_co_authored_route_saves_toggle() {
+        let (state, dir) = temp_state("toggle");
+        let root = dir.join("shared");
+        std::fs::create_dir_all(&root).unwrap();
+        mutate::add_folder(&state.config, root.to_str().unwrap(), &[], None, false).unwrap();
+        // 目录可能被规范化过(folder_id 回退 path 时以落盘值为准)
+        let folder_id = state.config.load().shared_folders[0].folder_id();
+
+        // 开:on=true 落盘,响应是 {"ok":true}
+        let (status, body) =
+            response_json(try_routes(&state, &post_ctx(
+                "/api/folders/git-strip-co-authored",
+                serde_json::json!({ "folderId": folder_id.clone(), "on": true }),
+            )).unwrap())
+            .await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(body["ok"], true);
+        assert_eq!(
+            state.config.load().shared_folders[0].git_strip_co_authored,
+            Some(true)
+        );
+
+        // 关:on=false 落成 None(缺省形态),不写字面量 false
+        let (status, body) =
+            response_json(try_routes(&state, &post_ctx(
+                "/api/folders/git-strip-co-authored",
+                serde_json::json!({ "folderId": folder_id, "on": false }),
+            )).unwrap())
+            .await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(body["ok"], true);
+        assert_eq!(
+            state.config.load().shared_folders[0].git_strip_co_authored,
+            None
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[tokio::test]
+    async fn git_strip_co_authored_route_rejects_bad_input() {
+        let (state, dir) = temp_state("bad");
+
+        // 缺 folderId / on 不是布尔 / 目录不存在:一律 400,与相邻路由同一文案口径
+        for (payload, needle) in [
+            (serde_json::json!({ "on": true }), "folderId is required"),
+            (
+                serde_json::json!({ "folderId": "/a", "on": "yes" }),
+                "on must be a boolean",
+            ),
+            (
+                serde_json::json!({ "folderId": "/missing", "on": true }),
+                "未找到共享目录",
+            ),
+        ] {
+            let (status, body) =
+                response_json(try_routes(&state, &post_ctx(
+                    "/api/folders/git-strip-co-authored",
+                    payload,
+                )).unwrap())
+                .await;
+            assert_eq!(status, StatusCode::BAD_REQUEST);
+            assert!(
+                body["error"].as_str().unwrap_or("").contains(needle),
+                "{body}"
+            );
+        }
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

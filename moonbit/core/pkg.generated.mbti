@@ -271,6 +271,7 @@ pub(all) struct SharedFolder {
   schedule : Json?
   git_sync : String?
   conflict_policy : String?
+  strip_co_authored : Bool?
   on_demand : Bool?
   on_demand_dirs : Array[String]?
   paused_files : Array[String]?

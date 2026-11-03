@@ -393,6 +393,77 @@ describe('control api folder gitignore toggle', () => {
   });
 });
 
+describe('control api git strip co-authored toggle', () => {
+  it('POST /api/folders/git-strip-co-authored passes folderId and on to the callback', async () => {
+    const calls: Array<{ folderId: string; on: boolean }> = [];
+    const server = createControlServer({
+      token: 'secret',
+      getStatus: () => ({ ok: true }),
+      setFolderGitStripCoAuthored: (folderId, on) => {
+        calls.push({ folderId, on });
+      },
+    });
+    server.listen(0, '127.0.0.1');
+    await once(server, 'listening');
+    const port = (server.address() as AddressInfo).port;
+
+    const on = await fetchJson(port, '/api/folders/git-strip-co-authored', 'secret', {
+      method: 'POST',
+      body: { folderId: 'f-1', on: true },
+    });
+    const off = await fetchJson(port, '/api/folders/git-strip-co-authored', 'secret', {
+      method: 'POST',
+      body: { folderId: 'f-1', on: false },
+    });
+
+    expect(on.status).toBe(200);
+    expect(on.body).toMatchObject({ ok: true });
+    expect(off.status).toBe(200);
+    expect(off.body).toMatchObject({ ok: true });
+    expect(calls).toEqual([
+      { folderId: 'f-1', on: true },
+      { folderId: 'f-1', on: false },
+    ]);
+
+    server.close();
+  });
+
+  it('rejects POST /api/folders/git-strip-co-authored without token, folderId, or a boolean on', async () => {
+    let called = 0;
+    const server = createControlServer({
+      token: 'secret',
+      getStatus: () => ({ ok: true }),
+      setFolderGitStripCoAuthored: () => {
+        called += 1;
+      },
+    });
+    server.listen(0, '127.0.0.1');
+    await once(server, 'listening');
+    const port = (server.address() as AddressInfo).port;
+
+    const noAuth = await fetchJson(port, '/api/folders/git-strip-co-authored', undefined, {
+      method: 'POST',
+      body: { folderId: 'f-1', on: true },
+    });
+    const noFolderId = await fetchJson(port, '/api/folders/git-strip-co-authored', 'secret', {
+      method: 'POST',
+      body: { on: true },
+    });
+    const nonBooleanOn = await fetchJson(port, '/api/folders/git-strip-co-authored', 'secret', {
+      method: 'POST',
+      body: { folderId: 'f-1', on: 'yes' },
+    });
+
+    expect(noAuth.status).toBe(401);
+    expect(noFolderId.status).toBe(400);
+    expect(nonBooleanOn.status).toBe(400);
+    // 校验失败不得触达落盘回调
+    expect(called).toBe(0);
+
+    server.close();
+  });
+});
+
 describe('control api git log and empty dirs', () => {
   it('GET /api/folders/git-log reports commits, and null as gitRepo false', async () => {
     const commits = [

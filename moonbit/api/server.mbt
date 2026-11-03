@@ -83,6 +83,7 @@ pub fn health_json() -> Json {
 ///   - 接了 actor 时叠加目录/统计域(folders/entries/tombstones/
 ///     conflictCounts,camelCase 对齐前端 `StatusData`);未接则缺省不上线,
 ///     其余字段(platform/devices/...)仍是后续里程碑。
+
 ///|
 /// 编译目标 OS(见 platform.c;与 cli 的 syncx_os_name 是两套取值口径)。
 extern "C" fn c_status_platform() -> String = "syncx_status_platform"
@@ -347,6 +348,9 @@ pub fn build_app(options : ApiOptions) -> @mocket.App {
   app.get("/api/folders", event => handle_list_folders(options, event))
   app.post("/api/folders", event => handle_add_folder(options, event))
   app.post("/api/pause", event => handle_pause(options, event))
+  app.post("/api/folders/git-strip-co-authored", event => {
+    handle_folder_git_strip_co_authored(options, event)
+  })
   app.get("/api/devices", event => handle_list_devices(options, event))
   app.post("/api/shutdown", event => handle_shutdown(options, event))
   // 上传安装包换入(预检只读;换入成功后旧进程由看门狗请退,见 upload.mbt)

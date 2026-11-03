@@ -290,3 +290,93 @@ async test "POST /api/shutdown:有回调回 ok,无回调回 503" {
   }
   assert_eq(flags.length(), 1)
 }
+
+///|
+async test "POST /api/folders/git-strip-co-authored:开/关落盘与 400 校验" {
+  let dir = test_config_dir("git-strip")
+  // 预置两份目录:一份 id 显式 + 未知键,另一份无 id(定位走 path 回退)
+  @fs.write_file(
+    "\{dir}/config.json",
+    "{\"sharedFolders\":[{\"path\":\"/data/repo\",\"id\":\"repo-1\",\"gitSync\":\"full\",\"futureKey\":1},{\"path\":\"/data/other\"}],\"formatVersion\":1}",
+    create_mode=CreateOrTruncate,
+  )
+  let app = @api.build_app(options_with("git-strip", dir))
+  let secret = @api.session_secret("test-token")
+  let ticket = @api.sign_session(
+    { via: "token", sub: "token", exp: @api.now_ms() + 60_000L, },
+    secret,
+  )
+  let headers : Map[@http.CaseInsensitiveString, StringView] = {
+    "Cookie": "syncx_session=\{ticket}",
+  }
+  // 开启:200 + ok:true,目标目录落盘 true,其余目录不受影响
+  let response = @mocket.dispatch_http(
+    app, "POST", "/api/folders/git-strip-co-authored", headers, b"{\"folderId\":\"repo-1\",\"on\":true}",
+  )
+  assert_eq(response.status_code.to_int(), 200)
+  let body : Json = response.read_body()
+  match body {
+    Object(obj) => assert_true(obj.get("ok") is Some(True))
+    _ => fail("响应应为对象")
+  }
+  let saved = @api.load_config("\{dir}/config.json")
+  assert_eq(saved.shared_folders.length(), 2)
+  assert_eq(saved.shared_folders[0].strip_co_authored, Some(true))
+  assert_eq(saved.shared_folders[0].git_sync, Some("full"))
+  assert_eq(saved.shared_folders[1].strip_co_authored, None)
+  // 落盘字段名与契约逐字一致,未知键照常保留
+  let raw = @fs.read_file("\{dir}/config.json").text()
+  assert_true(raw.contains("\"gitStripCoAuthored\":true"))
+  assert_true(raw.contains("futureKey"))
+  // 关闭:回到缺省形态(不落 false 痕迹)
+  let response = @mocket.dispatch_http(
+    app, "POST", "/api/folders/git-strip-co-authored", headers, b"{\"folderId\":\"repo-1\",\"on\":false}",
+  )
+  assert_eq(response.status_code.to_int(), 200)
+  let off = @api.load_config("\{dir}/config.json")
+  assert_eq(off.shared_folders[0].strip_co_authored, None)
+  assert_false(
+    @fs.read_file("\{dir}/config.json").text().contains("gitStripCoAuthored"),
+  )
+  // folderId 缺省回退 path:按 path 也能定位
+  let response = @mocket.dispatch_http(
+    app, "POST", "/api/folders/git-strip-co-authored", headers, b"{\"folderId\":\"/data/other\",\"on\":true}",
+  )
+  assert_eq(response.status_code.to_int(), 200)
+  let by_path = @api.load_config("\{dir}/config.json")
+  assert_eq(by_path.shared_folders[1].strip_co_authored, Some(true))
+  // 未知目录:400 + Node 同款文案
+  let response = @mocket.dispatch_http(
+    app, "POST", "/api/folders/git-strip-co-authored", headers, b"{\"folderId\":\"no-such\",\"on\":true}",
+  )
+  assert_eq(response.status_code.to_int(), 400)
+  let body : Json = response.read_body()
+  match body {
+    Object(obj) =>
+      assert_true(
+        obj.get("error") is Some(String("未找到共享目录:「no-such」")),
+      )
+    _ => fail("响应应为对象")
+  }
+  // 缺 folderId:on 非布尔:均 400
+  let response = @mocket.dispatch_http(
+    app, "POST", "/api/folders/git-strip-co-authored", headers, b"{\"on\":true}",
+  )
+  assert_eq(response.status_code.to_int(), 400)
+  let body : Json = response.read_body()
+  match body {
+    Object(obj) =>
+      assert_true(obj.get("error") is Some(String("folderId is required")))
+    _ => fail("响应应为对象")
+  }
+  let response = @mocket.dispatch_http(
+    app, "POST", "/api/folders/git-strip-co-authored", headers, b"{\"folderId\":\"repo-1\",\"on\":\"yes\"}",
+  )
+  assert_eq(response.status_code.to_int(), 400)
+  let body : Json = response.read_body()
+  match body {
+    Object(obj) =>
+      assert_true(obj.get("error") is Some(String("on must be a boolean")))
+    _ => fail("响应应为对象")
+  }
+}

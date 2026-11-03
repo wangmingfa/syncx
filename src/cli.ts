@@ -840,6 +840,10 @@ export async function run(args: ParsedArgs): Promise<void> {
       // 校验(非法策略 400)+ 落盘 + 内存生效都在 manager 内完成
       manager.setFolderConflictPolicy(folderId, policy);
     },
+    setFolderGitStripCoAuthored: (folderId, on) => {
+      // 布尔校验在路由层;落盘 + 内存生效都在 manager 内完成
+      manager.setFolderGitStripCoAuthored(folderId, on);
+    },
     setFolderE2E: (folderId, patch) => {
       // 口令/名单校验在 devices.setFolderE2E(错误 400 原样透出);
       // 生效后 manager 摘挂该目录全部数据通道,新入名单的盲区端即刻开始密文铺底

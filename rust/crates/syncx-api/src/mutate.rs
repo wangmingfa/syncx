@@ -480,6 +480,19 @@ pub fn set_folder_on_demand(store: &ConfigStore, folder_id: &str, on: bool) -> M
     })
 }
 
+/// 镜像自动提交是否剔除 Co-Authored-By 尾注行。关闭存 `None` 而不是字面量
+/// `false`:与 gitSync / conflictPolicy 的「关闭即未设置」同一形态,缺省行为不变。
+pub fn set_folder_git_strip_co_authored(
+    store: &ConfigStore,
+    folder_id: &str,
+    on: bool,
+) -> MutateResult<()> {
+    edit_folder(store, folder_id, move |folder| {
+        folder.git_strip_co_authored = if on { Some(true) } else { None };
+        Ok(())
+    })
+}
+
 pub fn set_folder_on_demand_dir(
     store: &ConfigStore,
     folder_id: &str,

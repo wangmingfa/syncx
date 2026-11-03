@@ -58,7 +58,7 @@ export async function tryFolderRoutes(
   res: ServerResponse,
   deps: ControlServerDeps,
 ): Promise<boolean> {
-  const { addFolder, removeFolder, setFolderDevices, setFolderUseGitignore, setFolderPaused, setFolderFilePaused, setFolderSchedule, setFolderGitSync, setFolderConflictPolicy, setFolderE2E, setFolderOnDemand, setFolderOnDemandDir, prioritizeTransfer, materializeFile, getFolderIgnoreInfo, setFolderIgnoreLines, testFolderIgnore, reAdoptFolderIdentity, reAdoptAllIdentities, getFolderHistory, getGlobalHistory, getWeeklyReport, clearFolderHistory, listFolderConflicts, resolveFolderConflict, conflictFilePair, applyConflictMerge, cleanIdenticalConflicts, diffFolder, compareFolder, readFilePair, applyFileSync, listFolderVersions, restoreFolderVersion, deleteFolderVersion, getFolderVersionContent, rollbackFolder, setScheduleOverride, setCalendarOverride, getCalendar, listGitChanges, readGitDiff, listGitLog, listGitCommitFiles, readGitCommitDiff, listUnpushedByFolder, pushGitFolder, getGitAutoCommitStatus, deleteGitIndexLock, retryGitAutoCommit, listEmptyDirs, deleteEmptyDirs } = deps;
+  const { addFolder, removeFolder, setFolderDevices, setFolderUseGitignore, setFolderPaused, setFolderFilePaused, setFolderSchedule, setFolderGitSync, setFolderConflictPolicy, setFolderGitStripCoAuthored, setFolderE2E, setFolderOnDemand, setFolderOnDemandDir, prioritizeTransfer, materializeFile, getFolderIgnoreInfo, setFolderIgnoreLines, testFolderIgnore, reAdoptFolderIdentity, reAdoptAllIdentities, getFolderHistory, getGlobalHistory, getWeeklyReport, clearFolderHistory, listFolderConflicts, resolveFolderConflict, conflictFilePair, applyConflictMerge, cleanIdenticalConflicts, diffFolder, compareFolder, readFilePair, applyFileSync, listFolderVersions, restoreFolderVersion, deleteFolderVersion, getFolderVersionContent, rollbackFolder, setScheduleOverride, setCalendarOverride, getCalendar, listGitChanges, readGitDiff, listGitLog, listGitCommitFiles, readGitCommitDiff, listUnpushedByFolder, pushGitFolder, getGitAutoCommitStatus, deleteGitIndexLock, retryGitAutoCommit, listEmptyDirs, deleteEmptyDirs } = deps;
   const path = req.url ? pathname(req.url) : '/';
 
   // Form POST /folders : add or (via _method=DELETE) remove a folder
@@ -285,6 +285,31 @@ export async function tryFolderRoutes(
       sendJson(res, 200, { ok: true });
     } catch (e) {
       sendJson(res, 400, { error: e instanceof Error ? e.message : '设置冲突策略失败' });
+    }
+    return true;
+  }
+
+  // POST /api/folders/git-strip-co-authored { folderId, on } : 镜像提交剔除 Co-Authored-By 行。
+  // on 必须是布尔(与 onDemand/paused 同款严格校验);开启只影响本机**之后**落库的镜像
+  // 提交信息,历史提交与中继给其余对端的原始通知都不动。
+  if (req.method === 'POST' && path === '/api/folders/git-strip-co-authored' && setFolderGitStripCoAuthored) {
+    try {
+      const raw = await readBody(req);
+      const body = raw === '' ? {} : JSON.parse(raw);
+      const folderId = (body as { folderId?: unknown }).folderId;
+      const on = (body as { on?: unknown }).on;
+      if (typeof folderId !== 'string' || folderId === '') {
+        sendJson(res, 400, { error: 'folderId is required' });
+        return true;
+      }
+      if (typeof on !== 'boolean') {
+        sendJson(res, 400, { error: 'on must be a boolean' });
+        return true;
+      }
+      setFolderGitStripCoAuthored(folderId, on);
+      sendJson(res, 200, { ok: true });
+    } catch (e) {
+      sendJson(res, 400, { error: e instanceof Error ? e.message : '设置 Co-Authored-By 剔除失败' });
     }
     return true;
   }

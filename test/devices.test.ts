@@ -3,8 +3,8 @@ import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, statSync
 import { rmDir } from './helpers.js';
 import { tmpdir, homedir } from 'node:os';
 import { join, resolve } from 'node:path';
-import { addSharedFolder, removeSharedFolder, isPeerAllowed, addPeer, removePeer, acceptFolderInvitation, setFolderGitSync, setFolderGitLastCommitHash, setFolderConflictPolicy } from '../src/devices.js';
-import type { SharedFolderConfig } from '../src/config.js';
+import { addSharedFolder, removeSharedFolder, isPeerAllowed, addPeer, removePeer, acceptFolderInvitation, setFolderGitSync, setFolderGitLastCommitHash, setFolderConflictPolicy, setFolderGitStripCoAuthored } from '../src/devices.js';
+import { loadConfig, type SharedFolderConfig } from '../src/config.js';
 
 function tempDir(): string {
   return mkdtempSync(join(tmpdir(), 'syncx-devices-'));
@@ -608,6 +608,48 @@ describe('conflict policy settings', () => {
   it('rejects an unknown folder', () => {
     const { dir, configPath } = folderFixture();
     expect(() => setFolderConflictPolicy(configPath, 'nope', 'local-wins')).toThrow(/未找到共享目录/);
+    rmDir(dir);
+  });
+});
+
+describe('git strip co-authored settings', () => {
+  /** 建一个带单个共享目录的配置,返回 configPath 与该目录的 folderId。 */
+  function folderFixture(): { dir: string; configPath: string; folderId: string } {
+    const dir = tempDir();
+    const configPath = join(dir, 'config.json');
+    const docsPath = join(dir, 'docs');
+    mkdirSync(docsPath, { recursive: true });
+    addSharedFolder(configPath, docsPath, ['DEV1234567'], 'strip-1');
+    return { dir, configPath, folderId: 'strip-1' };
+  }
+
+  function readFolder(configPath: string): Record<string, unknown> {
+    return JSON.parse(readFileSync(configPath, 'utf8')).sharedFolders[0];
+  }
+
+  it('persists the enabled flag verbatim and loadConfig round-trips it', () => {
+    const { dir, configPath, folderId } = folderFixture();
+    setFolderGitStripCoAuthored(configPath, folderId, true);
+    expect(readFolder(configPath).gitStripCoAuthored).toBe(true);
+    // loadConfig 走「挑拣后重建」路径:开关字段必须原样回来,否则重启即丢
+    expect(loadConfig(configPath).sharedFolders[0]!.gitStripCoAuthored).toBe(true);
+    rmDir(dir);
+  });
+
+  it('stores the disabled state as an absent field rather than literal false', () => {
+    const { dir, configPath, folderId } = folderFixture();
+    setFolderGitStripCoAuthored(configPath, folderId, true);
+    expect(readFolder(configPath).gitStripCoAuthored).toBe(true);
+
+    setFolderGitStripCoAuthored(configPath, folderId, false);
+    // 关闭态与「从未设置过」同形:配置里不留 false 痕迹(缺省语义由代码承载)
+    expect('gitStripCoAuthored' in readFolder(configPath)).toBe(false);
+    rmDir(dir);
+  });
+
+  it('rejects an unknown folder', () => {
+    const { dir, configPath } = folderFixture();
+    expect(() => setFolderGitStripCoAuthored(configPath, 'nope', true)).toThrow(/未找到共享目录/);
     rmDir(dir);
   });
 });

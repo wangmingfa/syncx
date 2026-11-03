@@ -79,6 +79,8 @@ export interface ControlServerDeps {
   setFolderGitSync?: (folderId: string, mode: 'off' | 'send' | 'receive' | 'full') => void;
   /** 设置某目录的冲突自动处理策略(keep-both / newest-wins / local-wins)。 */
   setFolderConflictPolicy?: (folderId: string, policy: 'keep-both' | 'newest-wins' | 'local-wins') => void;
+  /** 镜像提交时剔除提交信息里的 Co-Authored-By 行(目录级开关;缺省关闭)。 */
+  setFolderGitStripCoAuthored?: (folderId: string, on: boolean) => void;
   /**
    * 设置某目录的端到端加密口令 / 不可信节点名单(键出现才改;passphrase null/'' = 清除,
    * 连带清空名单)。生效靠 manager 内部摘挂数据通道,见 devices.setFolderE2E 与 e2e.ts。
