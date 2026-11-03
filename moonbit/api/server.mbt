@@ -137,6 +137,13 @@ pub fn status_json(options : ApiOptions) -> Json {
 }
 
 ///|
+/// 站点图标(SVG 源码)。真值在 src/favicon.ts(Node 侧内联常量),
+/// Rust 侧复制于 syncx-api/src/favicon.svg —— 三处逐字同源,改图标要一起动。
+/// 内联常量而非读盘:单文件/独立部署形态下没有 web/ 目录可用。
+const FAVICON_SVG : String =
+  "<svg xmlns=\"http://www.w3.org/2000/svg\" viewBox=\"0 0 32 32\">\n<rect width=\"32\" height=\"32\" rx=\"7\" fill=\"#0F6E56\"/>\n<g fill=\"none\" stroke=\"#FFFFFF\" stroke-width=\"2.4\" stroke-linecap=\"round\">\n<path d=\"M8.5 13H20\"/>\n<path d=\"M24 19H12\"/>\n</g>\n<path d=\"M20 10.5 24.5 13 20 15.5Z\" fill=\"#FFFFFF\"/>\n<path d=\"M12 16.5 7.5 19 12 21.5Z\" fill=\"#FFFFFF\"/>\n</svg>\n"
+
+///|
 /// 页面壳占位 HTML。dist/web 未配置/不存在时的兜底;
 /// 路由面(`/`、`/login`、`/compare*` 等)与 Rust `is_shell_path` 一致。
 pub fn index_html() -> String {
@@ -360,6 +367,18 @@ pub fn build_app(options : ApiOptions) -> @mocket.App {
   app.post("/api/self-update/upload", event => {
     handle_upload_swap(options, event)
   })
+  // 站点图标:免认证公开资源(浏览器 tab logo)。/favicon.ico 显式 204,
+  // 避免浏览器自动请求落到 404/401 分支误导排查(对齐 Node/Rust)
+  app.get("/favicon.svg", _event =>
+    @mocket.HttpResponse(
+      @mocket.OK,
+      headers={
+        "Content-Type": "image/svg+xml",
+        "Cache-Control": "public, max-age=86400",
+      },
+      body=@mocket.text(FAVICON_SVG),
+    ))
+  app.get("/favicon.ico", _event => @mocket.HttpResponse(@mocket.NoContent))
   // 静态资源 / 占位页(最后兜底)
   match options.web_dist {
     Some(dist) => mount_static(app, dist)
