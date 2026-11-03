@@ -643,6 +643,9 @@ export function loadConfig(configPath: string): Config {
     // 目录时段:旧字符串形态在加载时迁移成规则(与 peers 同一套「加载即自愈」手法)
     sharedFolders: (parsed.sharedFolders ?? []).map((f) => ({
       ...f,
+      // devices:空列表被 MoonBit 后端整体省略(见 core/config.mbt 序列化),补回空数组;
+      // 前端目录卡 folderActions 直接 .length,undefined 外溢会让整个状态页渲染崩掉
+      devices: f.devices ?? [],
       schedule: normalizeSchedule(f.schedule as unknown),
     })),
     // 加载时规范化 + 去重:旧版本遗留的 ::ffff: 形式条目自愈合并,不必手动清理 config.json

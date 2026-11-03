@@ -15,4 +15,5 @@ import {
   "cc06b/mooncry@0.95.0",
   "moonbitlang/regexp@0.3.6",
   "oboard/mocket@0.10.2",
+  "moonrockz/moon-lander-logging@0.11.0",
 }

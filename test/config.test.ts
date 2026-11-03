@@ -91,6 +91,26 @@ describe('config store', () => {
     rmDir(dir);
   });
 
+  it('defaults missing folder devices to an empty list', () => {
+    // MoonBit 后端序列化时空列表整体省略(devices:[] 不落盘);Node 侧 load 必须
+    // 补回空数组 —— 否则 status.folders 里 devices 为 undefined,前端目录卡
+    // folderActions 直接 .length 会让整个状态页渲染崩掉。
+    const dir = tempDir();
+    const path = join(dir, 'config.json');
+    writeFileSync(
+      path,
+      JSON.stringify({
+        sharedFolders: [{ path: '/data/docs', id: '7da51acbbba0' }],
+      }),
+    );
+
+    expect(loadConfig(path)).toMatchObject({
+      sharedFolders: [{ path: '/data/docs', devices: [] }],
+    });
+
+    rmDir(dir);
+  });
+
   it('normalizes legacy ::ffff:-mapped peer entries on load', () => {
     const dir = tempDir();
     const path = join(dir, 'config.json');
