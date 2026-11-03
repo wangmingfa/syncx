@@ -35,15 +35,25 @@ export interface ControlServerDeps {
   /** Web UI 确认后的 npm 自升级:下载官方 tgz → 校验 → updater 接管;抛错返回 400。 */
   selfUpdateNpm?: () => Promise<{ version: string }>;
   /**
-   * Web UI「上传安装包」第一步:只读预检上传的 tgz —— 校验结构/包名/版本并实跑 -v,
-   * 读出包内版本后清理临时目录,不改动任何运行期状态。current 为当前运行版本。
+   * Web UI「上传安装包」第一步:只读预检上传的安装包 —— npm tgz 走结构/包名/版本校验
+   * 并实跑 -v;后端二进制包(rust/moonbit)走 backend-swap 的结构/目标平台校验。
+   * 读出包内信息后清理临时目录,不改动任何运行期状态。current 为当前运行版本;
+   * backend 标识包的身份(node = npm tgz);target 为后端包的目标三元组(node 包为空)。
    */
-  inspectLocalPackage?: (tgz: Buffer) => Promise<{ version: string; name: string; current: string }>;
+  inspectLocalPackage?: (tgz: Buffer) => Promise<{
+    version: string;
+    name?: string;
+    current: string;
+    backend: 'node' | 'rust' | 'moonbit';
+    target?: string;
+  }>;
   /**
-   * Web UI「上传安装包」第二步:走与 npm/P2P 同一条自更新管线(校验 → updater 接管换入 →
-   * 拉起新 daemon,失败回滚)。路由响应后优雅关闭,由 updater 完成替换。抛错返回 400。
+   * Web UI「上传安装包」第二步:npm tgz 走与 npm/P2P 同一条自更新管线(校验 → updater
+   * 接管换入 → 拉起新 daemon,失败回滚);后端二进制包走跨后端换入(backend-swap:
+   * 二进制装进 <configDir>/bin → 优雅关闭 → 拉起新后端,健康检查不过自动回滚)。
+   * 路由响应后优雅关闭。抛错返回 400。
    */
-  selfUpdateUpload?: (tgz: Buffer) => Promise<{ version: string }>;
+  selfUpdateUpload?: (tgz: Buffer) => Promise<{ version: string; backend?: 'node' | 'rust' | 'moonbit' }>;
   getStatus: () => unknown;
   /** 添加共享目录;返回是否自动创建了不存在的目录(供前端提示)。
    *  receiveOnly 为 true 时该目录设为接收模式(只拉不推)。 */

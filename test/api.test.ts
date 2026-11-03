@@ -1745,7 +1745,7 @@ describe('上传安装包升级', () => {
       getStatus: () => ({}),
       inspectLocalPackage: async (tgz) => {
         seen.push(tgz);
-        return { version: '0.3.0', name: '@wangmingfa/syncx', current: '0.2.14' };
+        return { backend: 'node', version: '0.3.0', name: '@wangmingfa/syncx', current: '0.2.14' };
       },
     });
     server.listen(0, '127.0.0.1');
@@ -1837,7 +1837,7 @@ describe('dev 运行态拦截自更新接口', () => {
       },
       inspectLocalPackage: async () => {
         called.push('inspect');
-        return { version: '9.9.9', name: 'x', current: '0.1.0' };
+        return { backend: 'node', version: '9.9.9', name: 'x', current: '0.1.0' };
       },
       selfUpdateUpload: async () => {
         called.push('upload');
@@ -1855,7 +1855,7 @@ describe('dev 运行态拦截自更新接口', () => {
 
     expect([check.status, npm.status, ins.status, up.status]).toEqual([400, 400, 400, 400]);
     for (const r of [check, npm, ins, up]) {
-      expect((r.body as { error: string }).error).toContain('开发模式下不支持升级功能');
+      expect((r.body as { error: string }).error).toContain('开发模式下不支持升级/换入功能');
     }
     // 路由层已在最前面拒绝,后端 deps 一律不应被触发
     expect(called).toEqual([]);

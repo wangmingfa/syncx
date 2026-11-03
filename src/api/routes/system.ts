@@ -16,7 +16,12 @@ export async function trySystemRoutes(
   // dev 运行态:源码启动无单文件运行时可替换,所有自更新接口一律拒绝。
   // 前端入口已拦截,这里作为最后一道防线(防直连 API),并返回明确原因。
   if (deps.devMode && path.startsWith('/api/self-update')) {
-    sendJson(res, 400, { ok: false, error: '开发模式下不支持升级功能（运行态为 dev，无单文件运行时可替换）' });
+    sendJson(res, 400, {
+      ok: false,
+      error:
+        '开发模式下不支持升级/换入功能（运行态为 dev，无单文件运行时可替换）。' +
+        '如需切换到 Rust/MoonBit 后端，请先以打包形态（npm run build 后运行 dist/syncx.js）启动 daemon，再上传后端安装包。',
+    });
     return true;
   }
 
@@ -126,7 +131,16 @@ export async function trySystemRoutes(
     try {
       const tgz = await readBodyBuffer(req);
       const info = await inspectLocalPackage(tgz);
-      sendJson(res, 200, { ok: true, version: info.version, name: info.name, current: info.current });
+      // backend/target 是 ADR-0026 三后端形态下的新增字段:node npm tgz 恒为 'node',
+      // rust/moonbit 包由资产目录名解析;前端据此区分「升级」与「跨后端换入」文案。
+      sendJson(res, 200, {
+        ok: true,
+        version: info.version,
+        name: info.name,
+        current: info.current,
+        backend: info.backend,
+        target: info.target ?? null,
+      });
     } catch (e) {
       sendJson(res, 400, { ok: false, error: e instanceof Error ? e.message : String(e) });
     }
@@ -144,7 +158,7 @@ export async function trySystemRoutes(
     try {
       const tgz = await readBodyBuffer(req);
       const r = await selfUpdateUpload(tgz);
-      sendJson(res, 200, { ok: true, version: r.version, restarting: true });
+      sendJson(res, 200, { ok: true, version: r.version, backend: r.backend ?? 'node', restarting: true });
       setTimeout(() => shutdown?.(), 150);
     } catch (e) {
       sendJson(res, 400, { ok: false, error: e instanceof Error ? e.message : String(e) });

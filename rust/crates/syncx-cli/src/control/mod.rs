@@ -1102,11 +1102,21 @@ impl ControlOps for RuntimeOps {
             ));
         }
         let bytes = compare::request_self_binary(self, device_id)?;
-        install_tarball(&self.config_dir, &bytes)
+        // 对端互传只认 npm 载体:后端二进制包没有设备间的分发契约,换入风险
+        // (目标平台不符/来源二进制)也不该由这条通道兜。
+        let inspected = update::inspect_uploaded_package(&bytes).map_err(OpError::Failed)?;
+        if inspected.backend != "node" {
+            return Err(OpError::Failed(
+                "对端互传安装包只支持 npm 载体（收到后端二进制包）".to_string(),
+            ));
+        }
+        install_tarball(&self.config_dir, &bytes, &inspected)
     }
 
     fn inspect_package(&self, tgz: &[u8]) -> OpResult<Value> {
-        update::inspect_package(tgz).map_err(OpError::Failed)
+        update::inspect_uploaded_package(tgz)
+            .map(|inspect| inspect.to_json())
+            .map_err(OpError::Failed)
     }
 
     fn self_update_upload(&self, tgz: &[u8]) -> OpResult<String> {
@@ -1115,7 +1125,21 @@ impl ControlOps for RuntimeOps {
                 "开发模式下不支持升级功能（运行态为 dev，无单文件运行时可替换）".to_string(),
             ));
         }
-        install_tarball(&self.config_dir, tgz)
+        // 识别 → 按包类型分流:npm tgz 走 npm 覆盖(现有通道);后端二进制包
+        // (pack:local --backend rust/moonbit 的产物)走看门狗跨后端 exec 换入。
+        let inspected = update::inspect_uploaded_package(tgz).map_err(OpError::Failed)?;
+        match update::upload_route(&inspected.backend).map_err(OpError::Failed)? {
+            update::UploadRoute::NpmInstall => {
+                install_tarball(&self.config_dir, tgz, &inspected)
+            }
+            update::UploadRoute::BackendSwap => update::install_backend_package(
+                tgz,
+                &inspected,
+                &self.config_dir,
+                daemon_log_file_from_argv(),
+            )
+            .map_err(OpError::Failed),
+        }
     }
 
     // ---- 数据面动作 ----
@@ -1433,17 +1457,12 @@ fn find_offer(store: &ConfigStore, offer_id: &str) -> Result<PendingOffer, OpErr
         .ok_or_else(|| OpError::Failed("offer not found".to_string()))
 }
 
-/// 用 npm 安装一个本地 tgz(自更新上传 / 对端互传安装包走同一条路)。
+/// 用 npm 安装一个本地 tgz(自更新上传的 npm 包 / 对端互传安装包走同一条路)。
 ///
-/// Rust 后端没有「解包后直接替换运行时」的通道(自更新只认 GitHub Release),
-/// 而 npm 安装的二进制用 npm 覆盖是最稳的一条:它同时更新 launcher 与 bin 链接。
-fn install_tarball(config_dir: &Path, tgz: &[u8]) -> OpResult<String> {
-    let inspected = update::inspect_package(tgz).map_err(OpError::Failed)?;
-    let version = inspected
-        .get("version")
-        .and_then(|v| v.as_str())
-        .unwrap_or_default()
-        .to_string();
+/// npm 载体的包用 npm 覆盖是最稳的一条:它同时更新 launcher 与 bin 链接。
+/// 后端二进制包(rust/moonbit)不走这里,见 `update::install_backend_package`。
+fn install_tarball(config_dir: &Path, tgz: &[u8], inspected: &update::UploadedInspect) -> OpResult<String> {
+    let version = inspected.version.clone();
     let dir = config_dir.join("update");
     std::fs::create_dir_all(&dir).map_err(|e| OpError::Failed(e.to_string()))?;
     let path = dir.join(format!("{}.tgz", crate::invite::now_ms()));

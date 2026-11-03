@@ -109,6 +109,24 @@ int syncx_is_process_alive(int pid) {
 #endif
 }
 
+// 向指定进程发 SIGTERM(上传换入:看门狗在宽限期后请旧进程让位)。
+// Unix 走 SIGTERM;Windows 上旧进程没有信号概念,等价物是强杀 ——
+// 上传换入场景旧进程的职责就是退出,无需优雅钩子。
+void syncx_send_sigterm(int pid) {
+  if (pid <= 0) {
+    return;
+  }
+#if defined(_WIN32) || defined(_WIN64)
+  HANDLE h = OpenProcess(PROCESS_TERMINATE, FALSE, (DWORD)pid);
+  if (h != NULL) {
+    TerminateProcess(h, 0);
+    CloseHandle(h);
+  }
+#else
+  kill((pid_t)pid, SIGTERM);
+#endif
+}
+
 // ---- 启动编排(entry.mbt)专用 FFI ----
 
 // 系统熵源取 n 字节随机数(控制令牌等凭据生成;失败返回 0 长度)。

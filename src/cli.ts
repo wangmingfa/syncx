@@ -49,6 +49,7 @@ import { createLogger } from './logger.js';
 import { runUpgrade } from './upgrade.js';
 import { compareVersions } from './upgrade.js';
 import { consumeUpdateDoneFile, inspectPackage, isBundledRuntime, runSelfUpdate, runtimeVersion } from './selfupdate.js';
+import { extractBackendPackage, localTargetTriple, runBackendSwap, sniffBackendPackage } from './backend-swap.js';
 import { createUpdateChecker, downloadTarball } from './update-check.js';
 import { loadOrCreateToken, daemonStatusLines, stopDaemon, listenControl, pauseDaemon, pidFilePath, describePidHolder, type PidRecord } from './daemon.js';
 import { SyncSessionManager, type FolderDiffResult } from './session-manager.js';
@@ -535,14 +536,31 @@ export async function run(args: ParsedArgs): Promise<void> {
       logger.info(`self-update staged: ${runtimeVersion()} → ${avail.latest} (npm), shutting down for swap`);
       return { version: avail.latest };
     },
-    // Web UI「上传安装包」第一步:只读预检,读出包内版本供前端展示升级前后对比
+    // Web UI「上传安装包」第一步:只读预检,读出包内版本/后端身份供前端展示对比。
+    // 后端二进制包(syncx-rs-v* / syncx-mbt-v*)走 backend-swap 的结构校验,
+    // 其余一律按 npm tgz 处理(现有行为不变)。
     inspectLocalPackage: async (tgz) => {
+      const stage = await sniffBackendPackage(tgz);
+      if (stage) {
+        // 只读预检:校验结构 + 目标平台,用后即清,不落二进制、不派发 swapper
+        const pkg = await extractBackendPackage(tgz, { expectTarget: localTargetTriple() });
+        rmSync(pkg.workDir, { recursive: true, force: true });
+        return { backend: pkg.backend, version: pkg.version, target: pkg.target, current: runtimeVersion() };
+      }
       const info = await inspectPackage(tgz);
-      return { version: info.version, name: info.name, current: runtimeVersion() };
+      return { backend: 'node' as const, version: info.version, name: info.name, current: runtimeVersion() };
     },
-    // Web UI「上传安装包」第二步:本地打好的包没有「宣告版本」,目标版本以包内 package.json 为准
+    // Web UI「上传安装包」第二步:后端二进制包 → 跨后端换入(优雅关闭 → 拉起新二进制,
+    // 健康检查不过自动回滚);npm tgz 维持原「整包替换」管线,目标版本以包内 package.json 为准。
     selfUpdateUpload: async (tgz) => {
       if (!isBundledRuntime()) throw new Error('本机为 dev 运行态,不支持自更新');
+      const stage = await sniffBackendPackage(tgz);
+      if (stage) {
+        // dev/源码运行态、目标平台不符等拒绝理由由 decideSwapAction 在 runBackendSwap 内统一给出
+        const r = await runBackendSwap(tgz, { configDir, controlPort });
+        logger.info(`backend swap staged: node → ${r.backend} ${r.version} (${r.target}), shutting down for swap`);
+        return { version: r.version, backend: r.backend };
+      }
       const { version } = await runSelfUpdate(tgz, undefined);
       logger.info(`self-update staged: ${runtimeVersion()} → ${version} (uploaded package), shutting down for swap`);
       return { version };

@@ -40,6 +40,11 @@ pub const HEALTH_MARKER_TIMEOUT_MS : Int64 = 30_000L
 pub const UPDATE_MARKER_ENV : String = "SYNCX_UPDATE_MARKER"
 
 ///|
+/// 上传换入时,看门狗等旧进程自行退出的宽限期:HTTP 响应 + 优雅收尾
+/// 通常在几百毫秒内完成,超时即 SIGTERM 请它让位。
+pub const UPLOAD_KILL_PARENT_GRACE_MS : Int64 = 600L
+
+///|
 /// 自更新错误。
 pub(all) suberror UpdateError {
   /// 通道名非法。
@@ -84,6 +89,11 @@ extern "C" fn c_current_exec_path() -> String = "syncx_current_exec_path"
 
 ///|
 extern "C" fn c_is_process_alive(pid : Int32) -> Int32 = "syncx_is_process_alive"
+
+///|
+/// 向指定进程发 SIGTERM(看门狗在宽限期后请旧进程让位;Windows 走
+/// TerminateProcess —— 上传换入场景旧进程没有优雅关闭钩子可用)。
+extern "C" fn c_send_sigterm(pid : Int32) -> Unit = "syncx_send_sigterm"
 
 ///|
 /// os 名 + arch → 目标三元组,只对齐 workflow 的 6 个 target,不做模糊匹配
@@ -765,6 +775,16 @@ pub(all) struct UpdateJob {
   wait_ms : Int64
   verify_ms : Int64
   version : String
+  /// daemon 模式拉起的目标二进制(缺省 = exe,即换入后的自身路径)。
+  /// 上传换入(跨后端)用它指向数据目录 bin/ 下的新后端二进制。
+  restart_exe : String?
+  /// true = 跨后端上传换入:不动 exe 文件(新二进制在 restart_exe),
+  /// 回滚 = 重新拉起原 exe。发布路径(GitHub Releases)恒为 false。
+  no_swap : Bool
+  /// >0 时:等旧进程这么多毫秒还没退出,就向它发 SIGTERM 请它让位
+  /// (上传换入路径用:旧进程响应完 HTTP 后没有别的退出机制;
+  ///  0 = 不发,发布路径不变 —— CLI 升级由用户自己重启)。
+  kill_parent_ms : Int64
 }
 
 ///|
@@ -797,6 +817,12 @@ pub fn UpdateJob::to_json(self : UpdateJob) -> Json {
   map.set("wait_ms", Json::number(self.wait_ms.to_double()))
   map.set("verify_ms", Json::number(self.verify_ms.to_double()))
   map.set("version", Json::string(self.version))
+  match self.restart_exe {
+    Some(exe) => map.set("restart_exe", Json::string(exe))
+    None => map.set("restart_exe", Json::null())
+  }
+  map.set("no_swap", Json::boolean(self.no_swap))
+  map.set("kill_parent_ms", Json::number(self.kill_parent_ms.to_double()))
   Json::object(map)
 }
 
@@ -884,6 +910,10 @@ pub fn UpdateJob::from_json(value : Json) -> UpdateJob? {
     wait_ms: job_num(map, "wait_ms").to_int64(),
     verify_ms: job_num(map, "verify_ms").to_int64(),
     version,
+    // 新字段缺省:旧版本二进制写出的作业文件仍可执行(发布路径行为不变)
+    restart_exe: job_opt_str(map, "restart_exe"),
+    no_swap: map.get("no_swap") is Some(True),
+    kill_parent_ms: job_num(map, "kill_parent_ms").to_int64(),
   })
 }
 
@@ -932,18 +962,66 @@ async fn spawn_update_swap(
     version,
   }
   let job_path = "\{work}/job.json"
+  write_job_and_spawn_watchdog(job, job_path, exe)
+}
+
+///|
+/// 写盘作业文件并 detached 拉起看门狗(看门狗 = `watchdog_exe --update-swap
+/// <job.json>`,发布路径与上传路径都用**旧**二进制,保证换入/回滚代码
+/// 永远来自旧版本)。
+async fn write_job_and_spawn_watchdog(
+  job : UpdateJob,
+  job_path : String,
+  watchdog_exe : String,
+) -> Unit raise UpdateError {
   @fs.write_file(job_path, job.to_json().stringify()) catch {
     e => raise Io("写入更新作业文件失败:\{e}")
   }
   // 看门狗 = 当前(旧)二进制的一个 detached 进程;结果走 done 文件
   let _ = @process.spawn_orphan(
-    exe,
+    watchdog_exe,
     ["--update-swap", job_path],
     inherit_env=true,
   ) catch {
     e => raise Io("拉起换入看门狗失败:\{e}")
   }
   ()
+}
+
+///|
+/// 上传换入的交接(跨后端):不替换任何文件 —— 新二进制已在数据目录
+/// `<configDir>/bin/` 下(`new_exe`),看门狗等本进程退出后直接从它
+/// 拉起新后端;超时未写健康标记则重新拉起本进程(原 exe 原封未动,
+/// 回滚零成本)。`kill_parent_ms` 负责在 HTTP 响应冲出内核缓冲之后
+/// 请本进程让位。
+pub async fn spawn_upload_swap(
+  current_exe : String,
+  new_exe : String,
+  version : String,
+  restart : UpdateRestart,
+) -> Unit raise UpdateError {
+  let work = @fs.tmpdir(prefix="syncx-update") catch {
+    e => raise Io("创建作业目录失败:\{e}")
+  }
+  let job : UpdateJob = {
+    parent_pid: c_getpid(),
+    staging: new_exe,
+    exe: current_exe,
+    old_exe: sibling_with_suffix(current_exe, ".old"),
+    marker: "\{work}/healthy",
+    done: "\{work}/done.json",
+    restart_args: Some(restart.args),
+    restart_cwd: restart.cwd,
+    log_file: restart.log_file,
+    wait_ms: OLD_EXIT_WAIT_MS,
+    verify_ms: HEALTH_MARKER_TIMEOUT_MS,
+    version,
+    restart_exe: Some(new_exe),
+    no_swap: true,
+    kill_parent_ms: UPLOAD_KILL_PARENT_GRACE_MS,
+  }
+  let job_path = "\{work}/job.json"
+  write_job_and_spawn_watchdog(job, job_path, current_exe)
 }
 
 ///|
@@ -960,40 +1038,63 @@ pub async fn run_update_swap(job_path : String) -> Int32 {
       return 1
     }
   }
-  // 1) 等旧进程退出:它是被替换对象的持有者(Windows 上换不掉还开着的 exe)
+  // 1) 等旧进程退出:它是被替换对象的持有者(Windows 上换不掉还开着的 exe)。
+  //    上传换入路径(kill_parent_ms > 0)在宽限期后发 SIGTERM 兜底:旧进程
+  //    响应完 HTTP 后没有别的退出机制,由本看门狗(detached,不受旧进程
+  //    生命周期影响)在响应大概率已冲出内核缓冲之后请它让位。
   let exit_deadline = @async.now() + job.wait_ms
+  let kill_at = if job.kill_parent_ms > 0 {
+    @async.now() + job.kill_parent_ms
+  } else {
+    0L
+  }
+  let mut kill_sent = false
   while c_is_process_alive(job.parent_pid) != 0 {
     if @async.now() >= exit_deadline {
       write_done(job.done, false, "旧进程未在时限内退出,放弃换入")
       return 1
     }
+    if kill_at > 0 && !kill_sent && @async.now() >= kill_at {
+      c_send_sigterm(job.parent_pid)
+      kill_sent = true
+    }
     @async.sleep(300)
   }
-  // 2) 原子换入(失败保留 .old:exe 未被破坏,下次启动再试)
-  @fs.rename(job.staging, job.exe, replace=true) catch {
-    e => {
-      write_done(job.done, false, "换入失败:\{e}")
-      return 1
+  // 2) 原子换入(失败保留 .old:exe 未被破坏,下次启动再试)。
+  //    跨后端上传换入(no_swap)跳过:新二进制在 restart_exe(数据目录
+  //    bin/ 下),原可执行文件保持原位 —— 回滚就是重新拉起它。
+  if job.no_swap {
+    ()
+  } else {
+    @fs.rename(job.staging, job.exe, replace=true) catch {
+      e => {
+        write_done(job.done, false, "换入失败:\{e}")
+        return 1
+      }
     }
   }
   // 3) CLI 模式:换入即完成(新二进制已在换入前实跑校验过),不拉起 daemon
   let restart_args = match job.restart_args {
     Some(args) => args
     None => {
-      @fs.remove(job.old_exe) catch {
-        _ => ()
+      if !job.no_swap {
+        @fs.remove(job.old_exe) catch {
+          _ => ()
+        }
       }
       write_done_ok(job.done, "cli", job.version)
       return 0
     }
   }
-  // 4) daemon 模式:先清旧标记,再拉起新进程(失败即回滚,不留孤儿 .old)
+  // 4) daemon 模式:先清旧标记,再拉起新进程(失败即回滚,不留孤儿 .old)。
+  //    拉起目标:上传换入用包里的二进制,发布路径是换入后的自身路径。
   @fs.remove(job.marker) catch {
     _ => ()
   }
+  let new_exe = job.restart_exe.unwrap_or(job.exe)
   match
     spawn_restarted(
-      job.exe,
+      new_exe,
       restart_args,
       job.restart_cwd,
       job.marker,
@@ -1007,6 +1108,7 @@ pub async fn run_update_swap(job_path : String) -> Int32 {
         job.restart_cwd,
         job.marker,
         job.log_file,
+        job.no_swap,
       ) catch {
         rollback_error => {
           write_done_rollback(job.done, Some("\{rollback_error}"), error)
@@ -1029,6 +1131,7 @@ pub async fn run_update_swap(job_path : String) -> Int32 {
         job.restart_cwd,
         job.marker,
         job.log_file,
+        job.no_swap,
       ) catch {
         rollback_error => {
           write_done_rollback(
@@ -1118,7 +1221,8 @@ async fn spawn_restarted(
 }
 
 ///|
-/// 换回 `.old` 并拉回旧进程。
+/// 换回 `.old` 并拉回旧进程。跨后端上传换入(no_swap)没有动过 exe,
+/// 直接重新拉起它即可。
 async fn rollback(
   exe : String,
   old_exe : String,
@@ -1126,9 +1230,12 @@ async fn rollback(
   restart_cwd : String?,
   marker : String,
   log_file : String?,
+  no_swap : Bool,
 ) -> Unit {
-  @fs.rename(old_exe, exe, replace=true) catch {
-    e => raise Io("回滚换入失败:\{e}")
+  if !no_swap {
+    @fs.rename(old_exe, exe, replace=true) catch {
+      e => raise Io("回滚换入失败:\{e}")
+    }
   }
   match spawn_restarted(exe, restart_args, restart_cwd, marker, log_file) {
     Ok(_) => ()

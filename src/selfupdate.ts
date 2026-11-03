@@ -281,7 +281,7 @@ export async function inspectPackage(
  * (直接 `node dist/syncx.js` 从仓库里跑就是这个情况),换入会把 src/、web/、test/ 一并删掉。
  * npm / P2P 来源同样有这个隐患,故在自更新入口统一拦截。
  */
-function looksLikeSourceCheckout(dir: string): boolean {
+export function looksLikeSourceCheckout(dir: string): boolean {
   return existsSync(join(dir, '.git')) || existsSync(join(dir, 'src', 'main.ts'));
 }
 

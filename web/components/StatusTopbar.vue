@@ -11,7 +11,6 @@ import { useSkin, type SkinMode } from '../composables/useSkin';
 import { formatBytes } from '../utils/bytes';
 import { osIconLabel } from '../utils/os-icon';
 import { backendIconLabel } from '../utils/backend-icon';
-import { isNodeRuntime } from '../utils/format';
 
 const { status, busy, checkForUpdate, openUpload, openLogs, openTopology, openTraffic, openGuide, openSettings, openTerminal, openFleet, openAuth, logout, copy, notifSupported, notifEnabled, toggleNotifications } = useStatusContext();
 const { mode: themeMode, resolved: themeResolved, setMode } = useTheme();
@@ -116,10 +115,8 @@ const chipRows = computed<ChipRow[]>(() => [
   { kind: 'item', label: '拓扑', run: openTopology, disabled: busy.value },
   { kind: 'divider' },
   { kind: 'item', label: '检查更新', run: () => void checkForUpdate(), disabled: busy.value },
-  // 非 node 形态自更新走 GitHub Releases,没有 npm 包可传,上传入口整体不渲染(ADR-0025/0026)
-  ...(isNodeRuntime(status.value)
-    ? [{ kind: 'item' as const, label: '上传升级', run: openUpload, disabled: busy.value }]
-    : []),
+  // 三种后端都支持上传升级:node 传 npm tgz,单二进制形态传 pack:local 打的后端包(跨形态换入)
+  { kind: 'item', label: '上传升级', run: openUpload, disabled: busy.value },
   { kind: 'divider' },
   { kind: 'item', label: '使用指南', run: openGuide },
   { kind: 'item', label: '登录密码', run: openAuth },

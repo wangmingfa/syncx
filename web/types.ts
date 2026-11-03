@@ -365,6 +365,10 @@ export interface UploadPackageInfo {
   name: string;
   /** 本机当前运行版本,用于对比展示。 */
   current: string;
+  /** 包内二进制的目标三元组(后端二进制包才有;npm tgz 缺省)。 */
+  target?: string;
+  /** 上传包的后端形态;缺省 = 旧后端只认 npm tgz,视作 node。 */
+  backend?: PeerRuntime;
 }
 
 /** 一条同步记录(history 弹窗)。 */

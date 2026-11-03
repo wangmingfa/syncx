@@ -2,9 +2,11 @@ import { ref } from 'vue';
 import type { Ref } from 'vue';
 import { useToast } from './useToast';
 import { apiJson, errText } from '../utils/api';
-import { isNodeRuntime } from '../utils/format';
 import type { CoreDeps } from './statusContext';
-import type { UploadPackageInfo } from '../types';
+import type { PeerRuntime, UploadPackageInfo } from '../types';
+
+/** 后端形态中文名(跨后端换入文案用;缺省 node 与旧后端兼容)。 */
+const BACKEND_LABELS: Record<PeerRuntime, string> = { node: 'Node', rust: 'Rust', moonbit: 'MoonBit' };
 
 /**
  * 自更新(npm 定时检查 / 上传本地安装包)与登录态相关(退出登录)。
@@ -30,8 +32,6 @@ export function useSelfUpdate(deps: CoreDeps): {
 } {
   const { status, busy, isDev, refreshStatus, askConfirm } = deps;
 
-  /** 非 node 形态(单二进制)没有 npm 安装包可传,上传弹窗整体不适用(ADR-0025/0026)。 */
-  const NON_NODE_UPLOAD_BLOCKED = '单二进制后端不支持上传 npm 安包（自更新走 GitHub Releases）';
   const { showToast } = useToast();
 
   /** dev 运行态下自更新不可用:原因统一在此说明,各入口拦截后原样透出。 */
@@ -59,14 +59,11 @@ export function useSelfUpdate(deps: CoreDeps): {
     uploadInspecting.value = false;
   }
 
-  /** 返回是否真的打开了弹窗:被 dev/rust 拦下时调用方(页面级拖入)不应继续预检。 */
+  /** 返回是否真的打开了弹窗:被 dev 拦下时调用方(页面级拖入)不应继续预检。
+   *  非 node 形态不再拦截 —— 三种后端都支持上传后端二进制包跨形态换入(便于本地调试切换)。 */
   function openUpload(): boolean {
     if (isDev) {
       showToast(DEV_UPDATE_BLOCKED, 'alert');
-      return false;
-    }
-    if (!isNodeRuntime(status.value)) {
-      showToast(NON_NODE_UPLOAD_BLOCKED, 'alert');
       return false;
     }
     resetUpload(); // 每次打开都从干净态开始,不残留上一轮的包与结论
@@ -142,13 +139,21 @@ export function useSelfUpdate(deps: CoreDeps): {
       version?: string;
       name?: string;
       current?: string;
+      backend?: UploadPackageInfo['backend'];
+      target?: string;
     }>('/api/self-update/upload/inspect', {
       method: 'POST',
       headers: { 'Content-Type': 'application/octet-stream' },
       body: file,
     });
     if (!body.ok) throw new Error(body.error ?? '安装包校验失败');
-    return { version: body.version ?? '', name: body.name ?? '', current: body.current ?? '' };
+    return {
+      version: body.version ?? '',
+      name: body.name ?? '',
+      current: body.current ?? '',
+      backend: body.backend ?? 'node',
+      target: body.target,
+    };
   }
 
   /**
@@ -162,13 +167,19 @@ export function useSelfUpdate(deps: CoreDeps): {
     upgrading.value = true;
     uploadError.value = '';
     try {
-      const body = await apiJson<{ ok?: boolean; error?: string; version?: string }>('/api/self-update/upload', {
+      const body = await apiJson<{ ok?: boolean; error?: string; version?: string; backend?: UploadPackageInfo['backend'] }>('/api/self-update/upload', {
         method: 'POST',
         headers: { 'Content-Type': 'application/octet-stream' },
         body: file,
       });
       if (!body.ok) throw new Error(body.error ?? '升级失败');
-      showToast(`已开始升级到 ${body.version ?? ''},服务重启中,请稍候…`, 'alert');
+      const targetBackend = body.backend ?? 'node';
+      const fromBackend = status.value.runtime ?? 'node';
+      // 跨后端换入要说清楚「形态也变了」,不只是版本号变化
+      const verb = targetBackend !== fromBackend
+        ? `已开始切换到 ${BACKEND_LABELS[targetBackend]} 后端 v${body.version ?? ''}`
+        : `已开始升级到 v${body.version ?? ''}`;
+      showToast(`${verb},服务重启中,请稍候…`, 'alert');
       await waitForRestart();
       window.location.reload();
     } catch (e) {

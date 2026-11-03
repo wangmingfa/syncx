@@ -531,6 +531,16 @@ pub struct UpdateJob {
     pub wait_ms: u64,
     pub verify_ms: u64,
     pub version: String,
+    /// 换入方式:`true`(缺省)= self_replace 原地换入 `exe`(现有 Rust 自更新);
+    /// `false` = 跨后端 exec —— 不动任何文件,看门狗直接拉起 `exe` 指向的新二进制,
+    /// `old_exe` 就是原封不动的原 Rust 二进制,重新拉起它即完成回滚。
+    /// 旧版 job.json 没有这个字段,缺省按原地换入解析。
+    #[serde(default = "default_true")]
+    pub swap: bool,
+}
+
+fn default_true() -> bool {
+    true
 }
 
 /// 换入前的准备:备份当前二进制为 `.old`,写作业文件,detached 拉起看门狗。
@@ -546,24 +556,60 @@ fn spawn_update_swap(
     let old_exe = sibling_with_suffix(exe, ".old");
     // 备份旧二进制(覆盖上一轮留下的备份):这是回滚的唯一来源
     std::fs::copy(exe, &old_exe).map_err(|error| format!("备份当前二进制失败:{error}"))?;
-
-    let work =
-        std::env::temp_dir().join(format!("syncx-update-{}-{}", std::process::id(), now_ms()));
-    std::fs::create_dir_all(&work).map_err(|error| error.to_string())?;
     let job = UpdateJob {
         parent_pid: std::process::id(),
         staging,
         exe: exe.to_path_buf(),
         old_exe,
-        marker: work.join("healthy"),
-        done: work.join("done.json"),
+        marker: PathBuf::new(), // 由 launch_watchdog 填
+        done: PathBuf::new(),
         restart_args: restart.as_ref().map(|r| r.args.clone()),
         restart_cwd: restart.as_ref().map(|r| r.cwd.clone()),
         log_file: restart.as_ref().and_then(|r| r.log_file.clone()),
         wait_ms: OLD_EXIT_WAIT_MS,
         verify_ms: HEALTH_MARKER_TIMEOUT_MS,
         version,
+        swap: true,
     };
+    launch_watchdog(exe, job)
+}
+
+/// 跨后端换入的交接入口:看门狗不替换任何文件,直接拉起 `new_bin`;
+/// `old_exe` 就是当前(未被动过)的 Rust 二进制,健康校验失败时看门狗重新拉起它回滚。
+pub fn spawn_backend_swap(
+    current_exe: &Path,
+    new_bin: PathBuf,
+    version: String,
+    restart: Option<UpdateRestart>,
+) -> Result<(), String> {
+    let job = UpdateJob {
+        parent_pid: std::process::id(),
+        // exec 模式下 staging 不再被 self_replace 消费,与 exe 同源即可
+        staging: new_bin.clone(),
+        exe: new_bin,
+        old_exe: current_exe.to_path_buf(),
+        marker: PathBuf::new(),
+        done: PathBuf::new(),
+        restart_args: restart.as_ref().map(|r| r.args.clone()),
+        restart_cwd: restart.as_ref().map(|r| r.cwd.clone()),
+        log_file: restart.as_ref().and_then(|r| r.log_file.clone()),
+        wait_ms: OLD_EXIT_WAIT_MS,
+        verify_ms: HEALTH_MARKER_TIMEOUT_MS,
+        version,
+        swap: false,
+    };
+    // 看门狗仍然由**当前**二进制担任:换入与回滚的代码必须来自旧版本,
+    // 新后端的二进制没有资格参与对自己的回滚判定。
+    launch_watchdog(current_exe, job)
+}
+
+/// 写作业文件并 detached 拉起看门狗(`--update-swap <job.json>`)。
+fn launch_watchdog(watchdog_exe: &Path, mut job: UpdateJob) -> Result<(), String> {
+    let work =
+        std::env::temp_dir().join(format!("syncx-update-{}-{}", std::process::id(), now_ms()));
+    std::fs::create_dir_all(&work).map_err(|error| error.to_string())?;
+    job.marker = work.join("healthy");
+    job.done = work.join("done.json");
     let job_path = work.join("job.json");
     std::fs::write(
         &job_path,
@@ -572,7 +618,7 @@ fn spawn_update_swap(
     .map_err(|error| error.to_string())?;
 
     // 看门狗 = 当前(旧)二进制的一个 detached 进程;stdio 全关,它只写 done 文件
-    let mut command = std::process::Command::new(exe);
+    let mut command = std::process::Command::new(watchdog_exe);
     command.arg("--update-swap").arg(&job_path);
     detach(&mut command);
     command
@@ -613,22 +659,29 @@ pub fn run_update_swap(job_path: &Path) -> i32 {
         std::thread::sleep(std::time::Duration::from_millis(300));
     }
 
-    // 2) 原子换入(失败保留 .old:exe 未被破坏,下次启动再试)
-    if let Err(error) = self_replace::self_replace(&job.staging) {
-        done(serde_json::json!({ "ok": false, "error": format!("换入失败:{error}") }));
-        return 1;
+    // 2) 原子换入(失败保留 .old:exe 未被破坏,下次启动再试)。
+    //    跨后端 exec 模式没有「换入」这一步:新二进制已在数据目录,拉起即换。
+    if job.swap {
+        if let Err(error) = self_replace::self_replace(&job.staging) {
+            done(serde_json::json!({ "ok": false, "error": format!("换入失败:{error}") }));
+            return 1;
+        }
     }
 
-    // 3) CLI 模式:换入即完成(新二进制已在换入前实跑校验过),不拉起 daemon
+    // 3) CLI 模式:换入即完成(新二进制已在换入前实跑校验过),不拉起 daemon。
+    //    exec 模式保留 old_exe:那就是原可执行文件本体,删了等于拆掉回滚桥。
     let Some(restart_args) = job.restart_args.clone() else {
-        let _ = std::fs::remove_file(&job.old_exe);
+        if job.swap {
+            let _ = std::fs::remove_file(&job.old_exe);
+        }
         done(serde_json::json!({ "ok": true, "mode": "cli", "version": job.version }));
         return 0;
     };
 
-    // 4) daemon 模式:拉起新进程,等健康标记(先清旧标记,防上一轮残留误判)
+    // 4) daemon 模式:拉起新进程,等健康标记(先清旧标记,防上一轮残留误判)。
+    //    swap 模式下 job.exe 已被替换成新二进制;exec 模式下 job.exe 本就是包里的新二进制。
     let _ = std::fs::remove_file(&job.marker);
-    let child = match spawn_restarted(&job, &restart_args) {
+    let child = match spawn_restarted(&job.exe, &job, &restart_args) {
         Ok(child) => child,
         Err(error) => {
             // 拉不起来是「换入成功但启动失败」的形态之一:走回滚,不留孤儿 .old
@@ -675,26 +728,41 @@ pub fn run_update_swap(job_path: &Path) -> i32 {
     // 子进程是 detached 常驻进程,不 wait —— 看门狗的职责到「标记已写」为止
     drop(child);
     let _ = std::fs::remove_file(&job.marker);
-    let _ = std::fs::remove_file(&job.old_exe);
+    if job.swap {
+        // exec 模式不删 old_exe:那是仍在服役的原二进制(跨后端切换的回滚锚点)
+        let _ = std::fs::remove_file(&job.old_exe);
+    }
     done(serde_json::json!({ "ok": true, "mode": "daemon", "version": job.version }));
     0
 }
 
 /// 换回 `.old` 并拉回旧进程。返回回滚过程的错误(如实进 done 文件)。
+///
+/// swap 模式:把备份换回原路径,再拉起 `job.exe`(此时已是旧二进制)。
+/// exec 模式:原二进制从未被替换,直接拉起 `old_exe` 即完成回滚。
 fn rollback(job: &UpdateJob, restart_args: &[String]) -> Result<(), String> {
-    self_replace::self_replace(&job.old_exe).map_err(|error| format!("回滚换入失败:{error}"))?;
-    spawn_restarted(job, restart_args)
-        .map(|_| ())
-        .map_err(|error| format!("回滚后拉起旧进程失败:{error}"))
+    if job.swap {
+        self_replace::self_replace(&job.old_exe)
+            .map_err(|error| format!("回滚换入失败:{error}"))?;
+        spawn_restarted(&job.exe, job, restart_args)
+            .map(|_| ())
+            .map_err(|error| format!("回滚后拉起旧进程失败:{error}"))
+    } else {
+        spawn_restarted(&job.old_exe, job, restart_args)
+            .map(|_| ())
+            .map_err(|error| format!("回滚后拉起旧进程失败:{error}"))
+    }
 }
 
 /// 以原 argv 与原工作目录拉起 daemon,env 里带上健康标记路径。
 /// stdout/stderr 接到日志文件(启动期的 panic 不能进 /dev/null,否则排障一片黑)。
+/// `exe` 显式传入:跨后端时看门狗要能 exec 任意路径的二进制(包里的新二进制 / 原二进制)。
 fn spawn_restarted(
+    exe: &Path,
     job: &UpdateJob,
     restart_args: &[String],
 ) -> Result<std::process::Child, String> {
-    let mut command = std::process::Command::new(&job.exe);
+    let mut command = std::process::Command::new(exe);
     command
         .args(restart_args)
         .env(UPDATE_MARKER_ENV, &job.marker)
@@ -899,24 +967,185 @@ pub fn pack_self() -> Option<Vec<u8>> {
     None
 }
 
-/// 上传包预检:读出 `package/package.json` 的 `name` / `version`,与当前版本比对。
-pub fn inspect_package(tgz: &[u8]) -> Result<serde_json::Value, String> {
-    let decoder = flate2::read::GzDecoder::new(tgz);
+/* ---------------- 上传安装包识别与换入(npm tgz + 后端二进制包) ---------------- */
+
+/// 后端二进制包的已知目标三元组全集(与发布矩阵、`pack:local --backend` 一致)。
+/// 识别按「顶层目录名的后缀」匹配:triple 的段数不定(windows-msvc 是 4 段),
+/// 自己切分不如拿已知清单对后缀。
+pub const KNOWN_TARGETS: [&str; 6] = [
+    "aarch64-apple-darwin",
+    "x86_64-apple-darwin",
+    "aarch64-unknown-linux-gnu",
+    "x86_64-unknown-linux-gnu",
+    "aarch64-pc-windows-msvc",
+    "x86_64-pc-windows-msvc",
+];
+
+/// 后端包内可执行文件的固定名字(syncx-rs / syncx-mb,Windows 加 .exe)。
+fn backend_binary_name(backend: &str) -> &'static str {
+    let base = match backend {
+        "moonbit" => "syncx-mb",
+        // rust 后端与其余未知值都按 syncx-rs 处理;未知值在上游已被 upload_route 拦下
+        _ => "syncx-rs",
+    };
+    if cfg!(windows) {
+        match base {
+            "syncx-mb" => "syncx-mb.exe",
+            _ => "syncx-rs.exe",
+        }
+    } else {
+        base
+    }
+}
+
+/// 上传包预检结论。`backend` 决定换入通道:node → npm install 覆盖(现有通道),
+/// rust / moonbit → 解包二进制到数据目录,看门狗跨后端 exec 拉起(本文件后半段)。
+#[derive(Debug, Clone)]
+pub struct UploadedInspect {
+    /// "node" | "rust" | "moonbit"
+    pub backend: String,
+    /// 包内版本号:npm 取自 package.json,后端包取自顶层目录名。
+    pub version: String,
+    /// npm 包名或后端二进制名(syncx-rs / syncx-mb)。
+    pub name: String,
+    /// 后端包的目标三元组;npm 包为 None。
+    pub target: Option<String>,
+}
+
+impl UploadedInspect {
+    /// 路由 `/api/self-update/upload/inspect` 的响应体(前端据此展示版本对比)。
+    pub fn to_json(&self) -> serde_json::Value {
+        serde_json::json!({
+            "backend": self.backend,
+            "version": self.version,
+            "name": self.name,
+            "target": self.target,
+            "current": version_string(),
+        })
+    }
+}
+
+/// 上传包的换入通道决策(纯逻辑,测试覆盖)。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum UploadRoute {
+    /// npm tgz:`npm install -g` 覆盖安装目录。
+    NpmInstall,
+    /// 后端二进制包:解包到数据目录,看门狗跨后端拉起。
+    BackendSwap,
+}
+
+pub fn upload_route(backend: &str) -> Result<UploadRoute, String> {
+    match backend {
+        "node" => Ok(UploadRoute::NpmInstall),
+        "rust" | "moonbit" => Ok(UploadRoute::BackendSwap),
+        other => Err(format!("无法识别的后端类型:{other}")),
+    }
+}
+
+/// 解析后端包顶层目录名:`syncx-rs-v0.2.14-aarch64-apple-darwin` → (rust, 0.2.14, triple)。
+///
+/// 版本段可能带 `--append` 的预发布后缀(0.2.14-local.1),因此不能按「第 N 个
+/// 连字符」切分 —— 从尾部剥已知 triple 后缀,剩下的整段就是版本号。
+fn parse_backend_top_dir(dir: &str) -> Option<(&'static str, String, String)> {
+    let (backend, rest) = if let Some(rest) = dir.strip_prefix("syncx-rs-v") {
+        ("rust", rest)
+    } else {
+        ("moonbit", dir.strip_prefix("syncx-mbt-v")?)
+    };
+    for target in KNOWN_TARGETS {
+        if let Some(version) = rest.strip_suffix(&format!("-{target}")) {
+            if !version.is_empty() && version.starts_with(|c: char| c.is_ascii_digit()) {
+                return Some((backend, version.to_string(), target.to_string()));
+            }
+        }
+    }
+    None
+}
+
+/// 上传包预检(统一入口):一遍扫描同时识别 npm tgz(`package/package.json`)
+/// 与后端二进制包(顶层目录 `syncx-rs-v*` / `syncx-mbt-v*`,内含单二进制)。
+///
+/// 两类包结构互斥,判定顺序无关紧要;后端包要求 target triple 与本机编译目标
+/// 一致,不符直接报错 —— 换入一个起不来的二进制毫无意义。
+pub fn inspect_uploaded_package(bytes: &[u8]) -> Result<UploadedInspect, String> {
+    #[cfg(windows)]
+    if bytes.starts_with(b"PK\x03\x04") {
+        // Windows 上 pack:local 打的是 zip(与 Release 资产一致)
+        return inspect_backend_zip(bytes);
+    }
+    let decoder = flate2::read::GzDecoder::new(bytes);
     let mut archive = tar::Archive::new(decoder);
-    let entries = archive.entries().map_err(|error| error.to_string())?;
+    let entries = archive
+        .entries()
+        .map_err(|_| "无法解析安装包(不是合法的 tar.gz)".to_string())?;
+    let mut npm_json: Option<String> = None;
+    // (顶层目录, 后端, 版本, triple)
+    let mut backend_top: Option<(String, &'static str, String, String)> = None;
+    let mut backend_bad: Option<String> = None;
+    let mut backend_bin = false;
     for entry in entries {
         let mut entry = entry.map_err(|error| error.to_string())?;
         let path = entry
             .path()
             .map_err(|error| error.to_string())?
             .to_path_buf();
-        if !path.ends_with("package.json") {
+        let name = path
+            .file_name()
+            .map(|value| value.to_string_lossy().to_string())
+            .unwrap_or_default();
+        // npm 载体:第一个 package.json 即包描述(与旧行为一致)
+        if npm_json.is_none() && path.ends_with("package.json") {
+            let mut text = String::new();
+            entry
+                .read_to_string(&mut text)
+                .map_err(|error| error.to_string())?;
+            npm_json = Some(text);
             continue;
         }
-        let mut text = String::new();
-        entry
-            .read_to_string(&mut text)
-            .map_err(|error| error.to_string())?;
+        let Some(top) = path.iter().next().map(|v| v.to_string_lossy().to_string()) else {
+            continue;
+        };
+        // 后端载体:顶层目录名承载 后端/版本/triple 三份信息
+        if backend_top.is_none() && backend_bad.is_none() {
+            if let Some((backend, version, target)) = parse_backend_top_dir(&top) {
+                backend_top = Some((top.clone(), backend, version, target));
+            } else if top.starts_with("syncx-rs-v") || top.starts_with("syncx-mbt-v") {
+                backend_bad = Some(top.clone());
+            }
+        }
+        let is_backend_entry = backend_top
+            .as_ref()
+            .map(|(dir, ..)| *dir == top)
+            .unwrap_or(false);
+        if is_backend_entry {
+            let (_, backend, ..) = backend_top.as_ref().unwrap();
+            if name == backend_binary_name(backend) {
+                backend_bin = true;
+            }
+        }
+    }
+    if let Some((dir, backend, version, target)) = backend_top {
+        if !backend_bin {
+            return Err(format!("后端包 {dir} 里找不到可执行文件(应为 syncx-rs / syncx-mb)"));
+        }
+        if target != TARGET {
+            return Err(format!(
+                "安装包目标平台({target})与本机({TARGET})不符,拒绝换入"
+            ));
+        }
+        return Ok(UploadedInspect {
+            backend: backend.to_string(),
+            version,
+            name: backend_binary_name(backend).to_string(),
+            target: Some(target),
+        });
+    }
+    if let Some(dir) = backend_bad {
+        return Err(format!(
+            "后端包顶层目录 {dir} 无法解析(应为 syncx-rs-v<版本>-<目标三元组> 或 syncx-mbt-v…)"
+        ));
+    }
+    if let Some(text) = npm_json {
         let parsed: serde_json::Value = serde_json::from_str(&text)
             .map_err(|_| "安装包里的 package.json 无法解析".to_string())?;
         let name = parsed.get("name").and_then(|v| v.as_str()).unwrap_or("");
@@ -927,13 +1156,177 @@ pub fn inspect_package(tgz: &[u8]) -> Result<serde_json::Value, String> {
         if version.is_empty() {
             return Err("安装包缺少 version 字段".to_string());
         }
-        return Ok(serde_json::json!({
-            "version": version,
-            "name": name,
-            "current": version_string(),
-        }));
+        return Ok(UploadedInspect {
+            backend: "node".to_string(),
+            version: version.to_string(),
+            name: name.to_string(),
+            target: None,
+        });
     }
-    Err("安装包里找不到 package.json".to_string())
+    Err(
+        "无法识别的安装包:既不是 npm tgz(缺 package/package.json),也不是后端二进制包\
+         (顶层目录应为 syncx-rs-v* / syncx-mbt-v*,内含 syncx-rs / syncx-mb)"
+            .to_string(),
+    )
+}
+
+/// 把后端包里的二进制解到 `dest`(实文件,含可执行位)。
+fn unpack_backend_binary(bytes: &[u8], bin_name: &str, dest: &Path) -> Result<(), String> {
+    #[cfg(windows)]
+    if bytes.starts_with(b"PK\x03\x04") {
+        let temp_dir = std::env::temp_dir().join(format!("syncx-upload-{}", std::process::id()));
+        std::fs::create_dir_all(&temp_dir).map_err(|error| error.to_string())?;
+        let zip_path = temp_dir.join("upload.zip");
+        std::fs::write(&zip_path, bytes).map_err(|error| error.to_string())?;
+        let status = std::process::Command::new("powershell")
+            .args([
+                "-NoProfile",
+                "-NonInteractive",
+                "-Command",
+                &format!(
+                    "Expand-Archive -LiteralPath '{}' -DestinationPath '{}' -Force",
+                    zip_path.display(),
+                    temp_dir.display()
+                ),
+            ])
+            .status()
+            .map_err(|error| error.to_string())?;
+        if !status.success() {
+            return Err("解压安装包失败(PowerShell Expand-Archive)".to_string());
+        }
+        let found = find_file_named(&temp_dir, bin_name)
+            .ok_or_else(|| format!("安装包里找不到 {bin_name}"))?;
+        std::fs::copy(&found, dest).map_err(|error| error.to_string())?;
+        return Ok(());
+    }
+    let decoder = flate2::read::GzDecoder::new(bytes);
+    let mut archive = tar::Archive::new(decoder);
+    let entries = archive
+        .entries()
+        .map_err(|_| "无法解析安装包(不是合法的 tar.gz)".to_string())?;
+    for entry in entries {
+        let mut entry = entry.map_err(|error| error.to_string())?;
+        let path = entry
+            .path()
+            .map_err(|error| error.to_string())?
+            .to_path_buf();
+        let name = path
+            .file_name()
+            .map(|value| value.to_string_lossy().to_string())
+            .unwrap_or_default();
+        // 只按文件名挑:归档内路径结构由打包脚本决定,按路径挑会在改名后失效
+        if name != bin_name {
+            continue;
+        }
+        let mut out = std::fs::File::create(dest).map_err(|error| error.to_string())?;
+        std::io::copy(&mut entry, &mut out).map_err(|error| error.to_string())?;
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let _ = std::fs::set_permissions(dest, std::fs::Permissions::from_mode(0o755));
+        }
+        return Ok(());
+    }
+    Err(format!("安装包里找不到 {bin_name}"))
+}
+
+/// 后端二进制包换入:解包到数据目录 → 实跑校验 → 写交接作业 → detached 看门狗
+/// 等本进程退出后拉起新二进制(原 argv + 健康标记),超时未健康重新拉起原二进制。
+///
+/// 跨后端的核心:**不替换**当前可执行文件 —— 新二进制落在数据目录 `update/` 下,
+/// 看门狗直接 exec 它;原 Rust 二进制原地不动,天然就是回滚源。
+pub fn install_backend_package(
+    bytes: &[u8],
+    inspect: &UploadedInspect,
+    config_dir: &Path,
+    log_file: Option<PathBuf>,
+) -> Result<String, String> {
+    // dev/调试态(cargo run / debug 构建)没有安装布局可言,拒绝换入:
+    // 回滚依赖「重新拉起原二进制」,调试进程随时会被 IDE/用户终止,不能当回滚锚点。
+    if cfg!(debug_assertions) {
+        return Err(
+            "dev/调试运行态不支持后端换入。请先 cargo build --release 并从安装布局启动,再上传安装包"
+                .to_string(),
+        );
+    }
+    let current_exe = std::env::current_exe().map_err(|error| error.to_string())?;
+    let bin_name = backend_binary_name(&inspect.backend);
+    // 解包到数据目录:按版本 + 时间戳命名,不覆盖上一轮(便于排障与并行留存)
+    let dir = config_dir.join("update");
+    std::fs::create_dir_all(&dir).map_err(|error| error.to_string())?;
+    let staging = dir.join(format!(
+        "{}-v{}-{}{}",
+        inspect.name,
+        inspect.version,
+        crate::invite::now_ms(),
+        if cfg!(windows) { ".exe" } else { "" }
+    ));
+    unpack_backend_binary(bytes, bin_name, &staging)?;
+    // 实跑校验:新二进制必须能执行。版本号不强求与包名一致 —— pack:local 的
+    // --append 只改资产文件名、不注入二进制,等值比较会误杀合法本地包。
+    if binary_version(&staging).is_none() {
+        let _ = std::fs::remove_file(&staging);
+        return Err(format!(
+            "包内二进制无法执行({}),已放弃换入",
+            staging.display()
+        ));
+    }
+    let restart = UpdateRestart {
+        args: std::env::args().skip(1).collect(),
+        cwd: std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")),
+        log_file,
+    };
+    spawn_backend_swap(&current_exe, staging, inspect.version.clone(), Some(restart))?;
+    Ok(inspect.version.clone())
+}
+
+#[cfg(windows)]
+/// zip 载体的后端包预检:解到临时目录后按与 tar.gz 相同的规则识别。
+fn inspect_backend_zip(bytes: &[u8]) -> Result<UploadedInspect, String> {
+    let temp_dir = std::env::temp_dir().join(format!("syncx-upload-inspect-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&temp_dir);
+    std::fs::create_dir_all(&temp_dir).map_err(|error| error.to_string())?;
+    let zip_path = temp_dir.join("upload.zip");
+    std::fs::write(&zip_path, bytes).map_err(|error| error.to_string())?;
+    let status = std::process::Command::new("powershell")
+        .args([
+            "-NoProfile",
+            "-NonInteractive",
+            "-Command",
+            &format!(
+                "Expand-Archive -LiteralPath '{}' -DestinationPath '{}' -Force",
+                zip_path.display(),
+                temp_dir.display()
+            ),
+        ])
+        .status()
+        .map_err(|error| error.to_string())?;
+    if !status.success() {
+        return Err("解压安装包失败(PowerShell Expand-Archive)".to_string());
+    }
+    // 顶层目录 = 解压根下的第一层目录
+    let entries = std::fs::read_dir(&temp_dir).map_err(|error| error.to_string())?;
+    for entry in entries.flatten() {
+        let top = entry.file_name().to_string_lossy().to_string();
+        if let Some((backend, version, target)) = parse_backend_top_dir(&top) {
+            if find_file_named(&entry.path(), backend_binary_name(backend)).is_none() {
+                return Err(format!("后端包 {top} 里找不到可执行文件(应为 syncx-rs / syncx-mb)"));
+            }
+            if target != TARGET {
+                return Err(format!(
+                    "安装包目标平台({target})与本机({TARGET})不符,拒绝换入"
+                ));
+            }
+            return Ok(UploadedInspect {
+                backend: backend.to_string(),
+                version,
+                name: backend_binary_name(backend).to_string(),
+                target: Some(target),
+            });
+        }
+    }
+    let _ = std::fs::remove_dir_all(&temp_dir);
+    Err("无法识别的安装包:zip 里没有 syncx-rs-v* / syncx-mbt-v* 顶层目录".to_string())
 }
 
 #[cfg(test)]
@@ -1059,6 +1452,7 @@ mod update_swap_tests {
             wait_ms: 1000,
             verify_ms: 2000,
             version: "0.5.0".to_string(),
+            swap: true,
         };
         let bytes = serde_json::to_vec(&job).unwrap();
         let back: UpdateJob = serde_json::from_slice(&bytes).unwrap();
@@ -1090,6 +1484,214 @@ mod update_swap_tests {
         let fake = dir.join("not-a-binary");
         std::fs::write(&fake, b"junk").unwrap();
         assert_eq!(binary_version(&fake), None);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+}
+
+#[cfg(test)]
+mod upload_inspect_tests {
+    use super::*;
+
+    /// 打一个内存 tar.gz(顶层目录 + 若干文件),供 inspect / 解包测试用。
+    fn build_tgz(top: &str, files: &[(&str, &[u8])]) -> Vec<u8> {
+        let mut builder = tar::Builder::new(Vec::new());
+        for (path, data) in files {
+            let full = format!("{top}/{path}");
+            let mut header = tar::Header::new_gnu();
+            header.set_size(data.len() as u64);
+            header.set_mode(0o755);
+            header.set_cksum();
+            builder
+                .append_data(&mut header, &full, *data)
+                .expect("append tgz entry");
+        }
+        let raw = builder.into_inner().expect("finish tar");
+        let mut encoder =
+            flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::default());
+        std::io::Write::write_all(&mut encoder, &raw).expect("gzip");
+        encoder.finish().expect("finish gz")
+    }
+
+    fn npm_tgz(version: &str) -> Vec<u8> {
+        build_tgz(
+            "package",
+            &[
+                (
+                    "package.json",
+                    format!(
+                        "{{\"name\":\"{PACKAGE_NAME}\",\"version\":\"{version}\"}}"
+                    )
+                    .as_bytes(),
+                ),
+                ("dist/syncx.js", b"#!/usr/bin/env node\n"),
+            ],
+        )
+    }
+
+    #[test]
+    fn inspect_recognizes_npm_tgz_as_node() {
+        let bytes = npm_tgz("0.2.14");
+        let info = inspect_uploaded_package(&bytes).unwrap();
+        assert_eq!(info.backend, "node");
+        assert_eq!(info.version, "0.2.14");
+        assert_eq!(info.name, PACKAGE_NAME);
+        assert_eq!(info.target, None);
+        let json = info.to_json();
+        assert_eq!(json["current"], version_string());
+    }
+
+    #[test]
+    fn inspect_rejects_foreign_npm_package() {
+        let bytes = build_tgz(
+            "package",
+            &[("package.json", b"{\"name\":\"evil-pkg\",\"version\":\"1.0.0\"}")],
+        );
+        let err = inspect_uploaded_package(&bytes).unwrap_err();
+        assert!(err.contains("不是"), "unexpected: {err}");
+    }
+
+    #[test]
+    fn inspect_recognizes_rust_backend_package() {
+        let top = format!("syncx-rs-v0.6.0-{TARGET}");
+        let bytes = build_tgz(&top, &[("syncx-rs", b"\x7fELF fake"), ("README.md", b"readme")]);
+        let info = inspect_uploaded_package(&bytes).unwrap();
+        assert_eq!(info.backend, "rust");
+        assert_eq!(info.version, "0.6.0");
+        assert_eq!(info.name, if cfg!(windows) { "syncx-rs.exe" } else { "syncx-rs" });
+        assert_eq!(info.target.as_deref(), Some(TARGET));
+    }
+
+    #[test]
+    fn inspect_recognizes_moonbit_backend_package_with_prerelease_version() {
+        // pack:local --append 产的包:版本带预发布后缀,顶层目录名仍是三段式后缀
+        let top = format!("syncx-mbt-v0.6.1-local.1-{TARGET}");
+        let bytes = build_tgz(&top, &[("syncx-mb", b"moonbit fake")]);
+        let info = inspect_uploaded_package(&bytes).unwrap();
+        assert_eq!(info.backend, "moonbit");
+        assert_eq!(info.version, "0.6.1-local.1");
+        assert_eq!(info.name, if cfg!(windows) { "syncx-mb.exe" } else { "syncx-mb" });
+    }
+
+    #[test]
+    fn inspect_rejects_backend_package_for_foreign_target() {
+        // 找一个与本机不同的 triple;六个已知目标覆盖三大平台,不会全等于本机
+        let foreign = KNOWN_TARGETS
+            .iter()
+            .find(|t| **t != TARGET)
+            .expect("KNOWN_TARGETS 至少两个条目");
+        let top = format!("syncx-rs-v0.6.0-{foreign}");
+        let bytes = build_tgz(&top, &[("syncx-rs", b"\x7fELF fake")]);
+        let err = inspect_uploaded_package(&bytes).unwrap_err();
+        assert!(err.contains("不符"), "unexpected: {err}");
+        assert!(err.contains(foreign), "应报出包的目标平台:{err}");
+    }
+
+    #[test]
+    fn inspect_rejects_backend_package_without_binary() {
+        let top = format!("syncx-mbt-v0.6.0-{TARGET}");
+        let bytes = build_tgz(&top, &[("README.md", b"readme")]);
+        let err = inspect_uploaded_package(&bytes).unwrap_err();
+        assert!(err.contains("找不到可执行文件"), "unexpected: {err}");
+    }
+
+    #[test]
+    fn inspect_rejects_backend_top_dir_with_unknown_target() {
+        // 顶层目录带 rs/mbt 前缀但 triple 不在已知清单:给出定向报错,而不是笼统的「无法识别」
+        let bytes = build_tgz("syncx-rs-v0.6.0-mips64-unknown", &[("syncx-rs", b"x")]);
+        let err = inspect_uploaded_package(&bytes).unwrap_err();
+        assert!(err.contains("无法解析"), "unexpected: {err}");
+    }
+
+    #[test]
+    fn inspect_rejects_garbage_bytes() {
+        let err = inspect_uploaded_package(b"definitely not an archive").unwrap_err();
+        assert!(!err.is_empty());
+        // 空内容同罪
+        assert!(inspect_uploaded_package(b"").is_err());
+    }
+
+    #[test]
+    fn parse_backend_top_dir_covers_version_shapes() {
+        // 正常
+        let (backend, version, target) =
+            parse_backend_top_dir("syncx-rs-v1.2.3-aarch64-apple-darwin").unwrap();
+        assert_eq!((backend, version.as_str(), target.as_str()), ("rust", "1.2.3", "aarch64-apple-darwin"));
+        // 预发布后缀(--append)
+        let (_, version, _) =
+            parse_backend_top_dir("syncx-mbt-v1.2.3-beta.2.local.1-x86_64-pc-windows-msvc")
+                .unwrap();
+        assert_eq!(version, "1.2.3-beta.2.local.1");
+        // 4 段 triple 也能剥对
+        let (_, _, target) =
+            parse_backend_top_dir("syncx-mbt-v1.0.0-aarch64-pc-windows-msvc").unwrap();
+        assert_eq!(target, "aarch64-pc-windows-msvc");
+        // 非法:版本不以数字开头 / triple 未知 / 前缀不符
+        assert!(parse_backend_top_dir("syncx-rs-vx.y.z-aarch64-apple-darwin").is_none());
+        assert!(parse_backend_top_dir("syncx-rs-v1.2.3-mips-unknown-elf").is_none());
+        assert!(parse_backend_top_dir("package").is_none());
+        assert!(parse_backend_top_dir("syncx-rs-1.2.3-aarch64-apple-darwin").is_none());
+    }
+
+    #[test]
+    fn upload_route_decides_channel_by_backend() {
+        assert_eq!(upload_route("node").unwrap(), UploadRoute::NpmInstall);
+        assert_eq!(upload_route("rust").unwrap(), UploadRoute::BackendSwap);
+        assert_eq!(upload_route("moonbit").unwrap(), UploadRoute::BackendSwap);
+        assert!(upload_route("java").is_err());
+    }
+
+    #[test]
+    fn update_job_defaults_to_swap_and_round_trips_exec_mode() {
+        // 旧版 job.json 没有 swap 字段:缺省按原地换入解析(向后兼容)
+        let legacy = r#"{
+            "parent_pid": 42, "staging": "/tmp/s.bin", "exe": "/usr/local/bin/syncx-rs",
+            "old_exe": "/usr/local/bin/syncx-rs.old", "marker": "/tmp/m", "done": "/tmp/d",
+            "restart_args": null, "restart_cwd": null, "log_file": null,
+            "wait_ms": 1, "verify_ms": 2, "version": "0.5.0"
+        }"#;
+        let job: UpdateJob = serde_json::from_str(legacy).unwrap();
+        assert!(job.swap);
+
+        // exec 模式(swap=false)完整往返
+        let exec = UpdateJob {
+            parent_pid: 42,
+            staging: PathBuf::from("/data/update/syncx-mb-v0.6.0.bin"),
+            exe: PathBuf::from("/data/update/syncx-mb-v0.6.0.bin"),
+            old_exe: PathBuf::from("/usr/local/bin/syncx-rs"),
+            marker: PathBuf::from("/tmp/m"),
+            done: PathBuf::from("/tmp/d"),
+            restart_args: Some(vec!["start".to_string(), "--port".to_string()]),
+            restart_cwd: Some(PathBuf::from("/home/user")),
+            log_file: None,
+            wait_ms: 1000,
+            verify_ms: 2000,
+            version: "0.6.0".to_string(),
+            swap: false,
+        };
+        let bytes = serde_json::to_vec(&exec).unwrap();
+        let back: UpdateJob = serde_json::from_slice(&bytes).unwrap();
+        assert!(!back.swap);
+        assert_eq!(back.exe, PathBuf::from("/data/update/syncx-mb-v0.6.0.bin"));
+        assert_eq!(back.old_exe, PathBuf::from("/usr/local/bin/syncx-rs"));
+        assert_eq!(
+            back.restart_args,
+            Some(vec!["start".to_string(), "--port".to_string()])
+        );
+    }
+
+    #[test]
+    fn unpack_backend_binary_picks_only_the_named_binary() {
+        let top = format!("syncx-rs-v0.6.0-{TARGET}");
+        let bin_name = backend_binary_name("rust");
+        let bytes = build_tgz(
+            &top,
+            &[(bin_name, b"fake elf"), ("README.md", b"readme")],
+        );
+        let dir = std::env::temp_dir().join(format!("syncx-unpack-test-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let dest = dir.join("staged.bin");
+        unpack_backend_binary(&bytes, bin_name, &dest).unwrap();
+        assert_eq!(std::fs::read(&dest).unwrap(), b"fake elf");
         let _ = std::fs::remove_dir_all(&dir);
     }
 }

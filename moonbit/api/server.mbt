@@ -26,6 +26,12 @@ pub(all) struct ApiOptions {
   web_dist : String?
   /// 优雅关闭回调(None = POST /api/shutdown 回 503)。
   on_shutdown : (() -> Unit)?
+  /// dev 运行态:`/api/self-update*` 一律拒绝(Node 侧的最后一道防线)。
+  dev_mode : Bool
+  /// 上传包预检回调(None = POST /api/self-update/upload/inspect 回 503)。
+  upload_inspect : UploadInspectFn?
+  /// 上传包换入回调(None = POST /api/self-update/upload 回 503)。
+  upload_swap : UploadSwapFn?
 }
 
 ///|
@@ -40,6 +46,9 @@ pub fn ApiOptions::new(
   actor~ : @daemon.ActorHandle? = None,
   web_dist~ : String? = None,
   on_shutdown~ : (() -> Unit)? = None,
+  dev_mode~ : Bool = false,
+  upload_inspect~ : UploadInspectFn? = None,
+  upload_swap~ : UploadSwapFn? = None,
 ) -> ApiOptions {
   let web_dist = match web_dist {
     Some(dist) => Some(dist)
@@ -53,6 +62,9 @@ pub fn ApiOptions::new(
     actor,
     web_dist,
     on_shutdown,
+    dev_mode,
+    upload_inspect,
+    upload_swap,
   }
 }
 
@@ -319,6 +331,15 @@ pub fn build_app(options : ApiOptions) -> @mocket.App {
   app.post("/api/pause", event => handle_pause(options, event))
   app.get("/api/devices", event => handle_list_devices(options, event))
   app.post("/api/shutdown", event => handle_shutdown(options, event))
+  // 上传安装包换入(预检只读;换入成功后旧进程由看门狗请退,见 upload.mbt)
+  app.post(
+    "/api/self-update/upload/inspect",
+    event => handle_upload_inspect(options, event),
+  )
+  app.post(
+    "/api/self-update/upload",
+    event => handle_upload_swap(options, event),
+  )
   // 静态资源 / 占位页(最后兜底)
   match options.web_dist {
     Some(dist) => mount_static(app, dist)

@@ -141,8 +141,12 @@ pub fn try_routes(state: &AppState, ctx: &Ctx) -> Option<Response> {
         return Some(match ops.inspect_package(&ctx.body) {
             Ok(info) => util::ok(json!({
                 "ok": true,
+                // backend: "node" | "rust" | "moonbit" —— 前端据此决定确认文案;
+                // target 仅后端二进制包携带(供排查平台不符)。
+                "backend": info["backend"],
                 "version": info["version"],
                 "name": info["name"],
+                "target": info["target"],
                 "current": info["current"],
             })),
             Err(OpError::Unavailable) => {

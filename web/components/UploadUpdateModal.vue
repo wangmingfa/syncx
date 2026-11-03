@@ -4,12 +4,17 @@ import { NButton } from 'naive-ui';
 import { useStatusContext } from '../composables/statusContext';
 import { formatBytes } from '../utils/bytes';
 import ModalShell from './ModalShell.vue';
+import type { PeerRuntime } from '../types';
+
+/** 后端形态中文名(与 useSelfUpdate 的 BACKEND_LABELS 同义,弹窗内组句用)。 */
+const BACKEND_LABELS: Record<PeerRuntime, string> = { node: 'Node', rust: 'Rust', moonbit: 'MoonBit' };
 
 const props = defineProps<{ open: boolean }>();
 const emit = defineEmits<{ close: [] }>();
 
 // 选包与预检状态在 useSelfUpdate 里(页面级拖入与这里共用同一份),本组件只当视图
 const {
+  status,
   upgrading,
   uploadFile,
   uploadInfo,
@@ -22,6 +27,13 @@ const {
 const fileInput = ref<HTMLInputElement | null>(null);
 /** 校验/升级期间不接受新的点击:避免误触把正在校验的包换掉。 */
 const busy = computed(() => upgrading.value || uploadInspecting.value);
+
+/** 当前运行形态(缺省 node 与旧后端兼容);跨后端换入时对比展示用。 */
+const currentBackend = computed<PeerRuntime>(() => status.value.runtime ?? 'node');
+/** 预检包的后端形态;旧后端 inspect 不回 backend 时视作 node(只能传 npm tgz)。 */
+const targetBackend = computed<PeerRuntime>(() => uploadInfo.value?.backend ?? 'node');
+/** 是否跨后端换入:文案要说清楚「形态也变了」。 */
+const crossBackend = computed(() => targetBackend.value !== currentBackend.value);
 
 function pickFile(): void {
   if (busy.value) return;
@@ -46,9 +58,10 @@ function onConfirm(): void {
 <template>
   <ModalShell :open="props.open" title="上传安装包升级" @close="emit('close')">
     <p class="modal-lead">
-      选择本机 <code class="mono">npm run pack:local</code> 打出的 <code class="mono">.tgz</code>，
+      选择 <code class="mono">npm run pack:local[:rust|:moonbit]</code> 打出的安装包
+      （node 的 <code class="mono">.tgz</code> 或后端的 <code class="mono">.tar.gz</code>），
       或直接把文件拖到页面中间的投放区；校验通过后整包替换并自动重启 ——
-      无需发布 npm 新版本即可在多台设备上验证构建。
+      也可以借此在本机任意切换三种后端形态做调试。
     </p>
 
     <input
@@ -77,13 +90,16 @@ function onConfirm(): void {
     <div v-else-if="uploadInfo" class="upload-verdict">
       <div class="upload-verdict__row">
         <span class="upload-verdict__label">当前版本</span>
-        <span class="mono">{{ uploadInfo.current || '未知' }}</span>
+        <span class="mono">{{ BACKEND_LABELS[currentBackend] }} {{ uploadInfo.current || '未知' }}</span>
       </div>
       <div class="upload-verdict__row">
         <span class="upload-verdict__label">将升级到</span>
-        <span class="mono upload-verdict__to">{{ uploadInfo.version }}</span>
+        <span class="mono upload-verdict__to">{{ BACKEND_LABELS[targetBackend] }} {{ uploadInfo.version }}</span>
       </div>
-      <p v-if="uploadInfo.version === uploadInfo.current" class="confirm-note-extra confirm-note-extra--flush">
+      <p v-if="crossBackend" class="confirm-note-extra confirm-note-extra--flush">
+        这是一次跨后端换入：服务将切换为 {{ BACKEND_LABELS[targetBackend] }} 形态运行，新进程启动失败会自动回滚到当前 {{ BACKEND_LABELS[currentBackend] }} 后端。
+      </p>
+      <p v-else-if="uploadInfo.version === uploadInfo.current" class="confirm-note-extra confirm-note-extra--flush">
         与当前版本相同：将用这个包直接替换现有安装（用于验证新构建）。
       </p>
     </div>
