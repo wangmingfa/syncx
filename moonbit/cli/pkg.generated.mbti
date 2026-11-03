@@ -2,6 +2,7 @@
 package "wangmingfa/syncx/cli"
 
 import {
+  "wangmingfa/syncx/api",
   "wangmingfa/syncx/core",
 }
 
@@ -22,11 +23,19 @@ pub const GITHUB_REPO : String = "wangmingfa/syncx"
 
 pub const HEALTH_MARKER_TIMEOUT_MS : Int64 = 30_000
 
+pub const MAX_UPLOAD_PACKAGE_BYTES : Int32 = 67108864
+
+pub const MIN_UPLOAD_PACKAGE_BYTES : Int32 = 4096
+
 pub const OLD_EXIT_WAIT_MS : Int64 = 120_000
 
 pub const UPDATE_MARKER_ENV : String = "SYNCX_UPDATE_MARKER"
 
+pub const UPLOAD_KILL_PARENT_GRACE_MS : Int64 = 600
+
 pub fn asset_name(String, String) -> String
+
+pub fn build_update_restart(Array[String]) -> UpdateRestart
 
 pub async fn check_for_update() -> UpdateInfo
 
@@ -36,13 +45,21 @@ pub fn default_config_path() -> String
 
 pub fn detect_target() -> String raise UpdateError
 
+pub async fn extract_package(Bytes, min_bytes? : Int32) -> Result[UploadedPackage, String]
+
 pub async fn fetch_release(String?) -> ReleaseAsset
+
+pub async fn inspect_uploaded_package(Bytes, min_bytes? : Int32) -> Result[@api.InspectedPackage, String]
+
+pub async fn install_backend_binary(UploadedPackage, String) -> Result[String, String]
 
 pub async fn install_from_release(String?, UpdateRestart?) -> String
 
 pub fn is_dev_mode(StartArgs, Bool) -> Bool
 
 pub let known_commands : Array[String]
+
+pub fn known_target_triples() -> Array[String]
 
 pub async fn load_config_file(String) -> @core.Config
 
@@ -54,9 +71,13 @@ pub fn normalize_upgrade_tag(String?) -> String raise UpdateError
 
 pub fn parent_dir_of(String) -> String
 
+pub fn parse_backend_dir_name(String) -> (String, String, String)?
+
 pub fn parse_checksums(String, String) -> String?
 
 pub fn parse_start_args(Array[String]) -> Result[StartArgs, String]
+
+pub async fn perform_upload_swap(Bytes, String, min_bytes? : Int32) -> Result[String, String]
 
 pub fn pick_mode(Array[String]) -> Result[CliMode, String]
 
@@ -72,7 +93,11 @@ pub async fn save_config_atomic(String, @core.Config) -> Unit raise CliError
 
 pub fn sibling_with_suffix(String, String) -> String
 
+pub async fn spawn_upload_swap(String, String, String, UpdateRestart) -> Unit raise UpdateError
+
 pub fn target_triple(String, String) -> String?
+
+pub fn valid_semver(String) -> Bool
 
 // Errors
 pub(all) suberror CliError {
@@ -134,6 +159,9 @@ pub(all) struct UpdateJob {
   wait_ms : Int64
   verify_ms : Int64
   version : String
+  restart_exe : String?
+  no_swap : Bool
+  kill_parent_ms : Int64
 }
 pub fn UpdateJob::from_json(Json) -> Self?
 pub fn UpdateJob::to_json(Self) -> Json
@@ -142,6 +170,16 @@ pub(all) struct UpdateRestart {
   args : Array[String]
   cwd : String?
   log_file : String?
+}
+
+pub(all) struct UploadedPackage {
+  backend : String
+  version : String
+  target : String?
+  name : String?
+  work_dir : String
+  root : String
+  binary : String?
 }
 
 // Type aliases

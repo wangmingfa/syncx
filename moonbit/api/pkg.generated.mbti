@@ -9,6 +9,8 @@ import {
 }
 
 // Values
+pub const DEV_UPDATE_REJECT : String = "开发模式下不支持升级功能（运行态为 dev，无单文件运行时可替换）"
+
 pub const EVENTS_PATH : String = "/api/events"
 
 pub const SESSION_COOKIE : String = "syncx_session"
@@ -48,6 +50,10 @@ pub async fn handle_pause(ApiOptions, @mocket.MocketEvent) -> &@mocket.Responder
 pub async fn handle_shutdown(ApiOptions, @mocket.MocketEvent) -> &@mocket.Responder
 
 pub async fn handle_token_login(ApiOptions, @mocket.MocketEvent) -> &@mocket.Responder
+
+pub async fn handle_upload_inspect(ApiOptions, @mocket.MocketEvent) -> &@mocket.Responder
+
+pub async fn handle_upload_swap(ApiOptions, @mocket.MocketEvent) -> &@mocket.Responder
 
 pub fn health_json() -> Json
 
@@ -109,8 +115,11 @@ pub(all) struct ApiOptions {
   actor : @daemon.ActorHandle?
   web_dist : String?
   on_shutdown : (() -> Unit)?
+  dev_mode : Bool
+  upload_inspect : (async (Bytes) -> Result[InspectedPackage, String])?
+  upload_swap : (async (Bytes) -> Result[String, String])?
 }
-pub fn ApiOptions::new(device_id~ : String, control_token? : String, auth_file? : String?, config_file? : String?, actor? : @daemon.ActorHandle?, web_dist? : String?, on_shutdown? : (() -> Unit)?) -> Self
+pub fn ApiOptions::new(device_id~ : String, control_token? : String, auth_file? : String?, config_file? : String?, actor? : @daemon.ActorHandle?, web_dist? : String?, on_shutdown? : (() -> Unit)?, dev_mode? : Bool, upload_inspect? : (async (Bytes) -> Result[InspectedPackage, String])?, upload_swap? : (async (Bytes) -> Result[String, String])?) -> Self
 
 type DistProvider
 pub async fn DistProvider::get_contents(Self, StringView) -> &@mocket.Responder
@@ -120,6 +129,13 @@ pub fn DistProvider::get_index_names(Self) -> Array[String]
 pub async fn DistProvider::get_meta(Self, StringView) -> @mocket.StaticAssetMeta?
 pub fn DistProvider::get_type(Self, String) -> String?
 pub impl @mocket.ServeStaticProvider for DistProvider
+
+pub(all) struct InspectedPackage {
+  backend : String
+  version : String
+  target : String?
+  name : String?
+}
 
 pub(all) struct SessionPayload {
   via : String
@@ -137,5 +153,8 @@ pub fn StatusHub::detach(Self, String) -> Unit
 pub async fn StatusHub::run(Self) -> Unit
 
 // Type aliases
+pub type UploadInspectFn = async (Bytes) -> Result[InspectedPackage, String]
+
+pub type UploadSwapFn = async (Bytes) -> Result[String, String]
 
 // Traits

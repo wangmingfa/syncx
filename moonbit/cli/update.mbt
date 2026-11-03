@@ -960,6 +960,10 @@ async fn spawn_update_swap(
     wait_ms: OLD_EXIT_WAIT_MS,
     verify_ms: HEALTH_MARKER_TIMEOUT_MS,
     version,
+    // 发布路径:拉起换入后的自身路径,不请旧进程让位(CLI/用户自关)
+    restart_exe: None,
+    no_swap: false,
+    kill_parent_ms: 0L,
   }
   let job_path = "\{work}/job.json"
   write_job_and_spawn_watchdog(job, job_path, exe)

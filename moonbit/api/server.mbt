@@ -332,14 +332,12 @@ pub fn build_app(options : ApiOptions) -> @mocket.App {
   app.get("/api/devices", event => handle_list_devices(options, event))
   app.post("/api/shutdown", event => handle_shutdown(options, event))
   // 上传安装包换入(预检只读;换入成功后旧进程由看门狗请退,见 upload.mbt)
-  app.post(
-    "/api/self-update/upload/inspect",
-    event => handle_upload_inspect(options, event),
-  )
-  app.post(
-    "/api/self-update/upload",
-    event => handle_upload_swap(options, event),
-  )
+  app.post("/api/self-update/upload/inspect", event => {
+    handle_upload_inspect(options, event)
+  })
+  app.post("/api/self-update/upload", event => {
+    handle_upload_swap(options, event)
+  })
   // 静态资源 / 占位页(最后兜底)
   match options.web_dist {
     Some(dist) => mount_static(app, dist)

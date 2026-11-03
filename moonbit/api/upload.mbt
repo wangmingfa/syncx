@@ -55,7 +55,10 @@ pub async fn handle_upload_inspect(
     Some(inspect) => inspect
     None => {
       drain_body(event)
-      return json_error(@mocket.ServiceUnavailable, "upload update not available")
+      return json_error(
+        @mocket.ServiceUnavailable,
+        "upload update not available",
+      )
     }
   }
   // 请求体即包的原始字节;读不出来按坏请求处理
@@ -80,7 +83,7 @@ pub async fn handle_upload_inspect(
         Some(name) => map.set("name", Json::string(name))
         None => ()
       }
-      @mocket.HttpResponse(@mocket.OK).json(Json::object(map))
+      @mocket.HttpResponse(@mocket.OK).json(Json::object(map)).to_responder()
     }
     Err(message) => update_error_response(message)
   }
@@ -103,7 +106,10 @@ pub async fn handle_upload_swap(
     Some(swap) => swap
     None => {
       drain_body(event)
-      return json_error(@mocket.ServiceUnavailable, "upload update not available")
+      return json_error(
+        @mocket.ServiceUnavailable,
+        "upload update not available",
+      )
     }
   }
   let bytes : Bytes = event.body() catch {
@@ -118,7 +124,7 @@ pub async fn handle_upload_swap(
       map.set("ok", Json::boolean(true))
       map.set("version", Json::string(version))
       map.set("restarting", Json::boolean(true))
-      @mocket.HttpResponse(@mocket.OK).json(Json::object(map))
+      @mocket.HttpResponse(@mocket.OK).json(Json::object(map)).to_responder()
     }
     Err(message) => update_error_response(message)
   }
@@ -126,7 +132,7 @@ pub async fn handle_upload_swap(
 
 ///|
 /// dev 运行态拒绝(Node 同款 400 响应体)。
-fn update_reject_dev(event : @mocket.MocketEvent) -> &Responder {
+async fn update_reject_dev(event : @mocket.MocketEvent) -> &Responder {
   drain_body(event)
   update_error_response(DEV_UPDATE_REJECT)
 }

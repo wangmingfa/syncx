@@ -264,6 +264,14 @@ pub async fn run_start(args : StartArgs) -> Unit {
     println("control UI: http://\{control_host}:\{control_port}")
     println("peer port: \{peer_port}")
     // 控制 API 常驻(serve 内部 listen 常驻,不返回)
+    // 上传换入回调:识别/换入逻辑在 cli/upload.mbt(依赖方向 cli → api,
+    // 回调在这里注入;api 包只见类型不见实现)
+    let upload_inspect_fn : @api.UploadInspectFn = bytes => {
+      inspect_uploaded_package(bytes)
+    }
+    let upload_swap_fn : @api.UploadSwapFn = bytes => {
+      perform_upload_swap(bytes, config_dir)
+    }
     let api_options = @api.ApiOptions::new(
       device_id=identity.device_id,
       control_token=token,
@@ -276,6 +284,9 @@ pub async fn run_start(args : StartArgs) -> Unit {
         let _ = handle.send(@daemon.Cmd::Shutdown)
         c_exit(0)
       }),
+      dev_mode=dev,
+      upload_inspect=Some(upload_inspect_fn),
+      upload_swap=Some(upload_swap_fn),
     )
     @api.serve(api_options, "\{control_host}:\{control_port}")
   }
