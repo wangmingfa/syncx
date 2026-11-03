@@ -134,6 +134,9 @@ export function createWebhookNotifier(opts: WebhookNotifierOptions): WebhookNoti
 
   return {
     notify(ev: WebhookEvent): void {
+      // 未配置地址时直接跳过:一个事件都不入队、不打日志 —— 同步高峰期每个
+      // 事件都 warn 一句「未配置」会把日志刷成洪水(Termux 实测日志里占满屏)
+      if (!settings().url) return;
       tail = tail
         .then(async () => {
           const r = await deliver(ev);

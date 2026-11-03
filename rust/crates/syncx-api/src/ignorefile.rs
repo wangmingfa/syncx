@@ -12,8 +12,9 @@ use std::path::Path;
 use syncx_core::ignore::{IgnoreRuleset, IgnoreVerdict};
 
 /// 内置默认忽略行(展示给编辑器,只读;文本层面可被负向规则覆盖,硬闸门另算)。
-pub const BUILTIN_IGNORE_LINES: [&str; 5] = [
+pub const BUILTIN_IGNORE_LINES: [&str; 6] = [
     ".git",
+    ".git-rewrite",
     ".hg",
     ".svn",
     ".syncx-trash",

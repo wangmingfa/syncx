@@ -317,7 +317,7 @@ pub fn IgnoreRuleset::explain(
 /// 永远不参与同步的目录名(大小写不敏感)。见 Node 侧 `HARD_IGNORE_NAMES`。
 /// (MoonBit 的 const 只认不可变基础类型,列表以函数形式暴露。)
 pub fn hard_ignore_names() -> Array[String] {
-  [".git", ".hg", ".svn", ".syncx-trash", ".syncx-folder"]
+  [".git", ".git-rewrite", ".hg", ".svn", ".syncx-trash", ".syncx-folder"]
 }
 
 ///|

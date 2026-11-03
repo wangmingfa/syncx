@@ -253,7 +253,7 @@ export function filterIndexedEntries(rules: IgnoreRule[], entries: IndexEntry[])
  * `.syncx-folder` 是共享根的挂载标记(见 marker.ts),同样必须忽略,否则标记文件
  * 本身会被同步/生成墓碑,反而破坏「标记存在 = 目录可信」的判定。
  */
-export const BUILTIN_IGNORE_LINES = ['.git', '.hg', '.svn', '.syncx-trash', '.syncx-folder'];
+export const BUILTIN_IGNORE_LINES = ['.git', '.git-rewrite', '.hg', '.svn', '.syncx-trash', '.syncx-folder'];
 
 /**
  * 硬忽略名单:**任何配置都无法解除**的路径(目录或文件名)。与 BUILTIN_IGNORE_LINES
@@ -268,7 +268,7 @@ export const BUILTIN_IGNORE_LINES = ['.git', '.hg', '.svn', '.syncx-trash', '.sy
  * 四处独立闸门共用它(见各自注释):scanner 不扫、filterIndexedEntries 不进内存索引、
  * peer 不收不发、executor 不落盘。任何一处单独失效都还有其余三道兜底。
  */
-export const HARD_IGNORE_NAMES = ['.git', '.hg', '.svn', '.syncx-trash', '.syncx-folder'];
+export const HARD_IGNORE_NAMES = ['.git', '.git-rewrite', '.hg', '.svn', '.syncx-trash', '.syncx-folder'];
 
 const HARD_IGNORE_SET = new Set(HARD_IGNORE_NAMES);
 

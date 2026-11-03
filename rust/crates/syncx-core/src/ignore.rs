@@ -261,7 +261,7 @@ pub struct IgnoreVerdict {
 /* ==================== 硬忽略 ==================== */
 
 /// 永远不参与同步的目录名(大小写不敏感)。见 Node 侧 `HARD_IGNORE_NAMES`。
-pub const HARD_IGNORE_NAMES: [&str; 5] = [".git", ".hg", ".svn", ".syncx-trash", ".syncx-folder"];
+pub const HARD_IGNORE_NAMES: [&str; 6] = [".git", ".git-rewrite", ".hg", ".svn", ".syncx-trash", ".syncx-folder"];
 
 /// syncx 在途中间态后缀(见 Node 侧 `SCRATCH_SUFFIXES`)。
 pub const SCRATCH_SUFFIXES: [&str; 2] = [".syncx-tmp", ".syncx-partial"];

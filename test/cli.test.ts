@@ -300,7 +300,7 @@ describe('readFolderIgnoreLines', () => {
       writeFileSync(join(dir, '.syncxignore'), 'secret.txt\n!*.log\n');
       const lines = readFolderIgnoreLines(dir, true).map((l) => l.trim()).filter((l) => l !== '');
       // 内置默认忽略(.git/.hg/.svn/.syncx-trash/.syncx-folder)在前,其次 .gitignore,最后 .syncxignore(优先级最高)
-      expect(lines).toEqual(['.git', '.hg', '.svn', '.syncx-trash', '.syncx-folder', 'node_modules/', '*.log', '!keep.log', 'secret.txt', '!*.log']);
+      expect(lines).toEqual(['.git', '.git-rewrite', '.hg', '.svn', '.syncx-trash', '.syncx-folder', 'node_modules/', '*.log', '!keep.log', 'secret.txt', '!*.log']);
 
       const rules = parseIgnoreRules(readFolderIgnoreLines(dir, true));
       expect(isIgnored(rules, 'node_modules', true)).toBe(true);
@@ -322,6 +322,7 @@ describe('readFolderIgnoreLines', () => {
       // 无任何忽略文件时不抛错,仅返回内置默认忽略(避免把 .git 等当普通目录同步)
       expect(readFolderIgnoreLines(mkdtempSync(join(tmpdir(), 'syncx-ignore-empty')), true)).toEqual([
         '.git',
+        '.git-rewrite',
         '.hg',
         '.svn',
         '.syncx-trash',

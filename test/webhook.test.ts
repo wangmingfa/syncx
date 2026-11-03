@@ -151,7 +151,8 @@ describe('webhook delivery', () => {
     n.notify({ kind: 'completed', ts: 1 });
     await drain();
     expect(f.sent).toHaveLength(0);
-    expect(logs.some((l) => l.includes('未配置 Webhook 地址'))).toBe(true);
+    // 未配置时 notify 完全静默(不入队不打日志):同步高峰期的 warn 洪水比没配 webhook 更吵
+    expect(logs.some((l) => l.includes('未配置 Webhook 地址'))).toBe(false);
     rmDir(dirname(file));
   });
 
