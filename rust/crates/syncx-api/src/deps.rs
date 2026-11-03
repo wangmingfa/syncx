@@ -189,6 +189,12 @@ pub trait ControlOps: Send + Sync {
     fn git_push(&self, _folder_id: &str) -> OpResult<Value> {
         Err(OpError::Unavailable)
     }
+    /// 剔除某目录未推送提交消息里的 Co-Authored-By 行(git 历史重写)。
+    ///
+    /// 响应契约与 Node 同名:`{ok:true, stripped, rewritten}`。
+    fn git_strip_coauthored_unpushed(&self, _folder_id: &str) -> OpResult<Value> {
+        Err(OpError::Unavailable)
+    }
     fn git_auto_commit_status(&self, _folder_id: &str) -> OpResult<Value> {
         Err(OpError::Unavailable)
     }

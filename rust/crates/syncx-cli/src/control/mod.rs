@@ -16,7 +16,7 @@
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
-use std::sync::atomic::AtomicBool;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
@@ -125,7 +125,13 @@ pub struct RuntimeOps {
 
     pub shutdown_tx: UnboundedSender<()>,
     pub dial_tx: UnboundedSender<DialRequest>,
+    /// git 写操作(push / 剔除重写)共用的重入闸:swap 原子获取,先到者持闸,
+    /// 后到者按 [`Self::git_rewrite_running`] 区分忙文案。filter-branch 结束时才把
+    /// 分支指到新链,期间叠加的推送/自动提交都会悬在被替换的旧链上、随重写孤儿化。
     pub git_push_running: AtomicBool,
+    /// 剔除重写(git filter-branch)持有闸的标记:仅在闸内为真。忙文案按它区分
+    /// (「已有提交信息剔除正在进行」vs「已有推送正在进行」),自动提交结算也据它暂缓。
+    pub git_rewrite_running: AtomicBool,
 
     /// 自动提交台账:挂起通知 / 退避时刻 / 已失败次数 / 最近失败原因。
     ///
@@ -849,21 +855,27 @@ impl RuntimeOps {
         git_sync::retry_relays(self, &config);
         git_sync::retry_broadcasts(self, &config);
 
-        let due: Vec<(String, PathBuf)> = match self.git_state.lock() {
-            Ok(state) => state
-                .pending
-                .keys()
-                .filter(|id| state.retry_at.get(*id).is_none_or(|at| *at <= now))
-                .filter_map(|id| {
-                    config
-                        .folder(id)
-                        .map(|folder| (id.clone(), PathBuf::from(&folder.path)))
-                })
-                .collect(),
-            Err(_) => return,
-        };
-        for (folder_id, root) in due {
-            let _ = self.settle_git_notice(&folder_id, &root);
+        // 剔除重写进行中:filter-branch 正在重建该仓库的提交对象、结束时把分支指到
+        // 新链 —— 此刻叠加自动提交,新提交会悬在被替换的旧链上、随重写一并孤儿化。
+        // 暂缓一轮,闸放开后照常结算(与 Node flushPendingGitNotify 的
+        // gitRewriteRunning 闸同款);中继/广播补投与巡检不涉及提交,照常跑。
+        if !self.git_rewrite_running.load(Ordering::SeqCst) {
+            let due: Vec<(String, PathBuf)> = match self.git_state.lock() {
+                Ok(state) => state
+                    .pending
+                    .keys()
+                    .filter(|id| state.retry_at.get(*id).is_none_or(|at| *at <= now))
+                    .filter_map(|id| {
+                        config
+                            .folder(id)
+                            .map(|folder| (id.clone(), PathBuf::from(&folder.path)))
+                    })
+                    .collect(),
+                Err(_) => return,
+            };
+            for (folder_id, root) in due {
+                let _ = self.settle_git_notice(&folder_id, &root);
+            }
         }
 
         git_sync::check_local_commits(self, &config, now);
@@ -1425,6 +1437,9 @@ impl ControlOps for RuntimeOps {
     }
     fn git_push(&self, folder_id: &str) -> OpResult<Value> {
         git::push(self, folder_id)
+    }
+    fn git_strip_coauthored_unpushed(&self, folder_id: &str) -> OpResult<Value> {
+        git::strip_coauthored_unpushed(self, folder_id)
     }
     fn git_auto_commit_status(&self, folder_id: &str) -> OpResult<Value> {
         git::auto_commit_status(self, folder_id)

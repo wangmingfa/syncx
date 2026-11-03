@@ -741,3 +741,121 @@ export function gitPush(folderPath: string, timeoutMs = GIT_PUSH_TIMEOUT_MS): Pr
     );
   });
 }
+
+/* ==================== 未推送提交消息剔除(git 历史重写) ==================== */
+
+/**
+ * 解析当前分支的上游提交哈希(`git rev-parse --verify @{upstream}`)。
+ * 返回 null = 未设置上游(远程未配置 / 从未 push / 分支游离)—— 调用方据此把
+ * 「剔除未推送提交」挡在 400,与 countUnpushedCommits 的 null 同为「没有上游范围」口径。
+ */
+export function getUpstreamCommitHash(folderPath: string): string | null {
+  try {
+    const out = execFileSync('git', ['rev-parse', '--verify', '@{upstream}'], {
+      cwd: folderPath,
+      encoding: 'utf8',
+      stdio: ['ignore', 'pipe', 'ignore'],
+      windowsHide: true,
+      timeout: 5000,
+    });
+    return out.trim() || null;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * 读取一段提交区间里每笔提交的**原始完整消息**(`%B`,新→旧)。
+ * 返回 null = git 读取失败(不是仓库 / 区间表达式解析失败);空区间是正常状态,回 []。
+ *
+ * 与「未推送提交」弹窗的列表读取同一个解析套路:`-z`(记录以 NUL 分隔)+ 只读字段。
+ * 这里只取 `%B` —— 剔除 Co-Authored-By 的命中统计必须跑在**逐字节原文**上
+ * (%B 自带尾部换行),subject+body 的拼装口径做不到这一点。
+ */
+export function listRawCommitMessages(folderPath: string, range: string): string[] | null {
+  let out: string;
+  try {
+    out = execFileSync(
+      'git',
+      ['log', '-z', '--no-color', '--no-show-signature', '--format=%B', range],
+      {
+        cwd: folderPath,
+        encoding: 'utf8',
+        stdio: ['ignore', 'pipe', 'pipe'],
+        windowsHide: true,
+        timeout: 10_000,
+        maxBuffer: 4 * 1024 * 1024,
+      },
+    );
+  } catch {
+    return null;
+  }
+  // 每条记录 = 消息原文(尾部自带换行)+ NUL 分隔符。只有最后一个 NUL 之后的空尾串
+  // 该丢弃;中间的空串是「消息为空的提交」(罕见但合法),丢掉会让区间计数对不上。
+  const records = out.split('\0');
+  if (records.length > 0 && records[records.length - 1] === '') records.pop();
+  return records;
+}
+
+/**
+ * --msg-filter 的 shell 过滤器:与 daemon 侧 stripCoAuthoredBy(session-manager.ts)同一条
+ * 剔除规则的 shell 形态 —— grep 整行剔除(/co-?authored-by/i,git 自带的 sh+grep 保证
+ * 跨平台)+ `git stripspace` 收尾(去尾部空行、折叠连续空行,与纯函数「剔除后收掉消息
+ * 尾部空行」等价)。末尾 `|| true` 防 grep 把整条消息剔空时退出码 1 中断 filter-branch。
+ *
+ * 只以字面量出现在这里、不含任何用户输入,经 execFile 参数数组直达 git,无注入面。
+ */
+const STRIP_CO_AUTHORED_MSG_FILTER = "grep -Evi 'co-?authored-by' | git stripspace || true";
+
+/**
+ * filter-branch 逐提交跑一次 shell 过滤器,耗时随区间长度线性增长:给足上限但必须封顶,
+ * 与 push 同一档(120s)—— 本地重写通常秒级,卡死的仓库不能让请求挂死。
+ */
+export const GIT_REWRITE_TIMEOUT_MS = 120_000;
+
+/** 重写的结果;失败时 error 为 stderr 首行(如 Cannot rewrite branches: ...)。 */
+export type GitRewriteResult = { ok: true } | { ok: false; error: string };
+
+/**
+ * 用 `git filter-branch --msg-filter` 重写一段提交区间的提交消息(剔除 Co-Authored-By 行)。
+ * 区间只应传未推送范围(如 `@{upstream}..HEAD`)—— 未推送提交可安全重写(哈希会变),
+ * 已推送区间的重写会造成与远端的分叉,调用方负责保证这一点。
+ *
+ * 与本地仓库操作的 execFileSync 不同,**必须异步**:重写是可能秒级~分钟级的长操作,
+ * 同步执行会把 daemon 的事件循环整个卡住(同步与接收全停),与 gitPush 同一取舍。
+ *
+ * 实测口径(git 2.x,校准脚本验证):
+ *  - 只重写当前分支:refs/heads/<当前分支> 指向重写后的新链,上游引用原样不动,
+ *    原链备份在 refs/original/(filter-branch 自带,失败时仓库自恢复无需额外处理);
+ *  - 重写期间**不动工作区**(msg-filter 只重建对象与引用,工作区逐字节保持),
+ *    HEAD 保持符号引用不变;
+ *  - 作者时间/作者信息逐笔保留(只有消息走过滤器)。
+ */
+export function rewriteCommitMessages(folderPath: string, range: string, timeoutMs = GIT_REWRITE_TIMEOUT_MS): Promise<GitRewriteResult> {
+  return new Promise((resolve) => {
+    execFile(
+      'git',
+      ['filter-branch', '-f', '--msg-filter', STRIP_CO_AUTHORED_MSG_FILTER, '--', range],
+      {
+        cwd: folderPath,
+        windowsHide: true,
+        timeout: timeoutMs,
+        maxBuffer: 4 * 1024 * 1024,
+        // FILTER_BRANCH_SQUELCH_WARNING=1:压掉 filter-branch 的弃用大段警告,
+        // 让 stderr 里剩下的只有进度与真正的错误首行
+        env: { ...process.env, FILTER_BRANCH_SQUELCH_WARNING: '1' },
+      },
+      (err, _stdout, stderr) => {
+        if (!err) {
+          resolve({ ok: true });
+          return;
+        }
+        const firstLine = stderr.toString().trim().split('\n')[0];
+        resolve({
+          ok: false,
+          error: firstLine || (err.killed ? `超时(>${Math.round(timeoutMs / 1000)}s)` : err.message),
+        });
+      },
+    );
+  });
+}

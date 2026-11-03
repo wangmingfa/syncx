@@ -690,6 +690,7 @@ pub fn build_runtime(
         shutdown_tx,
         dial_tx,
         git_push_running: AtomicBool::new(false),
+        git_rewrite_running: AtomicBool::new(false),
         git_state: Mutex::new(super::GitState::default()),
     });
     let _ = cell.set(Arc::clone(&ops));

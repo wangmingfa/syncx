@@ -194,6 +194,12 @@ export interface ControlServerDeps {
    * 已有推送进行中 / 目录不是仓库 / 目录不存在时抛错,路由转 400。
    */
   pushGitFolder?: (folderId: string) => Promise<{ ok: boolean; error?: string }>;
+  /**
+   * 剔除某目录未推送提交信息里的 Co-Authored-By 行(filter-branch 重写未推送区间的
+   * 提交消息,哈希会变),返回 { ok: true, stripped, rewritten }。目录不存在 / 不是
+   * git 仓库 / 未设置上游 / 工作区有未提交变更 / 已有推送或剔除进行中时抛错,路由转 400。
+   */
+  stripGitCoAuthoredUnpushed?: (folderId: string) => Promise<{ ok: boolean; stripped: number; rewritten: number }>;
   /** 盘点共享目录里的空文件夹(「空文件夹」弹窗):只读扫盘,忽略规则决定报告范围。 */
   listEmptyDirs?: (folderId: string) => unknown;
   /** 删除勾选的空文件夹(逐条结果);只 rmdir,绝不删文件,不触发扫描。 */

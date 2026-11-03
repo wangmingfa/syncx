@@ -180,7 +180,8 @@ pub fn unpushed(ops: &RuntimeOps, folder_id: Option<&str>) -> Result<Value, OpEr
 /// 不必等下一轮扫描 —— 但这一轮扫描不在这里跑,数字由下一次扫描刷新。
 pub fn push(ops: &RuntimeOps, folder_id: &str) -> Result<Value, OpError> {
     if ops.git_push_running.swap(true, Ordering::SeqCst) {
-        return Err(OpError::Failed("已有推送正在进行,请稍候".to_string()));
+        // 闸被占着:按持有者区分文案(剔除重写与推送互斥,与 Node 同款)
+        return Err(OpError::Failed(busy_message(ops)));
     }
     let result = (|| -> Result<Value, OpError> {
         let root = folder_root(ops, folder_id)?;
@@ -201,6 +202,49 @@ pub fn push(ops: &RuntimeOps, folder_id: &str) -> Result<Value, OpError> {
     })();
     ops.git_push_running.store(false, Ordering::SeqCst);
     result
+}
+
+/// 剔除某目录未推送提交消息里的 Co-Authored-By 行(git 历史重写,哈希会变)。
+///
+/// 未推送区间可以安全重写 —— 对端还没有这笔提交;已推送历史绝不触碰。判定与
+/// 重写在 [`gitcmd::strip_unpushed_coauthored`],这里只管闸门与重写后的收尾。
+pub fn strip_coauthored_unpushed(ops: &RuntimeOps, folder_id: &str) -> Result<Value, OpError> {
+    // 与 git-push 共用重入闸(`git_push_running`,swap 原子获取,无并发窗口):
+    // filter-branch 结束时才把分支指到新链,期间叠加的推送/自动提交都会悬在被
+    // 替换的旧链上、随重写一并孤儿化。忙文案按持有者区分,与 Node 同款。
+    if ops.git_push_running.swap(true, Ordering::SeqCst) {
+        return Err(OpError::Failed(busy_message(ops)));
+    }
+    ops.git_rewrite_running.store(true, Ordering::SeqCst);
+    let result = (|| -> Result<Value, OpError> {
+        let root = folder_root(ops, folder_id)?;
+        let outcome = gitcmd::strip_unpushed_coauthored(&root, gitcmd::GIT_REWRITE_TIMEOUT_MS)
+            .map_err(OpError::Failed)?;
+        if outcome.rewrote {
+            tracing::info!(
+                "git strip co-authored ok: {folder_id} ({}/{} 提交被剔除尾注)",
+                outcome.stripped,
+                outcome.rewritten
+            );
+            // 基线推进到重写后的 HEAD 并落盘:旧哈希已不在分支上,滞留会让下一轮
+            // 巡检把整个重写区间误判成「本机新提交」再广播一遍给对端。
+            ops.set_git_baseline(folder_id, gitcmd::get_last_commit_hash(&root));
+        }
+        ops.notify_hub();
+        Ok(outcome.payload().to_json())
+    })();
+    ops.git_rewrite_running.store(false, Ordering::SeqCst);
+    ops.git_push_running.store(false, Ordering::SeqCst);
+    result
+}
+
+/// 重入闸忙时的文案:剔除重写持有 → 剔除忙;否则是推送忙。
+fn busy_message(ops: &RuntimeOps) -> String {
+    if ops.git_rewrite_running.load(Ordering::SeqCst) {
+        "已有提交信息剔除正在进行,请稍候".to_string()
+    } else {
+        "已有推送正在进行,请稍候".to_string()
+    }
 }
 
 /// 「Git 自动提交失败」弹窗的数据源。

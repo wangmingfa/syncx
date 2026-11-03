@@ -1407,6 +1407,21 @@ fn git_routes(state: &AppState, ctx: &Ctx) -> Option<Response> {
                 Err(error) => op_error(error, "推送失败"),
             })
         }
+        // 剔除未推送提交消息里的 Co-Authored-By 行(重写未推送区间历史)。
+        // 与 Node 同款:body 解析失败 / 缺 folderId → 400 带原因,不走兜底 404。
+        ("POST", "/api/folders/git-strip-coauthored-unpushed") => {
+            let body = match ctx.json() {
+                Ok(body) => body,
+                Err(_) => return Some(util::error(StatusCode::BAD_REQUEST, "invalid json body")),
+            };
+            let Some(folder_id) = non_empty_string(body.get("folderId")) else {
+                return Some(util::error(StatusCode::BAD_REQUEST, "folderId is required"));
+            };
+            Some(match ops.git_strip_coauthored_unpushed(&folder_id) {
+                Ok(value) => util::ok(value),
+                Err(error) => op_error(error, "剔除提交信息失败"),
+            })
+        }
         ("POST", "/api/folders/git-index-lock/delete") => {
             let body = ctx.json().ok()?;
             let folder_id = non_empty_string(body.get("folderId"))?;
@@ -1736,6 +1751,44 @@ mod tests {
                 "{body}"
             );
         }
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[tokio::test]
+    async fn git_strip_coauthored_unpushed_route_passes_ops_payload() {
+        // 路由只做透传:装配层给的 {ok, stripped, rewritten} 原样成为响应体
+        struct StubOps;
+        impl crate::deps::ControlOps for StubOps {
+            fn git_strip_coauthored_unpushed(
+                &self,
+                _folder_id: &str,
+            ) -> crate::deps::OpResult<Value> {
+                Ok(json!({ "ok": true, "stripped": 2, "rewritten": 3 }))
+            }
+        }
+        let (mut state, dir) = temp_state("strip-unpushed");
+        state.deps.ops = Some(std::sync::Arc::new(StubOps));
+
+        let (status, body) =
+            response_json(try_routes(&state, &post_ctx(
+                "/api/folders/git-strip-coauthored-unpushed",
+                serde_json::json!({ "folderId": "f1" }),
+            )).unwrap())
+            .await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(body["ok"], true);
+        assert_eq!(body["stripped"], 2);
+        assert_eq!(body["rewritten"], 3);
+
+        // 缺 folderId:与 Node 同款 400 带原因
+        let (status, body) =
+            response_json(try_routes(&state, &post_ctx(
+                "/api/folders/git-strip-coauthored-unpushed",
+                serde_json::json!({ "on": true }),
+            )).unwrap())
+            .await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        assert_eq!(body["error"], "folderId is required");
         let _ = std::fs::remove_dir_all(&dir);
     }
 }

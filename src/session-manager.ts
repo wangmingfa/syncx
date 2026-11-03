@@ -72,7 +72,7 @@ import { NETWORK_OFFLINE_BACKOFF_MS, offlineAwareReconnectDelay, reconnectDelayM
 import { hasRoutableInterface } from './net/offline-probe.js';
 import { isSelfPeerUrl, localInterfaceAddresses } from './net/peer-address.js';
 import { CAP_BINARY1, CAP_INDEX_CHUNK1 } from './handshake.js';
-import { isGitRepo, getLastCommitHash, getCommitInfo, hasUncommittedChanges, autoCommit, getUncommittedChanges, readFileAtHead, readFileAt, listCommitFiles, getCommitParents, isCommitHash, listRecentCommits, countUnpushedCommits, listUnpushedCommits, GIT_UNPUSHED_LIMIT, gitPush, findGitIndexLock, removeGitIndexLock, type CommitInfo, type GitChangeEntry, type GitCommitEntry, type GitCommitFileEntry, type GitPushResult, type HeadReadResult, type GitIndexLockInfo, type GitIndexLockRemoveResult } from './git-monitor.js';
+import { isGitRepo, getLastCommitHash, getCommitInfo, hasUncommittedChanges, autoCommit, getUncommittedChanges, readFileAtHead, readFileAt, listCommitFiles, getCommitParents, isCommitHash, listRecentCommits, countUnpushedCommits, listUnpushedCommits, GIT_UNPUSHED_LIMIT, gitPush, findGitIndexLock, removeGitIndexLock, getUpstreamCommitHash, listRawCommitMessages, rewriteCommitMessages, type CommitInfo, type GitChangeEntry, type GitCommitEntry, type GitCommitFileEntry, type GitPushResult, type HeadReadResult, type GitIndexLockInfo, type GitIndexLockRemoveResult } from './git-monitor.js';
 import { scanEmptyDirs, removeEmptyDirs, type EmptyDirScanResult, type EmptyDirDeleteResult } from './empty-dirs.js';
 
 /** scheduleVerdictFor 的结论:此刻该不该同步、被哪一层挡住、下一个边界何时。 */
@@ -98,6 +98,15 @@ export interface UnpushedFolderEntry {
   commits: GitCommitEntry[];
   /** 列表被上限截断(total 超出 GIT_UNPUSHED_LIMIT)。 */
   truncated: boolean;
+}
+
+/** 「剔除未推送提交里的 Co-Authored-By」端点成功时的结果。 */
+export interface GitStripCoAuthoredUnpushedResult {
+  ok: true;
+  /** 消息确实因剔除 Co-Authored-By 而变化的提交数(与前端检测口径同一规则)。 */
+  stripped: number;
+  /** 重写的提交总数(未推送区间长度;重写只改消息,提交个数不变)。 */
+  rewritten: number;
 }
 
 /** 「Git 自动提交失败」弹窗的数据源:挂起通知、重试状态、失败原因与残留锁现况。 */
@@ -796,6 +805,13 @@ export class SyncSessionManager {
    * 推送是长网络操作(单目录最长 120s),没有这道闸,连点两下就会让两侧结果互相打架。
    */
   private gitPushRunning = false;
+  /**
+   * 剔除未推送提交 Co-Authored-By 的 filter-branch 重写进行中(重入闸,见
+   * stripGitCoAuthoredUnpushed)。与 gitPushRunning 互斥:重写正在把未推送区间的
+   * 提交对象换成一串新对象、结束时把分支指向新链,期间叠加 git push / 再一次重写 /
+   * 自动提交都会互相踩踏(自动提交的新提交会悬在被替换的旧链上、随重写孤儿化)。
+   */
+  private gitRewriteRunning = false;
   /**
    * 全局发送带宽上限(config.maxSendKbps 的内存镜像,KB/s):目录未单独配置
    * maxBandwidthKbps 时的兜底默认。构造时读取,热重载 / setGlobalSettings 时同步;
@@ -1771,6 +1787,15 @@ export class SyncSessionManager {
       // 否则一次隔夜的定时暂停就能把下面「交换未落定」的 60s 封顶用光,解停后对端
       // 的索引还没换完,半套文件就被强提交了。
       if (this.folderPausedNow(folder) || this.gitBlockedByIdentity(folder)) {
+        folder.gitDrainWarned = false;
+        folder.gitDrainSince = undefined;
+        continue;
+      }
+      // 剔除重写进行中(与推送互斥的 gitRewriteRunning 闸,见 stripGitCoAuthoredUnpushed):
+      // filter-branch 正在重建该仓库的提交对象、结束时把分支指到新链 —— 此刻叠加自动提交,
+      // 新提交会悬在被替换的旧链上、随重写一并孤儿化。暂缓一轮,闸放开后照常结算;
+      // 与暂停同性质(中场休息),挂起计时一并清零、不消耗下面 60s 封顶的时钟。
+      if (this.gitRewriteRunning) {
         folder.gitDrainWarned = false;
         folder.gitDrainSince = undefined;
         continue;
@@ -4087,6 +4112,7 @@ export class SyncSessionManager {
    */
   async pushGitFolder(folderId: string): Promise<GitPushResult> {
     if (this.gitPushRunning) throw new Error('已有推送正在进行,请稍候');
+    if (this.gitRewriteRunning) throw new Error('已有提交信息剔除正在进行,请稍候');
     const folder = this.folderStates.find((f) => f.id === folderId);
     if (!folder) throw new Error('共享目录不存在(可能刚被移除)');
     if (!isGitRepo(folder.path)) throw new Error('该目录不是 git 仓库');
@@ -4103,6 +4129,64 @@ export class SyncSessionManager {
       return r;
     } finally {
       this.gitPushRunning = false;
+    }
+  }
+
+  /**
+   * 剔除某目录未推送提交信息里的 Co-Authored-By 行(「Git 推送」弹窗检测到尾注后的一键剔除)。
+   *
+   * 剔除 = 用 `git filter-branch --msg-filter` **重写未推送区间的提交消息**(见
+   * git-monitor.rewriteCommitMessages):未推送提交尚未出现在上游,可安全重写 ——
+   * 代价是哈希全变,响应里只有计数,前端刷新后以弹窗新列表为准。剔除规则与 daemon 侧
+   * 镜像提交的 stripCoAuthoredBy 完全同一条(命中统计跑的就是它,重写过滤器是它的
+   * shell 等价形态),两边不会各剔各的口径。
+   *
+   * 未推送区间的口径与「未推送 N」徽标 / git-unpushed 路由完全同一套:`@{upstream}..HEAD`
+   * (本地远程跟踪引用,绝不 fetch)。区间为空(没有未推送提交)直接回 ok 且 0/0,
+   * 不执行任何重写命令 —— 弹窗列表为空时按钮本就不该出现,这里是手写请求的兜底。
+   *
+   * 重入闸与 git-push 互斥(gitRewriteRunning ⇄ gitPushRunning 双向检查):重写期间
+   * 推送被拒、推送期间重写被拒,并发调用手感与「已有推送正在进行」一致。自动提交结算
+   * 也暂缓(见 flushPendingGitNotify 的 gitRewriteRunning 闸)—— filter-branch 结束时
+   * 把分支指到新链,期间叠加的自动提交会悬在被替换的旧链上、随重写一并孤儿化。
+   *
+   * 执行前要求工作区干净:filter-branch 重写期间叠加未提交改动,会把中间态一起写进
+   * 重写后的历史。成功后把 git 基线推进到新 HEAD(含落盘,见 setGitBaseline)——
+   * 旧基线哈希已不在分支上,不推进的话下一轮扫描会把整个重写区间误判成「新提交」
+   * 再广播一遍给对端。
+   */
+  async stripGitCoAuthoredUnpushed(folderId: string): Promise<GitStripCoAuthoredUnpushedResult> {
+    if (this.gitPushRunning) throw new Error('已有推送正在进行,请稍候');
+    if (this.gitRewriteRunning) throw new Error('已有提交信息剔除正在进行,请稍候');
+    const folder = this.folderStates.find((f) => f.id === folderId);
+    if (!folder) throw new Error('共享目录不存在(可能刚被移除)');
+    if (!isGitRepo(folder.path)) throw new Error('该目录不是 git 仓库');
+    // 先单独确认上游存在:区分「未设置上游」(结构性不可用,400 带原因)与区间为空(正常态)
+    if (getUpstreamCommitHash(folder.path) === null) {
+      throw new Error('未设置上游分支(远程未配置或从未推送),没有可剔除的未推送区间');
+    }
+    // 预统计:区间内哪些提交的消息会被剔除规则改写(stripped 的口径,与重写过滤器同一条规则)
+    const messages = listRawCommitMessages(folder.path, '@{upstream}..HEAD');
+    if (messages === null) throw new Error('读取未推送提交失败');
+    if (messages.length === 0) return { ok: true, stripped: 0, rewritten: 0 };
+    const stripped = messages.filter((m) => stripCoAuthoredBy(m) !== m).length;
+    // 工作区必须干净(syncx 在途中间态照旧豁免,见 hasUncommittedChanges)才动历史
+    if (hasUncommittedChanges(folder.path)) {
+      throw new Error('工作区有未提交的变更,请先提交或暂存后再剔除');
+    }
+    this.gitRewriteRunning = true;
+    try {
+      const r = await rewriteCommitMessages(folder.path, '@{upstream}..HEAD');
+      if (!r.ok) throw new Error(r.error || 'git 历史重写失败');
+      this.logger.info(`git strip co-authored ok: ${folder.id} (${folder.path}): ${stripped}/${messages.length} 提交被剔除尾注`);
+      // 重写只改消息,提交个数不变;计数照常重算(与 pushGitFolder 收尾同一套)
+      folder.gitUnpushedCount = countUnpushedCommits(folder.path) ?? 0;
+      // 基线推进到重写后的 HEAD 并落盘:旧哈希已不在分支上,滞留会让下一轮扫描误判广播
+      this.setGitBaseline(folder, getLastCommitHash(folder.path) ?? folder.lastCommitHash);
+      this.notifyStatus();
+      return { ok: true, stripped, rewritten: messages.length };
+    } finally {
+      this.gitRewriteRunning = false;
     }
   }
 

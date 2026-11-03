@@ -15,6 +15,9 @@ use std::time::Duration;
 
 use serde_json::{json, Map, Value};
 
+// 历史重写的命中判定与镜像提交清洗共用同一条规则(单一事实来源)
+use crate::control::strip_co_authored_lines;
+
 /// Windows:给子进程加 `CREATE_NO_WINDOW`,否则每次 git 调用都会闪一个控制台窗口。
 /// 其它平台是空操作 —— 这个标志只在 Windows 上存在,不能无条件调用。
 #[cfg(windows)]
@@ -38,8 +41,21 @@ pub const GIT_CHANGES_MAX: usize = 2000;
 /// push 是网络操作,给足超时但必须封顶。
 pub const GIT_PUSH_TIMEOUT_MS: u64 = 120_000;
 
+/// 未推送区间历史重写(`git filter-branch`)的超时,与 push 同一档。区间内每笔
+/// 提交都要起一次 shell 管道,本地仓库通常秒级完成;卡死的仓库不能让请求挂死。
+pub const GIT_REWRITE_TIMEOUT_MS: u64 = 120_000;
+
 /// 「最近提交」与「未推送提交」两处共用的机器可读格式。
 const GIT_LOG_FORMAT: &str = "%h%x1f%an%x1f%aI%x1f%D%x1f%s%x1f%b";
+
+/// 历史重写用的 msg-filter:逐行剔除 Co-Authored-By 行,再过 `git stripspace`
+/// 把剔除留下的尾部空行砍掉。命中规则与镜像提交清洗
+/// [`crate::control::strip_co_authored_lines`] 同源:整行 `/co-?authored-by/i`。
+/// 末尾 `|| true` 兜 grep 全剔空返回 1 的退出码(管道末位本就是 stripspace,
+/// 正常路径不会失败,纯属双保险)。filter 由 git 自带的 sh 执行
+/// (git-filter-branch 是 shell 脚本),grep/stripspace 都随 git 发行,跨平台一致。
+const STRIP_CO_AUTHORED_FILTER: &str =
+    "grep -Evi 'co-?authored-by' | git stripspace || true";
 
 /// `git add -A` / `git status` 的负向 pathspec:把 syncx 的在途中间态挡在版本库之外。
 ///
@@ -60,8 +76,14 @@ struct GitOutput {
     success: bool,
 }
 
-/// 跑一次 git。`cwd` 是仓库目录;超时按 Node 侧各调用点给的秒数。
-fn run_git(cwd: &Path, args: &[&str], timeout_ms: u64, max_out: usize) -> Option<GitOutput> {
+/// 跑一次 git,可附带环境变量(如 filter-branch 的告警抑制)。
+fn run_git_with_env(
+    cwd: &Path,
+    args: &[&str],
+    envs: &[(&str, &str)],
+    timeout_ms: u64,
+    max_out: usize,
+) -> Option<GitOutput> {
     let mut command = Command::new("git");
     command
         .args(args)
@@ -69,6 +91,9 @@ fn run_git(cwd: &Path, args: &[&str], timeout_ms: u64, max_out: usize) -> Option
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
+    for (key, value) in envs {
+        command.env(key, value);
+    }
     // Windows:daemon 没有控制台,不加这个标志每次调用都会闪一个黑框
     hide_console(&mut command);
     let mut child = command.spawn().ok()?;
@@ -101,6 +126,11 @@ fn run_git(cwd: &Path, args: &[&str], timeout_ms: u64, max_out: usize) -> Option
         stderr: String::from_utf8_lossy(&output.stderr).to_string(),
         success: output.status.success(),
     })
+}
+
+/// 跑一次 git。`cwd` 是仓库目录;超时按 Node 侧各调用点给的秒数。
+fn run_git(cwd: &Path, args: &[&str], timeout_ms: u64, max_out: usize) -> Option<GitOutput> {
+    run_git_with_env(cwd, args, &[], timeout_ms, max_out)
 }
 
 /// 文本版 git 调用(stdout 按 UTF-8 宽松解码)。
@@ -837,6 +867,193 @@ pub fn list_unpushed_commits(folder_path: &Path, limit: usize) -> Option<Vec<Git
     Some(parse_commit_records(&text))
 }
 
+/// 当前分支的上游短名(如 `origin/main`)。`None` = 未设置上游 / 分离 HEAD。
+pub fn upstream_branch(folder_path: &Path) -> Option<String> {
+    let text = git_text(
+        folder_path,
+        &["rev-parse", "--abbrev-ref", "@{upstream}"],
+        5_000,
+        64 * 1024,
+    )?;
+    let name = text.trim();
+    if name.is_empty() {
+        None
+    } else {
+        Some(name.to_string())
+    }
+}
+
+/// 读取未推送区间的全部提交消息(`%B`,NUL 分隔,新→旧)。
+///
+/// 与「推送弹窗」的列表不同,**不做条数上限**:命中统计与重写都要覆盖整个区间,
+/// 少一笔就会漏剔。`None` = 不是仓库 / 未设上游 / 读取失败。
+pub fn list_unpushed_messages(folder_path: &Path, upstream: &str) -> Option<Vec<String>> {
+    if !is_git_repo(folder_path) {
+        return None;
+    }
+    let range = format!("{upstream}..HEAD");
+    let text = git_text(
+        folder_path,
+        &[
+            "log",
+            "-z",
+            "--no-color",
+            "--no-show-signature",
+            "--format=%B",
+            &range,
+        ],
+        10_000,
+        4 * 1024 * 1024,
+    )?;
+    // 每条记录 = 消息原文(尾部自带换行)+ NUL 分隔符。只有最后一个 NUL 之后的
+    // 空尾串该丢弃;中间的空串是「消息为空的提交」(罕见但合法),丢掉会让区间计数对不上。
+    let mut records: Vec<String> = text.split('\0').map(str::to_string).collect();
+    if records.last().is_some_and(|last| last.is_empty()) {
+        records.pop();
+    }
+    Some(records)
+}
+
+/// 剔除未推送提交的响应载荷。字段名是三端契约,不得改:`{ok, stripped, rewritten}`。
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+pub struct StripCoAuthoredPayload {
+    pub ok: bool,
+    /// 消息确实变化的提交数。
+    pub stripped: usize,
+    /// 未推送区间的提交总数(区间空 / 无命中时也可能大于 stripped)。
+    pub rewritten: usize,
+}
+
+impl StripCoAuthoredPayload {
+    pub fn to_json(&self) -> Value {
+        // 纯数据结构,序列化不会失败
+        serde_json::to_value(self).expect("序列化 StripCoAuthoredPayload")
+    }
+}
+
+/// [`strip_unpushed_coauthored`] 的执行结论。
+#[derive(Debug, Clone, PartialEq)]
+pub struct StripUnpushedOutcome {
+    /// 消息确实变化的提交数。
+    pub stripped: usize,
+    /// 未推送区间的提交总数。
+    pub rewritten: usize,
+    /// 是否真的执行了 filter-branch(调用方据此把 HEAD 基线推到重写后的哈希)。
+    pub rewrote: bool,
+}
+
+impl StripUnpushedOutcome {
+    /// 响应载荷。区间空 / 无命中同样按契约交卷,只是不执行重写。
+    pub fn payload(&self) -> StripCoAuthoredPayload {
+        StripCoAuthoredPayload {
+            ok: true,
+            stripped: self.stripped,
+            rewritten: self.rewritten,
+        }
+    }
+}
+
+/// 剔除某目录未推送提交消息里的 Co-Authored-By 行:决策 + 重写一步到位。
+///
+/// 流程与闸门:未设上游 / 区间空 / 区间内没有命中消息时**不执行重写命令**
+/// (区间空连命中统计都不做);真要重写前先拒绝未提交改动 —— filter-branch
+/// 自己也要求干净工作树,但这里先给出可读的中文原因。重写只覆盖
+/// `<upstream>..HEAD`,已推送历史绝不触碰。
+pub fn strip_unpushed_coauthored(
+    folder_path: &Path,
+    timeout_ms: u64,
+) -> Result<StripUnpushedOutcome, String> {
+    if !is_git_repo(folder_path) {
+        return Err("该目录不是 git 仓库".to_string());
+    }
+    // 先单独确认上游存在:区分「未设置上游」(结构性不可用)与区间为空(正常态)
+    let Some(upstream) = upstream_branch(folder_path) else {
+        return Err("未设置上游分支(远程未配置或从未推送),没有可剔除的未推送区间".to_string());
+    };
+    // 预统计跑在**逐字节原文**(%B)上:命中判定与镜像提交清洗共用同一条规则,
+    // 剔除结果与原文逐字节比较即「这条消息会被改写」
+    let messages = list_unpushed_messages(folder_path, &upstream)
+        .ok_or_else(|| "读取未推送提交失败".to_string())?;
+    if messages.is_empty() {
+        // 区间为空:契约要求 ok 且两个 0,不执行任何重写命令
+        return Ok(StripUnpushedOutcome {
+            stripped: 0,
+            rewritten: 0,
+            rewrote: false,
+        });
+    }
+    let stripped = messages
+        .iter()
+        .filter(|message| {
+            let raw = message.as_str();
+            strip_co_authored_lines(raw) != raw
+        })
+        .count();
+    // 工作区必须干净才动历史(syncx 在途中间态照旧豁免):filter-branch 重写期间
+    // 叠加未提交改动,会把中间态一起写进重写后的历史
+    if has_uncommitted_changes(folder_path) {
+        return Err("工作区有未提交的变更,请先提交或暂存后再剔除".to_string());
+    }
+    if stripped == 0 {
+        // 没有命中:重写只会原样复制(filter-branch 对未变化的引用只打警告),
+        // 跳过重写 —— 也顺带保住无尾注提交里的连续空行节奏不被 stripspace 折叠
+        return Ok(StripUnpushedOutcome {
+            stripped: 0,
+            rewritten: messages.len(),
+            rewrote: false,
+        });
+    }
+    strip_co_authored_unpushed(folder_path, &upstream, timeout_ms)?;
+    Ok(StripUnpushedOutcome {
+        stripped,
+        rewritten: messages.len(),
+        rewrote: true,
+    })
+}
+
+/// 对仓库执行 `git filter-branch --msg-filter`,剔除 `<upstream>..HEAD` 区间内
+/// 提交消息里的 Co-Authored-By 行。未推送提交重写是安全的(对端还没有这笔提交,
+/// 哈希变化不影响任何人);失败时错误原文透出,原引用不会被破坏 —— filter-branch
+/// 的引用更新集中在全部提交重写完成之后,中途失败引用保持原样。
+fn strip_co_authored_unpushed(
+    folder_path: &Path,
+    upstream: &str,
+    timeout_ms: u64,
+) -> Result<(), String> {
+    let range = format!("{upstream}..HEAD");
+    // 与 Node 同款:错误原文(stderr 首行)直接透给前端,拿不到时兜底
+    // 「git 历史重写失败」(执行失败 / 超时被杀时 stderr 可能为空,不能只交个空串)
+    let output = match run_git_with_env(
+        folder_path,
+        &[
+            "filter-branch",
+            // 覆盖上一次重写留下的 refs/original 备份(同一分支二度剔除的场景)
+            "-f",
+            "--msg-filter",
+            STRIP_CO_AUTHORED_FILTER,
+            "--",
+            &range,
+        ],
+        // filter-branch 会对「重写历史」先打一段告警再故意等 10 秒;明确压掉,
+        // 让 stderr 里剩下的只有进度与真正的错误首行
+        &[("FILTER_BRANCH_SQUELCH_WARNING", "1")],
+        timeout_ms,
+        1024 * 1024,
+    ) {
+        Some(output) => output,
+        None => return Err("git 历史重写失败".to_string()),
+    };
+    if output.success {
+        return Ok(());
+    }
+    let first = output.stderr.trim().lines().next().unwrap_or("").trim();
+    Err(if first.is_empty() {
+        "git 历史重写失败".to_string()
+    } else {
+        first.to_string()
+    })
+}
+
 /// 单目录 `git push` 的结果。
 #[derive(Debug, Clone, PartialEq)]
 pub struct GitPushResult {
@@ -1045,5 +1262,172 @@ mod tests {
         std::fs::remove_file(dir.join("b.txt.syncx-tmp")).unwrap();
 
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn strip_payload_serde_round_trip() {
+        let payload = StripCoAuthoredPayload {
+            ok: true,
+            stripped: 2,
+            rewritten: 5,
+        };
+        let bytes = serde_json::to_vec(&payload).unwrap();
+        let back: StripCoAuthoredPayload = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(back, payload);
+        // 字段名是三端契约,不得改
+        let value: Value = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(value["ok"], true);
+        assert_eq!(value["stripped"], 2);
+        assert_eq!(value["rewritten"], 5);
+        // 响应走 to_json:必须与 serde 序列化同形
+        assert_eq!(payload.to_json(), value);
+    }
+
+    #[test]
+    fn strip_unpushed_rewrites_trailers_keeps_rest() {
+        // 真实仓库端到端:init + bare 远端设上游 + 多笔未推送提交(部分带尾注)。
+        // 没有 git 的环境直接跳过(不算失败),与 temp_repo_round_trip 同款。
+        let root = std::env::temp_dir().join(format!(
+            "syncx-cli-strip-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let dir = root.join("work");
+        std::fs::create_dir_all(&dir).unwrap();
+        let mut init = Command::new("git");
+        // 显式 -b main:不依赖环境里的 init.defaultBranch 配置
+        init.args(["init", "-q", "-b", "main"]).current_dir(&dir);
+        hide_console(&mut init);
+        if !init.status().map(|status| status.success()).unwrap_or(false) {
+            let _ = std::fs::remove_dir_all(&root);
+            return;
+        }
+        let git = |args: &[&str]| {
+            let mut command = Command::new("git");
+            command.args(args).current_dir(&dir);
+            hide_console(&mut command);
+            let output = command.output().expect("git 可执行");
+            assert!(
+                output.status.success(),
+                "git {args:?} 失败:{}",
+                String::from_utf8_lossy(&output.stderr)
+            );
+        };
+        for (key, value) in [("user.email", "t@example.com"), ("user.name", "T")] {
+            git(&["config", key, value]);
+        }
+
+        // 非 git 目录:直接给原因
+        let plain = root.join("plain");
+        std::fs::create_dir_all(&plain).unwrap();
+        assert_eq!(
+            strip_unpushed_coauthored(&plain, GIT_REWRITE_TIMEOUT_MS).unwrap_err(),
+            "该目录不是 git 仓库"
+        );
+
+        // 未设置上游:拒绝(与 Node 同文案)
+        std::fs::write(dir.join("a.txt"), "one\n").unwrap();
+        git(&["add", "-A"]);
+        git(&["commit", "-q", "-m", "base"]);
+        assert_eq!(
+            strip_unpushed_coauthored(&dir, GIT_REWRITE_TIMEOUT_MS).unwrap_err(),
+            "未设置上游分支(远程未配置或从未推送),没有可剔除的未推送区间"
+        );
+
+        // bare 远端 + push -u:上游口径与「未推送 N」徽标同源(@{upstream}..HEAD)
+        let remote = root.join("remote.git");
+        git(&[
+            "clone",
+            "-q",
+            "--bare",
+            dir.to_str().unwrap(),
+            remote.to_str().unwrap(),
+        ]);
+        git(&["remote", "add", "origin", remote.to_str().unwrap()]);
+        git(&["push", "-q", "-u", "origin", "main"]);
+        assert_eq!(upstream_branch(&dir).as_deref(), Some("origin/main"));
+
+        // 区间空:契约要求 ok 且两个 0,重写命令不执行(refs/original 不出现)
+        let outcome = strip_unpushed_coauthored(&dir, GIT_REWRITE_TIMEOUT_MS).unwrap();
+        assert_eq!(outcome.stripped, 0);
+        assert_eq!(outcome.rewritten, 0);
+        assert!(!outcome.rewrote);
+        assert!(
+            git_text(&dir, &["for-each-ref", "refs/original"], 5_000, 1024)
+                .unwrap_or_default()
+                .trim()
+                .is_empty(),
+            "空区间不得执行 filter-branch"
+        );
+
+        // 三笔未推送提交:两笔带尾注(标准大小写 / 无连字符变体各一),一笔干净
+        git(&[
+            "commit", "-q", "--allow-empty", "-m", "第二笔", "-m", "Co-authored-by: A <a@b>",
+        ]);
+        git(&["commit", "-q", "--allow-empty", "-m", "第三笔"]);
+        git(&[
+            "commit", "-q", "--allow-empty", "-m", "第四笔", "-m", "coauthored-by: B <b@c>",
+        ]);
+        assert_eq!(count_unpushed_commits(&dir), Some(3));
+
+        // 作者/提交者时间与 subject 快照:重写后必须逐条一致
+        let range = "origin/main..HEAD";
+        let identities = |dir: &Path| -> Vec<String> {
+            git_text(
+                dir,
+                &["log", "-z", "--format=%aI%x1f%cI%x1f%s", range],
+                10_000,
+                64 * 1024,
+            )
+            .unwrap()
+            .split('\0')
+            .filter(|record| !record.is_empty())
+            .map(str::to_string)
+            .collect()
+        };
+        let before = identities(&dir);
+        assert_eq!(before.len(), 3);
+
+        // 工作区有未提交改动:先拒绝,不动历史(区间非空时无论有无命中都拦)
+        std::fs::write(dir.join("dirty.txt"), "x\n").unwrap();
+        assert!(has_uncommitted_changes(&dir));
+        assert_eq!(
+            strip_unpushed_coauthored(&dir, GIT_REWRITE_TIMEOUT_MS).unwrap_err(),
+            "工作区有未提交的变更,请先提交或暂存后再剔除"
+        );
+        std::fs::remove_file(dir.join("dirty.txt")).unwrap();
+
+        // 重写:3 笔区间里 2 笔命中
+        let outcome = strip_unpushed_coauthored(&dir, GIT_REWRITE_TIMEOUT_MS).unwrap();
+        assert_eq!(outcome.stripped, 2, "两笔带尾注");
+        assert_eq!(outcome.rewritten, 3);
+        assert!(outcome.rewrote);
+
+        // 重写后:尾注消失(整条只剩正文首行),其余内容一字不动
+        let upstream = upstream_branch(&dir).unwrap();
+        assert_eq!(upstream, "origin/main", "上游引用不受重写影响");
+        let messages = list_unpushed_messages(&dir, &upstream).unwrap();
+        assert_eq!(messages, vec!["第四笔\n", "第三笔\n", "第二笔\n"]);
+        assert_eq!(identities(&dir), before, "作者/提交者时间与 subject 不变");
+        assert_eq!(count_unpushed_commits(&dir), Some(3));
+        assert!(!has_uncommitted_changes(&dir));
+
+        // 二度调用:区间里已无命中,重写不执行(幂等收卷);但区间非空且工作区脏时
+        // 仍按 Node 口径拒绝
+        std::fs::write(dir.join("dirty.txt"), "x\n").unwrap();
+        assert_eq!(
+            strip_unpushed_coauthored(&dir, GIT_REWRITE_TIMEOUT_MS).unwrap_err(),
+            "工作区有未提交的变更,请先提交或暂存后再剔除"
+        );
+        std::fs::remove_file(dir.join("dirty.txt")).unwrap();
+        let again = strip_unpushed_coauthored(&dir, GIT_REWRITE_TIMEOUT_MS).unwrap();
+        assert_eq!(again.stripped, 0);
+        assert_eq!(again.rewritten, 3);
+        assert!(!again.rewrote);
+
+        let _ = std::fs::remove_dir_all(&root);
     }
 }
