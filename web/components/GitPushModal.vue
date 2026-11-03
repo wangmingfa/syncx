@@ -2,8 +2,9 @@
 import { computed, ref, watch } from 'vue';
 import { NButton, NEmpty, NSpin } from 'naive-ui';
 import { apiJson, apiPost, errText } from '../utils/api';
+import { useToast } from '../composables/useToast';
 import { useStatusContext } from '../composables/statusContext';
-import type { GitUnpushedData, GitUnpushedFolder } from '../types';
+import type { GitCommitEntry, GitUnpushedData, GitUnpushedFolder } from '../types';
 import ModalShell from './ModalShell.vue';
 import CommitList from './CommitList.vue';
 
@@ -31,6 +32,7 @@ const props = defineProps<{
 }>();
 const emit = defineEmits<{ close: [] }>();
 const { refreshStatus } = useStatusContext();
+const { showToast } = useToast();
 
 interface PushRow extends GitUnpushedFolder {
   /** idle = 等待推送;ok = 已推送(✓);fail = 推送失败(error 为首行原因)。 */
@@ -49,6 +51,7 @@ watch(
     rows.value = [];
     errorText.value = '';
     pushing.value = false;
+    stripConfirm.value = false;
     if (s) void load(s);
   },
 );
@@ -70,6 +73,75 @@ async function load(s: 'all' | { id?: string; path: string }): Promise<void> {
 /** 还没打勾的行(待推送 + 失败)。全部 ✓ 后「开始推送」无事可做,置灰。 */
 const pendingRows = computed(() => rows.value.filter((r) => r.status !== 'ok'));
 const totalCommits = computed(() => rows.value.reduce((sum, r) => sum + r.total, 0));
+
+// ---- 一键剔除 Co-Authored-By ----
+// 检测口径与后端镜像提交剔除一致:整行包含 co-?authored-by(忽略大小写)即命中。
+// 快照里每目录最多 50 条(后端截断),检测只覆盖已列出的提交;真正执行时后端按
+// 未推送区间整段重写,哪怕超出列表的部分也会被一并剔除。
+
+/** 单条提交的信息(主题 + 正文)是否含 Co-Authored-By 行。 */
+function hasCoAuthored(c: GitCommitEntry): boolean {
+  return `${c.subject}\n${c.body}`.split('\n').some((line) => /co-?authored-by/i.test(line));
+}
+
+/** 将被剔除的提交(目录 + 提交),按目录顺序聚合,供确认弹窗列出。 */
+const affectedGroups = computed(() =>
+  rows.value
+    .map((r) => ({
+      folderId: r.folderId,
+      path: r.path,
+      truncated: r.truncated,
+      commits: r.commits.filter(hasCoAuthored),
+    }))
+    .filter((g) => g.commits.length > 0),
+);
+/** 命中提交总数(按钮与确认弹窗的总数同源)。 */
+const affectedCount = computed(() => affectedGroups.value.reduce((sum, g) => sum + g.commits.length, 0));
+/** 命中列表是否可能不完整(有目录被 50 条截断)。 */
+const maybeTruncated = computed(() => affectedGroups.value.some((g) => g.truncated));
+
+/** 「一键剔除」确认弹窗开关与执行态。 */
+const stripConfirm = ref(false);
+const stripping = ref(false);
+
+/** 点按钮 → 弹确认:列出将被剔除的提交与总数,确认后才真正重写历史。 */
+function askStrip(): void {
+  if (affectedCount.value === 0 || pushing.value) return;
+  stripConfirm.value = true;
+}
+
+/** 逐目录执行剔除;成功后重查快照(哈希全变,列表必须刷新)。 */
+async function runStrip(): Promise<void> {
+  if (stripping.value) return;
+  stripping.value = true;
+  let stripped = 0;
+  const failures: string[] = [];
+  try {
+    for (const g of affectedGroups.value) {
+      try {
+        const r = await apiPost<{ ok: boolean; stripped?: number; error?: string }>(
+          '/api/folders/git-strip-coauthored-unpushed',
+          { folderId: g.folderId },
+        );
+        if (r.ok) stripped += r.stripped ?? 0;
+        else failures.push(`${g.path}:${r.error ?? '剔除失败'}`);
+      } catch (e) {
+        failures.push(`${g.path}:${errText(e, '剔除失败')}`);
+      }
+    }
+  } finally {
+    stripping.value = false;
+    stripConfirm.value = false;
+    if (failures.length === 0) {
+      showToast(`已剔除 ${stripped} 个提交的 Co-Authored-By 行`);
+    } else {
+      showToast(`剔除完成但有失败:${failures[0]}${failures.length > 1 ? ` 等 ${failures.length} 项` : ''}`, 'alert');
+    }
+    // 无论成败都重查:重写过的目录哈希全变,旧快照已不可信
+    if (props.scope) await load(props.scope);
+    void refreshStatus();
+  }
+}
 
 const title = computed(() => {
   const s = props.scope;
@@ -161,6 +233,14 @@ async function runPush(): Promise<void> {
     <template #footer>
       <n-button size="small" :disabled="pushing" @click="emit('close')">关闭</n-button>
       <n-button
+        v-if="affectedCount > 0"
+        size="small"
+        :disabled="pushing"
+        @click="askStrip"
+      >
+        一键剔除 Co-Authored-By（{{ affectedCount }}）
+      </n-button>
+      <n-button
         size="small"
         type="primary"
         :disabled="rows.length === 0 || pendingRows.length === 0"
@@ -169,6 +249,39 @@ async function runPush(): Promise<void> {
       >
         开始推送
       </n-button>
+    </template>
+  </ModalShell>
+
+  <!-- 「一键剔除」二次确认:列出将被改写消息的提交与总数,确认后才重写历史 -->
+  <ModalShell
+    :open="stripConfirm"
+    title="剔除 Co-Authored-By 行"
+    :description="`共 ${affectedCount} 个提交将剔除 Co-Authored-By 行`"
+    wide
+    :close-disabled="stripping"
+    @close="stripConfirm = false"
+  >
+    <p class="confirm-note-extra confirm-note-extra--flush">
+      将对上述目录的未推送区间执行提交消息重写（<code class="mono">git filter-branch</code>）:
+      命中 Co-Authored-By 的行会被整行删除,其余内容与作者时间保持不变。
+      <template v-if="maybeTruncated">检测基于弹窗快照(每目录仅列前 50 条),执行时后端会对整个未推送区间生效。</template>
+      重写后所有未推送提交的哈希都会改变。
+    </p>
+    <section v-for="g in affectedGroups" :key="g.folderId" class="git-push__folder">
+      <div class="git-push__head">
+        <span class="git-push__path" :title="g.path">{{ g.path }}</span>
+        <span class="git-push__count">{{ g.commits.length }} 条</span>
+      </div>
+      <div class="git-strip__commits">
+        <div v-for="c in g.commits" :key="c.hash" class="git-strip__commit">
+          <span class="mono git-strip__hash">{{ c.hash }}</span>
+          <span class="git-strip__subject">{{ c.subject }}</span>
+        </div>
+      </div>
+    </section>
+    <template #footer>
+      <n-button size="small" :disabled="stripping" @click="stripConfirm = false">取消</n-button>
+      <n-button size="small" type="primary" :loading="stripping" @click="runStrip">确认剔除</n-button>
     </template>
   </ModalShell>
 </template>
@@ -243,6 +356,35 @@ async function runPush(): Promise<void> {
 .git-push__state.is-fail {
   color: #d03050;
   max-width: 100%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* 确认弹窗里的提交清单:哈希定宽等宽,主题一行截断(全文本来就在上一屏看过) */
+.git-strip__commits {
+  padding: 0 11px 9px;
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+}
+
+.git-strip__commit {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  min-width: 0;
+  font-size: 12px;
+}
+
+.git-strip__hash {
+  flex: none;
+  color: var(--muted);
+}
+
+.git-strip__subject {
+  flex: 1 1 auto;
+  min-width: 0;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
