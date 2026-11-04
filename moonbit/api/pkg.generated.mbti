@@ -33,6 +33,8 @@ pub fn default_config_path() -> String
 
 pub fn derive_password_hash(String, Bytes) -> Bytes
 
+pub fn device_infos_json(@core.Config) -> Array[Json]
+
 pub async fn handle_add_device(ApiOptions, @mocket.MocketEvent) -> &@mocket.Responder
 
 pub async fn handle_add_folder(ApiOptions, @mocket.MocketEvent) -> &@mocket.Responder
@@ -132,8 +134,9 @@ pub(all) struct ApiOptions {
   upload_swap : (async (Bytes) -> Result[String, String])?
   settings : Json?
   peer_port : Int32?
+  mut device_infos : Array[Json]
 }
-pub fn ApiOptions::new(device_id~ : String, control_token? : String, auth_file? : String?, config_file? : String?, actor? : @daemon.ActorHandle?, web_dist? : String?, on_shutdown? : (() -> Unit)?, dev_mode? : Bool, upload_inspect? : (async (Bytes) -> Result[InspectedPackage, String])?, upload_swap? : (async (Bytes) -> Result[String, String])?, settings? : Json?, peer_port? : Int32?) -> Self
+pub fn ApiOptions::new(device_id~ : String, control_token? : String, auth_file? : String?, config_file? : String?, actor? : @daemon.ActorHandle?, web_dist? : String?, on_shutdown? : (() -> Unit)?, dev_mode? : Bool, upload_inspect? : (async (Bytes) -> Result[InspectedPackage, String])?, upload_swap? : (async (Bytes) -> Result[String, String])?, settings? : Json?, peer_port? : Int32?, device_infos? : Array[Json]) -> Self
 
 type DistProvider
 pub async fn DistProvider::get_contents(Self, StringView) -> &@mocket.Responder

@@ -305,6 +305,9 @@ pub async fn run_start(args : StartArgs) -> Unit {
       settings=Some(@api.settings_json(config)),
       // peer 数据面监听端口(/api/status.peerPort;启动参数折算,缺省 22000)
       peer_port=Some(peer_port),
+      // 设备清单快照(/api/status.devices;设备卡与「已配对设备」徽标数据源),
+      // 设备增删路由成功后重建 —— 对应 Node 的内存态 + statusHub.notify
+      device_infos=@api.device_infos_json(config),
       web_dist~,
       on_shutdown=Some(() => {
         // TODO(cli):优雅关闭(关 peer 连接、收尾索引);当前直接退出

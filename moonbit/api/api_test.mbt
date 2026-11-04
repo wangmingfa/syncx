@@ -332,3 +332,65 @@ test "parse_lan_addresses:合法数组逐条收,非字符串与畸形输入丢�
   assert_eq(mixed.length(), 1)
   assert_eq(mixed[0], "10.0.0.9")
 }
+
+///|
+test "device_infos_json:knownDevices 映射离线设备卡,folders 反查指派目录" {
+  // 前端设备列表读 status.devices(快照),GET /api/devices 只承担增删动作;
+  // MoonBit 无 peer 会话层,online 恒 false,「共享 N 个目录」从目录 devices 反查
+  let config = @core.parse_config(
+    "{\"sharedFolders\":[{\"path\":\"/data/x\",\"id\":\"folder-a\",\"devices\":[\"DEVA\"]}],\"knownDevices\":[{\"id\":\"DEVA\"},{\"id\":\"DEVB\"}]}",
+  )
+  let items = @api.device_infos_json(config)
+  // 先钉解析层:parse_config 必须先吃到 knownDevices(设备列表空的疑似根因)
+  assert_eq(config.known_devices.length(), 2)
+  assert_eq(items.length(), 2)
+  let arr = match items {
+    [a, b] => (a, b)
+    _ => panic()
+  }
+  let (a, b) = arr
+  let info_a = require_object(a)
+  match info_a.get("deviceId") {
+    Some(String(s)) => assert_eq(s, "DEVA")
+    _ => panic()
+  }
+  assert_true(info_a.get("online") is Some(False))
+  // DEVA 被指派到 folder-a
+  match info_a.get("folders") {
+    Some(Array(ids)) => assert_eq(ids.length(), 1)
+    _ => panic()
+  }
+  // DEVB 未指派任何目录
+  let info_b = require_object(b)
+  match info_b.get("deviceId") {
+    Some(String(s)) => assert_eq(s, "DEVB")
+    _ => panic()
+  }
+  match info_b.get("folders") {
+    Some(Array(ids)) => assert_eq(ids.length(), 0)
+    _ => panic()
+  }
+}
+
+///|
+test "status_json:device_infos 快照透传(装配层/增删路由维护)" {
+  let config = @core.parse_config("{\"knownDevices\":[{\"id\":\"DEVA\"}]}")
+  let options = @api.ApiOptions::new(
+    device_id="TESTDEVICE01",
+    control_token="test-token",
+    device_infos=@api.device_infos_json(config),
+  )
+  let obj = require_object(@api.status_json(options))
+  match obj.get("devices") {
+    Some(Array(items)) => assert_eq(items.length(), 1)
+    _ => panic()
+  }
+  // 缺省注入 = 空数组(最小装配/旧形态),前端「还没有设备」兜底
+  let bare = require_object(
+    @api.status_json(@api.ApiOptions::new(device_id="D", control_token="test-token")),
+  )
+  match bare.get("devices") {
+    Some(Array(items)) => assert_eq(items.length(), 0)
+    _ => panic()
+  }
+}
