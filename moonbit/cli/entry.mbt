@@ -59,6 +59,13 @@ pub fn pick_mode(argv : Array[String]) -> Result[CliMode, String] {
 /// `start` 主流程。致命错误打印 `[fatal]` 后以退出码 1 结束;
 /// 正常路径常驻,不返回。
 pub async fn run_start(args : StartArgs) -> Unit {
+  // 0. 日志装配(先于一切可记日志的步骤):--log-file 传了走文件形态
+  //    (对齐 Node:日志进文件、不再刷 stdout),没传走 stdout 形态
+  //    (Information+,保持既有行为不回归)
+  match args.log_file {
+    Some(path) => @log.init_file(path)
+    None => @log.init_print()
+  }
   // 1. 配置路径与数据目录(身份/令牌/索引等数据一律放配置文件所在目录)
   let config_file = resolve_config_path(args)
   let config_dir = parent_dir_of(config_file)
@@ -101,13 +108,10 @@ pub async fn run_start(args : StartArgs) -> Unit {
   if dev {
     // 降级说明:api 包尚未支持 vite 代理(--dev-vite)与 dist 缺省占位页,
     // 行为与 Node 的「无 dist」分支一致(占位页),vite HMR 不生效。
-    println(
-      "[warn] dev 态(--dev-vite 或 dist/web 缺失):MoonBit 后端暂不支持 vite 代理,以静态资源/占位页降级运行",
+    @log.warn(
+      "dev 态(--dev-vite 或 dist/web 缺失):MoonBit 后端暂不支持 vite 代理,以静态资源/占位页降级运行",
+      [],
     )
-  }
-  if args.log_file is Some(_) {
-    // TODO(cli):接 --log-file 持久化日志(当前仅 stdout,与 Node 的 logger 不同)
-    println("[warn] --log-file 尚未实现,日志仅输出到标准输出")
   }
 
   // 6. 装配:actor → PeerServer → API → mDNS → 常驻
@@ -203,7 +207,7 @@ pub async fn run_start(args : StartArgs) -> Unit {
           None => ()
         }
       },
-      on_error: reason => println("[peer] \{reason}"),
+      on_error: reason => @log.error("peer 连接错误 {Reason}", [Json::string(reason)]),
     }
     let peer_server = @net.start_peer_server(
       @net.PeerHandshakeMode::Secure(identity),
@@ -221,8 +225,9 @@ pub async fn run_start(args : StartArgs) -> Unit {
       @net.advertise(peer_port, identity.device_id),
     ) catch {
       e => {
-        println(
-          "[warn] mDNS 广播不可用:\{@net.DiscoveryError::to_text(e)}",
+        @log.warn(
+          "mDNS 广播不可用:{Detail}",
+          [Json::string(@net.DiscoveryError::to_text(e))],
         )
         None
       }
@@ -263,11 +268,19 @@ pub async fn run_start(args : StartArgs) -> Unit {
       @daemon.FsWatchOptions::from_config(config),
     )
     // 启动横幅(控制端口绑定成功与否在 mocket 内部,绑定失败由 mocket 打印)
-    println("syncx \{@core.VERSION} (moonbit backend) started")
-    println("device: \{identity.device_id}")
-    println("config dir: \{config_dir}")
-    println("control UI: http://\{control_host}:\{control_port}")
-    println("peer port: \{peer_port}")
+    @log.info("syncx {Version} (moonbit backend) started", [Json::string(@core.VERSION)])
+    @log.info("device: {DeviceId}", [Json::string(identity.device_id)])
+    // 绝对路径展示:--config-dir 常传相对值(dev 脚本 ../.syncx-dev),日志里
+    // 看绝对路径才好核对;realpath 失败(目录异常)回退原值
+    @log.info(
+      "config dir: {Dir}",
+      [Json::string(@fs.realpath(config_dir) catch { _ => config_dir })],
+    )
+    @log.info(
+      "control UI: http://{Host}:{Port}",
+      [Json::string(control_host), Json::number(control_port.to_double())],
+    )
+    @log.info("peer port: {Port}", [Json::number(peer_port.to_double())])
     // 控制 API 常驻(serve 内部 listen 常驻,不返回)
     // 上传换入回调:识别/换入逻辑在 cli/upload.mbt(依赖方向 cli → api,
     // 回调在这里注入;api 包只见类型不见实现)
@@ -290,7 +303,7 @@ pub async fn run_start(args : StartArgs) -> Unit {
       web_dist~,
       on_shutdown=Some(() => {
         // TODO(cli):优雅关闭(关 peer 连接、收尾索引);当前直接退出
-        println("shutdown requested, exiting")
+        @log.info("shutdown requested, exiting", [])
         let _ = handle.send(@daemon.Cmd::Shutdown)
         c_exit(0)
       }),
@@ -305,7 +318,7 @@ pub async fn run_start(args : StartArgs) -> Unit {
 ///|
 /// 致命错误:打印后以退出码 1 结束进程(never returns)。
 fn[T] fatal(message : String) -> T {
-  eprintln("[fatal] \{message}")
+  @log.critical("fatal: {Message}", [Json::string(message)])
   c_exit(1)
   // 不可达,仅为让调用点出现在值位置(catch 臂)
   panic()
@@ -345,7 +358,9 @@ async fn load_or_create_identity(
   @fs.chmod(path, 0o600) catch {
     _ => ()
   }
-  println("设备身份已生成:\{identity.device_id}(\{path})")
+  @log.info("设备身份已生成 {DeviceId}({Path})", [
+    Json::string(identity.device_id), Json::string(path),
+  ])
   identity
 }
 
@@ -361,7 +376,7 @@ async fn load_or_create_token(config_dir : String) -> String raise CliError {
     if token != "" {
       return token
     }
-    println("[warn] \{path} 内容为空,已重新生成令牌")
+    @log.warn("{Path} 内容为空,已重新生成令牌", [Json::string(path)])
   }
   regenerate_token(path)
 }

@@ -7,10 +7,11 @@ options(
 import {
   "moonrockz/moon-lander-logging" @logging,
   "moonbitlang/core/encoding/utf8",
-  "moonbitlang/core/json",
 }
 
 import {
   "moonrockz/moon-lander-logging" @logging,
+  "moonbitlang/async",
+  "moonbitlang/async/fs",
   "wangmingfa/syncx/log",
 } for "test"

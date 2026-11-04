@@ -7,7 +7,7 @@
 test "门面直通:事件转发到当前进程 Logger,模板按序绑定" {
   let memory = @logging.MemoryLogger::new()
   let logger : &@logging.Logger = memory
-  @log.init(logger)
+  @log.init_logger(logger)
   @log.info("Loaded {Count} files from {Path}", [Json::number(3), Json::string("src")])
   @log.warn("低电量 {Level}", [Json::string("low")])
   let events = memory.events()
@@ -17,13 +17,13 @@ test "门面直通:事件转发到当前进程 Logger,模板按序绑定" {
   assert_eq(events[1].level, Warning)
   assert_eq(events[1].message(), "低电量 low")
   // 收尾恢复静默
-  @log.init(@logging.null_logger())
+  @log.init_logger(@logging.null_logger())
 }
 
 ///|
 test "级别过滤:min_level(Error) 之后 info 不记、error 记" {
   let memory = @logging.MemoryLogger::new()
-  @log.init(@logging.min_level(memory, Error))
+  @log.init_logger(@logging.min_level(memory, Error))
   @log.debug("不记", [])
   @log.info("也不记", [])
   @log.warn("还不记", [])
@@ -32,12 +32,12 @@ test "级别过滤:min_level(Error) 之后 info 不记、error 记" {
   assert_eq(events.length(), 1)
   assert_eq(events[0].level, Error)
   assert_eq(events[0].message(), "记下 disk full")
-  @log.init(@logging.null_logger())
+  @log.init_logger(@logging.null_logger())
 }
 
 ///|
 test "未装配时门面静默(null_logger 兜底,不抛错不刷屏)" {
-  @log.init(@logging.null_logger())
+  @log.init_logger(@logging.null_logger())
   @log.info("谁也收不到", [])
   @log.critical("同样静默", [])
 }

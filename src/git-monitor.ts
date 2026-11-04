@@ -547,8 +547,15 @@ export interface AutoCommitResult {
  * 执行自动提交:git add -A && git commit -m <message>。
  * 使用 --allow-empty 兜底:判定有无变更与 add 之间工作树可能被他程序改回,
  * 保证提交命令本身不因竞态失败。
+ *
+ * 超时后探测:spawnSync 超时只保证「进程没在期限内退出」,不保证「提交没发生」
+ * —— 慢盘 fsync、post-commit hook 卡顿都会让提交对象早已落盘而进程被杀。此时若
+ * 按失败重试,重试前的 hasUncommittedChanges 判定会被「同步仍在继续」的新变更
+ * 糊弄过去,同一镜像消息再吞一笔(把第一次提交之后到达的修改也提交进去)。
+ * 因此失败路径先比对 HEAD:前进了且消息与本次一致 = 实际成功,按成功结算。
  */
 export function autoCommit(folderPath: string, message: string): AutoCommitResult {
+  const beforeHead = getLastCommitHash(folderPath);
   try {
     // 先 stage 所有变更(含删除、新增),但把 syncx 的在途中间态挡在外面(见 SCRATCH_PATHSPECS)
     gitSync(['add', '-A', '--', ...SCRATCH_PATHSPECS], {
@@ -570,8 +577,30 @@ export function autoCommit(folderPath: string, message: string): AutoCommitResul
     const hash = getLastCommitHash(folderPath);
     return { success: true, hash: hash ?? undefined };
   } catch (err) {
+    // HEAD 前进且消息与本次一致 = 提交实际成功。消息不一致(并发了他程序提交)
+    // 保守按失败走原路 —— 那是罕见场景,且账目归调用方的基线/通知逻辑管。
+    const afterHead = getLastCommitHash(folderPath);
+    if (afterHead !== null && afterHead !== beforeHead && headMessageMatches(folderPath, message)) {
+      return { success: true, hash: afterHead };
+    }
     const msg = err instanceof Error ? err.message : String(err);
     return { success: false, error: msg };
+  }
+}
+
+/** HEAD 的完整提交正文(%B)与本次消息是否一致(两侧 trim 掉尾随空白后比对)。 */
+function headMessageMatches(folderPath: string, message: string): boolean {
+  try {
+    const out = gitSync(['log', '-1', '--format=%B'], {
+      cwd: folderPath,
+      encoding: 'utf8',
+      stdio: ['ignore', 'pipe', 'ignore'],
+      windowsHide: true,
+      timeout: 5000,
+    });
+    return String(out).trim() === message.trim();
+  } catch {
+    return false;
   }
 }
 

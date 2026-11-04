@@ -18,7 +18,21 @@ async fn drain_body(event : @mocket.MocketEvent) -> Unit {
 
 ///|
 /// JSON 错误响应:`{"error": <message>}`(Node sendJson 同款)。
-fn json_error(status : @mocket.StatusCode, message : String) -> &Responder {
+/// 统一失败观测点:每个走到这里的 handler 失败都记一条 Warning(带请求
+/// 路径与状态码),日志写不进也不影响响应本身(门面静默兜底)。
+fn json_error(
+  event : @mocket.MocketEvent,
+  status : @mocket.StatusCode,
+  message : String,
+) -> &Responder {
+  @log.warn(
+    "API 失败 {Path} {Status}: {Message}",
+    [
+      Json::string(event.req.url),
+      Json::number(status.to_int().to_double()),
+      Json::string(message),
+    ],
+  )
   let map : Map[String, Json] = Map([])
   map.set("error", Json::string(message))
   @mocket.HttpResponse(status).json(Json::object(map))
@@ -121,15 +135,15 @@ pub async fn handle_add_folder(
 ) -> &Responder {
   let body = match parse_json_body(event) {
     Some(body) => body
-    None => return json_error(@mocket.BadRequest, "invalid json body")
+    None => return json_error(event, @mocket.BadRequest, "invalid json body")
   }
   let obj = match body {
     Object(obj) => obj
-    _ => return json_error(@mocket.BadRequest, "invalid json body")
+    _ => return json_error(event, @mocket.BadRequest, "invalid json body")
   }
   let path = match non_empty_string(obj, "path") {
     Some(path) => path
-    None => return json_error(@mocket.BadRequest, "path is required")
+    None => return json_error(event, @mocket.BadRequest, "path is required")
   }
   let devices = string_array_of(obj, "devices")
   let id = non_empty_string(obj, "id")
@@ -138,14 +152,14 @@ pub async fn handle_add_folder(
   let created = match
     add_folder_to_config(config, path, devices, id, receive_only) {
     Ok(created) => created
-    Err(message) => return json_error(@mocket.BadRequest, message)
+    Err(message) => return json_error(event, @mocket.BadRequest, message)
   }
   if created {
     // 目录不存在时自动创建(与 Node addFolder 同款);失败按 Node 兜底文案回 400
     if !@fs.exists(path) {
       @fs.mkdir(path, recursive=true, allow_exist=true) catch {
         _ =>
-          return json_error(
+          return json_error(event,
             @mocket.BadRequest,
             "创建目录失败(目录为空?路径正确?)",
           )
@@ -153,7 +167,7 @@ pub async fn handle_add_folder(
     }
   }
   save_config(options.config_file, config) catch {
-    _ => return json_error(@mocket.BadRequest, "invalid json body")
+    _ => return json_error(event, @mocket.BadRequest, "invalid json body")
   }
   // TODO(daemon):目录登记后通知 daemon 重载配置并开新索引
   let map : Map[String, Json] = Map([])
@@ -171,16 +185,16 @@ pub async fn handle_pause(
 ) -> &Responder {
   let body = match parse_json_body(event) {
     Some(body) => body
-    None => return json_error(@mocket.BadRequest, "invalid json body")
+    None => return json_error(event, @mocket.BadRequest, "invalid json body")
   }
   let paused = match body {
     Object(obj) => obj.get("paused") is Some(True)
-    _ => return json_error(@mocket.BadRequest, "invalid json body")
+    _ => return json_error(event, @mocket.BadRequest, "invalid json body")
   }
   let config = load_config(options.config_file)
   config.paused = Some(paused)
   save_config(options.config_file, config) catch {
-    _ => return json_error(@mocket.BadRequest, "invalid json body")
+    _ => return json_error(event, @mocket.BadRequest, "invalid json body")
   }
   // TODO(daemon):落盘后通知装配层重载,让 daemon 立刻生效
   @mocket.HttpResponse(@mocket.OK).json(ok_true())
@@ -197,20 +211,20 @@ pub async fn handle_folder_git_strip_co_authored(
 ) -> &Responder {
   let body = match parse_json_body(event) {
     Some(body) => body
-    None => return json_error(@mocket.BadRequest, "invalid json body")
+    None => return json_error(event, @mocket.BadRequest, "invalid json body")
   }
   let obj = match body {
     Object(obj) => obj
-    _ => return json_error(@mocket.BadRequest, "invalid json body")
+    _ => return json_error(event, @mocket.BadRequest, "invalid json body")
   }
   let folder_id = match non_empty_string(obj, "folderId") {
     Some(id) => id
-    None => return json_error(@mocket.BadRequest, "folderId is required")
+    None => return json_error(event, @mocket.BadRequest, "folderId is required")
   }
   let on = match obj.get("on") {
     Some(True) => true
     Some(False) => false
-    _ => return json_error(@mocket.BadRequest, "on must be a boolean")
+    _ => return json_error(event, @mocket.BadRequest, "on must be a boolean")
   }
   let config = load_config(options.config_file)
   // 按 folderId 定位(id 缺省回退 path,与 Node folderIdFor 同口径)
@@ -221,7 +235,7 @@ pub async fn handle_folder_git_strip_co_authored(
     }
   }
   if target < 0 {
-    return json_error(
+    return json_error(event,
       @mocket.BadRequest,
       "未找到共享目录:「\{folder_id}」",
     )
@@ -237,7 +251,7 @@ pub async fn handle_folder_git_strip_co_authored(
     },
   }
   save_config(options.config_file, config) catch {
-    _ => return json_error(@mocket.BadRequest, "invalid json body")
+    _ => return json_error(event, @mocket.BadRequest, "invalid json body")
   }
   // TODO(daemon):落盘后通知 daemon 重载,让下一轮镜像提交立即按新开关剔除
   @mocket.HttpResponse(@mocket.OK).json(ok_true())
@@ -272,15 +286,15 @@ pub async fn handle_add_device(
 ) -> &Responder {
   let body = match parse_json_body(event) {
     Some(body) => body
-    None => return json_error(@mocket.BadRequest, "invalid json body")
+    None => return json_error(event, @mocket.BadRequest, "invalid json body")
   }
   let obj = match body {
     Object(obj) => obj
-    _ => return json_error(@mocket.BadRequest, "invalid json body")
+    _ => return json_error(event, @mocket.BadRequest, "invalid json body")
   }
   let device_id = match non_empty_string(obj, "deviceId") {
     Some(id) => id
-    None => return json_error(@mocket.BadRequest, "deviceId is required")
+    None => return json_error(event, @mocket.BadRequest, "deviceId is required")
   }
   let config = load_config(options.config_file)
   // 幂等登记:已存在不重复(core add_known_device 内部去重)
@@ -298,7 +312,7 @@ pub async fn handle_add_device(
     None => ()
   }
   save_config(options.config_file, config) catch {
-    _ => return json_error(@mocket.BadRequest, "invalid json body")
+    _ => return json_error(event, @mocket.BadRequest, "invalid json body")
   }
   // TODO(daemon):设备登记后通知 daemon 立即建连/补发配对请求
   // (Node 侧 manager.notifyPairingIntent 同职责),当前落盘即止
@@ -320,12 +334,12 @@ pub async fn handle_remove_device(
   }
   // Node `if (!deviceId)` 同口径:缺失与空串一律 400
   if device_id == "" {
-    return json_error(@mocket.BadRequest, "deviceId is required")
+    return json_error(event, @mocket.BadRequest, "deviceId is required")
   }
   let config = load_config(options.config_file)
   let _ = config.remove_known_device(device_id)
   save_config(options.config_file, config) catch {
-    _ => return json_error(@mocket.BadRequest, "invalid json body")
+    _ => return json_error(event, @mocket.BadRequest, "invalid json body")
   }
   // TODO(daemon):设备移除后通知 daemon 断开既有会话、清理学习到的
   // 对端地址并重算状态推送(Node 侧 forgetAndCloseSessions 同职责)
@@ -337,13 +351,13 @@ pub async fn handle_remove_device(
 /// (Node 同款 50ms 延迟);装配层未注入回调时回 503。
 pub async fn handle_shutdown(
   options : ApiOptions,
-  _event : @mocket.MocketEvent,
+  event : @mocket.MocketEvent,
 ) -> &Responder {
   match options.on_shutdown {
-    None => json_error(@mocket.ServiceUnavailable, "shutdown not available")
+    None => json_error(event, @mocket.ServiceUnavailable, "shutdown not available")
     Some(shutdown) => {
       // body 不参与本路由,显式丢弃(见 drain_body 注释)
-      drain_body(_event)
+      drain_body(event)
       // TODO(cli):换成真正的后台任务派发,避免占住请求线程 50ms
       @async.sleep(50)
       shutdown()

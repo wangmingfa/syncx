@@ -1,0 +1,50 @@
+// Generated using `moon info`, DON'T EDIT IT
+package "wangmingfa/syncx/log"
+
+import {
+  "moonrockz/moon-lander-logging",
+}
+
+// Values
+pub fn critical(String, Array[Json]) -> Unit
+
+pub fn debug(String, Array[Json]) -> Unit
+
+pub fn error(String, Array[Json]) -> Unit
+
+pub fn get() -> &@moon-lander-logging.Logger
+
+pub fn info(String, Array[Json]) -> Unit
+
+pub fn init_file(String, minimum? : @moon-lander-logging.Level) -> Unit
+
+pub fn init_logger(&@moon-lander-logging.Logger) -> Unit
+
+pub fn init_print(minimum? : @moon-lander-logging.Level) -> Unit
+
+pub fn trace(String, Array[Json]) -> Unit
+
+pub fn warn(String, Array[Json]) -> Unit
+
+// Errors
+
+// Types and methods
+pub struct FileLogger {
+  // private fields
+}
+pub fn FileLogger::enabled(Self, @moon-lander-logging.Level) -> Bool
+pub fn FileLogger::log(Self, @moon-lander-logging.LogEvent) -> Unit
+pub fn FileLogger::new(String) -> Self
+pub impl @moon-lander-logging.Logger for FileLogger
+
+pub enum PrintLogger {
+  PrintLogger
+}
+pub fn PrintLogger::enabled(Self, @moon-lander-logging.Level) -> Bool
+pub fn PrintLogger::log(Self, @moon-lander-logging.LogEvent) -> Unit
+pub fn PrintLogger::new() -> Self
+pub impl @moon-lander-logging.Logger for PrintLogger
+
+// Type aliases
+
+// Traits

@@ -330,12 +330,12 @@ pub async fn handle_login(
     Some(file) => file
     None => {
       drain_body(event)
-      return json_error(@mocket.NotFound, "未启用账号密码登录")
+      return json_error(event, @mocket.NotFound, "未启用账号密码登录")
     }
   }
   let body = match parse_json_body(event) {
     Some(body) => body
-    None => return json_error(@mocket.BadRequest, "invalid json body")
+    None => return json_error(event, @mocket.BadRequest, "invalid json body")
   }
   let (username, password) = match body {
     Object(obj) => {
@@ -349,10 +349,10 @@ pub async fn handle_login(
       }
       (username, password)
     }
-    _ => return json_error(@mocket.BadRequest, "invalid json body")
+    _ => return json_error(event, @mocket.BadRequest, "invalid json body")
   }
   if username == "" || password == "" {
-    return json_error(@mocket.BadRequest, "用户名和密码不能为空")
+    return json_error(event, @mocket.BadRequest, "用户名和密码不能为空")
   }
   match load_account(file) {
     Some(record) =>
@@ -369,9 +369,9 @@ pub async fn handle_login(
         )
         response.to_responder()
       } else {
-        json_error(@mocket.Unauthorized, "用户名或密码错误")
+        json_error(event, @mocket.Unauthorized, "用户名或密码错误")
       }
-    None => json_error(@mocket.Unauthorized, "用户名或密码错误")
+    None => json_error(event, @mocket.Unauthorized, "用户名或密码错误")
   }
 }
 

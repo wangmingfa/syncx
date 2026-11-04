@@ -55,7 +55,7 @@ pub async fn handle_upload_inspect(
     Some(inspect) => inspect
     None => {
       drain_body(event)
-      return json_error(
+      return json_error(event,
         @mocket.ServiceUnavailable,
         "upload update not available",
       )
@@ -106,7 +106,7 @@ pub async fn handle_upload_swap(
     Some(swap) => swap
     None => {
       drain_body(event)
-      return json_error(
+      return json_error(event,
         @mocket.ServiceUnavailable,
         "upload update not available",
       )

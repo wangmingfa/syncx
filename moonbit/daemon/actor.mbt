@@ -370,7 +370,7 @@ pub async fn SessionActor::run(self : SessionActor) -> Unit {
     // 单条命令失败只记日志,不掀翻整个 actor(与 Rust 侧 warn + 继续同口径)
     running = self.dispatch(cmd) catch {
       e => {
-        println("会话命令处理失败: \{@debug.to_string(e)}")
+        @log.error("会话命令处理失败 {Detail}", [Json::string(@debug.to_string(e))])
         true
       }
     }
@@ -440,6 +440,8 @@ fn SessionActor::folder_by_id(self : SessionActor, id : String) -> Folder? {
 ///|
 /// 扫一轮:对比索引,产出改动/墓碑并落地;本机改动外推到所有连接。
 /// 对应 Rust `Folder::scan` + `SessionActor::scan_all`(嵌套共享根换算)。
+/// 日志:开始 Debug / 完成 Information(带改动条数与耗时);异常走 dispatch
+/// 层统一记 Error。
 async fn SessionActor::do_scan(self : SessionActor, id : String) -> Unit {
   let folder = match self.folder_by_id(id) {
     Some(f) => f
@@ -455,12 +457,23 @@ async fn SessionActor::do_scan(self : SessionActor, id : String) -> Unit {
       nested.push(normalize_path(other.root))
     }
   }
+  @log.debug("扫描开始 {Folder}", [Json::string(id)])
+  let started = now_ms()
   let diff = scan_folder(
     folder.root,
     folder.index,
     folder.rules,
     self.device_id,
     nested,
+  )
+  @log.info(
+    "扫描完成 {Folder}:改动 {Changed} 条,墓碑 {Tombs} 条,耗时 {Ms}ms",
+    [
+      Json::string(id),
+      Json::number(diff.changed.length().to_double()),
+      Json::number(diff.tombstones.length().to_double()),
+      Json::number((now_ms() - started).to_double()),
+    ],
   )
   folder.conflict_count = diff.conflict_count
   // 墓碑:本地已删除 → 移回收站 + 写索引与内存索引(冻结路径跳过)
@@ -469,7 +482,10 @@ async fn SessionActor::do_scan(self : SessionActor, id : String) -> Unit {
       continue
     }
     folder.executor.apply_delete(folder.index, tomb.path, tomb) catch {
-      e => println("墓碑落地失败(\{tomb.path}): \{@debug.to_string(e)}")
+      e =>
+        @log.error("墓碑落地失败 {Path}: {Detail}", [
+          Json::string(tomb.path), Json::string(@debug.to_string(e)),
+        ])
     }
     folder.local_index.set(tomb.path, tomb)
   }

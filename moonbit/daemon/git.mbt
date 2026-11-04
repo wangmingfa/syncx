@@ -556,6 +556,16 @@ pub fn compose_mirror_commit_message(
 /// 执行自动提交:git add -A && git commit -m <message>(在途中间态挡在外面)。
 /// 使用 --allow-empty 兜底:判定有无变更与 add 之间工作树可能被他程序改回,
 /// 保证提交命令本身不因竞态失败(照 Node 语义)。失败时 error 为 stderr 首行。
+///
+/// 失败探测(与 Node git-monitor.ts autoCommit 的修复口径一致):提交命令
+/// 报错只说明「进程没按成功路径退出」,提交对象可能早已落盘(慢盘 fsync /
+/// post-commit hook 卡顿)。此时若按失败重试,重试前的变更判定会被「同步仍在
+/// 继续」的新变更糊弄过去,同一镜像消息再吞一笔 —— 把第一次成功提交之后到达
+/// 的修改也吞进同一笔。因此提交阶段失败后先比对 HEAD:前进了且 `git log -1
+/// --format=%B`(trim 后)与本次消息一致 = 实际成功,按成功结算;消息不一致
+/// (并发了他程序提交)保守按失败走原路 —— 账目归调用方的基线/通知逻辑管。
+/// 本形态的 git 调用(run_git)无超时,不存在「超时误判失败」,但「提交已
+/// 落盘而命令报错」的中间态失败同理成立,故做此最小等价探测。
 pub async fn auto_commit(folder : String, message : String) -> AutoCommitResult {
   let fail = (err : String) => {
     success: false,
@@ -563,7 +573,11 @@ pub async fn auto_commit(folder : String, message : String) -> AutoCommitResult 
     hash: None,
     error: Some(err),
   }
-  // 先 stage 所有变更(含删除、新增),syncx 在途中间态排除
+  // 基线 HEAD:提交阶段失败后的「实际成功」探测用它判前进
+  let before_head = get_last_commit_hash(folder)
+  // 先 stage 所有变更(含删除、新增),syncx 在途中间态排除。
+  // add 阶段失败不探测:提交还没跑,HEAD 不可能因本次提交前进(探测也只会
+  // 落回失败,白花两笔 git 调用),直接按失败上报。
   let (add_code, _, add_err) = run_git(
     "git",
     folder,
@@ -581,25 +595,67 @@ pub async fn auto_commit(folder : String, message : String) -> AutoCommitResult 
       },
     )
   }
-  // 提交:参数数组形式,不走 shell,无注入面
+  // 提交:参数数组形式,不走 shell,无注入面。失败走 HEAD 探测再定成败
   let (commit_code, _, commit_err) = run_git("git", folder, [
     "commit", "-m", message, "--allow-empty",
   ]) catch {
-    SpawnFailed(m) => return fail("git 拉起失败:\{m}")
-    GitFailed(m) => return fail(m)
+    SpawnFailed(m) =>
+      // 拉起失败 = 进程根本没跑,提交不可能落盘;探测兜一道仍按保守口径
+      return commit_failed_probe(folder, before_head, message, "git 拉起失败:\{m}")
+    GitFailed(m) =>
+      return commit_failed_probe(folder, before_head, message, m)
   }
   if commit_code != 0 {
-    return fail(
-      if first_line(commit_err) != "" {
-        first_line(commit_err)
-      } else {
-        "git commit 失败(退出码 \{commit_code})"
-      },
-    )
+    let err_text = if first_line(commit_err) != "" {
+      first_line(commit_err)
+    } else {
+      "git commit 失败(退出码 \{commit_code})"
+    }
+    return commit_failed_probe(folder, before_head, message, err_text)
   }
   // 新提交哈希:rev-parse 在 commit 之后失败极罕见,如实报错而非静默
   let hash = get_last_commit_hash(folder) catch { _ => None }
   { success: true, skipped: false, hash, error: None, }
+}
+
+///|
+/// 提交阶段失败后的「实际成功」探测:HEAD 前进了(相对 before_head;空仓库
+/// 基线为 None 时首个提交也算前进)且 HEAD 消息与本次一致 = 提交实际成功,
+/// 按成功结算;否则一律静默回落「按失败上报」(探测自身的任何失败也如此,
+/// 与 Node 口径一致)。
+async fn commit_failed_probe(
+  folder : String,
+  before_head : String?,
+  message : String,
+  err : String,
+) -> AutoCommitResult {
+  let after_head = get_last_commit_hash(folder)
+  match after_head {
+    Some(after) => {
+      let advanced = match before_head {
+        Some(before) => after != before
+        None => true
+      }
+      if advanced && head_message_matches(folder, message) {
+        return { success: true, skipped: false, hash: Some(after), error: None }
+      }
+    }
+    None => ()
+  }
+  { success: false, skipped: false, hash: None, error: Some(err) }
+}
+
+///|
+/// HEAD 的完整提交正文(%B)与本次消息是否一致(两侧 trim 后比对)。
+/// 读取失败(非仓库 / git 不可用等)一律按不一致处理,保守回落失败。
+async fn head_message_matches(folder : String, message : String) -> Bool {
+  let (code, out, _) = run_git("git", folder, ["log", "-1", "--format=%B"]) catch {
+    _ => return false
+  }
+  if code != 0 {
+    return false
+  }
+  out.trim().to_owned() == message.trim().to_owned()
 }
 
 ///|

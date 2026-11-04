@@ -414,3 +414,89 @@ async test "镜像提交信息组装:strip 开关作用在最终消息上" {
     "feat: a\n\nbody\n\nCo-Authored-By: MOSS",
   )
 }
+
+///|
+/// 装一个 repo 范围的 git PATH shim:脚本先于真实 git 置于 PATH,但只对
+/// 「commit 子命令 + 当前目录恰为指定测试仓库」的调用按 commit_script 分叉
+/// ({REAL}/{REPO} 占位符替换),其余任何调用(其它并发测试在各自己的仓库里
+/// 跑 git)原样透传 —— 无进程级全局状态,并发安全。用于模拟 MoonBit 形态
+/// 造不出的「命令报错但提交已落盘」中间态(run_git 无超时;post-commit hook
+/// 失败不影响 git commit 退出码、pre-commit 里嵌套 commit 会死锁,均实测)。
+async fn install_git_shim(repo : String, tag : String, commit_script : String) -> Unit {
+  // 真实 git 绝对路径与仓库的物理路径(getcwd 语义,macOS 下 /tmp 会被
+  // 解析成 /private/tmp,必须两边同口径)
+  let (_, real_git, _) = @daemon.run_git("sh", repo, ["-c", "command -v git"])
+  let real = real_git.trim().to_owned()
+  let (_, resolved, _) = @daemon.run_git("sh", repo, ["-c", "pwd -P"])
+  let repo_real = resolved.trim().to_owned()
+  let branch = commit_script.replace(old="{REAL}", new=real)
+  let shim_dir = git_tmp_dir("shim-\{tag}")
+  @fs.write_file(
+    "\{shim_dir}/git",
+    "#!/bin/sh\nif [ \"$1\" = \"commit\" ] && [ \"$(pwd -P)\" = \"\{repo_real}\" ]; then\n\{branch}\nfi\nexec \{real} \"$@\"\n",
+  )
+  @fs.chmod("\{shim_dir}/git", 0o755)
+  let orig_path = @env.get_env_var("PATH").unwrap_or("")
+  @env.set_env_var("PATH", "\{shim_dir}:\{orig_path}")
+}
+
+///|
+async test "auto_commit:提交阶段失败的探测(成功落盘 / 真失败 / 消息不一致)" {
+  // 并发测试进程共享 PATH,shim 必须 repo 范围隔离且**全部先装好**:不管
+  // PATH 前插次序如何,每个仓库只会命中自己的 shim,其余调用原样透传。
+  // 三个仓库各代表一种「提交阶段失败」形态:
+  let repo_ok = fresh_repo("probe-ok")
+  commit_file(repo_ok, "base.txt", "v1", "init: base")
+  @fs.write_file("\{repo_ok}/work.txt", "v2")
+  // 形态 1:commit 真跑(对象落盘)后伪装退出码 1 —— 「提交已成功而命令
+  // 报错」的中间态(对应 Node 侧慢盘 fsync / hook 卡顿被超时误杀)
+  install_git_shim(repo_ok, "ok", "  {REAL} \"$@\" >/dev/null 2>&1\n  exit 1")
+  let repo_fail = fresh_repo("probe-fail")
+  commit_file(repo_fail, "base.txt", "v1", "init: base")
+  @fs.write_file("\{repo_fail}/work.txt", "v2")
+  // 形态 2:commit 直接退出 1(不真跑)—— HEAD 不动,探测必须回落失败
+  install_git_shim(repo_fail, "fail", "  echo \"fake commit failure\" >&2\n  exit 1")
+  let repo_mix = fresh_repo("probe-mix")
+  commit_file(repo_mix, "base.txt", "v1", "init: base")
+  @fs.write_file("\{repo_mix}/work.txt", "v2")
+  // 形态 3:commit 换消息真跑后伪装退出 1 —— HEAD 前进但落的是他消息
+  // (并发了他程序提交的等价物),账目对不上必须保守按失败
+  install_git_shim(
+    repo_mix,
+    "mix",
+    "  {REAL} commit -m \"other: concurrent\" --allow-empty >/dev/null 2>&1\n  exit 1",
+  )
+  // 形态 1:HEAD 前进且消息一致 → 探测按成功结算,避免按失败重试吞双笔
+  let ok = @daemon.auto_commit(repo_ok, "mirror: probe")
+  assert_true(ok.success)
+  assert_true(!is_none(ok.hash))
+  // 提交内容确已落盘:HEAD 消息与本次一致,脏文件也已提交
+  let (_, head_msg, _) = @daemon.run_git("git", repo_ok, ["log", "-1", "--format=%B"]) catch {
+    _ => panic()
+  }
+  assert_eq(head_msg.trim().to_owned(), "mirror: probe")
+  assert_false(@daemon.has_uncommitted_changes(repo_ok))
+  // 形态 2:HEAD 未前进 → 按失败,error 为 shim 的 stderr 首行
+  let failed = @daemon.auto_commit(repo_fail, "mirror: fail")
+  assert_false(failed.success)
+  assert_eq(failed.error, Some("fake commit failure"))
+  assert_true(is_none(failed.hash))
+  // 形态 3:消息不一致 → 保守按失败
+  let mixed = @daemon.auto_commit(repo_mix, "mirror: mix")
+  assert_false(mixed.success)
+  assert_true(is_none(mixed.hash))
+}
+
+///|
+async test "auto_commit:index.lock 残留 → 失败路径不变" {
+  let repo = fresh_repo("lock")
+  commit_file(repo, "base.txt", "v1", "init: base")
+  let before = unwrap_or_panic(@daemon.get_last_commit_hash(repo), "基线应存在")
+  // 残留锁文件:git add 直接失败,HEAD 不动
+  @fs.write_file("\{repo}/.git/index.lock", "stale")
+  @fs.write_file("\{repo}/work.txt", "v2")
+  let result = @daemon.auto_commit(repo, "mirror: locked")
+  assert_false(result.success)
+  assert_true(result.error is Some(_))
+  assert_eq(@daemon.get_last_commit_hash(repo), Some(before))
+}

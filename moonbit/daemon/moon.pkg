@@ -2,6 +2,7 @@ import {
   "wangmingfa/syncx/sqlite",
   "wangmingfa/syncx/core",
   "wangmingfa/syncx/net",
+  "wangmingfa/syncx/log",
   "moonbitlang/core/json",
   "moonbitlang/core/encoding/utf8",
   "moonbitlang/async",
@@ -12,5 +13,18 @@ import {
   "moonbitlang/core/debug",
   "moonbitlang/core/encoding/base64",
 }
+
+import {
+  "moonbitlang/async",
+  "moonbitlang/async/fs",
+  "moonbitlang/async/process",
+  "moonbitlang/core/encoding/base64",
+  "moonbitlang/core/buffer",
+  "moonbitlang/core/encoding/utf8",
+  "moonbitlang/core/env",
+  "wangmingfa/syncx/core",
+  "wangmingfa/syncx/net",
+  "wangmingfa/syncx/sqlite",
+} for "test"
 
 supported_targets = "native"

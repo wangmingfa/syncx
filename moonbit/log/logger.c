@@ -46,3 +46,19 @@ syncx_log_append(const uint8_t *path, int32_t path_len, const uint8_t *line, int
 		return 0;
 	return 1;
 }
+
+// PrintLogger 的 stdout 写出:println 在「常驻进程 + stdout 连到管道/重定向」
+// 场景是全缓冲(4KB),横幅会一直躺在缓冲区里不出现(concurrently、tail -f
+// 日志排查全都会扑空);短命进程靠退出时的 flush 掩盖了这一点。这里每行
+// fwrite + fflush,与 FileLogger 的逐行落盘口径一致。返回 1 = 写出,0 = 静默失败。
+int32_t
+syncx_log_stdout(const uint8_t *line, int32_t line_len)
+{
+	if (line == NULL || line_len < 0)
+		return 0;
+	if (fwrite(line, 1, (size_t)line_len, stdout) != (size_t)line_len)
+		return 0;
+	if (fflush(stdout) != 0)
+		return 0;
+	return 1;
+}

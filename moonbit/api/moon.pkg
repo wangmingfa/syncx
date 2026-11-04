@@ -1,5 +1,6 @@
 import {
   "wangmingfa/syncx/core",
+  "wangmingfa/syncx/log",
   "wangmingfa/syncx/daemon",
   "cc06b/mooncry/lib",
   "oboard/mocket",
@@ -26,7 +27,6 @@ import {
   "moonbitlang/async/websocket",
   "moonbitlang/core/encoding/base64",
   "moonbitlang/core/encoding/utf8",
-  "moonbitlang/core/json",
 } for "test"
 
 supported_targets = "native"

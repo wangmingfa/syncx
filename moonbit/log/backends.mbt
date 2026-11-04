@@ -10,18 +10,34 @@
 ///|
 /// PrintLogger:每个事件一行打到标准输出(dev/缺省形态,保持既有 stdout
 /// 行为不回归)。带 error 的事件无需特殊处理 —— 库的 to_line 会自动追加
-/// `  error: <text>` 第二行。
-pub struct PrintLogger {}
+/// `  error: <text>` 第二行。无状态,用单例枚举承载(空 struct 字面量与
+/// Map 字面量同形,会造成歧义)。
+pub enum PrintLogger {
+  PrintLogger
+}
 
 ///|
 pub fn PrintLogger::new() -> PrintLogger {
-  {}
+  PrintLogger
 }
 
 ///|
-impl @logging.Logger for PrintLogger with log(_self, event) {
-  println(event.to_line())
+pub impl @logging.Logger for PrintLogger with log(_self, event) {
+  let line = @utf8.encode(event.to_line() + "\n")
+  let _ = c_log_stdout(line, line.length())
 }
+
+///|
+/// stdout 逐行写出(见 logger.c 的 syncx_log_stdout):每行 flush,绕开
+/// println 在「常驻进程 + 管道/重定向」下的全缓冲 —— 否则 concurrently、
+/// 重定向排查时横幅永远躺在缓冲区里不出现。返回值一律忽略(失败静默)。
+#borrow(line)
+extern "C" fn c_log_stdout(line : Bytes, line_len : Int32) -> Int32 = "syncx_log_stdout"
+
+///|
+/// impl 方法的显式提升声明(库的 MemoryLogger 同款):不写的话编译器按
+/// 隐式提升告警。
+pub extend PrintLogger with @logging.Logger::{enabled, log}
 
 ///|
 /// FileLogger:按行追加写日志文件(--log-file)。句柄由 C 侧缓存复用
@@ -33,7 +49,7 @@ pub struct FileLogger {
 
 ///|
 pub fn FileLogger::new(path : String) -> FileLogger {
-  { path }
+  { path, }
 }
 
 ///|
@@ -48,8 +64,11 @@ extern "C" fn c_log_append(
 ) -> Int32 = "syncx_log_append"
 
 ///|
-impl @logging.Logger for FileLogger with log(self, event) {
+pub impl @logging.Logger for FileLogger with log(self, event) {
   let path = @utf8.encode(self.path)
   let line = @utf8.encode(event.to_line() + "\n")
   let _ = c_log_append(path, path.length(), line, line.length())
 }
+
+///|
+pub extend FileLogger with @logging.Logger::{enabled, log}

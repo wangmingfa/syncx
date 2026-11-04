@@ -643,7 +643,18 @@ pub struct AutoCommitResult {
 ///
 /// `--allow-empty` 是兜底:判定有无变更与 add 之间工作树可能被其他程序改回,
 /// 保证提交命令本身不因竞态失败。
+///
+/// 超时后探测(与 Node 侧 `src/git-monitor.ts` 的 autoCommit 同款):spawn 超时只
+/// 保证「进程没在期限内退出」,不保证「提交没发生」—— 慢盘 fsync、post-commit hook
+/// 卡顿(Termux 实测存在)都会让提交对象早已落盘而进程被杀。此时若按失败重试,
+/// 重试前的 has_uncommitted_changes 判定会被「同步仍在继续」的新变更糊弄过去,
+/// 同一镜像消息再吞一笔(把第一次提交之后到达的修改也提交进去)。因此提交失败
+/// 路径先比对 HEAD:前进了且消息与本次一致 = 实际成功,按成功结算。
 pub fn auto_commit(folder_path: &Path, message: &str) -> AutoCommitResult {
+    // 调用前先记 HEAD 基线。空仓库(还没有任何提交)时为 None:首次提交落地后
+    // after(Some) ≠ before(None) 同样判「前进」,首次提交的超时探测也能覆盖。
+    let before_head = get_last_commit_hash(folder_path);
+
     let specs = scratch_pathspecs();
     let mut add_args: Vec<&str> = vec!["add", "-A", "--"];
     add_args.extend(specs.iter().map(String::as_str));
@@ -655,6 +666,7 @@ pub fn auto_commit(folder_path: &Path, message: &str) -> AutoCommitResult {
         None => Some("git add 执行失败".to_string()),
     };
     if let Some(error) = stage_error {
+        // stage 失败则 commit 根本没跑,不存在「实际成功」,无需探测
         return AutoCommitResult {
             success: false,
             hash: None,
@@ -663,29 +675,70 @@ pub fn auto_commit(folder_path: &Path, message: &str) -> AutoCommitResult {
     }
 
     // 参数数组形式,不经 shell —— 消息里有引号/换行都不会被解释
-    match run_git(folder_path, &["commit", "-m", message, "--allow-empty"], 10_000, 1024 * 1024) {
-        Some(output) if output.success => AutoCommitResult {
+    let commit_output =
+        run_git(folder_path, &["commit", "-m", message, "--allow-empty"], 10_000, 1024 * 1024);
+    if let Some(output) = &commit_output {
+        if output.success {
+            return AutoCommitResult {
+                success: true,
+                hash: get_last_commit_hash(folder_path),
+                error: None,
+            };
+        }
+    }
+
+    // 提交失败(非零退出或超时被杀)。不能直接判死 —— 先探测 HEAD 再定论,
+    // 见函数头注释。
+    if let Some(hash) = commit_landed_anyway(folder_path, before_head.as_deref(), message) {
+        return AutoCommitResult {
             success: true,
-            hash: get_last_commit_hash(folder_path),
+            hash: Some(hash),
             error: None,
-        },
+        };
+    }
+    let error = match &commit_output {
         Some(output) => {
             let text = output.stderr.trim();
-            AutoCommitResult {
-                success: false,
-                hash: None,
-                error: Some(if text.is_empty() {
-                    "git commit 执行失败".to_string()
-                } else {
-                    text.to_string()
-                }),
+            if text.is_empty() {
+                "git commit 执行失败".to_string()
+            } else {
+                text.to_string()
             }
         }
-        None => AutoCommitResult {
-            success: false,
-            hash: None,
-            error: Some("git commit 执行失败".to_string()),
-        },
+        None => "git commit 执行失败".to_string(),
+    };
+    AutoCommitResult {
+        success: false,
+        hash: None,
+        error: Some(error),
+    }
+}
+
+/// 「超时但实际成功」探测:HEAD 较调用前前进,且 HEAD 提交正文(`%B`,两侧 trim
+/// 后)与本次消息一致,才认定提交实际已落盘,返回新哈希;否则返回 `None`。
+/// 消息不一致(并发了他程序的提交)保守按失败走原路 —— 那是罕见场景,且账目归
+/// 调用方的基线/通知逻辑管。
+fn commit_landed_anyway(
+    folder_path: &Path,
+    before_head: Option<&str>,
+    message: &str,
+) -> Option<String> {
+    let after_head = get_last_commit_hash(folder_path)?;
+    // 哈希没动(含空仓库两侧都是 None)就不存在「实际成功」
+    if before_head == Some(after_head.as_str()) {
+        return None;
+    }
+    if !head_message_matches(folder_path, message) {
+        return None;
+    }
+    Some(after_head)
+}
+
+/// HEAD 的完整提交正文(`%B`)与本次消息是否一致(两侧 trim 掉空白后比对)。
+fn head_message_matches(folder_path: &Path, message: &str) -> bool {
+    match git_text(folder_path, &["log", "-1", "--format=%B"], 5_000, 64 * 1024) {
+        Some(text) => text.trim() == message.trim(),
+        None => false,
     }
 }
 
@@ -1262,6 +1315,107 @@ mod tests {
         std::fs::remove_file(dir.join("b.txt.syncx-tmp")).unwrap();
 
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// hook 探测两测共用的临时仓库根目录(带进程号 + 纳秒,避免并发撞名)。
+    fn probe_temp_root(tag: &str) -> PathBuf {
+        std::env::temp_dir().join(format!(
+            "syncx-cli-{tag}-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ))
+    }
+
+    /// 在 root 建一个带身份配置的真仓库;git 不可用返回 `None`(跳过不算失败),
+    /// 与 [`temp_repo_round_trip`] 同款的环境探测口径。
+    fn init_probe_repo(root: &Path) -> Option<()> {
+        std::fs::create_dir_all(root).ok()?;
+        let mut init = Command::new("git");
+        // 显式 -b main:不依赖环境里的 init.defaultBranch 配置
+        init.args(["init", "-q", "-b", "main"]).current_dir(root);
+        hide_console(&mut init);
+        if !init.status().ok()?.success() {
+            return None;
+        }
+        for (key, value) in [("user.email", "probe@local"), ("user.name", "probe")] {
+            let mut config = Command::new("git");
+            config.args(["config", key, value]).current_dir(root);
+            hide_console(&mut config);
+            config.status().ok()?;
+        }
+        Some(())
+    }
+
+    #[test]
+    fn auto_commit_counts_timeout_but_landed_commit_as_success() {
+        // 用 post-commit hook 睡 15s 模拟「提交已落盘但进程卡住」:超过 auto_commit
+        // 的 10s 提交超时。没有 git 的环境直接跳过(不算失败)。
+        let root = probe_temp_root("timeout");
+        if init_probe_repo(&root).is_none() {
+            let _ = std::fs::remove_dir_all(&root);
+            return;
+        }
+        std::fs::write(root.join("a.txt"), "first snapshot\n").unwrap();
+        let base = auto_commit(&root, "base");
+        assert!(base.success, "{:?}", base.error);
+
+        let hooks = root.join(".git").join("hooks");
+        std::fs::create_dir_all(&hooks).unwrap();
+        let hook = hooks.join("post-commit");
+        std::fs::write(&hook, "#!/bin/sh\nsleep 15\n").unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&hook, std::fs::Permissions::from_mode(0o755)).unwrap();
+        }
+
+        let started = std::time::Instant::now();
+        let result = auto_commit(&root, "镜像提交 from DEV-A");
+        // 走满 10s 超时才可能触发探测;hook 没生效(比如权限没加上)时这里兜底
+        // 拦住,避免测试在「根本没超时」的路径上假绿
+        assert!(
+            started.elapsed() >= std::time::Duration::from_secs(9),
+            "post-commit hook 未生效,提交没有走到超时路径"
+        );
+        assert!(result.success, "超时但实际成功应按成功结算:{:?}", result.error);
+        let head = result.hash.expect("探测成功应带回新哈希");
+        assert_eq!(get_last_commit_hash(&root).as_deref(), Some(head.as_str()));
+
+        // 只有一笔该消息的提交 —— 不再发生「重试又吞一笔」
+        let log = list_recent_commits(&root, GIT_LOG_LIMIT).unwrap().unwrap();
+        let hits = log
+            .iter()
+            .filter(|entry| entry.subject == "镜像提交 from DEV-A")
+            .count();
+        assert_eq!(hits, 1);
+        assert_eq!(log.len(), 2, "base + 一笔镜像提交");
+
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn auto_commit_still_fails_on_index_lock_residue() {
+        // 确定性失败回归:index.lock 残留必须仍按失败上报,HEAD 不动。
+        // 空仓库(before_head 为 None)同样覆盖。
+        let root = probe_temp_root("lock");
+        if init_probe_repo(&root).is_none() {
+            let _ = std::fs::remove_dir_all(&root);
+            return;
+        }
+        std::fs::write(root.join("a.txt"), "content\n").unwrap();
+        let before = get_last_commit_hash(&root);
+        assert_eq!(before, None, "前置:仓库还没有提交");
+
+        std::fs::write(root.join(".git").join("index.lock"), "").unwrap();
+        let result = auto_commit(&root, "镜像提交 from DEV-B");
+        assert!(!result.success, "index.lock 残留必须仍按失败上报");
+        assert!(result.error.is_some(), "失败要带原因:{:?}", result.error);
+        assert_eq!(get_last_commit_hash(&root), None, "HEAD 不动");
+
+        let _ = std::fs::remove_dir_all(&root);
     }
 
     #[test]

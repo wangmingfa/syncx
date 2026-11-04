@@ -21,13 +21,9 @@
 ///    平台无关:wait 抛错按失效,wait 挂着不动(部分后端对根目录被删无反应)
 ///    则由存活探针定期查根目录还在不在。
 ///
-/// 日志:watcher 启动/重建 info;事件批聚合数超阈值才记(平时零噪声);
-/// 降级 warn 一次(同一段失效期内不刷屏,恢复后再次失效会重新 warn)。
-/// 通道沿用 daemon 现状:标准输出 println。
-
-///|
-/// watcher 启动/重建的 info 日志前缀(daemon 尚无分级 logger,统一用标签)。
-const WATCH_LOG_TAG : String = "[watch]"
+/// 日志:watcher 启动/重建走 @log 门面(启动 Information / 失效重建 Warning);
+/// 事件批聚合数超阈值才记(平时零噪声,Debug);降级 warn 一次(同一段失效
+/// 期内不刷屏,恢复后再次失效会重新 warn);兜底全扫触发记 Information。
 
 ///|
 /// 事件防抖静默窗口毫秒:`@fs.Watcher` 的 debounce_timeout 语义是「事件静默满
@@ -173,8 +169,9 @@ pub fn start_fs_watch(
   }
   if !options.enabled {
     // 配置关闭:纯定时全扫,节奏 = 原扫描间隔,行为与接 watcher 之前一致
-    println(
-      "\{WATCH_LOG_TAG} fsWatchEnabled=false,按原 \{options.degraded_scan_ms}ms 周期定时全扫",
+    @log.info(
+      "fsWatchEnabled=false,按原 {Ms}ms 周期定时全扫",
+      [Json::number(options.degraded_scan_ms.to_double())],
     )
     let interval = options.degraded_scan_ms
     group.spawn_bg(allow_failure=true, no_wait=true) <| () => {
@@ -204,7 +201,7 @@ pub fn start_fs_watch(
 
 ///|
 /// 兜底全扫循环:先扫后睡(首轮立即,保住「启动即扫一遍」的旧语义);
-/// actor 队列已关 = 退出。
+/// actor 队列已关 = 退出。每轮触发记 Information(低频,600s 一条)。
 async fn fallback_scan_loop(
   handle : ActorHandle,
   folder_ids : Array[String],
@@ -212,6 +209,7 @@ async fn fallback_scan_loop(
 ) -> Unit {
   for ;; {
     for id in folder_ids {
+      @log.info("目录 {Folder} 兜底全扫触发", [Json::string(id)])
       if !handle.send(Cmd::ScanFolder(id)) {
         return
       }
@@ -237,9 +235,9 @@ async fn folder_watch_loop(
       Some(watcher) => {
         warned = false
         stats.starts += 1
-        println(
-          "\{WATCH_LOG_TAG} 目录 \{folder.id} 的文件系统监听已启动(\{folder.root})",
-        )
+        @log.info("目录 {Folder} 的文件系统监听已启动({Root})", [
+          Json::string(folder.id), Json::string(folder.root),
+        ])
         watch_until_broken(handle, folder, watcher, options)
         // 到这里 = watcher 失效(目录被删 / 句柄出错):立即补一次该目录扫描
         // (目录若被原地重建,这一刀把存量对上账),随后回循环顶端重建
@@ -247,13 +245,18 @@ async fn folder_watch_loop(
         if !handle.send(Cmd::ScanFolder(folder.id)) {
           return
         }
-        println("\{WATCH_LOG_TAG} 目录 \{folder.id} 的监听已失效,关闭后重建")
+        @log.warn("目录 {Folder} 的监听已失效,关闭后重建", [Json::string(folder.id)])
       }
       None => {
         if !warned {
           stats.degrades += 1
-          println(
-            "\{WATCH_LOG_TAG} [warn] 目录 \{folder.id}(\{folder.root})无法建文件系统监听,退回 \{options.degraded_scan_ms}ms 周期全扫",
+          @log.warn(
+            "目录 {Folder}({Root})无法建文件系统监听,退回 {Ms}ms 周期全扫",
+            [
+              Json::string(folder.id),
+              Json::string(folder.root),
+              Json::number(options.degraded_scan_ms.to_double()),
+            ],
           )
           warned = true
         }
@@ -348,9 +351,10 @@ async fn watch_until_broken(
         // 空批(创建+删除在同窗口内互相抵消)什么都不用做
         if events.length() > 0 {
           if events.length() >= WATCH_EVENT_LOG_THRESHOLD {
-            println(
-              "\{WATCH_LOG_TAG} 目录 \{folder.id} 一批聚合了 \{events.length()} 个文件事件,触发重扫",
-            )
+            @log.debug("目录 {Folder} 一批聚合了 {Count} 个文件事件,触发重扫", [
+              Json::string(folder.id),
+              Json::number(events.length().to_double()),
+            ])
           }
           if !handle.send(Cmd::ScanFolder(folder.id)) {
             return // actor 已退出(队列已关)
