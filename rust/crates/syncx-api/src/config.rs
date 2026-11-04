@@ -76,6 +76,15 @@ pub struct SharedFolder {
     pub git_relay_pending: Option<Value>,
     #[serde(rename = "gitBroadcastPending", default, skip_serializing_if = "Option::is_none")]
     pub git_broadcast_pending: Option<Value>,
+    /// 镜像提交结算后「内容尚未落齐」的漂移台账(见 `GitDeferredMirrorRecord` 的
+    /// Node 契约;仅本机使用,不进 wire、不跨设备对齐)。对端镜像提交时部分文件
+    /// 内容可能尚未经数据面落齐,这部分不进镜像提交、记入台账;内容到齐后由每轮
+    /// 巡检补一笔收敛提交。落盘是为了 daemon 重启后自愈继续 —— 这些文件再也不在
+    /// 任何通知的 changedFiles 里,丢了台账就永久没人提交。gitSync 改档时随其余
+    /// 台账一并清除。形状:`{ hash, message, files }`(camelCase 契约,与 Node
+    /// 同一份落盘文件)。
+    #[serde(rename = "gitDeferredMirror", default, skip_serializing_if = "Option::is_none")]
+    pub git_deferred_mirror: Option<Value>,
     #[serde(rename = "e2eKey", default, skip_serializing_if = "Option::is_none")]
     pub e2e_key: Option<Value>,
     #[serde(rename = "e2eUntrusted", default, skip_serializing_if = "Option::is_none")]
@@ -672,6 +681,7 @@ fn parse_shared_folder(value: Value) -> Option<SharedFolder> {
         git_last_commit_hash: non_empty_str(object.remove("gitLastCommitHash")),
         git_relay_pending: object.remove("gitRelayPending"),
         git_broadcast_pending: object.remove("gitBroadcastPending"),
+        git_deferred_mirror: object.remove("gitDeferredMirror"),
         e2e_key: object.remove("e2eKey"),
         e2e_untrusted: object.remove("e2eUntrusted").map(string_array_value),
         e2e_key_set: None,

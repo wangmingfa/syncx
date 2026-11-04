@@ -2,7 +2,8 @@
 //!
 //! 对应 Node `src/session-manager.ts` 的 `checkGitCommits` / `broadcastGitCommit` /
 //! `relayGitCommitNotify` / `retryGitCommitRelays` / `retryGitCommitBroadcasts` /
-//! `onGitCommitAck`。口径必须逐条对齐,否则两端混跑时会出现「内容同步了、提交少一笔」。
+//! `onGitCommitAck` / `healDeferredGitMirror`。口径必须逐条对齐,否则两端混跑时
+//! 会出现「内容同步了、提交少一笔」。
 //!
 //! 三个刻意的取舍:
 //!
@@ -15,10 +16,11 @@
 //!     接着补投;重发计数只在内存,重启多给几次机会无害。
 
 use std::path::Path;
+use std::sync::atomic::Ordering;
 
 use syncx_api::config::Config;
 
-use super::{GitLedger, GitNotice, RuntimeOps};
+use super::{GitDeferredMirror, GitFailure, GitLedger, GitNotice, RuntimeOps};
 
 /// 本地写成功后仍未回执的最大重发次数(与 Node `GIT_NOTIFY_MAX_RESENDS` 同值)。
 pub const GIT_NOTIFY_MAX_RESENDS: u32 = 5;
@@ -84,6 +86,139 @@ fn blocked_by_identity(folder: &syncx_api::config::SharedFolder) -> bool {
 
 /* ------------------------------ 本机新提交 ------------------------------ */
 
+/// 收敛提交信息里引用的原消息首行截断:超长的提交主题截到 64 个码点(整个 subject
+/// 连前缀仍在一行内可读)。按码点切,避免劈开代理对(与 Node `truncateGitSubject`
+/// 同口径;Rust 的 `char` 本就是码点,逐个收集即可)。
+pub(super) fn truncate_git_subject(line: &str, max: usize) -> String {
+    let trimmed = line.trim();
+    let mut count = 0usize;
+    let mut out = String::new();
+    for ch in trimmed.chars() {
+        if count >= max {
+            out.push('…');
+            break;
+        }
+        out.push(ch);
+        count += 1;
+    }
+    out
+}
+
+/// 漂移台账自愈:结算后经数据面落齐/回落的内容,补一笔收敛提交(机制二)。
+///
+/// 镜像提交按内容对齐收窄后,未对齐的文件进了台账 —— 而它们从此不在任何通知的
+/// changedFiles 里(范围收敛拒绝扫荡),没人再提交就永久脏着。这里在每轮
+/// `check_local_commits` 开头逐文件复查「工作树内容 vs 本机索引」:已对齐的收集
+/// 起来,非空则 `auto_commit` 一笔**本地新提交**(消息 `chore: 收敛镜像提交后到达
+/// 的内容 (<hash8> <原消息首行>)`),成功后从台账摘除;失败沿用与结算同一的错误
+/// 通道,台账保留下轮再试 —— 不设上限次数,内容不到齐就一直脏着,反正对齐判据
+/// 保证了提交内容不会错。
+///
+/// 收敛提交会被同轮的新提交检测当作新 HEAD 正常广播给对端(对端工作树内容一致 →
+/// 对端结算走「nothing to commit」跳过并推进基线,可接受 —— 内容早已一致,只欠
+/// 一笔提交记录)。中途叠加的暂停/身份闸/重写闸与结算闸门同口径:中场休息,不自愈。
+pub fn heal_deferred_mirror(ops: &RuntimeOps, config: &Config) {
+    let ledgers: Vec<(String, GitDeferredMirror)> = match ops.git_state.lock() {
+        Ok(state) => state
+            .deferred_mirror
+            .iter()
+            .map(|(id, ledger)| (id.clone(), ledger.clone()))
+            .collect(),
+        Err(_) => return,
+    };
+    // 台账为空:零开销(不读盘不比文件)
+    if ledgers.is_empty() {
+        return;
+    }
+    for (folder_id, ledger) in ledgers {
+        let Some(folder) = config.folder(&folder_id).cloned() else {
+            // 目录已被移除:欠账随目录走,不替死人收敛
+            ops.set_git_deferred_mirror(&folder_id, None);
+            continue;
+        };
+        // 关了 git 同步不再动它的仓库(改模式会清台账,这里兜手改配置的底)
+        let mode = folder.git_sync.as_deref();
+        if mode.is_none() || mode == Some("off") {
+            continue;
+        }
+        if folder.is_paused() || config.is_paused() {
+            continue;
+        }
+        // 身份指纹坏掉:HEAD 读数来自「可能被换掉的盘」,此刻提交等于替错误内容背书
+        if blocked_by_identity(&folder) {
+            continue;
+        }
+        // filter-branch 进行中:叠加自动提交会被孤儿化(见结算闸门)
+        if ops.git_rewrite_running.load(Ordering::SeqCst) {
+            continue;
+        }
+        let root = Path::new(&folder.path);
+        if !crate::git::is_git_repo(root) {
+            continue;
+        }
+        let aligned: Vec<String> = ledger
+            .files
+            .iter()
+            .filter(|rel| {
+                let entry = ops.entry_lookup(&folder_id, rel);
+                crate::git::work_tree_content_aligned(root, rel, entry.as_ref())
+            })
+            .cloned()
+            .collect();
+        if aligned.is_empty() {
+            continue; // 内容还没到齐:下轮再试(不设上限)
+        }
+        let subject = truncate_git_subject(ledger.message.lines().next().unwrap_or(""), 64);
+        let hash8: String = ledger.hash.chars().take(8).collect();
+        let message = format!("chore: 收敛镜像提交后到达的内容 ({hash8} {subject})");
+        let outcome = crate::git::auto_commit(root, &message, Some(&aligned));
+        if outcome.success {
+            let remaining: Vec<String> = ledger
+                .files
+                .iter()
+                .filter(|rel| !aligned.contains(rel))
+                .cloned()
+                .collect();
+            let next = if remaining.is_empty() {
+                None
+            } else {
+                Some(GitDeferredMirror {
+                    hash: ledger.hash.clone(),
+                    message: ledger.message.clone(),
+                    files: remaining,
+                })
+            };
+            ops.set_git_deferred_mirror(&folder_id, next);
+            let preview: Vec<String> = aligned.iter().take(10).cloned().collect();
+            tracing::info!(
+                "git drift healed: {folder_id} -> {} ({} 个文件: {}{})",
+                outcome.hash.as_deref().unwrap_or(""),
+                aligned.len(),
+                preview.join(", "),
+                if aligned.len() > 10 { " …" } else { "" },
+            );
+            // 收敛提交不在这里推基线:同轮 check_local_commits 的新提交检测会把它
+            // 当作新 HEAD 正常广播给对端并对齐基线 —— 自愈自己不推基线,广播免了。
+        } else {
+            let error = outcome
+                .error
+                .clone()
+                .unwrap_or_else(|| "git commit 执行失败".to_string());
+            tracing::warn!("git drift heal commit failed: {folder_id}: {error}");
+            if let Ok(mut state) = ops.git_state.lock() {
+                state.error.insert(
+                    folder_id.clone(),
+                    GitFailure {
+                        message: error,
+                        ts: syncx_api::auth::now_ms(),
+                    },
+                );
+            }
+            ops.notify_hub();
+        }
+    }
+}
+
 /// 检测各目录 HEAD 变化并广播给其余共享设备。
 ///
 /// 由 [`RuntimeOps::flush_git_notices`] 在结算之后调用;节流到与 Node 一致的 5s
@@ -102,6 +237,10 @@ pub fn check_local_commits(ops: &RuntimeOps, config: &Config, now: i64) {
     if config.is_paused() {
         return;
     }
+    // 漂移台账自愈(机制二):结算时未落齐的文件内容到位后,在这里补一笔收敛提交。
+    // 刻意放在下方新提交检测**之前**:收敛提交是一笔本地新提交,下面的循环会把它
+    // 当作新 HEAD 正常广播给对端并对齐基线 —— 自愈自己不推基线,广播这一跳免了。
+    heal_deferred_mirror(ops, config);
     for folder in &config.shared_folders {
         let folder_id = folder.folder_id();
         if folder.is_paused() || blocked_by_identity(folder) {

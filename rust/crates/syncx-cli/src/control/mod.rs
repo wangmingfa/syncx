@@ -156,6 +156,12 @@ pub struct GitState {
     pub broadcast: HashMap<String, GitLedger>,
     /// 替别人中继的待回执台账。
     pub relay: HashMap<String, GitLedger>,
+    /// 镜像提交结算后「内容尚未落齐」的漂移台账:`folderId → 欠账`。
+    ///
+    /// 结算把通知的 changedFiles 按「工作树内容 vs 本机索引」拆分,未对齐的记入
+    /// 这里(见 [`GitDeferredMirror`]);`check_local_commits` 每拍复查,内容落齐即
+    /// 补一笔收敛提交。与配置里的 `gitDeferredMirror` 同值落盘,重启不丢。
+    pub deferred_mirror: HashMap<String, GitDeferredMirror>,
     /// 各目录的 HEAD 基线内存镜像。缺键 = 尚未从配置读取;
     /// 值为 `None` = 盘上没有基线(首次启用 / 不是仓库)。
     pub baseline: HashMap<String, Option<String>>,
@@ -190,6 +196,65 @@ pub struct GitLedger {
     pub targets: Vec<String>,
     /// 各目标「本地写成功却始终没回执」的重发次数。仅内存,重启归零。
     pub attempts: HashMap<String, u32>,
+}
+
+/// 镜像提交结算时「内容尚未落齐」文件的漂移台账(**仅本机使用,不进 wire、不跨
+/// 设备对齐**;与 Node `GitDeferredMirrorRecord` 同一份落盘契约,字段名不得改)。
+///
+/// 镜像提交按范围收敛只 stage 通知宣称的文件,而其中内容尚未与本机索引对齐的部分
+/// 不能一并定格(宁缺勿错,见 [`crate::git::work_tree_content_aligned`]);它们记入
+/// 本台账,由 `check_local_commits` 每拍的自愈(`heal_deferred_mirror`)在内容到齐后
+/// 补一笔收敛提交。落盘同 `git_relay_pending` / `git_broadcast_pending` 的「内存与
+/// 配置同值」口径:daemon 重启后台账还在,漂移文件不会因为重启而永远没人提交。
+#[derive(Debug, Clone, PartialEq)]
+pub struct GitDeferredMirror {
+    /// 来源通知的提交哈希(供收敛提交信息与日志)。
+    pub hash: String,
+    /// 来源通知的原始提交消息(供收敛提交信息与日志)。
+    pub message: String,
+    /// 尚未对齐、等待内容到齐后补提交的相对路径('/' 分隔,与索引同形)。
+    pub files: Vec<String>,
+}
+
+impl GitDeferredMirror {
+    /// 落盘记录(camelCase 契约,与 Node `gitDeferredMirror` 同形)。
+    pub fn to_record(&self) -> Value {
+        json!({
+            "hash": self.hash,
+            "message": self.message,
+            "files": self.files,
+        })
+    }
+
+    /// 从配置里的漂移台账还原(daemon 重启后自愈继续)。防御性读:字段不全或文件
+    /// 清单已空都视为无 —— 台账本来就是「等内容到齐」的暂记,残缺记录宁可不认,
+    /// 不能凭它对工作树乱下判断(配置可被手改)。
+    pub fn from_record(record: &Value) -> Option<Self> {
+        let hash = record
+            .get("hash")
+            .and_then(|v| v.as_str())
+            .filter(|v| !v.is_empty())?
+            .to_string();
+        let message = record.get("message")?.as_str()?.to_string();
+        let files: Vec<String> = record
+            .get("files")
+            .and_then(|v| v.as_array())
+            .map(|list| {
+                list.iter()
+                    .filter_map(|v| v.as_str())
+                    .filter(|v| !v.is_empty())
+                    .map(str::to_string)
+                    .collect()
+            })?;
+        if files.is_empty() {
+            return None;
+        }
+        Some(Self {
+            hash,
+            message,
+            files,
+        })
+    }
 }
 
 /// 自动提交失败原因。`ts` 供弹窗展示「多久以前失败的」。
@@ -771,11 +836,74 @@ impl RuntimeOps {
         if folder.git_strip_co_authored == Some(true) {
             message = strip_co_authored_lines(&message);
         }
+        // ── 机制一:结算前逐文件内容对齐(宁缺勿错)──
+        // 台账排空只证明「没有在途接收」,不证明「内容已经落齐」:对端镜像提交把
+        // 半途内容定格(消息对、内容错)的事故里,认领早已释放、结算闸门一路放行,
+        // 差的就是这一道内容比对。把 changed_files 拆成两份:工作树内容与本机索引
+        // 逐块一致的(或索引墓碑 + 盘上已删的)才进本次镜像提交;未对齐的不提交,
+        // 记入漂移台账(git_deferred_mirror),由 heal_deferred_mirror 在内容到齐后
+        // 补提交 —— 这些文件从此不在任何通知的 changed_files 里,不记台账就永久挂起。
+        // 旧版对端的通知没有文件清单(changed_files 为空),无从逐文件判定,保持
+        // 既有全量兜底不变。
+        let mut stage_files = notice.changed_files.clone();
+        let mut deferred_files: Vec<String> = Vec::new();
+        if !notice.changed_files.is_empty() {
+            let index = self.index_snapshot(folder_id).unwrap_or_default();
+            let lookup = |rel: &str| index.iter().find(|entry| entry.path == rel);
+            let mut aligned: Vec<String> = Vec::new();
+            for rel in &notice.changed_files {
+                if crate::git::work_tree_content_aligned(root, rel, lookup(rel)) {
+                    aligned.push(rel.clone());
+                } else {
+                    deferred_files.push(rel.clone());
+                }
+            }
+            stage_files = aligned;
+            if stage_files.is_empty() {
+                // 全都不对齐:一笔也不提交 —— 半途内容绝不能被定格;但通知照常结算 +
+                // 基线推进(沿用「干净工作树跳过提交但推进基线」的口径,通知本身不能
+                // 卡住),剩余文件交给漂移台账的自愈。
+                let preview: Vec<String> = deferred_files.iter().take(10).cloned().collect();
+                tracing::warn!(
+                    "git auto-commit settled without commit (no changed file content aligned with the local index): {folder_id} (from {}) \"{}\" — {} 个文件进漂移台账: {}{}",
+                    notice.from_device_id,
+                    notice.commit_message.lines().next().unwrap_or(""),
+                    deferred_files.len(),
+                    preview.join(", "),
+                    if deferred_files.len() > 10 { " …" } else { "" },
+                );
+                self.record_git_deferred_mirror(folder_id, &notice, &deferred_files);
+                if let Ok(mut state) = self.git_state.lock() {
+                    state.pending.remove(folder_id);
+                    state.attempts.remove(folder_id);
+                    state.retry_at.remove(folder_id);
+                    state.error.remove(folder_id);
+                    state.relay.remove(folder_id);
+                }
+                self.set_git_baseline(folder_id, crate::git::get_last_commit_hash(root));
+                self.notify_hub();
+                let mut out = serde_json::Map::new();
+                out.insert("ok".into(), json!(true));
+                out.insert("attempts".into(), json!(0));
+                return Ok(Some(Value::Object(out)));
+            }
+            if !deferred_files.is_empty() {
+                let preview: Vec<String> = deferred_files.iter().take(10).cloned().collect();
+                tracing::info!(
+                    "git mirror commit narrowed to content-aligned files: {folder_id} — committing {}, deferring {} to the drift ledger ({}{})",
+                    stage_files.len(),
+                    deferred_files.len(),
+                    preview.join(", "),
+                    if deferred_files.len() > 10 { " …" } else { "" },
+                );
+            }
+        }
         // 范围收敛:只 stage 通知宣称的文件 —— 工作树里用户并发的未提交改动
         // 不属于这笔镜像提交,绝不能被 add -A 顺手打包(与 Node 55b1c35 同根治)。
         // 旧对端的通知可能没有清单(changed_files 为空),auto_commit 内部会退回
-        // 全量 SCRATCH 排除兜底。
-        let outcome = crate::git::auto_commit(root, &message, Some(&notice.changed_files));
+        // 全量 SCRATCH 排除兜底;机制一再此之上再按内容对齐收窄(见上),内容未
+        // 落齐的文件绝不定格进提交。
+        let outcome = crate::git::auto_commit(root, &message, Some(&stage_files));
         let mut state = match self.git_state.lock() {
             Ok(state) => state,
             Err(_) => return Err(OpError::Failed("提交台账不可用".to_string())),
@@ -802,6 +930,41 @@ impl RuntimeOps {
             // 真的落成了一笔镜像提交,才把通知中继给本机其余对端 ——
             // 链路不成环正是因为它每经一台真落了提交的设备才多走一跳。
             git_sync::relay_notice(self, folder_id, &notice);
+            // 未对齐的文件进漂移台账(提交失败则不动台账:通知还挂着,下轮结算会
+            // 重新判定)。
+            if !deferred_files.is_empty() {
+                self.record_git_deferred_mirror(folder_id, &notice, &deferred_files);
+            }
+            // 本笔镜像提交已把「此前欠着、这次对齐了」的文件一并提交:从台账摘除,
+            // 否则自愈会对着 HEAD 里已有的内容再补一笔空收敛提交。stage_files 为空
+            // 只发生在「旧对端无清单走全量兜底」,无从对应台账文件,不摘。
+            if !stage_files.is_empty() {
+                let ledger = self
+                    .git_state
+                    .lock()
+                    .ok()
+                    .and_then(|state| state.deferred_mirror.get(folder_id).cloned());
+                if let Some(ledger) = ledger {
+                    let remaining: Vec<String> = ledger
+                        .files
+                        .iter()
+                        .filter(|rel| !stage_files.contains(rel))
+                        .cloned()
+                        .collect();
+                    if remaining.len() != ledger.files.len() {
+                        let next = if remaining.is_empty() {
+                            None
+                        } else {
+                            Some(GitDeferredMirror {
+                                hash: ledger.hash,
+                                message: ledger.message,
+                                files: remaining,
+                            })
+                        };
+                        self.set_git_deferred_mirror(folder_id, next);
+                    }
+                }
+            }
             let mut out = serde_json::Map::new();
             out.insert("ok".into(), json!(true));
             if let Some(hash) = &outcome.hash {
@@ -1003,7 +1166,78 @@ impl RuntimeOps {
         });
     }
 
-    /// 从配置里把两份待投递台账还原进内存(热重载与启动时各调一次)。
+    /// 更新某目录的漂移台账并落盘(与 [`Self::set_git_ledger`] 同一套「内存与配置
+    /// 同值」不变式;`None` = 台账已收敛清空)。
+    pub fn set_git_deferred_mirror(&self, folder_id: &str, next: Option<GitDeferredMirror>) {
+        {
+            let mut state = match self.git_state.lock() {
+                Ok(state) => state,
+                Err(_) => return,
+            };
+            match &next {
+                Some(record) => {
+                    state.deferred_mirror.insert(folder_id.to_string(), record.clone());
+                }
+                None => {
+                    state.deferred_mirror.remove(folder_id);
+                }
+            }
+        }
+        let record = next.map(|ledger| ledger.to_record());
+        let _ = self.store.mutate(|config: &mut Config| {
+            let Some(folder) = config
+                .shared_folders
+                .iter_mut()
+                .find(|folder| folder.folder_id() == folder_id)
+            else {
+                return Ok::<_, std::io::Error>(false);
+            };
+            if folder.git_deferred_mirror == record {
+                return Ok(false);
+            }
+            folder.git_deferred_mirror = record;
+            Ok(true)
+        });
+    }
+
+    /// 把结算时未对齐的文件并入该目录的漂移台账。多笔通知的欠账合并去重(files 取
+    /// 并集,旧账在前),hash/message 取最新一笔 —— 台账只描述「这些内容还没提交」,
+    /// 收敛提交的信息引用最新的来源即可。
+    pub fn record_git_deferred_mirror(
+        &self,
+        folder_id: &str,
+        notice: &GitNotice,
+        files: &[String],
+    ) {
+        let prev = self
+            .git_state
+            .lock()
+            .ok()
+            .and_then(|state| state.deferred_mirror.get(folder_id).cloned());
+        let mut merged: Vec<String> = Vec::new();
+        if let Some(prev) = &prev {
+            for rel in &prev.files {
+                if !merged.contains(rel) {
+                    merged.push(rel.clone());
+                }
+            }
+        }
+        for rel in files {
+            if !merged.contains(rel) {
+                merged.push(rel.clone());
+            }
+        }
+        self.set_git_deferred_mirror(
+            folder_id,
+            Some(GitDeferredMirror {
+                hash: notice.commit_hash.clone(),
+                message: notice.commit_message.clone(),
+                files: merged,
+            }),
+        );
+    }
+
+    /// 从配置里把两份待投递台账与漂移台账还原进内存(热重载与启动时各调一次)。
     pub fn restore_git_ledgers(&self, config: &Config) {
         let mut state = match self.git_state.lock() {
             Ok(state) => state,
@@ -1011,6 +1245,7 @@ impl RuntimeOps {
         };
         state.broadcast.clear();
         state.relay.clear();
+        state.deferred_mirror.clear();
         state.baseline.clear();
         for folder in &config.shared_folders {
             let folder_id = folder.folder_id();
@@ -1037,13 +1272,20 @@ impl RuntimeOps {
                 .and_then(|record| GitNotice::from_record(&folder_id, record))
             {
                 state.relay.insert(
-                    folder_id,
+                    folder_id.clone(),
                     GitLedger {
                         notice,
                         targets,
                         attempts: HashMap::new(),
                     },
                 );
+            }
+            if let Some(record) = folder
+                .git_deferred_mirror
+                .as_ref()
+                .and_then(GitDeferredMirror::from_record)
+            {
+                state.deferred_mirror.insert(folder_id, record);
             }
         }
     }
@@ -1797,5 +2039,455 @@ mod tests {
             strip_co_authored_lines(&msg.mirror_message()),
             "第三笔:收尾\n\n第一笔"
         );
+    }
+
+    /* ================= 结算内容对齐 + 漂移自愈(集成口径)=================
+     *
+     * 2026-11-04 实测事故的契约(与 Node `git-sync-drain.test.ts` 新增的 6 条
+     * 同语义):结算把 changedFiles 按「工作树内容 vs 本机索引」拆分,只提交对齐的;
+     * 未对齐的进漂移台账,由每轮巡检自愈补一笔收敛提交。测试走真仓库 + 真 actor:
+     * settle 与 check_local_commits 的完整闸门链都在路径上,单测替不了。
+     */
+
+    use std::process::Command as TestCommand;
+
+    use syncx_core::blockstore::{hash_block, split_ranges};
+    use syncx_core::plan::IndexEntry;
+    use syncx_core::version::VersionVector;
+    use syncx_daemon::actor::{spawn_actor, SessionActor};
+
+    /// 一个测试结束才删除的临时根目录(配置目录 + git 仓库都在里面)。
+    struct Harness {
+        root: PathBuf,
+        share: PathBuf,
+        ops: Arc<RuntimeOps>,
+    }
+
+    impl Drop for Harness {
+        fn drop(&mut self) {
+            // actor 句柄随 ops 一起丢弃,通道关闭后 actor 线程自行退出
+            let _ = std::fs::remove_dir_all(&self.root);
+        }
+    }
+
+    fn run_git(dir: &Path, args: &[&str]) -> bool {
+        TestCommand::new("git")
+            .args(args)
+            .current_dir(dir)
+            .status()
+            .map(|status| status.success())
+            .unwrap_or(false)
+    }
+
+    fn build_ops(root: &Path) -> Arc<RuntimeOps> {
+        let (shutdown_tx, _) = tokio::sync::mpsc::unbounded_channel();
+        let (dial_tx, _) = tokio::sync::mpsc::unbounded_channel();
+        let secret = [7u8; 32];
+        Arc::new(RuntimeOps {
+            identity: Arc::new(DeviceIdentity::from_secret_bytes(&secret)),
+            store: ConfigStore::new(root.join("config.json")),
+            config_path: root.join("config.json"),
+            config_dir: root.to_path_buf(),
+            device_id: "DEV-TEST".to_string(),
+            version: "test".to_string(),
+            dev_mode: false,
+            peer_port: None,
+            actor: spawn_actor(move |snapshot| SessionActor::new("DEV-TEST", snapshot)),
+            hub: None,
+            terminal: TerminalHub::new(),
+            started_at: Instant::now(),
+            sessions: Mutex::new(HashMap::new()),
+            peer_info: Mutex::new(HashMap::new()),
+            peer_urls: Mutex::new(HashMap::new()),
+            remote_folders: Mutex::new(HashMap::new()),
+            remote_pending: Mutex::new(HashMap::new()),
+            pending_snapshots: Mutex::new(HashMap::new()),
+            pending_files: Mutex::new(HashMap::new()),
+            pending_writes: Mutex::new(HashMap::new()),
+            pending_binaries: Mutex::new(HashMap::new()),
+            shutdown_tx,
+            dial_tx,
+            git_push_running: AtomicBool::new(false),
+            git_rewrite_running: AtomicBool::new(false),
+            git_state: Mutex::new(GitState::default()),
+        })
+    }
+
+    /// 建带初始提交的真仓库 + full 模式的目录,注册进 actor(**不发 Scan**:测试
+    /// 自管索引条目,后台扫描会与注入竞态)。
+    fn boot(mode: &str) -> Harness {
+        let root = std::env::temp_dir().join(format!(
+            "syncx-settle-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let share = root.join("share");
+        std::fs::create_dir_all(&share).unwrap();
+        let git_ok = run_git(&share, &["init", "-q", "-b", "main"]);
+        if !git_ok {
+            // 没有 git 的环境:直接失败(上层 CI 都有 git;与既有 git.rs 测试的
+            // 跳过口径不同,这里闸门链依赖真提交,静默跳过会掩盖回归)
+            panic!("测试需要 git 可用");
+        }
+        for (key, value) in [("user.email", "t@example.com"), ("user.name", "T")] {
+            run_git(&share, &["config", key, value]);
+        }
+        std::fs::write(share.join("seed.txt"), "seed\n").unwrap();
+        run_git(&share, &["add", "-A"]);
+        run_git(&share, &["commit", "-q", "-m", "init"]);
+
+        let store = ConfigStore::new(root.join("config.json"));
+        mutate::add_folder(&store, &share.to_string_lossy(), &[], Some("main"), false)
+            .map_err(|e| e.to_string())
+            .unwrap();
+        mutate::set_folder_git_sync(&store, "main", mode)
+            .map_err(|e| e.to_string())
+            .unwrap();
+
+        let ops = build_ops(&root);
+        let config = ops.store.load();
+        let specs = assembly::folder_specs(&ops, &config);
+        assert!(ops.actor.send(Cmd::Reload { specs }));
+        // 屏障:actor 按序处理命令,这条等到回执即 Reload 已生效
+        assert!(ops.index_snapshot("main").is_some());
+        Harness { root, share, ops }
+    }
+
+    impl Harness {
+        fn git_out(&self, args: &[&str]) -> String {
+            let out = TestCommand::new("git")
+                .args(args)
+                .current_dir(&self.share)
+                .output()
+                .unwrap();
+            String::from_utf8_lossy(&out.stdout).to_string()
+        }
+        fn commit_count(&self) -> usize {
+            self.git_out(&["rev-list", "--count", "HEAD"]).trim().parse().unwrap()
+        }
+        fn head_files(&self) -> Vec<String> {
+            self.git_out(&["show", "--name-only", "--format="])
+                .lines()
+                .map(str::trim)
+                .filter(|line| !line.is_empty())
+                .map(str::to_string)
+                .collect()
+        }
+        fn head_subject(&self) -> String {
+            self.git_out(&["log", "-1", "--format=%s"]).trim().to_string()
+        }
+        fn head_hash(&self) -> String {
+            self.git_out(&["rev-parse", "HEAD"]).trim().to_string()
+        }
+
+        /// 只写盘、不动索引:模拟「内容尚未落齐」的半途工作树。
+        fn write_file(&self, rel: &str, content: &str) {
+            std::fs::write(self.share.join(rel), content).unwrap();
+        }
+
+        /// 注入本机索引条目(块哈希与 content 逐块一致),不写盘 —— 与 Node 测试
+        /// 的 `folder.localIndex.set` 同形。真实链路里接收侧落地即写索引,两者必然
+        /// 同时在;测试里拆开写才能表达「对端内容已宣告、本机字节未落齐」。
+        fn inject_entry(&self, rel: &str, content: &str) {
+            let data = content.as_bytes();
+            let blocks = split_ranges(data.len())
+                .iter()
+                .map(|(off, len)| hash_block(&data[(*off)..(*off + len)]))
+                .collect();
+            let entry = syncx_daemon::StoredEntry::new(
+                IndexEntry {
+                    path: rel.to_string(),
+                    version: VersionVector::new(),
+                    size: data.len() as u64,
+                    deleted: false,
+                    blocks,
+                    cdh: None,
+                    clens: None,
+                },
+                None,
+                false,
+            );
+            assert!(
+                self.ops
+                    .actor
+                    .send(Cmd::StoreEntry { folder: "main".to_string(), entry }),
+                "actor 通道应存活"
+            );
+        }
+
+        /// 模拟「内容已经数据面落地」:写盘 + 写本机索引条目(Node 测试的 `land`)。
+        fn land(&self, rel: &str, content: &str) {
+            self.write_file(rel, content);
+            self.inject_entry(rel, content);
+        }
+
+        fn notify(&self, hash: &str, message: &str, changed_files: Vec<String>) {
+            self.ops.note_git_notice(
+                "main",
+                GitNotice {
+                    from_device_id: "PEER000001".to_string(),
+                    commit_hash: hash.to_string(),
+                    commit_message: message.to_string(),
+                    changed_files,
+                    diff_stat: None,
+                    commit_subjects: None,
+                    parent_hash: "p".repeat(40),
+                    via_device_id: None,
+                },
+            );
+        }
+
+        fn settle(&self) -> Option<Value> {
+            self.ops
+                .settle_git_notice("main", &self.share)
+                .unwrap_or_else(|error| panic!("settle 不应报错:{error}"))
+        }
+
+        fn pending_notice(&self) -> Option<GitNotice> {
+            self.ops
+                .git_state
+                .lock()
+                .unwrap()
+                .pending
+                .get("main")
+                .cloned()
+        }
+
+        fn ledger(&self) -> Option<GitDeferredMirror> {
+            self.ops
+                .git_state
+                .lock()
+                .unwrap()
+                .deferred_mirror
+                .get("main")
+                .cloned()
+        }
+
+        /// 从磁盘配置读漂移台账(验证「内存与配置同值」不变量)。
+        fn ledger_on_disk(&self) -> Option<Value> {
+            let raw = std::fs::read_to_string(self.root.join("config.json")).unwrap();
+            let value: Value = serde_json::from_str(&raw).unwrap();
+            value
+                .get("sharedFolders")
+                .and_then(|folders| folders.as_array())
+                .and_then(|folders| folders.first())
+                .and_then(|folder| folder.get("gitDeferredMirror"))
+                .cloned()
+        }
+
+        /// 强制过 5s 节流后跑一轮巡检(自愈挂载点 + 新提交检测)。
+        fn run_git_check(&self) {
+            self.ops.git_state.lock().unwrap().checked_at = 0;
+            let config = self.ops.store.load();
+            git_sync::check_local_commits(
+                &self.ops,
+                &config,
+                syncx_api::auth::now_ms(),
+            );
+        }
+    }
+
+    #[test]
+    fn settle_commits_only_aligned_files_and_defers_the_rest() {
+        let h = boot("full");
+        // a.txt 已落齐;b.txt 半途(索引宣告 'final-b',盘上还是 'half-way')
+        h.land("a.txt", "landed-a");
+        h.write_file("b.txt", "half-way");
+        h.inject_entry("b.txt", "final-b");
+
+        h.notify(
+            &"a".repeat(40),
+            "feat: 半途事故",
+            vec!["a.txt".to_string(), "b.txt".to_string()],
+        );
+        let out = h.settle().expect("混合批次照常结算");
+        assert_eq!(out["ok"], json!(true));
+
+        // 镜像提交只含 a.txt;b.txt 没有被定格进去
+        assert_eq!(h.commit_count(), 2, "初始提交 + 只含 a.txt 的镜像提交");
+        assert_eq!(h.head_files(), vec!["a.txt".to_string()]);
+        // 通知照常结算、基线推进
+        assert!(h.pending_notice().is_none());
+        assert_eq!(
+            h.ops.git_baseline("main").as_deref(),
+            Some(h.head_hash().as_str())
+        );
+        // b.txt 进漂移台账(内存与磁盘同值),信息来自来源通知
+        let ledger = h.ledger().expect("未对齐文件应进台账");
+        assert_eq!(ledger.hash, "a".repeat(40));
+        assert_eq!(ledger.message, "feat: 半途事故");
+        assert_eq!(ledger.files, vec!["b.txt".to_string()]);
+        let disk = h.ledger_on_disk().expect("台账应落盘");
+        assert_eq!(disk["files"][0], json!("b.txt"));
+        assert_eq!(disk["hash"], json!("a".repeat(40)));
+    }
+
+    #[test]
+    fn settle_without_any_alignment_commits_nothing_but_still_settles() {
+        let h = boot("full");
+        let base = h.head_hash();
+        // 两份内容都半途:盘上字节与索引宣告不符
+        h.write_file("a.txt", "half-a");
+        h.inject_entry("a.txt", "final-a");
+        h.write_file("b.txt", "half-b");
+        h.inject_entry("b.txt", "final-b");
+
+        h.notify(
+            &"b".repeat(40),
+            "feat: 全半途",
+            vec!["a.txt".to_string(), "b.txt".to_string()],
+        );
+        let out = h.settle().expect("通知本身不能卡住");
+        assert_eq!(out["ok"], json!(true));
+
+        // 宁缺勿错:一笔也不提交;但通知照常结算、基线推进到当前 HEAD
+        assert_eq!(h.commit_count(), 1);
+        assert!(h.pending_notice().is_none());
+        assert_eq!(h.ops.git_baseline("main").as_deref(), Some(base.as_str()));
+        // 台账收全
+        let ledger = h.ledger().unwrap();
+        assert_eq!(ledger.files, vec!["a.txt".to_string(), "b.txt".to_string()]);
+        assert_eq!(ledger.hash, "b".repeat(40));
+        let disk = h.ledger_on_disk().unwrap();
+        assert_eq!(disk["files"], json!(["a.txt", "b.txt"]));
+    }
+
+    #[test]
+    fn heal_commits_when_content_lands_and_keeps_the_rest() {
+        let h = boot("full");
+        // 先欠 b.txt 的账(内容半途 → 结算不提交但照常结算)
+        h.write_file("b.txt", "half-way");
+        h.inject_entry("b.txt", "final-b");
+        h.notify(
+            &"c".repeat(40),
+            "feat: 台账里的欠账\n\n正文第二行",
+            vec!["b.txt".to_string()],
+        );
+        h.settle();
+        assert_eq!(h.commit_count(), 1);
+        // 再欠 c.txt:两笔通知的欠账合并(files 取并集),hash/message 取最新一笔
+        h.write_file("c.txt", "half-c");
+        h.inject_entry("c.txt", "final-c");
+        h.notify(
+            &"d".repeat(40),
+            "feat: 第二笔欠账",
+            vec!["c.txt".to_string()],
+        );
+        h.settle();
+        let ledger = h.ledger().unwrap();
+        assert_eq!(
+            ledger.files,
+            vec!["b.txt".to_string(), "c.txt".to_string()]
+        );
+        assert_eq!(ledger.hash, "d".repeat(40));
+
+        // b.txt 内容落齐:下一拍产生只含 b.txt 的收敛提交,剩余 c.txt 保留。
+        // 台账合并后 hash/message 取最新一笔(第二笔欠账),收敛消息引用它。
+        h.write_file("b.txt", "final-b");
+        h.run_git_check();
+        assert_eq!(h.commit_count(), 2);
+        assert_eq!(
+            h.head_subject(),
+            format!(
+                "chore: 收敛镜像提交后到达的内容 ({} feat: 第二笔欠账)",
+                "d".repeat(8)
+            )
+        );
+        assert_eq!(h.head_files(), vec!["b.txt".to_string()]);
+        let ledger = h.ledger().expect("未落齐的 c.txt 应保留在台账");
+        assert_eq!(ledger.files, vec!["c.txt".to_string()]);
+        assert_eq!(ledger.hash, "d".repeat(40), "剩余欠账保留原来源信息");
+        // 收敛提交是一笔本地新提交:基线推进,交给同轮新提交检测正常广播
+        assert_eq!(
+            h.ops.git_baseline("main").as_deref(),
+            Some(h.head_hash().as_str())
+        );
+
+        // c.txt 也落齐:再一拍清空台账(内存与磁盘同值)
+        h.write_file("c.txt", "final-c");
+        h.run_git_check();
+        assert_eq!(h.commit_count(), 3);
+        assert!(h.ledger().is_none(), "收敛成功应清空台账");
+        assert!(h.ledger_on_disk().is_none(), "磁盘同值");
+    }
+
+    #[test]
+    fn deferred_mirror_persists_across_restart() {
+        let h = boot("full");
+        h.write_file("b.txt", "half-way");
+        h.inject_entry("b.txt", "final-b");
+        h.notify(
+            &"e".repeat(40),
+            "feat: 重启前的欠账",
+            vec!["b.txt".to_string()],
+        );
+        h.settle();
+        assert!(h.ledger().is_some());
+
+        // 「重启」:同一份配置目录上新建 ops 并 restore —— 台账还在,自愈继续。
+        // 与既有 ledger 持久化同一条不变式:内存与 config.json 同值。
+        let ops2 = build_ops(&h.root);
+        ops2.restore_git_ledgers(&ops2.store.load());
+        let restored = ops2
+            .git_state
+            .lock()
+            .unwrap()
+            .deferred_mirror
+            .get("main")
+            .cloned()
+            .expect("重启后台账应从配置还原");
+        assert_eq!(restored.hash, "e".repeat(40));
+        assert_eq!(restored.message, "feat: 重启前的欠账");
+        assert_eq!(restored.files, vec!["b.txt".to_string()]);
+    }
+
+    #[test]
+    fn deferred_mirror_record_round_trips_and_defends() {
+        let record = GitDeferredMirror {
+            hash: "h".repeat(40),
+            message: "feat: x".to_string(),
+            files: vec!["a".to_string(), "b".to_string()],
+        };
+        let value = record.to_record();
+        assert_eq!(value["hash"], json!("h".repeat(40)));
+        assert_eq!(value["files"][1], json!("b"));
+        let restored = GitDeferredMirror::from_record(&value).unwrap();
+        assert_eq!(restored, record);
+
+        // 防御性读:hash 空 / message 缺失 / files 空一律视为无(残缺记录宁可不认)
+        let mut bad = value.clone();
+        bad["hash"] = json!("");
+        assert!(GitDeferredMirror::from_record(&bad).is_none());
+        let mut bad = value.clone();
+        bad.as_object_mut().unwrap().remove("message");
+        assert!(GitDeferredMirror::from_record(&bad).is_none());
+        let mut bad = value.clone();
+        bad["files"] = json!([]);
+        assert!(GitDeferredMirror::from_record(&bad).is_none());
+        let mut bad = value.clone();
+        bad["files"] = json!([""]);
+        assert!(GitDeferredMirror::from_record(&bad).is_none());
+    }
+
+    #[test]
+    fn truncate_git_subject_caps_at_code_points() {
+        // 两侧 trim:收敛消息里引用的是干净的首行
+        assert_eq!(
+            git_sync::truncate_git_subject("  feat: 短主题  ", 64),
+            "feat: 短主题"
+        );
+        let fits = format!("feat: {}", "长".repeat(58));
+        assert_eq!(git_sync::truncate_git_subject(&fits, 64), fits);
+        // 按码点截:64 个码点处一刀,接省略号;多字节字符不劈半
+        let over = format!("feat: {}", "字".repeat(70));
+        let head: String = over.chars().take(64).collect();
+        assert_eq!(
+            git_sync::truncate_git_subject(&over, 64),
+            format!("{head}…")
+        );
+        assert_eq!(git_sync::truncate_git_subject("", 64), "");
     }
 }

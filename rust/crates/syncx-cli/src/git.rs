@@ -492,6 +492,51 @@ pub fn has_uncommitted_changes(folder_path: &Path) -> bool {
     }
 }
 
+/// 工作树内容是否与本机索引条目「对齐」—— 镜像提交结算的逐文件准入判据。
+///
+/// 事故还原(2026-11-04,契约动机):本地提交被广播后遭改写(reset + 重做),对端
+/// 13 秒内就镜像了旧通知(范围收敛:只 stage changedFiles),此刻部分文件的内容
+/// 尚未经数据面落齐 → 对端把半途内容定格成一笔提交(消息对、内容错);随后本地
+/// revert 的内容又同步过去 → 对端工作树 ≠ HEAD,而这些文件再也不在任何通知的
+/// changedFiles 里(范围收敛拒绝扫荡)→ 残留 17 个脏文件永久挂起,无人再提交。
+///
+/// 解法是「宁缺勿错」:结算前逐文件问一遍「盘上字节是否就是索引宣告的那份内容」,
+/// 对齐的才准进本次镜像提交;未对齐(半途/在途/被改写)的不提交,交漂移台账
+/// (见 `control::GitDeferredMirror`)等内容到齐后自愈补提交。判定必须用内容本身,
+/// 不看 mtime —— 定格半途内容的代价是永久性历史污染,比对一次块哈希的代价只是
+/// 几毫秒 IO。
+///
+/// 对齐口径(与扫描器 contentChanged / drift 哨兵共用 `blocks_match_on_disk` 同一条
+/// 「块哈希还代表不代表盘上字节」的判定):
+///  - 索引无条目(从未收到过该路径的内容)→ 未对齐;
+///  - 索引是墓碑:盘上文件也缺失才算对齐(墓碑/删除语义);盘上还在 = 删除尚未
+///    落地,此刻提交会把「该删未删」定格;
+///  - 索引是活条目:盘上须有实体文件(按需同步占位条目盘上无文件 → 未对齐),
+///    且大小一致、按 `BLOCK_SIZE` 切块哈希逐一相等(首块不符立刻短路,不整读)。
+pub fn work_tree_content_aligned(
+    folder_path: &Path,
+    rel_path: &str,
+    entry: Option<&syncx_daemon::StoredEntry>,
+) -> bool {
+    let Some(entry) = entry else {
+        return false;
+    };
+    let abs_path = folder_path.join(rel_path);
+    if entry.deleted {
+        return !abs_path.exists();
+    }
+    let Ok(meta) = std::fs::metadata(&abs_path) else {
+        return false; // 盘上没有实体文件(含占位条目)→ 未对齐
+    };
+    if !meta.is_file() {
+        return false;
+    }
+    if meta.len() != entry.size {
+        return false; // 大小先短路:省掉整文件切块哈希
+    }
+    syncx_daemon::scanner::blocks_match_on_disk(&abs_path, &entry.blocks)
+}
+
 /// 工作区一条未提交变更。
 #[derive(Debug, Clone, PartialEq)]
 pub struct GitChangeEntry {
@@ -1712,5 +1757,113 @@ mod tests {
         assert!(!again.rewrote);
 
         let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /* ---------------- 结算内容对齐(workTreeContentAligned)---------------- */
+
+    use syncx_core::blockstore::{hash_block, split_ranges};
+    use syncx_core::plan::IndexEntry;
+    use syncx_core::version::VersionVector;
+
+    /// 按内容构造活条目(块哈希与 content 逐块一致),供「索引声明的内容」与盘上
+    /// 字节比对 —— 与 Node 侧测试的 `entryFor` 同形。
+    fn entry_for(rel: &str, content: &str) -> syncx_daemon::StoredEntry {
+        let data = content.as_bytes();
+        let blocks = split_ranges(data.len())
+            .iter()
+            .map(|(off, len)| hash_block(&data[(*off)..(*off + len)]))
+            .collect();
+        syncx_daemon::StoredEntry::new(
+            IndexEntry {
+                path: rel.to_string(),
+                version: VersionVector::new(),
+                size: data.len() as u64,
+                deleted: false,
+                blocks,
+                cdh: None,
+                clens: None,
+            },
+            None,
+            false,
+        )
+    }
+
+    /// 墓碑条目:索引已标记删除、块列表为空(与接收侧落墓碑同形)。
+    fn tombstone_entry(rel: &str) -> syncx_daemon::StoredEntry {
+        syncx_daemon::StoredEntry::new(
+            IndexEntry {
+                path: rel.to_string(),
+                version: VersionVector::new(),
+                size: 0,
+                deleted: true,
+                blocks: Vec::new(),
+                cdh: None,
+                clens: None,
+            },
+            None,
+            false,
+        )
+    }
+
+    #[test]
+    fn work_tree_alignment_judges_by_content_not_mtime() {
+        let dir = std::env::temp_dir().join(format!(
+            "syncx-align-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+
+        // 落齐:盘上字节与索引逐块一致 → 对齐
+        std::fs::write(dir.join("a.txt"), "landed-a").unwrap();
+        assert!(work_tree_content_aligned(
+            &dir,
+            "a.txt",
+            Some(&entry_for("a.txt", "landed-a"))
+        ));
+
+        // 半途:索引宣告 'final-b',盘上还是 'half-way' → 未对齐(消息对内容错的
+        // 事故形态;大小不同走短路,逐块比对用于同长的不同内容)
+        std::fs::write(dir.join("b.txt"), "half-way").unwrap();
+        assert!(!work_tree_content_aligned(
+            &dir,
+            "b.txt",
+            Some(&entry_for("b.txt", "final-b"))
+        ));
+        // 同长度不同内容:必须真的逐块哈希,大小短路兜不住
+        std::fs::write(dir.join("b2.txt"), "aaaa").unwrap();
+        assert!(!work_tree_content_aligned(
+            &dir,
+            "b2.txt",
+            Some(&entry_for("b2.txt", "aaab"))
+        ));
+
+        // 墓碑 + 盘上缺失 = 对齐(删除语义);墓碑 + 盘上还在 = 删除尚未落地,未对齐
+        assert!(work_tree_content_aligned(
+            &dir,
+            "missing.txt",
+            Some(&tombstone_entry("missing.txt"))
+        ));
+        std::fs::write(dir.join("still-there.txt"), "x").unwrap();
+        assert!(!work_tree_content_aligned(
+            &dir,
+            "still-there.txt",
+            Some(&tombstone_entry("still-there.txt"))
+        ));
+
+        // 索引无条目(从未收到过该路径的内容)→ 未对齐
+        std::fs::write(dir.join("c.txt"), "anything").unwrap();
+        assert!(!work_tree_content_aligned(&dir, "c.txt", None));
+        // 盘上根本没有文件(按需同步占位条目的形态)→ 未对齐
+        assert!(!work_tree_content_aligned(
+            &dir,
+            "ghost.txt",
+            Some(&entry_for("ghost.txt", "never landed"))
+        ));
+
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

@@ -432,7 +432,8 @@ pub fn set_folder_schedule(
 }
 
 /// 设置 git 提交同步模式。`off` 存成 `None` 而不是字面量 `"off"`,与「从未设置过」
-/// 保持同一形态;同时清空上次 HEAD 基线与两份待投递台账,改模式一律按「重新启用」处理。
+/// 保持同一形态;同时清空上次 HEAD 基线、两份待投递台账与漂移台账,改模式一律按
+/// 「重新启用」处理。
 pub fn set_folder_git_sync(store: &ConfigStore, folder_id: &str, mode: &str) -> MutateResult<()> {
     if !matches!(mode, "off" | "send" | "receive" | "full") {
         return invalid(format!("git 同步模式应为 off / send / receive / full:「{mode}」"));
@@ -447,6 +448,9 @@ pub fn set_folder_git_sync(store: &ConfigStore, folder_id: &str, mode: &str) -> 
         folder.git_last_commit_hash = None;
         folder.git_relay_pending = None;
         folder.git_broadcast_pending = None;
+        // 漂移台账一并清除:改模式一律按「重新启用」处理,旧欠账不作数
+        // (与 Node setFolderGitSync 清 gitDeferredMirror 同口径)。
+        folder.git_deferred_mirror = None;
         Ok(())
     })
 }
