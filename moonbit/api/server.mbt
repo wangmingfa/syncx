@@ -127,6 +127,26 @@ pub fn parse_lan_addresses(text : String) -> Array[String] {
 }
 
 ///|
+/// 本机局域网 IPv4 列表(C FFI getifaddrs → JSON 解析的对外包装)。cli 启动
+/// 横幅的地址列表与 /api/status.localAddresses 共用同一取数口径,勿复制 C 侧。
+pub fn lan_addresses() -> Array[String] {
+  parse_lan_addresses(c_status_lan_addresses())
+}
+  let parsed : Json? = Some(@json.parse(text)) catch { _ => None }
+  let addresses : Array[String] = []
+  match parsed {
+    Some(Array(items)) =>
+      for item in items {
+        if item is String(addr) {
+          addresses.push(addr)
+        }
+      }
+    _ => ()
+  }
+  addresses
+}
+
+///|
 /// `/api/status.settings` 全局设置段(设置弹窗读取;键名与 config.json 顶层
 /// 字段逐字一致,camelCase 对齐 Node 的 GlobalSettingsStatus)。本里程碑只
 /// 透出 fsWatch 两键,其余全局设置随各自里程碑补齐;字段缺省不上线与既有
