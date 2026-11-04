@@ -178,6 +178,48 @@ async test "自动提交:脏树落一笔,干净树跳过" {
 }
 
 ///|
+/// 跑一条 git 命令拿输出(测试夹具;git 拉不起来时按空输出降级)。
+async fn git_out(cwd : String, args : Array[String]) -> String {
+  let (_, out, _) : (Int32, String, String) = @daemon.run_git("git", cwd, args) catch {
+    _ => (1, "", "")
+  }
+  out
+}
+
+///|
+/// 范围收敛(55b1c35 契约):changed_files 精确 stage —— 通知外的用户并发
+/// 改动绝不被镜像提交打包带走(根治 2026-11-04 回声吞变更事故)。
+async test "auto_commit:changed_files 精确 stage,通知外改动不被吞" {
+  let repo = fresh_repo("scope")
+  commit_file(repo, "a.txt", "v1", "init")
+  commit_file(repo, "b.txt", "v1", "init-b")
+  // 两处脏改动 + 一个用户新文件:只有 a.txt 在通知清单里,其余是用户并发改动
+  @fs.write_file("\{repo}/a.txt", "v2")
+  @fs.write_file("\{repo}/b.txt", "v2-user")
+  @fs.write_file("\{repo}/c-new.txt", "user-new")
+  @fs.write_file("\{repo}/c-new.txt.syncx-tmp", "in-flight")
+  let r = @daemon.auto_commit(repo, "syncx: 镜像 a", changed_files=["a.txt"])
+  assert_true(r.success)
+  assert_false(r.skipped)
+  // 提交内容 = 通知清单:a.txt 进了,其余没被顺手打包
+  let names = git_out(repo, ["show", "--name-only", "--format=", "HEAD"])
+  assert_true(names.contains("a.txt"))
+  assert_false(names.contains("b.txt"))
+  assert_false(names.contains("c-new.txt"))
+  // 工作树仍脏:通知外的改动原样保留(a.txt 已提交、不再出现在 status)
+  assert_true(@daemon.has_uncommitted_changes(repo))
+  let status = git_out(repo, ["status", "--porcelain"])
+  assert_true(status.contains("b.txt"))
+  assert_true(status.contains("c-new.txt"))
+  assert_false(status.contains("a.txt"))
+  // 空清单(旧对端没给清单)退回全量兜底:剩余变更收进一笔
+  let r2 = @daemon.auto_commit(repo, "syncx: 兜底", changed_files=[])
+  assert_true(r2.success)
+  assert_false(@daemon.has_uncommitted_changes(repo))
+  assert_true(@fs.exists("\{repo}/c-new.txt.syncx-tmp")) // 在途中间态仍不入库
+}
+
+///|
 async test "自动提交:非仓库目录降级为跳过" {
   let dir = git_tmp_dir("notrepo")
   let r = @daemon.auto_commit_if_dirty(dir, "msg")

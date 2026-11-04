@@ -5,6 +5,8 @@ import {
   "moonbitlang/core/json",
   "wangmingfa/syncx/api",
   "wangmingfa/syncx/core",
+  "wangmingfa/syncx/daemon",
+  "wangmingfa/syncx/net",
 }
 
 // Values
@@ -22,13 +24,25 @@ pub const DEFAULT_UPGRADE_TAG : String = "latest"
 
 pub const GITHUB_REPO : String = "wangmingfa/syncx"
 
+pub const GIT_AUTO_COMMIT_MAX_ATTEMPTS : Int32 = 5
+
+pub const GIT_AUTO_COMMIT_RETRY_MS : Int64 = 60000
+
+pub const GIT_DRAIN_CAP_MS : Int64 = 60000
+
 pub const HEALTH_MARKER_TIMEOUT_MS : Int64 = 30_000
 
 pub const MAX_UPLOAD_PACKAGE_BYTES : Int32 = 67108864
 
 pub const MIN_UPLOAD_PACKAGE_BYTES : Int32 = 4096
 
+pub const MIRROR_FLUSH_PERIOD_MS : Int32 = 2000
+
 pub const OLD_EXIT_WAIT_MS : Int64 = 120_000
+
+pub const PROCESSED_REMOTE_CAP : Int32 = 1000
+
+pub const PROCESSED_REMOTE_EVICT : Int32 = 500
 
 pub const RECONNECT_BASE_MS : Int32 = 1000
 
@@ -54,6 +68,8 @@ pub fn default_config_path() -> String
 
 pub fn detect_target() -> String raise UpdateError
 
+pub fn drain_gate(Int32, Bool, Int64?, Int64) -> DrainGate
+
 pub async fn extract_package(Bytes, min_bytes? : Int32) -> Result[UploadedPackage, String]
 
 pub async fn fetch_release(String?) -> ReleaseAsset
@@ -74,9 +90,13 @@ pub fn known_target_triples() -> Array[String]
 
 pub async fn load_config_file(String) -> @core.Config
 
+pub fn log_git_commit_ack(String, String, String) -> Unit
+
 pub let loopback_hosts : Array[String]
 
 pub fn merge_device_status(Array[@json.Json], PeerSessionRegistry) -> Array[@json.Json]
+
+pub async fn mirror_flush_loop(GitMirror) -> Unit
 
 pub async fn mutate_config(String, (@core.Config) -> Bool) -> Result[Unit, String]
 
@@ -141,6 +161,31 @@ pub(all) enum CliMode {
   Version
 }
 
+pub(all) struct DrainGate {
+  flush_now : Bool
+  reasons : String
+  blocked_since : Int64?
+}
+
+pub struct GitMirror {
+  // private fields
+}
+pub async fn GitMirror::flush(Self) -> Unit
+pub fn GitMirror::has_slot(Self, String) -> Bool
+pub fn GitMirror::new(@core.Config, PeerSessionRegistry, PeerSenders, @daemon.ActorHandle) -> Self
+pub fn GitMirror::on_notify(Self, @net.ControlMessage, String?) -> Unit
+pub fn GitMirror::processed_size(Self) -> Int32
+pub fn GitMirror::slot_attempts(Self, String) -> Int32
+
+pub struct PeerSenders {
+  // private fields
+}
+pub fn PeerSenders::devices(Self) -> Array[String]
+pub fn PeerSenders::new() -> Self
+pub fn PeerSenders::register(Self, String, async (@net.WireMessage) -> Bool) -> Unit
+pub async fn PeerSenders::send_to(Self, String, @net.WireMessage) -> Bool
+pub fn PeerSenders::unregister(Self, String) -> Unit
+
 pub(all) struct PeerSessionMeta {
   version : String?
   platform : String?
@@ -157,6 +202,15 @@ pub fn PeerSessionRegistry::register(Self, String, PeerSessionMeta) -> Unit
 pub fn PeerSessionRegistry::register_hello(Self, String, String, String?, String?) -> Unit
 pub fn PeerSessionRegistry::size(Self) -> Int32
 pub fn PeerSessionRegistry::unregister(Self, String) -> Unit
+
+pub(all) struct PendingGitNotify {
+  notify : @net.ControlMessage
+  via : String?
+  mut attempts : Int32
+  mut retry_at : Int64?
+  mut blocked_since : Int64?
+  mut warned : Bool
+}
 
 pub(all) struct ReleaseAsset {
   version : String

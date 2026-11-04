@@ -127,12 +127,23 @@ pub async fn run_start(args : StartArgs) -> Unit {
     let mut server_ref : @net.PeerServer? = None
     let session_sinks : Map[String, Map[String, @async.Queue[@daemon.Outbound]]] = Map([],
     )
+    // 发送闭包登记表 + git 镜像循环(通知结算/中继;flush 常驻 ~2s 一拍)
+    let senders : PeerSenders = PeerSenders::new()
+    let mirror : GitMirror = GitMirror::new(config, registry, senders, handle)
+    group.spawn_bg(allow_failure=true, no_wait=true) <| () => {
+      mirror_flush_loop(mirror)
+    }
     let handlers : @net.PeerServerHandlers = {
       on_connect: device => {
         match server_ref {
           Some(server) => {
             // 该设备被指派的每个目录各挂一条会话 + 一个出站泵(投递走本条入站连接)
             spawn_session_pumps(group, handle, config, device, session_sinks, msg => {
+              server.send_message(device, msg) catch { _ => return false }
+              true
+            })
+            // 发送闭包登记(镜像中继按它寻址;断开钩子摘除)
+            senders.register(device, msg => {
               server.send_message(device, msg) catch { _ => return false }
               true
             })
@@ -156,9 +167,26 @@ pub async fn run_start(args : StartArgs) -> Unit {
         }
       },
       on_message: (device, message) => {
-        // hello 解析进会话注册表;其余 Control 维持丢弃(TODO:notify/中继);
+        // hello 解析进会话注册表;git 提交通知/回执走镜像循环(处理到即回
+        // 回执);其余 Control 维持丢弃(TODO:notify 扫描触发 / 中继);
         // 数据面消息按 folder 路由进 actor
-        handle_peer_message(registry, handle, device, message)
+        handle_peer_message(
+          registry,
+          handle,
+          identity.device_id,
+          Some(mirror),
+          device,
+          message,
+          msg => {
+            match server_ref {
+              Some(server) =>
+                server.send_message(device, @net.WireMessage::Control(payload=msg)) catch {
+                  _ => ()
+                }
+              None => ()
+            }
+          },
+        )
       },
       on_binary: (_device, _data) => (), // 二进制信封:后续里程碑
       on_disconnect: device => {
@@ -175,6 +203,7 @@ pub async fn run_start(args : StartArgs) -> Unit {
           }
           None => ()
         }
+        senders.unregister(device)
         registry.unregister(device)
       },
       on_error: reason => @log.error("peer 连接错误 {Reason}", [Json::string(reason)]),
@@ -195,7 +224,18 @@ pub async fn run_start(args : StartArgs) -> Unit {
     for peer_url in config.peers {
       let url = peer_url
       group.spawn_bg(allow_failure=true, no_wait=true) <| () => {
-        outbound_peer_loop(registry, identity, config, handle, group, session_sinks, url, peer_port)
+        outbound_peer_loop(
+          registry,
+          identity,
+          config,
+          handle,
+          group,
+          session_sinks,
+          senders,
+          mirror,
+          url,
+          peer_port,
+        )
       }
     }
     // mDNS 广播:组播环境不可用(沙箱/无网)只警告,不阻塞启动
@@ -467,7 +507,7 @@ fn build_folder_specs(
   for folder in config.shared_folders {
     let hash = short_hash(folder.index_key())
     // TODO(cli):.gitignore / .syncxignore 规则载入(当前空规则集,
-    // 硬忽略仍生效);folderIdentity 收养、gitSync、时段窗口也待接。
+    // 硬忽略仍生效);folderIdentity 收养、时段窗口也待接。
     specs.push({
       id: folder.folder_id(),
       root: folder.path,
@@ -482,6 +522,10 @@ fn build_folder_specs(
       paused_files: folder.paused_files.unwrap_or([]),
       baseline_pending: true,
       max_bandwidth_kbps: folder.max_bandwidth_kbps,
+      // gitSync 模式与 Co-Authored-By 剔除开关:装配层只做折算透传,
+      // 检测/镜像/中继三闸由 daemon 侧 git_sync_plan 推导(见 git.mbt)。
+      git_sync: @daemon.git_sync_mode_of(folder.git_sync),
+      git_strip_co_authored: folder.strip_co_authored.unwrap_or(false),
     })
   }
   specs
@@ -535,5 +579,8 @@ fn outbound_to_wire(
       @net.WireMessage::IndexFingerprint(folder~, fingerprint=fp)
     IndexAck => @net.WireMessage::IndexAck(folder~)
     IndexRequest => @net.WireMessage::IndexRequest(folder~)
+    // git 提交通知:载荷本身就是 ControlMessage::GitCommitNotify 变体,
+    // 原样包进 Control 帧外发(对端 handle_peer_message 里对称解包)。
+    GitCommitNotify(notify) => @net.WireMessage::Control(payload=notify)
   }
 }

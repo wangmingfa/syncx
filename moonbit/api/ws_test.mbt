@@ -47,6 +47,9 @@ async fn ws_make_spec(root : String) -> @daemon.FolderSpec {
     paused_files: [],
     baseline_pending: false,
     max_bandwidth_kbps: None,
+    // ws 层单测不覆盖 git 镜像路径,一律按 off 装配。
+    git_sync: @daemon.GitSyncMode::Off,
+    git_strip_co_authored: false,
   }
 }
 

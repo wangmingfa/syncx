@@ -27,6 +27,13 @@
 ///  - CDC 块的请求与供应未移植(只走定长块)。
 
 ///|
+/// git 提交检测心跳的周期(周期泵节拍数):POLL_TICK_MS = 500ms × 10 = 5s,
+/// 对齐 Node checkGitCommits 所在的 5s 扫描节拍。纯 git 命令产生的提交只动
+/// .git(文件监听按硬忽略排除),检测时效靠这条心跳兜住;扫描轮尾的检测
+/// (文件变更驱动)照旧并行存在,两路共用同一个观察器基线。
+const GIT_CHECK_TICKS : Int = 10
+
+///|
 /// 索引消息的语义:全量(并集规划)或增量(只判消息里提到的路径)。
 /// **缺省 = 增量**:把增量当全量做并集规划,两端会各自回推对方「没提到」的
 /// 本地条目,形成回声死循环(见 `core/plan.mbt` 的 `build_delta_plan` 注释)。
@@ -62,6 +69,9 @@ pub(all) enum Outbound {
   IndexAck
   /// 初始交换:请求对端发全量索引。
   IndexRequest
+  /// git 提交同步:本机检测到新提交,通知对端镜像提交。载荷恒为
+  /// ControlMessage::GitCommitNotify 变体(驱动层包成 Control 帧外发)。
+  GitCommitNotify(@net.ControlMessage)
 }
 
 ///|
@@ -82,6 +92,10 @@ pub(all) enum Cmd {
     remote_device_id~ : String,
     sink~ : @async.Queue[Outbound]
   )
+  /// git 提交同步:镜像提交成功(或工作树干净跳过)后由装配层回填该目录的
+  /// 提交检测基线 —— 防止扫描轮把镜像提交误判为「本地新提交」再广播回去
+  /// (死循环防护;对应 Node setGitBaseline 在会话层持有基线的口径)。
+  GitBaseline(folder~ : String, hash~ : String)
   /// 收到一条对端 wire 消息(已按 folder 路由到该目录的会话)。
   PeerMessage(
     folder~ : String,
@@ -129,6 +143,9 @@ pub(all) struct FolderStatus {
   tombstones : Int64
   /// 盘上残留的冲突副本数(目录卡徽标)。
   conflicts : Int32
+  /// 各会话在途接收的总条数(镜像提交的 drain 闸判据;Node receiveLedger
+  /// 的等价物 —— 块未拉齐时通知先挂着,不把半套文件定格成提交)。
+  in_flight_receives : Int32
 }
 
 ///|
@@ -161,6 +178,11 @@ pub(all) struct FolderSpec {
   /// 目录级发送带宽上限(KB/s;core Config 的 `maxBandwidthKbps`,
   /// 0 / None = 不限)。只作用于出站块响应(供块是唯一的大流量出口)。
   max_bandwidth_kbps : Int32?
+  /// gitSync 模式(装配层从 config 折算;检测/镜像/中继三闸由
+  /// git_sync_plan 推导,见 git.mbt)。
+  git_sync : GitSyncMode
+  /// gitStripCoAuthored:镜像提交时剔除 Co-Authored-By 尾注行。
+  git_strip_co_authored : Bool
 }
 
 ///|
@@ -237,6 +259,10 @@ priv struct Folder {
   peers : Map[String, PeerSession]
   /// 目录级限速令牌桶(maxBandwidthKbps;None = 不限,对齐 Node)。
   limiter : RateLimiter?
+  /// gitSync 模式(检测/镜像/中继三闸由 git_sync_plan 推导;见 git.mbt)。
+  git_sync : GitSyncMode
+  /// 本地提交检测观察器(基线结算在 watcher 内部;首轮只记基线)。
+  git_watcher : GitWatcher
 }
 
 ///|
@@ -246,6 +272,8 @@ pub struct SessionActor {
   priv device_id : String
   priv folders : Array[Folder]
   priv cell : SnapshotCell
+  /// git 提交检测心跳的节拍计数(见 GIT_CHECK_TICKS;周期泵每 500ms 一拍)。
+  priv mut git_tick : Int
 }
 
 ///|
@@ -308,6 +336,8 @@ pub fn new_session_actor(
       conflict_count: 0,
       peers: Map([]),
       limiter: make_rate_limiter(spec.max_bandwidth_kbps),
+      git_sync: spec.git_sync,
+      git_watcher: { root: spec.root, mode: spec.git_sync, last_hash: None },
     })
   }
   let actor : SessionActor = {
@@ -315,6 +345,7 @@ pub fn new_session_actor(
     device_id,
     folders,
     cell: { value: { folders: [], total_entries: 0L, total_tombstones: 0L, }, },
+    git_tick: 0,
   }
   actor.publish()
   actor
@@ -386,6 +417,7 @@ async fn SessionActor::dispatch(self : SessionActor, cmd : Cmd) -> Bool {
   match cmd {
     Shutdown => return false
     ScanFolder(id) => self.do_scan(id)
+    GitBaseline(folder~, hash~) => self.do_git_baseline(folder, hash)
     ApplyPlan(id) => self.do_apply_plan(id)
     PeerOpen(folder~, remote_device_id~, sink~) =>
       self.do_peer_open(folder, remote_device_id, sink)
@@ -441,8 +473,9 @@ fn SessionActor::folder_by_id(self : SessionActor, id : String) -> Folder? {
 /// 扫一轮:对比索引,产出改动/墓碑并落地;本机改动外推到所有连接。
 /// 对应 Rust `Folder::scan` + `SessionActor::scan_all`(嵌套共享根换算)。
 /// 日志:开始 Debug / 完成 Information(带改动条数与耗时);异常走 dispatch
-/// 层统一记 Error。
-async fn SessionActor::do_scan(self : SessionActor, id : String) -> Unit {
+/// 层统一记 Error。`quiet~` 供 git 心跳的静默扫描抑制「扫描完成」INF
+/// (每 5s 一条会刷屏),完成日志降为 Debug;其余行为完全一致。
+async fn SessionActor::do_scan(self : SessionActor, id : String, quiet~ : Bool = false) -> Unit {
   let folder = match self.folder_by_id(id) {
     Some(f) => f
     None => return
@@ -466,15 +499,27 @@ async fn SessionActor::do_scan(self : SessionActor, id : String) -> Unit {
     self.device_id,
     nested,
   )
-  @log.info(
-    "扫描完成 {Folder}:改动 {Changed} 条,墓碑 {Tombs} 条,耗时 {Ms}ms",
-    [
-      Json::string(id),
-      Json::number(diff.changed.length().to_double()),
-      Json::number(diff.tombstones.length().to_double()),
-      Json::number((now_ms() - started).to_double()),
-    ],
-  )
+  if quiet {
+    @log.debug(
+      "扫描完成 {Folder}:改动 {Changed} 条,墓碑 {Tombs} 条,耗时 {Ms}ms(git 心跳静默扫描)",
+      [
+        Json::string(id),
+        Json::number(diff.changed.length().to_double()),
+        Json::number(diff.tombstones.length().to_double()),
+        Json::number((now_ms() - started).to_double()),
+      ],
+    )
+  } else {
+    @log.info(
+      "扫描完成 {Folder}:改动 {Changed} 条,墓碑 {Tombs} 条,耗时 {Ms}ms",
+      [
+        Json::string(id),
+        Json::number(diff.changed.length().to_double()),
+        Json::number(diff.tombstones.length().to_double()),
+        Json::number((now_ms() - started).to_double()),
+      ],
+    )
+  }
   folder.conflict_count = diff.conflict_count
   // 墓碑:本地已删除 → 移回收站 + 写索引与内存索引(冻结路径跳过)
   for tomb in diff.tombstones {
@@ -522,9 +567,68 @@ async fn SessionActor::do_scan(self : SessionActor, id : String) -> Unit {
       }
     }
   }
+  // git 提交检测挂扫描轮尾(与 Node checkGitCommits 同构):只处理启用了
+  // 发送的模式;基线结算在 GitWatcher 内部 —— 首轮只记基线绝不重放历史,
+  // 检测当轮推进基线,送达保证交给上层(镜像端的工作树/对端回执)。
+  self.check_folder_git_commits(folder)
+}
+
+///|
+/// 单目录的本地提交检测 + 广播(与 Node broadcastGitCommit 同口径):观察器
+/// 发现新提交就构造 GitCommitNotify 推给该目录全部在线会话;基线在检测当轮
+/// 推进(watcher 内部),送达保证交给上层(镜像端的工作树/对端回执)。
+/// 检测节拍有两路:扫描轮尾(文件变更驱动)+ 周期泵心跳(见
+/// GIT_CHECK_TICKS,对齐 Node checkGitCommits 的 5s 扫描节拍)—— 纯 git
+/// 命令产生的提交只动 .git(被监听排除),靠心跳兜住检测时效。
+async fn SessionActor::check_folder_git_commits(self : SessionActor, folder : Folder) -> Unit {
+  if !git_sync_plan(folder.git_sync).watch_local {
+    return
+  }
+  let info = folder.git_watcher.check_new_commit()
+  match info {
+    Some(commit) => {
+      let notify : @net.ControlMessage = @net.ControlMessage::GitCommitNotify(
+        from_device_id=self.device_id,
+        folder_id=folder.id,
+        commit_hash=commit.hash,
+        commit_message=commit.full_message,
+        changed_files=commit.changed_files,
+        diff_stat=commit.diff_stat,
+        commit_subjects=Some(commit.commit_subjects),
+        parent_hash=commit.parent_hash,
+        version=None,
+        hostname=None,
+        platform=None,
+        runtime=None,
+      )
+      for _, session in folder.peers {
+        push_outbound(session, GitCommitNotify(notify))
+      }
+      @log.info(
+        "git commit broadcast: {Folder} {Hash8} \"{Subject}\" ({Files})",
+        [
+          Json::string(folder.id),
+          Json::string(commit.hash[0:8].to_owned()),
+          Json::string(commit.message),
+          Json::string(git_files_desc(commit.changed_files)),
+        ],
+      )
+    }
+    None => ()
+  }
 }
 
 // ==================== 会话挂载 / 拆除 ====================
+
+///|
+/// 回填 git 提交检测基线(镜像提交成功 / 干净树跳过后由装配层调用;
+/// 死循环防护的一半 —— 另一半是装配层 processedRemoteCommits 去重)。
+fn SessionActor::do_git_baseline(self : SessionActor, folder_id : String, hash : String) -> Unit {
+  match self.folder_by_id(folder_id) {
+    Some(folder) => folder.git_watcher.last_hash = Some(hash)
+    None => ()
+  }
+}
 
 ///|
 /// 挂一条连接:建会话并发本机索引指纹(初始交换第一步)。
@@ -594,7 +698,12 @@ fn SessionActor::do_drain_events(
 
 ///|
 /// 周期泵(对齐 Rust `Peer::poll_timeouts` 的块重试与租约部分):
-/// 到期块重发 / 放弃、租约衰减、限速延迟队列重放。
+/// 到期块重发 / 放弃、租约衰减、限速延迟队列重放;每 GIT_CHECK_TICKS 拍
+/// 对 gitSync 发送端目录跑一轮**静默扫描**:纯 git 命令产生的提交只动被
+/// 监听排除的 .git,检测时效靠这条心跳兜住(节拍对齐 Node checkGitCommits
+/// 的 5s 扫描周期)。关键在「先扫后检」的次序 —— 索引增量与提交通知进
+/// 同一个会话出站队列,FIFO 保证对端先收到内容增量、再收到通知,接收侧
+/// 的 drain 闸(in-flight)因此总有账可查,不会拿空账提前结算。
 async fn SessionActor::do_poll_timeouts(
   self : SessionActor,
   now : Int64,
@@ -604,6 +713,15 @@ async fn SessionActor::do_poll_timeouts(
       poll_block_retries(session, now)
       decay_serve_lease(session, now)
       self.pump_deferred(folder, session)
+    }
+  }
+  self.git_tick = self.git_tick + 1
+  if self.git_tick >= GIT_CHECK_TICKS {
+    self.git_tick = 0
+    for folder in self.folders {
+      if git_sync_plan(folder.git_sync).watch_local {
+        self.do_scan(folder.id, quiet=true)
+      }
     }
   }
 }
@@ -1328,6 +1446,11 @@ fn SessionActor::publish(self : SessionActor) -> Unit {
     }
     total_entries += counts.entries
     total_tombstones += counts.tombstones
+    // 在途接收总数:各会话认领台账的大小之和(镜像提交 drain 闸的判据)
+    let mut in_flight = 0
+    for _, session in folder.peers {
+      in_flight += session.pending.length()
+    }
     folders.push({
       id: folder.id,
       path: folder.root,
@@ -1337,6 +1460,7 @@ fn SessionActor::publish(self : SessionActor) -> Unit {
       entries: counts.entries,
       tombstones: counts.tombstones,
       conflicts: folder.conflict_count,
+      in_flight_receives: in_flight,
     })
   }
   self.cell.value = { folders, total_entries, total_tombstones, }

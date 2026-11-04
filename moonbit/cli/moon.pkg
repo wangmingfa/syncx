@@ -17,6 +17,15 @@ import {
   "wangmingfa/syncx/net",
 }
 
+import {
+  "moonbitlang/async",
+  "moonbitlang/async/fs",
+  "moonbitlang/async/process",
+  "wangmingfa/syncx/core",
+  "wangmingfa/syncx/daemon",
+  "wangmingfa/syncx/net",
+} for "test"
+
 supported_targets = "native"
 
 pkgtype(kind: "executable")

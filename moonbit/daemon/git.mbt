@@ -555,6 +555,27 @@ pub fn compose_mirror_commit_message(
 }
 
 ///|
+/// 变更清单的日志描述(照 Node 口径:数量 + 前 10 个文件名,超出截断)。
+pub fn git_files_desc(changed : Array[String]) -> String {
+  if changed.length() == 0 {
+    return "无文件变更"
+  }
+  let head : Array[String] = []
+  for i in 0..<changed.length() {
+    if i >= 10 {
+      break
+    }
+    head.push(changed[i])
+  }
+  let tail = if changed.length() > 10 {
+    " …"
+  } else {
+    ""
+  }
+  "\{changed.length()} 个文件: \{head.join(", ")}\{tail}"
+}
+
+///|
 /// 执行自动提交:git add -A && git commit -m <message>(在途中间态挡在外面)。
 /// 使用 --allow-empty 兜底:判定有无变更与 add 之间工作树可能被他程序改回,
 /// 保证提交命令本身不因竞态失败(照 Node 语义)。失败时 error 为 stderr 首行。
@@ -568,7 +589,19 @@ pub fn compose_mirror_commit_message(
 /// (并发了他程序提交)保守按失败走原路 —— 账目归调用方的基线/通知逻辑管。
 /// 本形态的 git 调用(run_git)无超时,不存在「超时误判失败」,但「提交已
 /// 落盘而命令报错」的中间态失败同理成立,故做此最小等价探测。
-pub async fn auto_commit(folder : String, message : String) -> AutoCommitResult {
+///
+/// 范围收敛(changed_files,对齐 Node 55b1c35 契约):镜像提交只 stage 通知
+/// 宣称的那批文件(含删除 —— `add -A -- path` 同样登记删除),绝不再
+/// `add -A` 全吞 —— 否则「回声通知未结清 + 用户并发改动」时,用户的未提交
+/// 修改会被旧通知的消息打包带走(实测 2026-11-04 回声吞变更事故)。清单为空
+/// (旧对端没给清单)才退回全量兜底。内容已在本地(staged 无差异)时仍落
+/// --allow-empty 空提交:两端提交链对齐是既有契约,范围收敛后空提交不再吞
+/// 任何内容,链上多一笔镜像记录无害。
+pub async fn auto_commit(
+  folder : String,
+  message : String,
+  changed_files~ : Array[String] = [],
+) -> AutoCommitResult {
   let fail = (err : String) => {
     success: false,
     skipped: false,
@@ -577,13 +610,28 @@ pub async fn auto_commit(folder : String, message : String) -> AutoCommitResult 
   }
   // 基线 HEAD:提交阶段失败后的「实际成功」探测用它判前进
   let before_head = get_last_commit_hash(folder)
-  // 先 stage 所有变更(含删除、新增),syncx 在途中间态排除。
-  // add 阶段失败不探测:提交还没跑,HEAD 不可能因本次提交前进(探测也只会
-  // 落回失败,白花两笔 git 调用),直接按失败上报。
+  // stage:有清单按清单精确 stage,无清单退回全量;两种路径都把 syncx 的
+  // 在途中间态挡在外面(负向 pathspec / 精确清单不冲突)。add 阶段失败不
+  // 探测:提交还没跑,HEAD 不可能因本次提交前进(探测也只会落回失败,白花
+  // 两笔 git 调用),直接按失败上报。
+  let paths : Array[String] = {
+    let trimmed : Array[String] = []
+    for path in changed_files {
+      let t = path.trim().to_owned()
+      if t != "" {
+        trimmed.push(t)
+      }
+    }
+    if trimmed.length() > 0 {
+      trimmed
+    } else {
+      scratch_pathspecs()
+    }
+  }
   let (add_code, _, add_err) = run_git(
     "git",
     folder,
-    ["add", "-A", "--", ..scratch_pathspecs()],
+    ["add", "-A", "--", ..paths],
   ) catch {
     SpawnFailed(m) => return fail("git 拉起失败:\{m}")
     GitFailed(m) => return fail(m)

@@ -6,6 +6,8 @@
 ///     退避重拨(曲线与 Node reconnectDelayMs 同口径);
 ///   - 会话建立后主动发 hello,收到的 hello(Control)解析进会话注册表,
 ///     对端元数据生命周期跟随会话(断开即失效);
+///   - git 提交通知/回执(Control 面)接镜像循环(见 gitmirror.mbt):
+///     通知处理到即回回执,结算由镜像循环闸门负责;
 ///   - 明确不做(后续包):地址学习(learnedUrl / 反向发现)、mDNS 建连、
 ///     Control 面其余消息(notify 扫描触发 / 中继)、配置热重载。
 
@@ -230,18 +232,52 @@ fn close_session_sinks(
 }
 
 ///|
-/// hello 驱动的元数据处理(收发两侧共用口径):只认 Hello,其余 Control
-/// 维持丢弃(TODO:notify 扫描触发 / 中继等后续包);数据面消息路由进 actor。
-/// 元数据登记走 register_hello(保留已知 Some url,入站侧无从得知对端地址)。
+/// hello 驱动的元数据处理(收发两侧共用口径):
+///   - Hello:元数据登记进会话注册表(register_hello 保留已知 Some url,
+///     入站侧无从得知对端地址);
+///   - GitCommitNotify:投递回执**即刻**回给这一跳的对端(处理到即回,与
+///     随后有没有真落成一笔镜像提交无关 —— 与 offer-receipt 同一口径;按
+///     这一跳寻址而非消息署名来源,中继场景下署名来源在两跳之外没有会话),
+///     随后通知交给镜像循环只入队不立即提交;
+///   - GitCommitAck:投递层回执,MoonBit 侧无台账,记日志销账;
+///   - 其余 Control 维持丢弃(TODO:notify 扫描触发 / 中继等后续包);
+///   - 数据面消息路由进 actor。
 fn handle_peer_message(
   registry : PeerSessionRegistry,
   handle : @daemon.ActorHandle,
+  self_device_id : String,
+  mirror : GitMirror?,
   device_id : String,
   message : @net.WireMessage,
+  send_control : (@net.ControlMessage) -> Unit,
 ) -> Unit {
   match message {
     Control(payload=Hello(from_device_id=_, version~, hostname~, platform~, ..)) =>
       registry.register_hello(device_id, version, platform, hostname)
+    Control(payload=notify) =>
+      match notify {
+        GitCommitNotify(from_device_id=_, folder_id~, commit_hash~, ..) => {
+          send_control(
+            @net.ControlMessage::GitCommitAck(
+              from_device_id=self_device_id,
+              folder_id=folder_id,
+              commit_hash=commit_hash,
+              version=None,
+              hostname=None,
+              platform=None,
+              runtime=None,
+            ),
+          )
+          match mirror {
+            Some(m) => m.on_notify(notify, Some(device_id))
+            None => ()
+          }
+        }
+        GitCommitAck(from_device_id=sender, folder_id~, commit_hash~, ..) =>
+          log_git_commit_ack(sender, folder_id, commit_hash)
+        // 其余 Control 维持丢弃(TODO:notify 扫描触发 / 中继等后续包)
+        _ => ()
+      }
     _ =>
       match message_folder(message) {
         Some(folder) => {
@@ -260,9 +296,10 @@ fn handle_peer_message(
 
 ///|
 /// 单个配置对端的出站拨号 + 断线重连常驻循环。拨号成功:登记会话、主动发
-/// hello、接 actor 出站泵、跑收发循环;连接结束(对端断开/链路故障):撤销
-/// 会话与 sinks、记 WRN、按退避曲线重拨 —— 成功即归零 attempts(闭链后
-/// 0ms 立即重拨),失败持续指数退避(1s 起 30s 封顶,与 Node 同曲线)。
+/// hello、接 actor 出站泵与 git 回执泵、跑收发循环;连接结束(对端断开/
+/// 链路故障):撤销会话与 sinks、记 WRN、按退避曲线重拨 —— 成功即归零
+/// attempts(闭链后 0ms 立即重拨),失败持续指数退避(1s 起 30s 封顶,
+/// 与 Node 同曲线)。
 async fn outbound_peer_loop(
   registry : PeerSessionRegistry,
   identity : @net.DeviceIdentity,
@@ -270,6 +307,8 @@ async fn outbound_peer_loop(
   handle : @daemon.ActorHandle,
   group : @async.TaskGroup[Unit],
   session_sinks : Map[String, Map[String, @async.Queue[@daemon.Outbound]]],
+  senders : PeerSenders,
+  mirror : GitMirror,
   url : String,
   peer_port : Int32,
 ) -> Unit {
@@ -329,10 +368,43 @@ async fn outbound_peer_loop(
           client.send_message(msg) catch { _ => return false }
           true
         })
+        // 发送闭包登记(镜像中继按它寻址;断开钩子摘除)
+        senders.register(device_id, msg => {
+          client.send_message(msg) catch { _ => return false }
+          true
+        })
+        // git 回执泵:handle_peer_message 是同步回调,而 client 发送是 async ——
+        // 回执先入无界箱,由本任务异步投递(单线程 async,箱即同步转发)
+        let ack_outbox : @async.Queue[@net.ControlMessage] = @async.Queue(
+          kind=Unbounded,
+        )
+        group.spawn_bg(allow_failure=true, no_wait=true) <| () => {
+          for ;; {
+            let ack : @net.ControlMessage? = Some(ack_outbox.get()) catch { _ => None }
+            match ack {
+              Some(m) =>
+                client.send_message(@net.WireMessage::Control(payload=m)) catch {
+                  _ => ()
+                }
+              // 箱已关 = 会话结束,泵收工
+              None => break
+            }
+          }
+        }
         // 收发循环:返回 = 连接结束(对端断开 / 链路故障)
         client.run({
           on_message: message =>
-            handle_peer_message(registry, handle, device_id, message),
+            handle_peer_message(
+              registry,
+              handle,
+              identity.device_id,
+              Some(mirror),
+              device_id,
+              message,
+              msg => {
+                let _ = ack_outbox.try_put(msg) catch { _ => false }
+              },
+            ),
           on_binary: _ => (),
           on_error: reason =>
             @log.warn("peer {DeviceId} message error {Reason}", [
@@ -340,9 +412,12 @@ async fn outbound_peer_loop(
             ]),
           on_close: () => (),
         })
-        // 会话撤销:元数据失效 + sinks 关闭(与 server 侧 on_disconnect 对称)
+        // 会话撤销:元数据失效 + sinks 关闭 + 发送闭包摘除 + 回执箱关停
+        // (与 server 侧 on_disconnect 对称)
         registry.unregister(device_id)
+        senders.unregister(device_id)
         close_session_sinks(session_sinks, device_id)
+        ack_outbox.close(clear=true)
         @log.warn(
           "peer {DeviceId} session closed ({Url}); reconnecting",
           [Json::string(device_id), Json::string(url)],

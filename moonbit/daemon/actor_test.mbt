@@ -65,6 +65,9 @@ async fn actor_make_spec(
     paused_files: [],
     baseline_pending: false,
     max_bandwidth_kbps: kbps,
+    // actor 单测不覆盖 git 镜像路径,一律按 off 装配(检测/镜像全关)。
+    git_sync: @daemon.GitSyncMode::Off,
+    git_strip_co_authored: false,
   }
 }
 
@@ -513,6 +516,7 @@ fn actor_outbound_to_wire(
       @net.WireMessage::IndexFingerprint(folder~, fingerprint=fp)
     IndexAck => @net.WireMessage::IndexAck(folder~)
     IndexRequest => @net.WireMessage::IndexRequest(folder~)
+    GitCommitNotify(notify) => @net.WireMessage::Control(payload=notify)
   }
 }
 
