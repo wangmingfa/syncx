@@ -33,8 +33,8 @@ pub(all) struct ApiOptions {
   /// 上传包换入回调(None = POST /api/self-update/upload 回 503)。
   upload_swap : UploadSwapFn?
   /// `/api/status.settings` 全局设置段(装配层启动时从 config.json 折算注入;
-  /// None = 不上线该段。MoonBit 尚无配置热重载,当前值为启动时快照)。
-  settings : Json?
+  /// None = 不上线该段)。配置热重载:每次配置落盘后由装配层回调重建快照。
+  mut settings : Json?
   /// peer 数据面监听端口(`/api/status.peerPort`,顶栏本机信息浮层用;
   /// cli 装配时从启动参数注入,缺省 22000;None = 未注入,不上线该字段)。
   peer_port : Int32?
@@ -50,6 +50,26 @@ pub(all) struct ApiOptions {
   /// (单线程 async,无锁)。会话注册表在 cli 装配层,api 只见闭包不见类型;
   /// 装配层先构造 ApiOptions 再回填本字段(mut,打破闭包自引用)。
   mut device_status : (() -> Array[Json])?
+  /// 配置变更回调(None = 未接 daemon,落盘即止):任何写路由成功落盘后
+  /// 触发一次,装配层借此重读配置并热重载 daemon 派生状态(目录集重建 /
+  /// 设备清单快照 / fs-watch 对账 / 出站拨号对账)。回调在单线程事件循环里
+  /// 执行,必须轻(读配置 + 发命令,不做 git/网络动作)。
+  mut on_config_changed : ConfigChangedFn?
+}
+
+///|
+/// 配置变更回调的形态:重读配置 + 派发重建命令(fs 读是 async,回调整体
+/// async;不做 git / 网络动作)。
+pub type ConfigChangedFn = async () -> Unit
+
+///|
+/// 通知装配层「配置已落盘」:写路由在 save_config 成功后调用;未接回调
+/// (api 单测 / 未装配 daemon)时为无操作。
+pub async fn notify_config_changed(options : ApiOptions) -> Unit {
+  match options.on_config_changed {
+    Some(notify) => notify()
+    None => ()
+  }
 }
 
 ///|
@@ -70,6 +90,7 @@ pub fn ApiOptions::new(
   settings~ : Json? = None,
   peer_port~ : Int32? = None,
   device_infos~ : Array[Json] = [],
+  on_config_changed~ : ConfigChangedFn? = None,
 ) -> ApiOptions {
   let web_dist = match web_dist {
     Some(dist) => Some(dist)
@@ -90,6 +111,7 @@ pub fn ApiOptions::new(
     peer_port,
     device_infos,
     device_status: None,
+    on_config_changed,
   }
 }
 

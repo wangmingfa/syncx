@@ -775,8 +775,9 @@ pub async fn git_push(
 pub(all) struct GitWatcher {
   /// 共享目录绝对路径。
   root : String
-  /// 该目录的 gitSync 模式(观察器本身不闸模式,策略由调用方套)。
-  mode : GitSyncMode
+  /// 该目录的 gitSync 模式(观察器本身不闸模式,策略由调用方套;
+  /// 配置热重载就地更新)。
+  mut mode : GitSyncMode
   /// 上次观测到的 HEAD 提交哈希;None = 尚未建立基线或当前不是仓库。
   mut last_hash : String?
 }

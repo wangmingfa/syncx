@@ -3,8 +3,11 @@
 ///
 /// ADR-0026:三端共享 `~/.syncx`,本层用 core 的逐字段清洗模型(parse_config
 /// 保留未知键,to_json 铺回)做「读 → 改 → 整体回写」,字段名与 Node/Rust
-/// 逐字对齐。带锁的完整 ConfigStore 在 daemon 层(另一里程碑);
-/// TODO(daemon):写路径接 daemon 的互斥锁与原子写,当前为直接覆盖。
+/// 逐字对齐。并发口径:全部写路径都在同一事件循环里串行执行(load → 改 →
+/// save 中间的 await 点只有 fs 自身,不存在两条路由交错改同一份的窗口),
+/// 不需要额外的互斥锁;写盘走「临时文件 + rename」原子替换,读到半截
+/// config.json 的窗口不复存在。目录身份等派生字段的生成仍在后续包
+/// (见 add_folder_to_config 的注释)。
 
 ///|
 /// 默认配置路径:`~/.syncx/config.json`(HOME 缺失时退相对路径,仅测试场景)。
@@ -28,15 +31,19 @@ pub async fn load_config(config_file : String) -> @core.Config {
 
 ///|
 /// 回写配置:盖 `formatVersion` + `generatedBy` 戳(Node 同款,
-/// generatedBy = 版本号单源 package.json 的值)。
+/// generatedBy = 版本号单源 package.json 的值)。写盘走「临时文件 + rename」
+/// 原子替换:rename 在同一文件系统内是原子的,读者要么看到旧全文、要么
+/// 看到新全文,不会看到半截 JSON。
 pub async fn save_config(config_file : String, config : @core.Config) -> Unit {
   config.format_version = @core.FORMAT_VERSION
   config.generated_by = Some(@core.VERSION)
+  let tmp = "\{config_file}.tmp"
   @fs.write_file(
-    config_file,
+    tmp,
     config.to_json().stringify() + "\n",
     create_mode=CreateOrTruncate,
   )
+  @fs.rename(tmp, config_file, replace=true)
 }
 
 ///|

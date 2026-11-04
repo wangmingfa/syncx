@@ -668,3 +668,23 @@ pub fn PeerServer::close(self : PeerServer) -> Unit {
   self.conns.clear()
   self.registry.clear()
 }
+
+///|
+/// 断开指定设备的连接(配置热重载:设备被移除或不再共享任何目录时,装配层
+/// 主动掐线,避免僵尸会话继续收发)。口径与同设备重连顶替一致:置 Dead、
+/// 关出站队列、关 WS;读循环因 WS 关闭而返回,断开钩子(on_disconnect)
+/// 照常触发,装配层按既有路径清理会话态。幂等:未连接即无操作。
+pub fn PeerServer::close_device(self : PeerServer, device_id : String) -> Unit {
+  match self.registry.get(device_id) {
+    Some(cid) =>
+      match self.conns.get(cid) {
+        Some(state) => {
+          state.stage = Dead
+          state.outbound.close(clear=true)
+          state.ws.close()
+        }
+        None => ()
+      }
+    None => ()
+  }
+}

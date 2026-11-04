@@ -36,7 +36,7 @@ async fn watch_run(
     let folders : Array[@daemon.FsWatchFolder] = [
       { id: "f1", root, paused: false },
     ]
-    let stats = @daemon.start_fs_watch(group, handle, folders, options)
+    let stats = @daemon.start_fs_watch(group, handle, () => folders, options)
     body(handle, stats)
     let _ = handle.send(@daemon.Cmd::Shutdown)
   }

@@ -155,10 +155,11 @@ pub(all) struct PendingGitNotify {
 }
 
 ///|
-/// git 镜像循环主体:配置(现值直读)+ 会话注册表(drain 闸对账)+
-/// 发送闭包表(中继)+ actor 句柄(基线回填与在途接收读数)+ 去重集合。
+/// git 镜像循环主体:配置供应者(每次 flush 现读 —— 配置热重载下模式/
+/// 共享名单/剔除开关即插即拔)+ 会话注册表(drain 闸对账)+ 发送闭包表
+/// (中继)+ actor 句柄(基线回填与在途接收读数)+ 去重集合。
 pub struct GitMirror {
-  priv config : @core.Config
+  priv config_of : () -> @core.Config
   priv registry : PeerSessionRegistry
   priv senders : PeerSenders
   priv handle : @daemon.ActorHandle
@@ -171,12 +172,19 @@ pub struct GitMirror {
 
 ///|
 pub fn GitMirror::new(
-  config : @core.Config,
-  registry : PeerSessionRegistry,
-  senders : PeerSenders,
-  handle : @daemon.ActorHandle,
+  config_of~ : () -> @core.Config,
+  registry~ : PeerSessionRegistry,
+  senders~ : PeerSenders,
+  handle~ : @daemon.ActorHandle,
 ) -> GitMirror {
-  { config, registry, senders, handle, processed: Map([]), slots: Map([]) }
+  {
+    config_of,
+    registry,
+    senders,
+    handle,
+    processed: Map([]),
+    slots: Map([]),
+  }
 }
 
 ///|
@@ -224,7 +232,7 @@ fn GitMirror::folder_of(
   self : GitMirror,
   folder_id : String,
 ) -> @core.SharedFolder? {
-  for folder in self.config.shared_folders {
+  for folder in (self.config_of)().shared_folders {
     if folder.folder_id() == folder_id {
       return Some(folder)
     }

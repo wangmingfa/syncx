@@ -78,6 +78,10 @@ pub async fn run_start(args : StartArgs) -> Unit {
   @core.assert_format_version(config.format_version) catch {
     e => fatal(@core.FormatVersionError::to_text(e))
   }
+  // 配置热重载的共享单元格:api 写路由成功落盘后,回调重读盘上配置灌进来;
+  // 所有「现读」读者(fs-watch 对账 / 拨号监督 / 镜像循环 / 会话面重建 /
+  // 出站泵)从这里拿最新值,不再持有启动快照
+  let config_cell : Ref[@core.Config] = Ref(config)
 
   // 3. 首次运行写出默认配置(热重载与另一后端依赖文件存在;
   //    注意在闸门之后:闸门失败绝不落任何东西)
@@ -127,9 +131,17 @@ pub async fn run_start(args : StartArgs) -> Unit {
     let mut server_ref : @net.PeerServer? = None
     let session_sinks : Map[String, Map[String, @async.Queue[@daemon.Outbound]]] = Map([],
     )
-    // 发送闭包登记表 + git 镜像循环(通知结算/中继;flush 常驻 ~2s 一拍)
+    // 发送闭包登记表 + 客户端连接 closer 表(配置热重载:设备不再共享任何
+    // 目录时由会话面对账主动掐线)+ git 镜像循环(通知结算/中继;flush
+    // 常驻 ~2s 一拍)。镜像循环每次 flush 现读配置单元格。
     let senders : PeerSenders = PeerSenders::new()
-    let mirror : GitMirror = GitMirror::new(config, registry, senders, handle)
+    let closers : Map[String, () -> Unit] = Map([])
+    let mirror : GitMirror = GitMirror::new(
+      config_of=() => config_cell.val,
+      registry~,
+      senders~,
+      handle~,
+    )
     group.spawn_bg(allow_failure=true, no_wait=true) <| () => {
       mirror_flush_loop(mirror)
     }
@@ -137,15 +149,15 @@ pub async fn run_start(args : StartArgs) -> Unit {
       on_connect: device => {
         match server_ref {
           Some(server) => {
-            // 该设备被指派的每个目录各挂一条会话 + 一个出站泵(投递走本条入站连接)
-            spawn_session_pumps(group, handle, config, device, session_sinks, msg => {
-              server.send_message(device, msg) catch { _ => return false }
-              true
-            })
-            // 发送闭包登记(镜像中继按它寻址;断开钩子摘除)
+            // 发送闭包登记(镜像中继与会话面重建都按它寻址;断开钩子摘除)
             senders.register(device, msg => {
               server.send_message(device, msg) catch { _ => return false }
               true
+            })
+            // 该设备被指派的每个目录各挂一条会话 + 一个出站泵(投递走本条
+            // 入站连接;目录清单现读配置单元格 —— 热重载后新连接自动带上新目录)
+            spawn_session_pumps(group, handle, config_cell.val, device, session_sinks, msg => {
+              senders.send_to(device, msg)
             })
             // 会话登记 + 主动 hello 宣告(版本/平台/主机名;生命周期跟随会话)
             registry.register(
@@ -219,23 +231,37 @@ pub async fn run_start(args : StartArgs) -> Unit {
     group.spawn_bg(allow_failure=true, no_wait=true) <| () => {
       peer_server.listen()
     }
-    // 出站拨号 + 断线重连:config.peers 每个 ws:// 地址一条常驻循环(地址
-    // 学习与 mDNS 建连是后续包,这里只拨配置地址)
-    for peer_url in config.peers {
-      let url = peer_url
-      group.spawn_bg(allow_failure=true, no_wait=true) <| () => {
-        outbound_peer_loop(
-          registry,
-          identity,
-          config,
-          handle,
-          group,
-          session_sinks,
-          senders,
-          mirror,
-          url,
-          peer_port,
-        )
+    // 出站拨号 + 断线重连:监督循环每拍现读配置单元格的 peers 清单做 diff ——
+    // 新增 URL 补起常驻拨号循环(设备登记路由的「立即建连」由这个节拍承担,
+    // 配置热重载即插即拔),被移除的 URL 由循环自身在重拨点退出后从名册摘除
+    // (地址学习与 mDNS 建连是后续包)
+    let dialed : Map[String, Bool] = Map([])
+    group.spawn_bg(allow_failure=true, no_wait=true) <| () => {
+      for ;; {
+        for peer_url in config_cell.val.peers {
+          if !dialed.contains(peer_url) {
+            dialed.set(peer_url, true)
+            let url = peer_url
+            group.spawn_bg(allow_failure=true, no_wait=true) <| () => {
+              outbound_peer_loop(
+                registry,
+                identity,
+                config_cell,
+                handle,
+                group,
+                session_sinks,
+                senders,
+                closers,
+                mirror,
+                url,
+                peer_port,
+                url2 => config_cell.val.peers.contains(url2),
+                () => dialed.remove(url),
+              )
+            }
+          }
+        }
+        @async.sleep(DIAL_SUPERVISOR_TICK_MS)
       }
     }
     // mDNS 广播:组播环境不可用(沙箱/无网)只警告,不阻塞启动
@@ -267,22 +293,24 @@ pub async fn run_start(args : StartArgs) -> Unit {
       None => ()
     }
     // 文件系统监听驱动的扫描 + 定时兜底全扫(daemon::start_fs_watch,三端
-    // 统一契约):每个未暂停目录一条 @fs.Watcher,事件只当触发器,判定仍走
-    // 现有扫描管线;watcher 正常时按 fsWatchFallbackScanSecs(缺省 600s)兜底
-    // 全扫,创建失败退回原扫描间隔(30s)并 warn 一次;fsWatchEnabled=false
-    // 时为纯定时全扫(行为与旧版完全一致)。
-    let watch_folders : Array[@daemon.FsWatchFolder] = []
-    for folder in config.shared_folders {
-      watch_folders.push({
-        id: folder.folder_id(),
-        root: folder.path,
-        paused: folder.is_paused(),
-      })
-    }
+    // 统一契约):目录清单以供应者闭包给定,对账循环每拍现读配置单元格 ——
+    // 配置热重载后目录增删/暂停切换即插即拔;watcher 正常时按
+    // fsWatchFallbackScanSecs(缺省 600s)兜底全扫,创建失败退回原扫描间隔
+    // (30s)并 warn 一次;fsWatchEnabled=false 时为纯定时全扫。
     let _watch_stats = @daemon.start_fs_watch(
       group,
       handle,
-      watch_folders,
+      () => {
+        let folders : Array[@daemon.FsWatchFolder] = []
+        for folder in config_cell.val.shared_folders {
+          folders.push({
+            id: folder.folder_id(),
+            root: folder.path,
+            paused: folder.is_paused() || config_cell.val.is_paused(),
+          })
+        }
+        folders
+      },
       @daemon.FsWatchOptions::from_config(config),
     )
     // 启动横幅(控制端口绑定成功与否在 mocket 内部,绑定失败由 mocket 打印):
@@ -318,8 +346,8 @@ pub async fn run_start(args : StartArgs) -> Unit {
       control_token=token,
       config_file=Some(config_file),
       actor=Some(handle),
-      // 全局设置快照(/api/status.settings;设置弹窗读取。MoonBit 尚无配置
-      // 热重载,当前值为启动时折算 —— 与 actor 目录参数同一份 config)
+      // 全局设置快照(/api/status.settings;设置弹窗读取):启动时折算,
+      // 之后每次配置热重载回调重建 —— 与目录集同一份新鲜配置
       settings=Some(@api.settings_json(config)),
       // peer 数据面监听端口(/api/status.peerPort;启动参数折算,缺省 22000)
       peer_port=Some(peer_port),
@@ -341,6 +369,56 @@ pub async fn run_start(args : StartArgs) -> Unit {
     // 打破闭包对 api_options 的自引用;单线程 async 无锁)
     api_options.device_status = Some(() =>
       merge_device_status(api_options.device_infos, registry))
+    // 配置热重载回调:任何写路由成功落盘后触发(Node 的 configWatcher +
+    // reload 语义收拢成一个同步入口)。职责面:
+    //   1. 重读盘上配置灌进共享单元格 —— 镜像循环 / fs-watch 对账 / 拨号
+    //      监督全部现读,随之生效;
+    //   2. 通知 actor 按新目录参数集重建目录态(新增开索引首扫、移除拆会话、
+    //      保留目录就地更新运行期字段;全局 paused 折算在内);
+    //   3. 刷新 status 的 settings/devices 快照;
+    //   4. 会话面对账:在线设备的每目录 sinks 重建(新目录接入、移除目录
+    //      摘除;重复 PeerOpen 由 actor 的重连顶替语义收敛),不再共享任何
+    //      目录的既有连接主动掐线(server/client 两侧;对端自动重连)。
+    // 单线程事件循环内同步执行,必须轻:只读配置 + 发命令 + 改内存表,
+    // 不做 git / 网络动作。
+    api_options.on_config_changed = Some(() => {
+      let fresh = load_config_file(config_file)
+      config_cell.val = fresh
+      let _ = handle.send(
+        @daemon.Cmd::Reconfigure(specs=build_folder_specs(config_dir, fresh)),
+      )
+      api_options.settings = Some(@api.settings_json(fresh))
+      api_options.device_infos = @api.device_infos_json(fresh)
+      for device in registry.devices() {
+        close_session_sinks(session_sinks, device)
+        spawn_session_pumps(group, handle, fresh, device, session_sinks, msg =>
+          senders.send_to(device, msg))
+      }
+      let shared : Map[String, Bool] = Map([])
+      for folder in fresh.shared_folders {
+        for d in folder.devices {
+          shared.set(d, true)
+        }
+      }
+      let stale : Array[String] = []
+      for device in registry.devices() {
+        if !shared.contains(device) {
+          stale.push(device)
+        }
+      }
+      for device in stale {
+        senders.unregister(device)
+        registry.unregister(device)
+        match server_ref {
+          Some(server) => server.close_device(device)
+          None => ()
+        }
+        match closers.get(device) {
+          Some(closer) => closer()
+          None => ()
+        }
+      }
+    })
     @api.serve(api_options, "\{control_host}:\{control_port}")
   }
 }
@@ -518,7 +596,9 @@ fn build_folder_specs(
       rules: @core.IgnoreRuleset::from_lines([]),
       receive_only: folder.is_receive_only(),
       conflict_policy: conflict_policy_of(folder.conflict_policy),
-      paused: folder.is_paused(),
+      // 暂停闸:目录级或全局暂停(config.paused,Node 同语义)任一命中;
+      // 配置热重载:全局暂停开关经重建目录集即刻生效。
+      paused: folder.is_paused() || config.is_paused(),
       paused_files: folder.paused_files.unwrap_or([]),
       baseline_pending: true,
       max_bandwidth_kbps: folder.max_bandwidth_kbps,

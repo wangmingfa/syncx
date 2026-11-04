@@ -107,7 +107,7 @@ pub fn set_send_window_bytes(Int32) -> Int32
 
 pub fn split_ext(String) -> (String, String)
 
-pub fn start_fs_watch(@async.TaskGroup[Unit], ActorHandle, Array[FsWatchFolder], FsWatchOptions) -> WatchStats
+pub fn start_fs_watch(@async.TaskGroup[Unit], ActorHandle, () -> Array[FsWatchFolder], FsWatchOptions) -> WatchStats
 
 pub fn start_session_actor(@async.TaskGroup[Unit], String, Array[FolderSpec]) -> ActorHandle raise IndexStoreError
 
@@ -168,6 +168,7 @@ pub(all) enum Cmd {
   ApplyPlan(String)
   PeerOpen(folder~ : String, remote_device_id~ : String, sink~ : @aqueue.Queue[Outbound])
   GitBaseline(folder~ : String, hash~ : String)
+  Reconfigure(specs~ : Array[FolderSpec])
   PeerMessage(folder~ : String, remote_device_id~ : String, message~ : @net.WireMessage)
   PeerClose(folder~ : String, remote_device_id~ : String)
   Snapshot(reply~ : @aqueue.Queue[StatusSnapshot])
@@ -290,7 +291,7 @@ pub fn GitSyncPlan::not_equal(Self, Self) -> Bool
 
 pub(all) struct GitWatcher {
   root : String
-  mode : GitSyncMode
+  mut mode : GitSyncMode
   mut last_hash : String?
 }
 pub async fn GitWatcher::check_new_commit(Self) -> CommitInfo?

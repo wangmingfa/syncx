@@ -243,6 +243,7 @@ pub struct PeerServer {
 }
 pub fn PeerServer::bound_port(Self) -> Int32
 pub fn PeerServer::close(Self) -> Unit
+pub fn PeerServer::close_device(Self, String) -> Unit
 pub fn PeerServer::connected_devices(Self) -> Array[String]
 pub fn PeerServer::connection(Self, String) -> PeerConnectionInfo?
 pub fn PeerServer::connection_count(Self) -> Int32

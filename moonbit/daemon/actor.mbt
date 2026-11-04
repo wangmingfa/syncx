@@ -96,6 +96,9 @@ pub(all) enum Cmd {
   /// 提交检测基线 —— 防止扫描轮把镜像提交误判为「本地新提交」再广播回去
   /// (死循环防护;对应 Node setGitBaseline 在会话层持有基线的口径)。
   GitBaseline(folder~ : String, hash~ : String)
+  /// 配置热重载:装配层重读 config.json 后把新目录参数集投进来,actor 对账
+  /// 重建目录态(见 do_reconfigure)。
+  Reconfigure(specs~ : Array[FolderSpec])
   /// 收到一条对端 wire 消息(已按 folder 路由到该目录的会话)。
   PeerMessage(
     folder~ : String,
@@ -250,17 +253,19 @@ priv struct Folder {
   /// actor 任务上,故无需锁)。
   local_index : Map[String, Entry]
   rules : @core.IgnoreRuleset
-  receive_only : Bool
-  conflict_policy : ConflictPolicy
-  paused : Bool
+  /// 运行期可变字段(mut):配置热重载按新 spec 就地更新 —— 索引库、内存
+  /// 索引与会话态跨重载保留,只有这几项跟随配置走。
+  mut receive_only : Bool
+  mut conflict_policy : ConflictPolicy
+  mut paused : Bool
   paused_files : Array[String]
   mut conflict_count : Int32
   /// remote_device_id → 会话(认领台账未移植:同设备至多一条连接,TODO)。
   peers : Map[String, PeerSession]
   /// 目录级限速令牌桶(maxBandwidthKbps;None = 不限,对齐 Node)。
-  limiter : RateLimiter?
+  mut limiter : RateLimiter?
   /// gitSync 模式(检测/镜像/中继三闸由 git_sync_plan 推导;见 git.mbt)。
-  git_sync : GitSyncMode
+  mut git_sync : GitSyncMode
   /// 本地提交检测观察器(基线结算在 watcher 内部;首轮只记基线)。
   git_watcher : GitWatcher
 }
@@ -270,7 +275,7 @@ priv struct Folder {
 pub struct SessionActor {
   priv rx : @async.Queue[Cmd]
   priv device_id : String
-  priv folders : Array[Folder]
+  priv mut folders : Array[Folder]
   priv cell : SnapshotCell
   /// git 提交检测心跳的节拍计数(见 GIT_CHECK_TICKS;周期泵每 500ms 一拍)。
   priv mut git_tick : Int
@@ -310,6 +315,36 @@ pub async fn ActorHandle::sync_snapshot(self : ActorHandle) -> StatusSnapshot {
 }
 
 ///|
+/// 按一份目录参数构造运行期目录态:打开/复用索引库、载入内存索引、建执行器
+/// 与限速器。启动(启动失败 = fatal)与热重载(单个目录失败 = 记日志跳过,
+/// actor 存活)共用;索引库按 index_path 命名 —— 同一目录重载后原库原索引
+/// 原样接上,不存在「重载清索引」的坑。
+fn make_folder(spec : FolderSpec) -> Folder raise IndexStoreError {
+  let index = IndexStore::open(spec.index_path)
+  let local_index : Map[String, Entry] = Map([])
+  for entry in index.list_entries() {
+    local_index.set(entry.path, entry)
+  }
+  {
+    id: spec.id,
+    root: spec.root,
+    index,
+    executor: make_executor(spec),
+    local_index,
+    rules: spec.rules,
+    receive_only: spec.receive_only,
+    conflict_policy: spec.conflict_policy,
+    paused: spec.paused,
+    paused_files: spec.paused_files,
+    conflict_count: 0,
+    peers: Map([]),
+    limiter: make_rate_limiter(spec.max_bandwidth_kbps),
+    git_sync: spec.git_sync,
+    git_watcher: { root: spec.root, mode: spec.git_sync, last_hash: None },
+  }
+}
+
+///|
 /// 按配置构造 actor(打开索引库并载入内存索引;失败如实上抛)。
 pub fn new_session_actor(
   device_id : String,
@@ -317,28 +352,7 @@ pub fn new_session_actor(
 ) -> SessionActor raise IndexStoreError {
   let folders : Array[Folder] = []
   for spec in specs {
-    let index = IndexStore::open(spec.index_path)
-    let local_index : Map[String, Entry] = Map([])
-    for entry in index.list_entries() {
-      local_index.set(entry.path, entry)
-    }
-    folders.push({
-      id: spec.id,
-      root: spec.root,
-      index,
-      executor: make_executor(spec),
-      local_index,
-      rules: spec.rules,
-      receive_only: spec.receive_only,
-      conflict_policy: spec.conflict_policy,
-      paused: spec.paused,
-      paused_files: spec.paused_files,
-      conflict_count: 0,
-      peers: Map([]),
-      limiter: make_rate_limiter(spec.max_bandwidth_kbps),
-      git_sync: spec.git_sync,
-      git_watcher: { root: spec.root, mode: spec.git_sync, last_hash: None },
-    })
+    folders.push(make_folder(spec))
   }
   let actor : SessionActor = {
     rx: @async.Queue(kind=Unbounded),
@@ -418,6 +432,7 @@ async fn SessionActor::dispatch(self : SessionActor, cmd : Cmd) -> Bool {
     Shutdown => return false
     ScanFolder(id) => self.do_scan(id)
     GitBaseline(folder~, hash~) => self.do_git_baseline(folder, hash)
+    Reconfigure(specs~) => self.do_reconfigure(specs)
     ApplyPlan(id) => self.do_apply_plan(id)
     PeerOpen(folder~, remote_device_id~, sink~) =>
       self.do_peer_open(folder, remote_device_id, sink)
@@ -627,6 +642,111 @@ fn SessionActor::do_git_baseline(self : SessionActor, folder_id : String, hash :
   match self.folder_by_id(folder_id) {
     Some(folder) => folder.git_watcher.last_hash = Some(hash)
     None => ()
+  }
+}
+
+///|
+/// 配置热重载:按新目录参数集对账重建目录态。语义边界(对齐 Node 热重载
+/// 能力范围,刻意收窄项见各行注释):
+///   - 新增目录:开索引库(失败记日志跳过,actor 存活 —— 与启动期的 fatal
+///     不同,热重载不能因一个坏目录掀桌)+ 首轮扫描;
+///   - 移除目录:关全部会话出站队列(泵退出)、丢运行态;索引库文件留在盘上,
+///     重新添加同一目录时原库原索引接上;
+///   - 保留目录:索引库 / 内存索引 / 会话 / git 观察器基线全保留,仅就地更新
+///     运行期字段(receive_only / conflict_policy / paused / 限速 / gitSync);
+///   - 换根(改名 / 挪路径):等同删 + 建 —— 索引键按目录 id 不变,库接上,
+///     会话拆除、观察器重建(基线重新起算,不重放历史);
+///   - 会话拆除只关出站队列,传输层连接不动:装配层的会话面对账负责断开
+///     不再共享任何目录的既有连接(见 cli reload 回调)。
+async fn SessionActor::do_reconfigure(self : SessionActor, specs : Array[FolderSpec]) -> Unit {
+  let existing : Map[String, Folder] = Map([])
+  for folder in self.folders {
+    existing.set(folder.id, folder)
+  }
+  let rebuilt : Array[Folder] = []
+  let fresh : Array[String] = []
+  for spec in specs {
+    match existing.get(spec.id) {
+      Some(folder) => {
+        if normalize_path(folder.root) == normalize_path(spec.root) {
+          // 保留目录:就地更新运行期字段
+          folder.receive_only = spec.receive_only
+          folder.conflict_policy = spec.conflict_policy
+          folder.paused = spec.paused
+          folder.limiter = make_rate_limiter(spec.max_bandwidth_kbps)
+          folder.git_sync = spec.git_sync
+          folder.git_watcher.mode = spec.git_sync
+          rebuilt.push(folder)
+        } else {
+          // 换根:删 + 建
+          for _, session in folder.peers {
+            session.sink.close(clear=true)
+          }
+          let opened : Folder? = Some(make_folder(spec)) catch {
+            e => {
+              @log.error(
+                "配置重载:目录 {Folder} 换根后索引库打开失败,跳过 ({Detail})",
+                [
+                  Json::string(spec.id),
+                  Json::string(IndexStoreError::to_text(e)),
+                ],
+              )
+              None
+            }
+          }
+          match opened {
+            Some(f) => {
+              rebuilt.push(f)
+              fresh.push(f.id)
+            }
+            None => ()
+          }
+        }
+      }
+      None => {
+        // 新增目录
+        let opened : Folder? = Some(make_folder(spec)) catch {
+          e => {
+            @log.error(
+              "配置重载:新目录 {Folder} 索引库打开失败,跳过 ({Detail})",
+              [
+                Json::string(spec.id),
+                Json::string(IndexStoreError::to_text(e)),
+              ],
+            )
+            None
+          }
+        }
+        match opened {
+          Some(f) => {
+            rebuilt.push(f)
+            fresh.push(f.id)
+          }
+          None => ()
+        }
+      }
+    }
+  }
+  // 移除的目录:关会话出站队列(泵退出)、丢运行态
+  let kept : Map[String, Bool] = Map([])
+  for f in rebuilt {
+    kept.set(f.id, true)
+  }
+  for folder in self.folders {
+    if !kept.contains(folder.id) {
+      for _, session in folder.peers {
+        session.sink.close(clear=true)
+      }
+      @log.info("配置重载:目录 {Folder} 已移除,运行态随之拆除", [
+        Json::string(folder.id),
+      ])
+    }
+  }
+  self.folders = rebuilt
+  self.publish()
+  // 新目录首轮扫描(基线 / 索引入库;paused 目录 do_scan 自行退闸)
+  for id in fresh {
+    self.do_scan(id)
   }
 }
 

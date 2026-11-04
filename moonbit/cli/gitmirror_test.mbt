@@ -97,7 +97,7 @@ fn gm_mirror(
       panic()
     }
   }
-  (@cli.GitMirror::new(config, registry, senders, handle), handle)
+  (@cli.GitMirror::new(config_of=() => config, registry~, senders~, handle~), handle)
 }
 
 ///|
@@ -314,6 +314,34 @@ async test "镜像 flush:提交失败退避,通知不丢" {
     // 失败夹具本身仍在:残留锁没被清掉,工作树依旧脏
     assert_true(@fs.exists("\{repo}/.git/index.lock"))
     // 收尾:叫停 actor 常驻循环
+    let _ = handle.send(@daemon.Cmd::Shutdown)
+  }
+}
+
+///|
+async test "镜像热重载:配置单元格现读,gitSync 关闭即刻生效" {
+  @async.with_task_group() <| group => {
+    let config = @core.parse_config(
+      "{\"sharedFolders\":[{\"path\":\"/tmp/nope-m\",\"id\":\"f1\",\"gitSync\":\"full\"}]}",
+    )
+    let (mirror, handle) = gm_mirror(
+      group,
+      config,
+      @cli.PeerSessionRegistry::new(),
+      @cli.PeerSenders::new(),
+    )
+    mirror.on_notify(gm_notify("DEV-A", "f1", "h-live"), Some("DEV-A"))
+    assert_true(mirror.has_slot("f1"))
+    // 热重载:整目录拷贝替换把 gitSync 改为 off(与写路由同款语义;
+    // 供应者闭包每次现读)
+    let f = config.shared_folders[0]
+    config.shared_folders[0] = { ..f, git_sync: Some("off") }
+    // 入队闸即刻收紧:新通知不再入队
+    mirror.on_notify(gm_notify("DEV-A", "f1", "h-live-2"), Some("DEV-A"))
+    assert_eq(mirror.processed_size(), 1)
+    // 已挂的槽在下一拍 flush 被模式闸结算(off 只出不进)
+    mirror.flush()
+    assert_false(mirror.has_slot("f1"))
     let _ = handle.send(@daemon.Cmd::Shutdown)
   }
 }

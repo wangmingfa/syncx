@@ -101,7 +101,9 @@ fn device_to_json(device : @core.DeviceConfig) -> Json {
 }
 
 ///|
-/// 随机短 id(目录无显式 id 时兜底)。TODO(daemon):对齐 Rust short_id 长度。
+/// 随机短 id(目录无显式 id 时兜底)。TODO(daemon):对齐 Rust short_id 长度
+/// 与字符集(纯展示差异,不影响互操作 —— id 只在本机配置与 wire 的
+/// folderId 间对应,两端各自生成各自持有)。
 fn short_id() -> String {
   let raw = match @env.rand(8) {
     Some(bytes) => bytes
@@ -169,7 +171,10 @@ pub async fn handle_add_folder(
   save_config(options.config_file, config) catch {
     _ => return json_error(event, @mocket.BadRequest, "invalid json body")
   }
-  // TODO(daemon):目录登记后通知 daemon 重载配置并开新索引
+  // 配置热重载:目录登记(新增/合并 devices)即刻生效 —— 装配层回调重读
+  // 配置,重建 daemon 目录集(新目录开索引并首扫,合并 devices 的目录就地
+  // 更新共享名单)
+  notify_config_changed(options)
   let map : Map[String, Json] = Map([])
   map.set("ok", Json::boolean(true))
   map.set("created", Json::boolean(created))
@@ -196,7 +201,8 @@ pub async fn handle_pause(
   save_config(options.config_file, config) catch {
     _ => return json_error(event, @mocket.BadRequest, "invalid json body")
   }
-  // TODO(daemon):落盘后通知装配层重载,让 daemon 立刻生效
+  // 配置热重载:全局暂停/恢复即刻生效(重建目录集时按新 paused 折算)
+  notify_config_changed(options)
   @mocket.HttpResponse(@mocket.OK).json(ok_true())
 }
 
@@ -253,7 +259,9 @@ pub async fn handle_folder_git_strip_co_authored(
   save_config(options.config_file, config) catch {
     _ => return json_error(event, @mocket.BadRequest, "invalid json body")
   }
-  // TODO(daemon):落盘后通知 daemon 重载,让下一轮镜像提交立即按新开关剔除
+  // 配置热重载:下一轮镜像提交立即按新开关剔除(镜像循环每次 flush 现读
+  // 配置,回调刷新的正是它读的那份)
+  notify_config_changed(options)
   @mocket.HttpResponse(@mocket.OK).json(ok_true())
 }
 
@@ -317,8 +325,9 @@ pub async fn handle_add_device(
   // 刷新 status.devices 快照:添加动作后设备卡立即出现(Node 的
   // statusHub.notify 同职责)
   options.device_infos = device_infos_json(config)
-  // TODO(daemon):设备登记后通知 daemon 立即建连/补发配对请求
-  // (Node 侧 manager.notifyPairingIntent 同职责),当前落盘即止
+  // 配置热重载:出站拨号对账循环按新 peers 清单补起拨号循环(Node 的
+  // notifyPairingIntent 「立即建连」职责由对账节拍承担,见 cli 装配层)
+  notify_config_changed(options)
   @mocket.HttpResponse(@mocket.Created).json(ok_true())
 }
 
@@ -346,8 +355,10 @@ pub async fn handle_remove_device(
   }
   // 刷新 status.devices 快照:移除动作后设备卡立即消失
   options.device_infos = device_infos_json(config)
-  // TODO(daemon):设备移除后通知 daemon 断开既有会话、清理学习到的
-  // 对端地址并重算状态推送(Node 侧 forgetAndCloseSessions 同职责)
+  // 配置热重载:重建目录集(共享名单已联动摘除)+ 会话面对账 —— 不再共享
+  // 任何目录的既有连接由装配层主动断开(Node forgetAndCloseSessions 同职责);
+  // 「清理学习到的对端地址」依赖地址学习,尚未实现,残留项
+  notify_config_changed(options)
   @mocket.HttpResponse(@mocket.OK).json(ok_true())
 }
 

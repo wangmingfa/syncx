@@ -798,3 +798,53 @@ async test "actor 回环: 限速下出站块响应被令牌桶压住" {
     actor_loop_stop(env)
   }
 }
+
+///|
+/// 配置热重载:Reconfigure 对账重建目录集。保留目录就地更新运行期字段
+/// (paused 即刻生效)、新增目录入列、移除目录出列;索引库按 index_path
+/// 复用,重载不清索引。
+async test "配置热重载:Reconfigure 对账重建目录集" {
+  @async.with_task_group() <| group => {
+    let root_a = "/tmp/syncx-mb-actor-reload-a-\{@daemon.now_ms()}"
+    let root_b = "/tmp/syncx-mb-actor-reload-b-\{@daemon.now_ms()}"
+    @fs.mkdir(root_a, recursive=true, allow_exist=true)
+    @fs.mkdir(root_b, recursive=true, allow_exist=true)
+    let spec_a = actor_make_spec(root_a)
+    let handle = @daemon.start_session_actor(group, "reload-device", [spec_a])
+    // 初始:仅 f1;重载后 f1 暂停 + 新增 f2
+    let spec_b = { ..actor_make_spec(root_b), id: "f2" }
+    let _ = handle.send(
+      @daemon.Cmd::Reconfigure(
+        specs=[{ ..spec_a, paused: true }, spec_b],
+      ),
+    )
+    assert_true(
+      actor_wait_until(() => {
+        let s = handle.snapshot()
+        s.folders.length() == 2 &&
+        s.folders[0].paused &&
+        s.folders[1].id == "f2"
+      }),
+      msg="重载后应有两个目录,f1 暂停生效,f2 就位",
+    )
+    // 移除 f1:f2 保留
+    let _ = handle.send(@daemon.Cmd::Reconfigure(specs=[spec_b]))
+    assert_true(
+      actor_wait_until(() => {
+        let s = handle.snapshot()
+        s.folders.length() == 1 && s.folders[0].id == "f2"
+      }),
+      msg="重载后仅剩 f2",
+    )
+    // 恢复 f1(同 index_path):原库原索引接上,不再是 paused
+    let _ = handle.send(@daemon.Cmd::Reconfigure(specs=[spec_a, spec_b]))
+    assert_true(
+      actor_wait_until(() => {
+        let s = handle.snapshot()
+        s.folders.length() == 2 && !s.folders[0].paused
+      }),
+      msg="f1 重新添加后恢复未暂停态",
+    )
+    let _ = handle.send(@daemon.Cmd::Shutdown)
+  }
+}

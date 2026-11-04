@@ -20,6 +20,12 @@ pub const RECONNECT_BASE_MS : Int = 1000
 pub const RECONNECT_MAX_MS : Int = 30000
 
 ///|
+/// 出站拨号监督循环的 diff 节拍(ms):每拍现读配置的 peers 清单,新 URL 补起
+/// 拨号循环。配置热重载的「设备登记后立即建连」由这个节拍承担(3s 内跟上;
+/// Node 是回调即拨,MoonBit 以轻量轮询等价,避免回调里碰网络)。
+pub const DIAL_SUPERVISOR_TICK_MS : Int = 3000
+
+///|
 /// 断线重连退避延迟(ms),与 Node `reconnectDelayMs` 同曲线:`attempts` 为
 /// 已连续失败次数,第 0 次(首连失败)立即重试(0ms)—— 避免双 daemon 同时
 /// 启动时互相拒连把连接建立推到 30s 边缘 —— 之后 1s 起指数退避,30s 封顶。
@@ -94,6 +100,16 @@ pub fn PeerSessionRegistry::unregister(self : PeerSessionRegistry, device_id : S
 /// 活跃会话数(观测/测试用)。
 pub fn PeerSessionRegistry::size(self : PeerSessionRegistry) -> Int {
   self.sessions.length()
+}
+
+///|
+/// 当前活跃设备清单(观测/会话面对账用,配置热重载按它对账 sinks 与连接)。
+pub fn PeerSessionRegistry::devices(self : PeerSessionRegistry) -> Array[String] {
+  let out : Array[String] = []
+  for device, _ in self.sessions {
+    out.push(device)
+  }
+  out
 }
 
 ///|
@@ -300,20 +316,35 @@ fn handle_peer_message(
 /// 链路故障):撤销会话与 sinks、记 WRN、按退避曲线重拨 —— 成功即归零
 /// attempts(闭链后 0ms 立即重拨),失败持续指数退避(1s 起 30s 封顶,
 /// 与 Node 同曲线)。
+///
+/// 配置热重载:`still_configured` 在每个重拨点检查该 URL 是否仍在配置里 ——
+/// 被移除的 URL 在既有连接自然断开后退出循环(连接不断,等链路自己收);
+/// `on_exit` 供监督循环把 URL 从「已拨」名册摘除,URL 重新添加时能重新起循环。
 async fn outbound_peer_loop(
   registry : PeerSessionRegistry,
   identity : @net.DeviceIdentity,
-  config : @core.Config,
+  config_cell : Ref[@core.Config],
   handle : @daemon.ActorHandle,
   group : @async.TaskGroup[Unit],
   session_sinks : Map[String, Map[String, @async.Queue[@daemon.Outbound]]],
   senders : PeerSenders,
+  closers : Map[String, () -> Unit],
   mirror : GitMirror,
   url : String,
   peer_port : Int32,
+  still_configured : (String) -> Bool,
+  on_exit : () -> Unit,
 ) -> Unit {
   let mut attempts = 0
   for ;; {
+    if !still_configured(url) {
+      // 该对端地址已从配置移除:既断则断后的清理段已跑过,这里直接收工
+      @log.info("peer {Url} no longer in config, dial loop exiting", [
+        Json::string(url),
+      ])
+      on_exit()
+      return
+    }
     let dial : @net.PeerClient? = Some(
       @net.connect_peer(
         @net.PeerHandshakeMode::Secure(identity),
@@ -363,16 +394,19 @@ async fn outbound_peer_loop(
             ),
           ),
         ) catch { _ => () }
-        // actor 出站接线(共享目录 sinks + 泵,直接走本条客户端连接)
-        spawn_session_pumps(group, handle, config, device_id, session_sinks, msg => {
+        // actor 出站接线(共享目录 sinks + 泵,直接走本条客户端连接;
+        // 目录清单现读配置单元格)
+        spawn_session_pumps(group, handle, config_cell.val, device_id, session_sinks, msg => {
           client.send_message(msg) catch { _ => return false }
           true
         })
-        // 发送闭包登记(镜像中继按它寻址;断开钩子摘除)
+        // 发送闭包登记(镜像中继按它寻址;断开钩子摘除)+ 连接 closer 登记
+        // (配置热重载:设备不再共享任何目录时由会话面对账主动掐线)
         senders.register(device_id, msg => {
           client.send_message(msg) catch { _ => return false }
           true
         })
+        closers.set(device_id, () => { client.close() })
         // git 回执泵:handle_peer_message 是同步回调,而 client 发送是 async ——
         // 回执先入无界箱,由本任务异步投递(单线程 async,箱即同步转发)
         let ack_outbox : @async.Queue[@net.ControlMessage] = @async.Queue(
@@ -412,10 +446,11 @@ async fn outbound_peer_loop(
             ]),
           on_close: () => (),
         })
-        // 会话撤销:元数据失效 + sinks 关闭 + 发送闭包摘除 + 回执箱关停
-        // (与 server 侧 on_disconnect 对称)
+        // 会话撤销:元数据失效 + sinks 关闭 + 发送闭包/closer 摘除 + 回执箱
+        // 关停(与 server 侧 on_disconnect 对称)
         registry.unregister(device_id)
         senders.unregister(device_id)
+        closers.remove(device_id)
         close_session_sinks(session_sinks, device_id)
         ack_outbox.close(clear=true)
         @log.warn(

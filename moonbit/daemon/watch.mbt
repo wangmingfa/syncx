@@ -3,8 +3,9 @@
 /// 对应 Node `src/cli.ts` 周期扫描段的升级形态)。
 ///
 /// 架构契约:
-///  - 每个「未暂停」的共享目录一条 `@fs.Watcher`(递归监听整棵树)。身份校验
-///    门禁(folderIdentity 收养)落地前暂以 paused 为闸,与 cli 装配层 TODO 同步;
+///  - 每个「未暂停」的共享目录一条 `@fs.Watcher`(递归监听整棵树)。目录清单
+///    以供应者闭包给定,对账循环按拍 diff —— 配置热重载下目录增删/暂停切换
+///    即插即拔。身份校验门禁(folderIdentity 收养)落地前暂以 paused 为闸;
 ///  - 事件只当**触发器**:判定(相对路径拼接、diff、墓碑、忽略、嵌套共享根)
 ///    完全走 scanner.mbt 现有管线,这里不复制任何判定逻辑;
 ///  - 事件聚合防抖靠 `@fs.Watcher` 自带的 debounce(debounce_timeout = 事件静默
@@ -13,13 +14,15 @@
 ///    重扫。重入闸与现有语义一致 —— actor 单线程命令循环串行处理 ScanFolder,
 ///    重扫天然互斥;自己写入也产生事件,不过滤,聚合后重扫幂等;
 ///  - 定时兜底全扫:watcher 正常时按 fsWatchFallbackScanSecs(缺省 600s,可配置)
-///    对一次总账;watcher 创建失败/不可用 → 该目录退回原扫描间隔
-///    (DEGRADED_SCAN_INTERVAL_MS,接 watcher 之前的 30s 节奏)并 warn 一次;
-///    fsWatchEnabled=false → 纯定时全扫,行为与接 watcher 之前完全一致;
-///  - watcher 失效(目录被删重建):close 后重建 + 立即触发该目录扫描;目录
-///    消失期间由「重建重试的降级节奏 + 兜底定时器」顶着,不崩。失效检测与
-///    平台无关:wait 抛错按失效,wait 挂着不动(部分后端对根目录被删无反应)
-///    则由存活探针定期查根目录还在不在。
+///    对一次总账;watcher 创建失败/不可用 → 该目录进降级名册,按原扫描间隔
+///    (DEGRADED_SCAN_INTERVAL_MS,接 watcher 之前的 30s 节奏)周期全扫并
+///    warn 一次;fsWatchEnabled=false → 纯定时全扫,行为与接 watcher 之前
+///    完全一致;
+///  - watcher 失效(目录被删重建):值守任务记 rebuilds + 补一扫,对账循环
+///    下一拍重建;目录被移除/暂停的主动撤除不计失效。目录消失期间由
+///    「降级节奏的周期全扫 + 兜底定时器」顶着,不崩。失效检测与平台无关:
+///    wait 抛错按失效,wait 挂着不动(部分后端对根目录被删无反应)则由
+///    存活探针定期查根目录还在不在。
 ///
 /// 日志:watcher 启动/重建走 @log 门面(启动 Information / 失效重建 Warning);
 /// 事件批聚合数超阈值才记(平时零噪声,Debug);降级 warn 一次(同一段失效
@@ -153,20 +156,23 @@ pub fn WatchStats::degrade_count(self : WatchStats) -> Int {
 /// 起「文件系统监听 + 定时兜底」监督器:返回运行统计(cli 侧可忽略;
 /// 测试用来观测启动/重建/降级)。
 ///
-/// 目录列表由装配层给定(通常来自 config.sharedFolders);暂停目录不建
+/// 目录列表由装配层以**供应者闭包**给定(配置热重载:每次对账现读最新
+/// config.shared_folders,目录增删/暂停切换即插即拔);暂停目录不建
 /// watcher(扫描侧本就跳过它们),但仍在兜底定时器名册里 —— 是否真扫由
 /// actor 的 paused 闸决定,与接 watcher 之前的纯定时行为一致。
+///
+/// 形态:一条对账循环(节拍 = min(1s, 存活探针间隔))按供应者清单 diff 当前
+/// watcher 集 —— 新目录建 watcher 起值守任务、消失/暂停目录 close watcher
+/// (值守任务随之 Broken 退出);建不出 watcher 的目录进降级名册,由降级
+/// 节奏的周期全扫顶着,恢复后自动接上。原「每目录自建自重建」形态的失效
+/// 重建职责由对账循环承担,行为等价。
 pub fn start_fs_watch(
   group : @async.TaskGroup[Unit],
   handle : ActorHandle,
-  folders : Array[FsWatchFolder],
+  folders_of : () -> Array[FsWatchFolder],
   options : FsWatchOptions,
 ) -> WatchStats {
   let stats : WatchStats = { starts: 0, rebuilds: 0, degrades: 0 }
-  let ids : Array[String] = []
-  for folder in folders {
-    ids.push(folder.id)
-  }
   if !options.enabled {
     // 配置关闭:纯定时全扫,节奏 = 原扫描间隔,行为与接 watcher 之前一致
     @log.info(
@@ -175,7 +181,7 @@ pub fn start_fs_watch(
     )
     let interval = options.degraded_scan_ms
     group.spawn_bg(allow_failure=true, no_wait=true) <| () => {
-      fallback_scan_loop(handle, ids, interval)
+      fallback_scan_loop(handle, folders_of, interval)
     }
     return stats
   }
@@ -184,33 +190,37 @@ pub fn start_fs_watch(
   // 也给 watcher 建好之前的存量文件一个基准)。
   let fallback_ms = options.fallback_scan_ms
   group.spawn_bg(allow_failure=true, no_wait=true) <| () => {
-    fallback_scan_loop(handle, ids, fallback_ms)
+    fallback_scan_loop(handle, folders_of, fallback_ms)
   }
-  // 每个未暂停目录一条 watcher 常驻任务
-  for folder in folders {
-    if folder.paused {
-      continue
-    }
-    let f = folder
-    group.spawn_bg(allow_failure=true, no_wait=true) <| () => {
-      folder_watch_loop(handle, f, options, stats)
-    }
+  // watcher 对账循环 + 降级扫描循环(降级名册由对账循环维护)
+  let reconcile_ms = if options.alive_probe_ms < 1000 {
+    options.alive_probe_ms
+  } else {
+    1000
+  }
+  let degraded : Map[String, FsWatchFolder] = Map([])
+  group.spawn_bg(allow_failure=true, no_wait=true) <| () => {
+    watch_reconcile_loop(group, handle, folders_of, options, stats, degraded, reconcile_ms)
+  }
+  group.spawn_bg(allow_failure=true, no_wait=true) <| () => {
+    degraded_scan_loop(handle, degraded, options)
   }
   stats
 }
 
 ///|
 /// 兜底全扫循环:先扫后睡(首轮立即,保住「启动即扫一遍」的旧语义);
-/// actor 队列已关 = 退出。每轮触发记 Information(低频,600s 一条)。
+/// 每轮目录清单现取(热重载即插即拔);actor 队列已关 = 退出。
+/// 每轮触发记 Information(低频,600s 一条)。
 async fn fallback_scan_loop(
   handle : ActorHandle,
-  folder_ids : Array[String],
+  folders_of : () -> Array[FsWatchFolder],
   interval_ms : Int,
 ) -> Unit {
   for ;; {
-    for id in folder_ids {
-      @log.info("目录 {Folder} 兜底全扫触发", [Json::string(id)])
-      if !handle.send(Cmd::ScanFolder(id)) {
+    for folder in folders_of() {
+      @log.info("目录 {Folder} 兜底全扫触发", [Json::string(folder.id)])
+      if !handle.send(Cmd::ScanFolder(folder.id)) {
         return
       }
     }
@@ -219,55 +229,118 @@ async fn fallback_scan_loop(
 }
 
 ///|
-/// 单目录 watcher 常驻循环:建 watcher → 值守到失效 → 重建;建不出来
-/// (目录缺失/不是目录/平台不支持)→ 降级为原节奏周期全扫,并周期性重试。
-async fn folder_watch_loop(
+/// 降级扫描循环:对「建不出 watcher」的降级名册按原扫描间隔周期全扫
+/// (目录暂缺/平台不支持时的最后防线;名册由对账循环维护,建出 watcher
+/// 即摘除)。
+async fn degraded_scan_loop(
   handle : ActorHandle,
-  folder : FsWatchFolder,
+  degraded : Map[String, FsWatchFolder],
+  options : FsWatchOptions,
+) -> Unit {
+  for ;; {
+    @async.sleep(options.degraded_scan_ms)
+    for pair in degraded {
+      if !handle.send(Cmd::ScanFolder(pair.1.id)) {
+        return
+      }
+    }
+  }
+}
+
+///|
+/// watcher 对账循环:每拍按供应者清单 diff 当前 watcher 集。
+///  - 新目录(未暂停):建 watcher → 记 starts → 起值守任务;
+///  - 消失/暂停目录:从名册摘除并 close watcher —— 值守任务随 Broken 退出
+///    (retired 闸把这次主动撤销与「失效重建」区分开,不刷 rebuilds/不补扫);
+///  - 建不出 watcher:进降级名册(每段失效期 warn 一次),降级扫描循环顶着。
+async fn watch_reconcile_loop(
+  group : @async.TaskGroup[Unit],
+  handle : ActorHandle,
+  folders_of : () -> Array[FsWatchFolder],
   options : FsWatchOptions,
   stats : WatchStats,
+  degraded : Map[String, FsWatchFolder],
+  reconcile_ms : Int,
 ) -> Unit {
-  // 降级警告只发一次:同一段失效期内不刷屏;恢复(建出 watcher)后再次
+  // folder_id → 该目录的在值值守(active watcher 与 retired 闸)
+  let active : Map[String, @fs.Watcher] = Map([])
+  let retired : Map[String, Ref[Bool]] = Map([])
+  // 降级 warn 只发一次:同一段失效期内不刷屏;建出 watcher 后清旗,再次
   // 失效会重新 warn 并计入新的失效期
-  let mut warned = false
+  let warned : Map[String, Bool] = Map([])
   for ;; {
-    match make_folder_watcher(folder.root, options) {
-      Some(watcher) => {
-        warned = false
-        stats.starts += 1
-        @log.info("目录 {Folder} 的文件系统监听已启动({Root})", [
-          Json::string(folder.id), Json::string(folder.root),
-        ])
-        watch_until_broken(handle, folder, watcher, options)
-        // 到这里 = watcher 失效(目录被删 / 句柄出错):立即补一次该目录扫描
-        // (目录若被原地重建,这一刀把存量对上账),随后回循环顶端重建
-        stats.rebuilds += 1
-        if !handle.send(Cmd::ScanFolder(folder.id)) {
-          return
-        }
-        @log.warn("目录 {Folder} 的监听已失效,关闭后重建", [Json::string(folder.id)])
+    let desired : Map[String, FsWatchFolder] = Map([])
+    for folder in folders_of() {
+      if !folder.paused {
+        desired.set(folder.id, folder)
       }
-      None => {
-        if !warned {
-          stats.degrades += 1
-          @log.warn(
-            "目录 {Folder}({Root})无法建文件系统监听,退回 {Ms}ms 周期全扫",
-            [
-              Json::string(folder.id),
-              Json::string(folder.root),
-              Json::number(options.degraded_scan_ms.to_double()),
-            ],
-          )
-          warned = true
+    }
+    // 新目录接入
+    for id, folder in desired {
+      if active.contains(id) {
+        continue
+      }
+      match make_folder_watcher(folder.root, options) {
+        Some(watcher) => {
+          active.set(id, watcher)
+          retired.set(id, Ref(false))
+          warned.remove(id)
+          stats.starts += 1
+          @log.info("目录 {Folder} 的文件系统监听已启动({Root})", [
+            Json::string(folder.id), Json::string(folder.root),
+          ])
+          let stop = retired.get(id).unwrap_or(Ref(false))
+          let f = folder
+          group.spawn_bg(allow_failure=true, no_wait=true) <| () => {
+            watch_until_broken(handle, f, watcher, options, stats, stop)
+            // 值守结束(失效断裂;主动撤除的对账侧已摘过名册,幂等):把
+            // 名册条目摘掉 —— 对账循环下一拍发现「还在配置里但已不在值」,
+            // 重建接管。摘除与返回之间无 await 点,不会插进新一轮重建。
+            active.remove(f.id)
+            retired.remove(f.id)
+          }
         }
-        // 降级节奏全扫 + 重试建 watcher:目录只是暂时缺席(未挂载/重建中)
-        // 时,两条路都能在目录回来后自动接上
-        @async.sleep(options.degraded_scan_ms)
-        if !handle.send(Cmd::ScanFolder(folder.id)) {
-          return
+        None => {
+          degraded.set(id, folder)
+          match warned.get(id) {
+            Some(_) => ()
+            None => {
+              stats.degrades += 1
+              @log.warn(
+                "目录 {Folder}({Root})无法建文件系统监听,退回 {Ms}ms 周期全扫",
+                [
+                  Json::string(folder.id),
+                  Json::string(folder.root),
+                  Json::number(options.degraded_scan_ms.to_double()),
+                ],
+              )
+              warned.set(id, true)
+            }
+          }
         }
       }
     }
+    // 消失/暂停目录撤除:置 retired 后 close —— 值守任务 Broken 退出且不计重建
+    // (先取键快照再删:Map 边遍历边删是未定义行为)
+    let gone : Array[String] = []
+    for id, _ in active {
+      if !desired.contains(id) {
+        gone.push(id)
+      }
+    }
+    for id in gone {
+      match retired.get(id) {
+        Some(flag) => flag.val = true
+        None => ()
+      }
+      match active.get(id) {
+        Some(watcher) => watcher.close()
+        None => ()
+      }
+      active.remove(id)
+      retired.remove(id)
+    }
+    @async.sleep(reconcile_ms)
   }
 }
 
@@ -334,15 +407,18 @@ async fn watch_wait_slice(
 }
 
 ///|
-/// 一个 watcher 实例的值守周期:批量取事件并触发该目录重扫,直到失效才
-/// 返回(调用方负责重建)。任何一批事件只投一条 ScanFolder —— wait() 已经
-/// 在静默窗口内做过聚合,一批 = 一次该目录重扫;事件路径一律不看,
-/// 判定完全交给现有扫描管线。
+/// 一个 watcher 实例的值守周期:批量取事件并触发该目录重扫,直到失效或被
+/// 对账循环撤除(retired)才返回;重建职责在对账循环。任何一批事件只投一条
+/// ScanFolder —— wait() 已经在静默窗口内做过聚合,一批 = 一次该目录重扫;
+/// 事件路径一律不看,判定完全交给现有扫描管线。失效(非撤除)时记一次
+/// rebuilds 并补一扫对账(目录若被原地重建,这一刀把存量对上账)。
 async fn watch_until_broken(
   handle : ActorHandle,
   folder : FsWatchFolder,
   watcher : @fs.Watcher,
   options : FsWatchOptions,
+  stats : WatchStats,
+  stop : Ref[Bool],
 ) -> Unit {
   defer watcher.close()
   for ;; {
@@ -361,7 +437,15 @@ async fn watch_until_broken(
           }
         }
       Quiet => continue
-      Broken => return
+      Broken => {
+        if stop.val {
+          return // 对账循环主动撤除(目录被移除/暂停):不计失效
+        }
+        stats.rebuilds += 1
+        @log.warn("目录 {Folder} 的监听已失效,关闭后重建", [Json::string(folder.id)])
+        let _ = handle.send(Cmd::ScanFolder(folder.id))
+        return
+      }
     }
   }
 }

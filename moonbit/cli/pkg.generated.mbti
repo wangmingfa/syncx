@@ -22,6 +22,8 @@ pub const DEFAULT_PEER_PORT : Int32 = 22000
 
 pub const DEFAULT_UPGRADE_TAG : String = "latest"
 
+pub const DIAL_SUPERVISOR_TICK_MS : Int32 = 3000
+
 pub const GITHUB_REPO : String = "wangmingfa/syncx"
 
 pub const GIT_AUTO_COMMIT_MAX_ATTEMPTS : Int32 = 5
@@ -172,7 +174,7 @@ pub struct GitMirror {
 }
 pub async fn GitMirror::flush(Self) -> Unit
 pub fn GitMirror::has_slot(Self, String) -> Bool
-pub fn GitMirror::new(@core.Config, PeerSessionRegistry, PeerSenders, @daemon.ActorHandle) -> Self
+pub fn GitMirror::new(config_of~ : () -> @core.Config, registry~ : PeerSessionRegistry, senders~ : PeerSenders, handle~ : @daemon.ActorHandle) -> Self
 pub fn GitMirror::on_notify(Self, @net.ControlMessage, String?) -> Unit
 pub fn GitMirror::processed_size(Self) -> Int32
 pub fn GitMirror::slot_attempts(Self, String) -> Int32
@@ -196,6 +198,7 @@ pub(all) struct PeerSessionMeta {
 pub struct PeerSessionRegistry {
   // private fields
 }
+pub fn PeerSessionRegistry::devices(Self) -> Array[String]
 pub fn PeerSessionRegistry::lookup(Self, String) -> PeerSessionMeta?
 pub fn PeerSessionRegistry::new() -> Self
 pub fn PeerSessionRegistry::register(Self, String, PeerSessionMeta) -> Unit

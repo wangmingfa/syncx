@@ -82,6 +82,8 @@ pub fn mount_static(@mocket.App, String) -> Unit
 
 pub fn new_status_hub(ApiOptions, @daemon.ActorHandle) -> StatusHub
 
+pub async fn notify_config_changed(ApiOptions) -> Unit
+
 pub fn now_ms() -> Int64
 
 pub fn parse_lan_addresses(String) -> Array[String]
@@ -137,12 +139,13 @@ pub(all) struct ApiOptions {
   dev_mode : Bool
   upload_inspect : (async (Bytes) -> Result[InspectedPackage, String])?
   upload_swap : (async (Bytes) -> Result[String, String])?
-  settings : @json.Json?
+  mut settings : @json.Json?
   peer_port : Int32?
   mut device_infos : Array[@json.Json]
   mut device_status : (() -> Array[@json.Json])?
+  mut on_config_changed : (async () -> Unit)?
 }
-pub fn ApiOptions::new(device_id~ : String, control_token? : String, auth_file? : String?, config_file? : String?, actor? : @daemon.ActorHandle?, web_dist? : String?, on_shutdown? : (() -> Unit)?, dev_mode? : Bool, upload_inspect? : (async (Bytes) -> Result[InspectedPackage, String])?, upload_swap? : (async (Bytes) -> Result[String, String])?, settings? : @json.Json?, peer_port? : Int32?, device_infos? : Array[@json.Json]) -> Self
+pub fn ApiOptions::new(device_id~ : String, control_token? : String, auth_file? : String?, config_file? : String?, actor? : @daemon.ActorHandle?, web_dist? : String?, on_shutdown? : (() -> Unit)?, dev_mode? : Bool, upload_inspect? : (async (Bytes) -> Result[InspectedPackage, String])?, upload_swap? : (async (Bytes) -> Result[String, String])?, settings? : @json.Json?, peer_port? : Int32?, device_infos? : Array[@json.Json], on_config_changed? : (async () -> Unit)?) -> Self
 
 type DistProvider
 pub async fn DistProvider::get_contents(Self, StringView) -> &@mocket.Responder
@@ -176,6 +179,8 @@ pub fn StatusHub::detach(Self, String) -> Unit
 pub async fn StatusHub::run(Self) -> Unit
 
 // Type aliases
+pub type ConfigChangedFn = async () -> Unit
+
 pub type UploadInspectFn = async (Bytes) -> Result[InspectedPackage, String]
 
 pub type UploadSwapFn = async (Bytes) -> Result[String, String]
