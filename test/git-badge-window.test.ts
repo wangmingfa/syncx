@@ -11,15 +11,16 @@ import { SyncSessionManager } from '../src/session-manager.js';
 import { rmDir } from './helpers.js';
 
 /**
- * 目录卡「改动 N / 未推送 N」徽标的刷新节奏(2026-11-05 徽标消失回归防线)。
+ * 目录卡「改动 N / 未推送 N」徽标的刷新架构(2026-11-05 徽标整排消失的回归防线)。
  *
- * 两条口径:
- *  - 窗口内:每轮扫描顺带现查,一轮后就必须是真值 —— 这是「徽标全消失」的
- *    回归防线(异步化后扫描链路任何一环断掉,这里第一个红);
- *  - 只被时段挡住:数据面不扫,但徽标是目录卡的事实陈述,每 6 拍(~30s,
- *    与 Rust 侧 git 计数循环同节奏)低频现查 —— 窗口外用户自己改文件/手动
- *    git 提交后,徽标不能永远挂着旧数;
- *  - 手动暂停:连徽标也不刷(保持旧值),与数据面意图一致。
+ * 徽标与扫描**彻底解耦**:独立 30s 循环(refreshGitBadges)对全部目录现查,与
+ * Rust 侧 spawn_git_counts_loop 同构。此前挂在扫描体里,三个口子都能让徽标长期
+ * 停在旧值 —— 收窄轮(只扫脏目录)刷不到别的目录、时段外/暂停整轮跳过、自更新
+ * 重启清零后要等下一次全扫。远端实测:四次自更新重启 + 提交流触发的收窄轮连绵,
+ * 六个目录的徽标整排消失 11 分钟没恢复。
+ *
+ * 三条口径这里钉死:扫描不刷徽标(解耦)、时段外照刷(解耦时段)、手动暂停照刷
+ * (徽标是目录卡的事实陈述,连手动暂停的目录也说真话;同步归同步,徽标归徽标)。
  */
 
 function gitAvailable(): boolean {
@@ -88,9 +89,14 @@ async function shutdown(manager: SyncSessionManager): Promise<void> {
   manager.close();
 }
 
-/** 测试视角的内部接口:scanOnce 是 private,按结构类型触达。 */
-async function scanOnce(manager: SyncSessionManager): Promise<void> {
-  await (manager as unknown as { scanOnce(): Promise<void> }).scanOnce();
+/** 测试视角的内部接口:按结构类型触达 private 成员。 */
+interface Internals {
+  scanOnce(): Promise<void>;
+  refreshGitBadges(): Promise<void>;
+}
+
+function internalsOf(manager: SyncSessionManager): Internals {
+  return manager as unknown as Internals;
 }
 
 /** 「永远在窗口外」的目录时段:dow 空数组 = 没有任何一天命中。 */
@@ -102,9 +108,9 @@ afterEach(() => {
   }
 });
 
-describe('目录卡 git 徽标刷新节奏', () => {
+describe('目录卡 git 徽标刷新架构', () => {
   it.skipIf(!HAS_GIT)(
-    '窗口内:一轮扫描后改动/未推送徽标就是真值(徽标全消失的回归防线)',
+    '徽标与扫描解耦:扫描不刷徽标,独立循环一次现查到真值(徽标全消失的回归防线)',
     async () => {
       const dir = mkdtempSync(join(tmpdir(), 'syncx-badge-fixture-'));
       cleanupDirs.push(dir);
@@ -118,7 +124,13 @@ describe('目录卡 git 徽标刷新节奏', () => {
 
       const { manager, folder } = boot(repo, 'main');
       try {
-        await scanOnce(manager);
+        const internals = internalsOf(manager);
+        // 一轮全扫跑完,徽标仍是初值 —— 扫描不再顺带刷徽标(职责已拆出)
+        await internals.scanOnce();
+        expect(folder.gitUnpushedCount).toBe(0);
+        expect(folder.gitChangeCount).toBe(0);
+        // 独立循环一次现查,徽标立刻是真值;状态映射同步可取
+        await internals.refreshGitBadges();
         expect(folder.gitUnpushedCount).toBe(2);
         expect(folder.gitChangeCount).toBeGreaterThanOrEqual(1);
         expect(manager.folderGitUnpushedCounts()).toMatchObject({ main: 2 });
@@ -129,7 +141,7 @@ describe('目录卡 git 徽标刷新节奏', () => {
   );
 
   it.skipIf(!HAS_GIT)(
-    '时段外:数据面不扫,徽标按 6 拍节奏低频追上真值',
+    '时段外照刷:窗口关闭不再冻结徽标',
     async () => {
       const dir = mkdtempSync(join(tmpdir(), 'syncx-badge-fixture-'));
       cleanupDirs.push(dir);
@@ -141,20 +153,10 @@ describe('目录卡 git 徽标刷新节奏', () => {
 
       const { manager, folder } = boot(repo, 'main');
       try {
-        // 时段判定读的是内存里的 folder.config.schedule,直接置「永不命中」
         folder.config.schedule = NEVER_SCHEDULE;
-        const internals = manager as unknown as { scanBeat: number };
-        // 前 5 拍:尚未到刷新拍,徽标保持初值(数据面确实没扫)
-        await scanOnce(manager);
-        expect(internals.scanBeat).toBe(1);
-        expect(folder.gitUnpushedCount).toBe(0);
-        for (let i = 2; i <= 5; i++) await scanOnce(manager);
-        expect(folder.gitUnpushedCount).toBe(0);
-        // 第 6 拍:低频现查命中,徽标追上真值
-        await scanOnce(manager);
+        await internalsOf(manager).refreshGitBadges();
         expect(folder.gitUnpushedCount).toBe(1);
         expect(folder.gitChangeCount).toBeGreaterThanOrEqual(1);
-        expect(manager.folderGitUnpushedCounts()).toMatchObject({ main: 1 });
       } finally {
         await shutdown(manager);
       }
@@ -162,7 +164,7 @@ describe('目录卡 git 徽标刷新节奏', () => {
   );
 
   it.skipIf(!HAS_GIT)(
-    '手动暂停:徽标连低频现查也不跑(保持旧值)',
+    '手动暂停也照刷:徽标说真话,同步归同步',
     async () => {
       const dir = mkdtempSync(join(tmpdir(), 'syncx-badge-fixture-'));
       cleanupDirs.push(dir);
@@ -175,9 +177,9 @@ describe('目录卡 git 徽标刷新节奏', () => {
       const { manager, folder } = boot(repo, 'main');
       try {
         folder.config.paused = true;
-        for (let i = 0; i < 7; i++) await scanOnce(manager);
-        expect(folder.gitUnpushedCount).toBe(0);
-        expect(folder.gitChangeCount).toBe(0);
+        await internalsOf(manager).refreshGitBadges();
+        expect(folder.gitUnpushedCount).toBe(1);
+        expect(folder.gitChangeCount).toBeGreaterThanOrEqual(1);
       } finally {
         await shutdown(manager);
       }

@@ -77,6 +77,7 @@ interface Internals {
   onControl(msg: ControlMessage, hopDeviceId: string): void;
   flushPendingGitNotify(): Promise<void>;
   checkGitCommits(): Promise<void>;
+  refreshGitBadges(): Promise<void>;
   sendControlTo(deviceId: string, msg: ControlMessage): boolean;
 }
 
@@ -1192,8 +1193,8 @@ describe('git changes inventory (manager API)', async () => {
     await expect(internals.readGitDiff('main', '../x')).rejects.toThrow();
     await expect(internals.readGitDiff('main', '/etc/passwd')).rejects.toThrow();
 
-    // 徽标计数:扫描一轮后刷新到当前条数
-    await manager.runScan();
+    // 徽标计数:独立刷新循环一次现查到当前条数(与扫描解耦,见 refreshGitBadges)
+    await (manager as unknown as { refreshGitBadges(): Promise<void> }).refreshGitBadges();
     expect(folder.gitChangeCount).toBe(2);
 
     (manager as unknown as { close(): void }).close();
@@ -1336,8 +1337,8 @@ describe('git push (manager API)', async () => {
     writeFileSync(join(share, 'pushed.txt'), 'new work');
     git(share, ['add', '-A']);
     git(share, ['commit', '-qm', 'feat: 待推送']);
-    // 徽标计数的常规刷新路径:随每轮扫描顺手盘点(不随 status 高频推送现跑 git)
-    await manager.runScan();
+    // 徽标计数的常规刷新路径:独立 30s 循环现查(不随 status 高频推送现跑 git)
+    await (manager as unknown as { refreshGitBadges(): Promise<void> }).refreshGitBadges();
     expect(folder.gitUnpushedCount).toBe(1);
     folder.gitUnpushedCount = 7;
 

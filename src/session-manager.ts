@@ -792,10 +792,8 @@ export class SyncSessionManager {
    * 重入直接跳过(下一轮心跳自然会补上),与旧同步版「天然原子」行为对齐。
    */
   private gitCheckRunning = false;
-  /** 全扫兜底轮次计数(见 scanOnce 的 fullScan);时段外徽标低频刷新按它取模。 */
-  private scanBeat = 0;
-  /** 时段外目录的 git 徽标刷新周期(拍数):6 拍 × 5s ≈ 30s,与 Rust 侧 git 计数循环同节奏。 */
-  private static readonly GIT_BADGE_REFRESH_BEATS = 6;
+  /** git 徽标独立刷新定时器句柄;close() 时清除(见 startGitBadgeTimer)。 */
+  private gitBadgeTimer: ReturnType<typeof setInterval> | undefined;
   /** 最近的中转活动环形缓冲(ADR-0014 遥测);上限 100,溢出丢弃最旧。仅供拓扑视图展示。 */
   private readonly relayActivity: RelayActivity[] = [];
   private static readonly RELAY_ACTIVITY_CAP = 100;
@@ -988,6 +986,7 @@ export class SyncSessionManager {
     this.refreshNetworkStateAndApply();
     this.startHeartbeat();
     this.startScheduleTicker();
+    this.startGitBadgeTimer();
   }
 
   /**
@@ -1623,9 +1622,6 @@ export class SyncSessionManager {
   private async scanOnce(onlyFolders?: ReadonlySet<string>): Promise<void> {
     // 整轮计时:见函数尾部的 [perf] 扫描整轮 日志(Termux 排查「扫描吃掉主线程」用)
     const roundStart = performance.now();
-    // 全扫兜底轮次计数(脏目录驱动的收窄轮不计):时段外徽标低频刷新按这个节拍
-    const fullScan = onlyFolders === undefined;
-    if (fullScan) this.scanBeat += 1;
     // 本轮真正走到扫描的目录数(被暂停/身份门禁挡住的不计,它们几乎不耗时)
     let roundScannedFolders = 0;
     // watcher 集合对账兜在每轮开头:目录恢复挂载/身份重采后自动补建监听,
@@ -1640,22 +1636,9 @@ export class SyncSessionManager {
       if (onlyFolders && !onlyFolders.has(folder.id)) continue;
       // 暂停的目录(目录级或全局):数据面整体停摆 —— 不扫描、不广播、不应用变更。
       // 控制面照常(连接保持在线),恢复后由下一轮扫描 / reconcile 继续同步。
-      if (this.folderPausedNow(folder)) {
-        // 但「改动 / 未推送」徽标是目录卡的事实陈述,不该跟着同步时段一起冻结 ——
-        // 用户在窗口外自己改文件 / 手动 git 提交后,徽标会一直挂着旧数(实测:
-        // 卡片显示「改动 1」,点开弹窗现查是「工作区干净」)。只被时段挡住的目录
-        // 每 6 拍(~30s,与 Rust 侧独立 git 计数循环同节奏)低频现查一次;
-        // 手动暂停 / 电源守卫挡住的不刷(那几类连着数据面意图,保持旧值即可)。
-        if (fullScan && this.scheduleBlockedOnly(folder) && this.scanBeat % SyncSessionManager.GIT_BADGE_REFRESH_BEATS === 0) {
-          folder.gitChangeCount = isGitRepo(folder.path)
-            ? ((await getUncommittedChanges(folder.path))?.entries.length ?? 0)
-            : 0;
-          folder.gitUnpushedCount = isGitRepo(folder.path)
-            ? ((await countUnpushedCommits(folder.path)) ?? 0)
-            : 0;
-        }
-        continue;
-      }
+      // 「改动 / 未推送」徽标不在这里刷:它已与扫描彻底解耦(见 refreshGitBadges),
+      // 收窄轮 / 暂停 / 时段外都不再影响徽标的新鲜度。
+      if (this.folderPausedNow(folder)) continue;
       // 一轮扫描走到这里且后续无错误即视为「干净」:清除该目录上一次的错误提示,
       // 让问题自愈后目录卡上的错误横幅自动消失。磁盘守卫错误除外 —— 它的解除
       // 只认磁盘实际可用空间(下面复检),扫描干净不代表盘有空间。
@@ -1740,17 +1723,10 @@ export class SyncSessionManager {
       }
       // 徽标计数源:副本已硬忽略不进索引,取扫描顺带盘点的结果(零额外 IO)
       folder.conflictCount = diff.conflictCount;
-      // Git 改动徽标:工作区未提交变更条数(只对 git 仓库盘点;详情弹窗按需现查,
-      // 这里只维持徽标的量级)。暂停/身份闸门挡住的目录不刷新,徽标保持旧值。
-      folder.gitChangeCount = isGitRepo(folder.path)
-        ? ((await getUncommittedChanges(folder.path))?.entries.length ?? 0)
-        : 0;
-      // 「未推送 N」徽标:与上游分支比较的提交数(只对 git 仓库盘点;未设置上游时 0,
-      // 徽标不出现)。与 gitChangeCount 同一份节奏 —— 本机的自动提交/推送都会在下一轮
-      // 扫描内反映出来,status 高频推送时绝不现跑 git。
-      folder.gitUnpushedCount = isGitRepo(folder.path)
-        ? ((await countUnpushedCommits(folder.path)) ?? 0)
-        : 0;
+      // 「改动 N / 未推送 N」徽标已从扫描体中拆除(见 refreshGitBadges):此前挂在
+      // 扫描里,收窄轮(只扫脏目录)/ 暂停 / 时段外都刷不到,加上自更新重启清零,
+      // 远端实测徽标整排消失且长期不恢复。独立 30s 循环统一现查,与 Rust 侧
+      // spawn_git_counts_loop 同构。
       // 结构性守卫:目录身份无法校验时(平台不提供 inode / 配置里尚未采集指纹),把
       // 「一个文件都没看到、却要删东西」当作目录不可信的形态,拒绝执行这批删除。
       // 只有这个极端情形被挡 —— 而那正是「盘未挂载 / 目录被换掉」的样子;正常的单文件
@@ -1885,8 +1861,8 @@ export class SyncSessionManager {
    * 「本机提交 → 本机广播」这一跳因此慢到分钟级。这条独立心跳每 5s 跑一轮
    * checkGitCommits:有基线且 HEAD 未变时只是一次毫秒级 rev-parse,发现变化才做
    * 完整的提交盘点与广播。节拍与 Rust 端排空泵的 5s 节流(GIT_COMMIT_CHECK_INTERVAL_MS)
-   * 和 MoonBit 端的 GIT_CHECK_TICKS 心跳同节奏。函数体全程同步(无 await 间隙),
-   * 与扫描轮尾的同名调用天然互斥,不需要重入闸。
+   * 和 MoonBit 端的 GIT_CHECK_TICKS 心跳同节奏。重入闸见 gitCheckRunning(git 调用
+   * 异步化后函数体会让出主线程,定时器 × 扫描轮尾可能并发)。
    */
   startGitCheckTimer(): void {
     if (this.gitCheckTimer || this.closed) return;
@@ -1895,6 +1871,48 @@ export class SyncSessionManager {
     const timer = setInterval(() => void this.checkGitCommits(), intervalMs);
     timer.unref?.();
     this.gitCheckTimer = timer;
+  }
+
+  /**
+   * 启动 git 徽标独立刷新循环(daemon 装配点:构造器调用;close() 时清除)。
+   *
+   * 「改动 N / 未推送 N」徽标**不挂在扫描上** —— 那是 2026-11-05 远端实测的徽标整排
+   * 消失事故的根因:收窄轮(只扫脏目录)刷不到别的目录、时段外/暂停整轮跳过、
+   * 自更新重启清零后要等下一次全扫才能填回来,三个口子任何一个都能让徽标长期
+   * 停在旧值。现在与扫描、暂停、时段全部解耦:每 30s 对**所有**目录现查一遍
+   * (git 子进程已异步化,不再冻结事件循环),有变化才 notifyStatus。
+   * 与 Rust 侧的独立计数循环(spawn_git_counts_loop,GIT_COUNT_INTERVAL=30s)同构同节奏;
+   * git 徽标是目录卡的事实陈述,连手动暂停的目录也照刷 —— 徽标说真话,同步归同步。
+   */
+  private startGitBadgeTimer(): void {
+    if (this.gitBadgeTimer || this.closed) return;
+    const intervalMs = Number(process.env.SYNCX_GIT_BADGE_MS) || 30_000;
+    const timer = setInterval(() => void this.refreshGitBadges(), intervalMs);
+    timer.unref?.();
+    this.gitBadgeTimer = timer;
+  }
+
+  /** 现查全部目录的 git 徽标(独立循环的 tick;测试直接调它,不等 30s)。 */
+  private async refreshGitBadges(): Promise<void> {
+    if (this.closed) return;
+    let changed = false;
+    for (const folder of this.folderStates) {
+      const isRepo = isGitRepo(folder.path);
+      // 工作区未提交变更条数(「Git 改动」弹窗按需现查,这里只维持徽标量级);
+      // 与上游分支比较的提交数(未设置上游时 0,徽标不出现)。
+      const changeCount = isRepo ? ((await getUncommittedChanges(folder.path))?.entries.length ?? 0) : 0;
+      const unpushed = isRepo ? ((await countUnpushedCommits(folder.path)) ?? 0) : 0;
+      if (folder.gitChangeCount !== changeCount) {
+        folder.gitChangeCount = changeCount;
+        changed = true;
+      }
+      if (folder.gitUnpushedCount !== unpushed) {
+        folder.gitUnpushedCount = unpushed;
+        changed = true;
+      }
+    }
+    // 徽标随状态推送下发;无变化不打扰高频通道。
+    if (changed) this.notifyStatus();
   }
 
   /**
@@ -4686,19 +4704,6 @@ export class SyncSessionManager {
   }
 
   /**
-   * 该目录是否**只**被同步时段挡住(非手动暂停 / 非全局暂停 / 非电源守卫):
-   * 这类目录的数据面停摆是调度层的、暂态的,目录卡徽标仍按低频节拍现查真值。
-   */
-  private scheduleBlockedOnly(folder: FolderState): boolean {
-    return (
-      !this.globalPaused &&
-      this.powerGuardReason === null &&
-      folder.config.paused !== true &&
-      !this.scheduleVerdictFor(folder).inside
-    );
-  }
-
-  /**
    * 暂停状态变化的统一生效点:对所有存活会话重新对账目录通道 ——
    * 暂停即摘除数据通道(出站不再广播、入站被忽略),恢复即重挂并发送全量索引。
    * 控制面不受影响:连接保持在线,配对 / 邀请 / 版本宣告照常。
@@ -5400,6 +5405,10 @@ export class SyncSessionManager {
     if (this.gitCheckTimer) {
       clearInterval(this.gitCheckTimer);
       this.gitCheckTimer = undefined;
+    }
+    if (this.gitBadgeTimer) {
+      clearInterval(this.gitBadgeTimer);
+      this.gitBadgeTimer = undefined;
     }
     this.peerLiveness.clear();
     this.peerOutboundBytes.clear();
