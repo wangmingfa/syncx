@@ -748,6 +748,8 @@ export class SyncSessionManager {
   private readonly peerOutboundBytes = new Map<WebSocket, number>();
   /** 心跳定时器句柄;close() 时清除,避免阻止 daemon 退出。 */
   private heartbeatTimer: ReturnType<typeof setInterval> | undefined;
+  /** git 提交检测心跳定时器句柄;close() 时清除(见 startGitCheckTimer)。 */
+  private gitCheckTimer: ReturnType<typeof setInterval> | undefined;
   /** 最近的中转活动环形缓冲(ADR-0014 遥测);上限 100,溢出丢弃最旧。仅供拓扑视图展示。 */
   private readonly relayActivity: RelayActivity[] = [];
   private static readonly RELAY_ACTIVITY_CAP = 100;
@@ -1794,6 +1796,29 @@ export class SyncSessionManager {
       log: (level, line) => this.logger[level](line),
     });
     this.syncWatchers();
+  }
+
+  /* ==================== git 提交检测心跳(独立于扫描轮) ==================== */
+
+  /**
+   * 启动 git 提交检测心跳(daemon 装配点:cli 在 manager 就绪后调用一次;测试可不
+   * 调用 —— 不调用则检测仍挂扫描轮尾,行为与旧架构一致)。
+   *
+   * 为什么扫描轮兜不住:纯 git 命令产生的提交只动 .git,而 .git 被文件监听硬忽略
+   * —— 提交后没有任何工作树事件驱动扫描,检测只能等兜底全扫(缺省 600s)兜住,
+   * 「本机提交 → 本机广播」这一跳因此慢到分钟级。这条独立心跳每 5s 跑一轮
+   * checkGitCommits:有基线且 HEAD 未变时只是一次毫秒级 rev-parse,发现变化才做
+   * 完整的提交盘点与广播。节拍与 Rust 端排空泵的 5s 节流(GIT_COMMIT_CHECK_INTERVAL_MS)
+   * 和 MoonBit 端的 GIT_CHECK_TICKS 心跳同节奏。函数体全程同步(无 await 间隙),
+   * 与扫描轮尾的同名调用天然互斥,不需要重入闸。
+   */
+  startGitCheckTimer(): void {
+    if (this.gitCheckTimer || this.closed) return;
+    // 测试经环境变量注入短周期,避免真实等待 5s(同 SYNCX_FS_WATCH_DEBOUNCE_MS 模式)
+    const intervalMs = Number(process.env.SYNCX_GIT_CHECK_MS) || 5000;
+    const timer = setInterval(() => void this.checkGitCommits(), intervalMs);
+    timer.unref?.();
+    this.gitCheckTimer = timer;
   }
 
   /**
@@ -5122,6 +5147,10 @@ export class SyncSessionManager {
     if (this.heartbeatTimer) {
       clearInterval(this.heartbeatTimer);
       this.heartbeatTimer = undefined;
+    }
+    if (this.gitCheckTimer) {
+      clearInterval(this.gitCheckTimer);
+      this.gitCheckTimer = undefined;
     }
     this.peerLiveness.clear();
     this.peerOutboundBytes.clear();

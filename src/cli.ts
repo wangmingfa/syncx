@@ -499,6 +499,10 @@ export async function run(args: ParsedArgs): Promise<void> {
   // 必须在首次 armScanTimer 之前启动:启动期降级(平台不支持递归 watch)要立即反映
   // 到兜底间隔上。单元测试不调用它,行为保持与旧架构一致。
   manager.startFolderWatchers();
+  // git 提交检测心跳:纯 git 提交只动被监听硬忽略的 .git,检测不能再依赖扫描轮
+  // (兜底全扫缺省 600s);独立 5s 心跳让「本机提交 → 本机广播」稳定在秒级,
+  // 节拍对齐 Rust 排空泵的 5s 节流与 MoonBit 的 GIT_CHECK_TICKS 心跳
+  manager.startGitCheckTimer();
   // 无目录提示也延迟到端口绑定成功后输出(与其它启动日志同批)
   const noFoldersAtBoot = manager.folderStates.length === 0;
 
