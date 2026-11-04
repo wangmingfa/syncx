@@ -55,12 +55,7 @@ async test "探测:HEAD 前进且消息一致 → 按成功(含空仓库首笔)"
     None => panic()
   }
   wb_commit(repo, "b.txt", "v1", "mirror: probe")
-  let result = commit_failed_probe(
-    repo,
-    Some(before),
-    "mirror: probe",
-    "fake err",
-  )
+  let result = commit_failed_probe(repo, Some(before), "mirror: probe", "fake err")
   assert_true(result.success)
   assert_true(!is_none(result.hash))
   assert_true(is_none(result.error))

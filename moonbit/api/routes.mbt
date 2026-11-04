@@ -25,11 +25,14 @@ fn json_error(
   status : @mocket.StatusCode,
   message : String,
 ) -> &Responder {
-  @log.warn("API 失败 {Path} {Status}: {Message}", [
-    Json::string(event.req.url),
-    Json::number(status.to_int().to_double()),
-    Json::string(message),
-  ])
+  @log.warn(
+    "API 失败 {Path} {Status}: {Message}",
+    [
+      Json::string(event.req.url),
+      Json::number(status.to_int().to_double()),
+      Json::string(message),
+    ],
+  )
   let map : Map[String, Json] = Map([])
   map.set("error", Json::string(message))
   @mocket.HttpResponse(status).json(Json::object(map))
@@ -158,8 +161,7 @@ pub async fn handle_add_folder(
     if !@fs.exists(path) {
       @fs.mkdir(path, recursive=true, allow_exist=true) catch {
         _ =>
-          return json_error(
-            event,
+          return json_error(event,
             @mocket.BadRequest,
             "创建目录失败(目录为空?路径正确?)",
           )
@@ -239,8 +241,7 @@ pub async fn handle_folder_git_strip_co_authored(
     }
   }
   if target < 0 {
-    return json_error(
-      event,
+    return json_error(event,
       @mocket.BadRequest,
       "未找到共享目录:「\{folder_id}」",
     )
@@ -369,8 +370,7 @@ pub async fn handle_shutdown(
   event : @mocket.MocketEvent,
 ) -> &Responder {
   match options.on_shutdown {
-    None =>
-      json_error(event, @mocket.ServiceUnavailable, "shutdown not available")
+    None => json_error(event, @mocket.ServiceUnavailable, "shutdown not available")
     Some(shutdown) => {
       // body 不参与本路由,显式丢弃(见 drain_body 注释)
       drain_body(event)

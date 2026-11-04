@@ -1017,7 +1017,7 @@ pub fn Config::add_known_device(self : Config, device_id : String) -> Bool {
       return false
     }
   }
-  self.known_devices.push({ id: device_id, name: None, extra: Map([]), })
+  self.known_devices.push({ id: device_id, name: None, extra: Map([]) })
   true
 }
 
@@ -1051,7 +1051,7 @@ pub fn Config::remove_known_device(self : Config, device_id : String) -> Bool {
     }
     if hit {
       changed = true
-      self.shared_folders[i] = { ..folder, devices, }
+      self.shared_folders[i] = { ..folder, devices }
     }
   }
   changed

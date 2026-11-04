@@ -291,7 +291,8 @@ async test "POST /api/devices:400 校验、201 登记、幂等、地址登记口
   assert_eq(idempotent.known_devices.length(), 1)
   // 非法 address(缺 ws:// 前缀):响应仍 201,peers 不变
   let response = @mocket.dispatch_http(
-    app, "POST", "/api/devices", headers, b"{\"deviceId\":\"DEV3\",\"address\":\"10.0.0.9:22000\"}",
+    app, "POST", "/api/devices", headers,
+    b"{\"deviceId\":\"DEV3\",\"address\":\"10.0.0.9:22000\"}",
   )
   assert_eq(response.status_code.to_int(), 201)
   let no_peer = @api.load_config("\{dir}/config.json")
@@ -299,14 +300,16 @@ async test "POST /api/devices:400 校验、201 登记、幂等、地址登记口
   assert_eq(no_peer.peers.length(), 0)
   // 合法 ws:// address:落进 peers,且 ::ffff: 前缀被规范化剥离
   let response = @mocket.dispatch_http(
-    app, "POST", "/api/devices", headers, b"{\"deviceId\":\"DEV3\",\"address\":\"ws://[::ffff:10.0.0.9]:22000\"}",
+    app, "POST", "/api/devices", headers,
+    b"{\"deviceId\":\"DEV3\",\"address\":\"ws://[::ffff:10.0.0.9]:22000\"}",
   )
   assert_eq(response.status_code.to_int(), 201)
   let with_peer = @api.load_config("\{dir}/config.json")
   assert_eq(with_peer.peers, ["ws://10.0.0.9:22000"])
   // 再登记同地址(大小写不敏感前缀 + host 小写):幂等,peers 不重复
   let response = @mocket.dispatch_http(
-    app, "POST", "/api/devices", headers, b"{\"deviceId\":\"DEV4\",\"address\":\"WS://10.0.0.9:22000\"}",
+    app, "POST", "/api/devices", headers,
+    b"{\"deviceId\":\"DEV4\",\"address\":\"WS://10.0.0.9:22000\"}",
   )
   assert_eq(response.status_code.to_int(), 201)
   let deduped = @api.load_config("\{dir}/config.json")
@@ -332,9 +335,7 @@ async test "DELETE /api/devices:knownDevices 与目录 devices 联动摘除,幂�
     "Cookie": "syncx_session=\{ticket}",
   }
   // 缺参 → 400 + Node 同款文案
-  let response = @mocket.dispatch_http(
-    app, "DELETE", "/api/devices", headers, b"",
-  )
+  let response = @mocket.dispatch_http(app, "DELETE", "/api/devices", headers, b"")
   assert_eq(response.status_code.to_int(), 400)
   let body : Json = response.read_body()
   match body {

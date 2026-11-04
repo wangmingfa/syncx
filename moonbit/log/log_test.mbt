@@ -8,10 +8,7 @@ test "门面直通:事件转发到当前进程 Logger,模板按序绑定" {
   let memory = @logging.MemoryLogger::new()
   let logger : &@logging.Logger = memory
   @log.init_logger(logger)
-  @log.info("Loaded {Count} files from {Path}", [
-    Json::number(3),
-    Json::string("src"),
-  ])
+  @log.info("Loaded {Count} files from {Path}", [Json::number(3), Json::string("src")])
   @log.warn("低电量 {Level}", [Json::string("low")])
   let events = memory.events()
   assert_eq(events.length(), 2)
@@ -47,9 +44,7 @@ test "未装配时门面静默(null_logger 兜底,不抛错不刷屏)" {
 
 ///|
 async test "FileLogger:两行落盘,行首级别码 [INF]/[WRN]" {
-  let dir = @fs.tmpdir(prefix="syncx-mb-log") catch {
-    _ => fail("临时目录创建失败")
-  }
+  let dir = @fs.tmpdir(prefix="syncx-mb-log") catch { _ => fail("临时目录创建失败") }
   let path = "\{dir}/syncx.log"
   let file_logger = @log.FileLogger::new(path)
   let logger : &@logging.Logger = file_logger

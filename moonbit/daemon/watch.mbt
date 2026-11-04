@@ -32,7 +32,7 @@
 /// 事件防抖静默窗口毫秒:`@fs.Watcher` 的 debounce_timeout 语义是「事件静默满
 /// 这么久才把这批交给 wait()」。取 2s:写完一个文件到触发重扫最多再等 2s,
 /// 而解压整棵树、git 操作这类连续事件流能在窗口内塌缩成一批。
-pub const FS_WATCH_DEBOUNCE_MS : Int32 = 2000
+pub const FS_WATCH_DEBOUNCE_MS : Int = 2000
 
 ///|
 /// 根目录存活探针间隔毫秒:`wait()` 对「被监听根目录本身被删」的行为是平台
@@ -44,25 +44,25 @@ pub const FS_WATCH_DEBOUNCE_MS : Int32 = 2000
 /// 实际切片时长见 watch_slice_ms:必须长过 debounce 强冲窗口,否则取消本身
 /// 会把事件饿死(2026-11-04 根因)。生产目录被删的检测延迟由 1s 放宽到
 /// 5s(debmax 4s + 1s);测试调短。
-pub const FS_WATCH_ALIVE_PROBE_MS : Int32 = 1000
+pub const FS_WATCH_ALIVE_PROBE_MS : Int = 1000
 
 ///|
 /// 防抖强制冲刷上限毫秒(`max_debounce_delay`):持续不断的写入(比如对端
 /// 回放大批文件)下,静默窗口永远凑不满,超过上限就把手头的事件冲出来,
 /// 不让重扫无限滞后。取静默窗口的 2 倍。
-pub const FS_WATCH_DEBOUNCE_MAX_MS : Int32 = 2 * FS_WATCH_DEBOUNCE_MS
+pub const FS_WATCH_DEBOUNCE_MAX_MS : Int = 2 * FS_WATCH_DEBOUNCE_MS
 
 ///|
 /// 降级周期全扫间隔毫秒:接 watcher 之前的原扫描节奏(cli 装配层原先写死的
 /// 30s)。watcher 创建失败/不可用,以及 fsWatchEnabled=false 的纯定时形态,
 /// 都退回这个间隔。
-pub const DEGRADED_SCAN_INTERVAL_MS : Int32 = 30_000
+pub const DEGRADED_SCAN_INTERVAL_MS : Int = 30_000
 
 ///|
 /// 单批事件聚合数的日志阈值:一批事件少于这个数不值得一行日志
 /// (保存文件就是一两个事件,重扫是例行公事);超过阈值说明刚发生了
 /// 批量动作(解压/检出/批量删除),点名出来供排查。
-const WATCH_EVENT_LOG_THRESHOLD : Int32 = 32
+const WATCH_EVENT_LOG_THRESHOLD : Int = 32
 
 ///|
 /// 兜底全扫间隔的折算上限(秒):一日已覆盖任何合理的兜底节奏,同时防配置
@@ -84,15 +84,15 @@ pub(all) struct FsWatchOptions {
   /// 总开关(fsWatchEnabled;false = 不建 watcher,纯定时全扫)。
   enabled : Bool
   /// 兜底全扫间隔毫秒(生产 = fsWatchFallbackScanSecs × 1000)。
-  fallback_scan_ms : Int32
+  fallback_scan_ms : Int
   /// 事件防抖静默窗口毫秒(@fs.Watcher debounce_timeout)。
-  debounce_ms : Int32
+  debounce_ms : Int
   /// 防抖强制冲刷上限毫秒(@fs.Watcher max_debounce_delay)。
-  debounce_max_ms : Int32
+  debounce_max_ms : Int
   /// 根目录存活探针间隔毫秒(wait 分片等待的切片长度)。
-  alive_probe_ms : Int32
+  alive_probe_ms : Int
   /// 降级周期全扫间隔毫秒(watcher 不可用或整体关闭时;生产 = 原扫描间隔)。
-  degraded_scan_ms : Int32
+  degraded_scan_ms : Int
 }
 
 ///|
@@ -131,26 +131,26 @@ pub fn FsWatchOptions::new(
 ///|
 /// 运行统计(诊断与测试观测):单线程事件循环内读写,无锁。
 pub struct WatchStats {
-  priv mut starts : Int32
-  priv mut rebuilds : Int32
-  priv mut degrades : Int32
+  priv mut starts : Int
+  priv mut rebuilds : Int
+  priv mut degrades : Int
 }
 
 ///|
 /// watcher 创建成功的总次数(启动 + 重建;≥ 2 即发生过重建)。
-pub fn WatchStats::start_count(self : WatchStats) -> Int32 {
+pub fn WatchStats::start_count(self : WatchStats) -> Int {
   self.starts
 }
 
 ///|
 /// watcher 失效断裂的次数(wait 出错走重建分支;诊断用)。
-pub fn WatchStats::rebuild_count(self : WatchStats) -> Int32 {
+pub fn WatchStats::rebuild_count(self : WatchStats) -> Int {
   self.rebuilds
 }
 
 ///|
 /// 进入降级扫描的失效期次数(每次失效期 warn 一次;诊断用)。
-pub fn WatchStats::degrade_count(self : WatchStats) -> Int32 {
+pub fn WatchStats::degrade_count(self : WatchStats) -> Int {
   self.degrades
 }
 
@@ -174,12 +174,13 @@ pub fn start_fs_watch(
   folders_of : () -> Array[FsWatchFolder],
   options : FsWatchOptions,
 ) -> WatchStats {
-  let stats : WatchStats = { starts: 0, rebuilds: 0, degrades: 0, }
+  let stats : WatchStats = { starts: 0, rebuilds: 0, degrades: 0 }
   if !options.enabled {
     // 配置关闭:纯定时全扫,节奏 = 原扫描间隔,行为与接 watcher 之前一致
-    @log.info("fsWatchEnabled=false,按原 {Ms}ms 周期定时全扫", [
-      Json::number(options.degraded_scan_ms.to_double()),
-    ])
+    @log.info(
+      "fsWatchEnabled=false,按原 {Ms}ms 周期定时全扫",
+      [Json::number(options.degraded_scan_ms.to_double())],
+    )
     let interval = options.degraded_scan_ms
     group.spawn_bg(allow_failure=true, no_wait=true) <| () => {
       fallback_scan_loop(handle, folders_of, interval)
@@ -201,9 +202,7 @@ pub fn start_fs_watch(
   }
   let degraded : Map[String, FsWatchFolder] = Map([])
   group.spawn_bg(allow_failure=true, no_wait=true) <| () => {
-    watch_reconcile_loop(
-      group, handle, folders_of, options, stats, degraded, reconcile_ms,
-    )
+    watch_reconcile_loop(group, handle, folders_of, options, stats, degraded, reconcile_ms)
   }
   group.spawn_bg(allow_failure=true, no_wait=true) <| () => {
     degraded_scan_loop(handle, degraded, options)
@@ -218,7 +217,7 @@ pub fn start_fs_watch(
 async fn fallback_scan_loop(
   handle : ActorHandle,
   folders_of : () -> Array[FsWatchFolder],
-  interval_ms : Int32,
+  interval_ms : Int,
 ) -> Unit {
   for ;; {
     for folder in folders_of() {
@@ -263,7 +262,7 @@ async fn watch_reconcile_loop(
   options : FsWatchOptions,
   stats : WatchStats,
   degraded : Map[String, FsWatchFolder],
-  reconcile_ms : Int32,
+  reconcile_ms : Int,
 ) -> Unit {
   // folder_id → 该目录的在值值守(active watcher 与 retired 闸)
   let active : Map[String, @fs.Watcher] = Map([])
@@ -290,8 +289,7 @@ async fn watch_reconcile_loop(
           warned.remove(id)
           stats.starts += 1
           @log.info("目录 {Folder} 的文件系统监听已启动({Root})", [
-            Json::string(folder.id),
-            Json::string(folder.root),
+            Json::string(folder.id), Json::string(folder.root),
           ])
           let stop = retired.get(id).unwrap_or(Ref(false))
           let f = folder
@@ -396,7 +394,7 @@ priv enum WatchSlice {
 /// 切片而侥幸全绿)。因此切片时长取 max(alive_probe_ms, debmax + 1s):
 /// 目录被删的失效检测延迟放宽到 5s(删除是罕见事件,兜底扫描可兜),
 /// 换事件链的活性,划算。
-fn watch_slice_ms(options : FsWatchOptions) -> Int32 {
+fn watch_slice_ms(options : FsWatchOptions) -> Int {
   let floor = options.debounce_max_ms + 1000
   if options.alive_probe_ms > floor {
     options.alive_probe_ms
@@ -415,9 +413,11 @@ fn watch_slice_ms(options : FsWatchOptions) -> Int32 {
 async fn watch_wait_slice(
   watcher : @fs.Watcher,
   root : String,
-  slice_ms : Int32,
+  slice_ms : Int,
 ) -> WatchSlice {
-  Events(@async.with_timeout(slice_ms, () => watcher.wait())) catch {
+  try {
+    Events(@async.with_timeout(slice_ms, () => watcher.wait()))
+  } catch {
     @async.TimeoutError => {
       let kind = @fs.kind(root) catch { _ => Unknown }
       if kind is Directory {
@@ -452,13 +452,10 @@ async fn watch_until_broken(
         // 空批(创建+删除在同窗口内互相抵消)什么都不用做
         if events.length() > 0 {
           if events.length() >= WATCH_EVENT_LOG_THRESHOLD {
-            @log.debug(
-              "目录 {Folder} 一批聚合了 {Count} 个文件事件,触发重扫",
-              [
-                Json::string(folder.id),
-                Json::number(events.length().to_double()),
-              ],
-            )
+            @log.debug("目录 {Folder} 一批聚合了 {Count} 个文件事件,触发重扫", [
+              Json::string(folder.id),
+              Json::number(events.length().to_double()),
+            ])
           }
           if !handle.send(Cmd::ScanFolder(folder.id)) {
             return // actor 已退出(队列已关)
@@ -470,9 +467,7 @@ async fn watch_until_broken(
           return // 对账循环主动撤除(目录被移除/暂停):不计失效
         }
         stats.rebuilds += 1
-        @log.warn("目录 {Folder} 的监听已失效,关闭后重建", [
-          Json::string(folder.id),
-        ])
+        @log.warn("目录 {Folder} 的监听已失效,关闭后重建", [Json::string(folder.id)])
         let _ = handle.send(Cmd::ScanFolder(folder.id))
         return
       }

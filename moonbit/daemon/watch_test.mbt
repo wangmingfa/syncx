@@ -29,12 +29,12 @@ async fn watch_run(
   root : String,
   options : @daemon.FsWatchOptions,
   body : async (@daemon.ActorHandle, @daemon.WatchStats) -> Unit,
-) -> Unit {
+) -> Unit raise {
   @async.with_task_group() <| group => {
     let spec = actor_make_spec(root)
     let handle = @daemon.start_session_actor(group, "watch-test-device", [spec])
     let folders : Array[@daemon.FsWatchFolder] = [
-      { id: "f1", root, paused: false, },
+      { id: "f1", root, paused: false },
     ]
     let stats = @daemon.start_fs_watch(group, handle, () => folders, options)
     body(handle, stats)
@@ -54,7 +54,10 @@ async fn watch_fresh_root(tag : String) -> String {
 ///|
 /// 带超时的条件轮询:条件成立即返回 true;超时返回最后一次判定
 /// (调用方直接 assert_true,失败信息就是「等了 10s 也没等到」)。
-async fn watch_poll(cond : () -> Bool, timeout_ms~ : Int32 = 10_000) -> Bool {
+async fn watch_poll(
+  cond : () -> Bool,
+  timeout_ms~ : Int = 10_000,
+) -> Bool {
   let deadline = @daemon.now_ms() + timeout_ms.to_int64()
   while @daemon.now_ms() < deadline {
     if cond() {
@@ -71,7 +74,7 @@ async fn watch_poll(cond : () -> Bool, timeout_ms~ : Int32 = 10_000) -> Bool {
 async fn watch_poll_entries(
   handle : @daemon.ActorHandle,
   want : Int64,
-  timeout_ms~ : Int32 = 10_000,
+  timeout_ms~ : Int = 10_000,
 ) -> Bool {
   let deadline = @daemon.now_ms() + timeout_ms.to_int64()
   while @daemon.now_ms() < deadline {
@@ -96,12 +99,8 @@ async fn watch_poll_entries(
 /// 清掉测试目录树(共享根 + 索引状态目录);watcher 可能还在值班,删除
 /// 触发的事件只是让 actor 多扫一轮空目录,无副作用。
 async fn watch_cleanup(root : String) -> Unit {
-  @fs.rmdir(root, recursive=true) catch {
-    _ => ()
-  }
-  @fs.rmdir("\{root}-state", recursive=true) catch {
-    _ => ()
-  }
+  @fs.rmdir(root, recursive=true) catch { _ => () }
+  @fs.rmdir("\{root}-state", recursive=true) catch { _ => () }
 }
 
 ///|
@@ -111,7 +110,10 @@ test "FsWatchOptions::from_config 按配置折算" {
   assert_true(options.enabled)
   assert_eq(options.fallback_scan_ms, 600_000)
   assert_eq(options.debounce_ms, @daemon.FS_WATCH_DEBOUNCE_MS)
-  assert_eq(options.degraded_scan_ms, @daemon.DEGRADED_SCAN_INTERVAL_MS)
+  assert_eq(
+    options.degraded_scan_ms,
+    @daemon.DEGRADED_SCAN_INTERVAL_MS,
+  )
   // 显式配置生效;间隔带上限(防配置笔误顶到溢出量级)
   let custom = @daemon.FsWatchOptions::from_config(
     @core.parse_config(
