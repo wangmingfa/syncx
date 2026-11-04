@@ -133,7 +133,7 @@ function shiftYear(d: number): void {
 </script>
 
 <template>
-  <ModalShell :open="open" title="节假日日历预览" description="休息日按数据与手动覆盖标注" class="cal-modal" @close="emit('close')">
+  <ModalShell :open="open" title="节假日日历预览" description="休息日按数据与手动覆盖标注" class="cal-modal" esc-close @close="emit('close')">
     <div class="cal-head">
       <button type="button" class="settings-link" :disabled="year <= 1970" @click="shiftYear(-1)">‹</button>
       <span class="cal-head__year">{{ year }} 年</span>

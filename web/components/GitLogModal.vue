@@ -131,6 +131,7 @@ const description = computed(() =>
     :description="description"
     descriptionMono
     wide
+    esc-close
     class="git-log-modal"
     @close="emit('close')"
   >

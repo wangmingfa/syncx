@@ -64,7 +64,7 @@ function segH(n: number): string {
 </script>
 
 <template>
-  <ModalShell :open="open" title="同步周报" description="近 7 天:变更趋势 / 目录贡献 / 对端活跃度(数据来自同步记录)" wide @close="emit('close')">
+  <ModalShell :open="open" title="同步周报" description="近 7 天:变更趋势 / 目录贡献 / 对端活跃度(数据来自同步记录)" wide esc-close @close="emit('close')">
     <n-spin :show="loading && !report">
       <p v-if="errorText" class="confirm-note-extra">{{ errorText }}</p>
       <template v-if="report">

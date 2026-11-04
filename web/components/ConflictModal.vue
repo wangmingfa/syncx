@@ -274,6 +274,7 @@ function askCleanIdentical(): void {
     :description="lastPath"
     description-mono
     wide
+    esc-close
     class="conflict-modal"
     @close="emit('close')"
   >

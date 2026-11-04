@@ -61,7 +61,7 @@ function rateOf(bytes: number): string {
 </script>
 
 <template>
-  <ModalShell :open="open" title="传输统计" description="daemon 本次在线期间(重启清零)" wide @close="emit('close')">
+  <ModalShell :open="open" title="传输统计" description="daemon 本次在线期间(重启清零)" wide esc-close @close="emit('close')">
     <div v-if="!traffic || (traffic.sent === 0 && traffic.received === 0 && traffic.samples.length === 0)" class="empty">
       还没有传输记录
     </div>

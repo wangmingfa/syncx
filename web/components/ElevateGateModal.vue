@@ -14,7 +14,8 @@ import { gateOpen, gatePurpose, gateLocked, gateSuccess, gateDismiss } from '../
 </script>
 
 <template>
-  <ModalShell :open="gateOpen" title="敏感操作验证" :description="gatePurpose" :close-disabled="gateLocked" @close="gateDismiss()">
+  <!-- 锁定态(gateLocked)下 Esc 与 × / 遮罩一起被 closeDisabled 挡住 -->
+  <ModalShell :open="gateOpen" title="敏感操作验证" :description="gatePurpose" :close-disabled="gateLocked" esc-close @close="gateDismiss()">
     <p class="gate-hint">
       即将使用高权限功能。请通过账号密码或控制令牌确认是本人操作;
       验证通过后 10 分钟内不再询问。

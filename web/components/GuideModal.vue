@@ -7,7 +7,7 @@ const emit = defineEmits<{ close: [] }>();
 </script>
 
 <template>
-  <ModalShell :open="open" title="使用指南" wide @close="emit('close')">
+  <ModalShell :open="open" title="使用指南" wide esc-close @close="emit('close')">
     <p class="modal-lead">四步把两台设备连起来，开始局域网同步。</p>
 
     <!-- 中文段落一律写成「单个源行」:HTML 会把源码里的换行折叠成一个半角空格,

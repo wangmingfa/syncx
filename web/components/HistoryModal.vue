@@ -300,6 +300,7 @@ function askClearHistory(): void {
     :description="global ? '' : lastPath"
     description-mono
     wide
+    esc-close
     class="history-modal"
     :class="{ 'is-global': global }"
     @close="emit('close')"

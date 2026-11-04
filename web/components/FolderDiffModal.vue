@@ -145,6 +145,7 @@ function transferring(p?: { pending: number; sending: number; receiving: number 
     :description="diffFolder?.path"
     description-mono
     wide
+    esc-close
     @close="closeDiff()"
   >
     <!-- 对端选择 + 重跑:目录只指派了一个设备时只剩「重新对比」 -->

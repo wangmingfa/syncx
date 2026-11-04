@@ -263,6 +263,7 @@ const description = computed(() =>
     :title="`空文件夹（${folder?.path ?? ''}）`"
     :description="description"
     descriptionMono
+    esc-close
     class="empty-dirs-modal"
     @close="emit('close')"
   >

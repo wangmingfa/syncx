@@ -164,6 +164,7 @@ async function retry(): Promise<void> {
     :open="!!folder"
     :title="`自动提交失败（${folder?.path ?? ''}）`"
     description="内容已同步到本机,但镜像提交没有成功;通知会保留,修好原因后可立即重试"
+    esc-close
     class="git-commit-error-modal"
     @close="emit('close')"
   >

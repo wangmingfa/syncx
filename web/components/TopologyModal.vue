@@ -57,6 +57,7 @@ function nodeClass(n: TopoNode): string {
     title="设备同步拓扑"
     description="谁和谁在同步哪些目录"
     wide
+    esc-close
     @close="emit('close')"
   >
     <div v-if="topo.nodes.length === 0" class="empty">还没有共享目录</div>

@@ -51,6 +51,7 @@ const qrSvg = (): string => (pairUrl() ? qrToSvg(pairUrl(), 4) : '');
     :open="open"
     title="本机配对二维码"
     description="在对方设备的「添加设备」里扫码,或直接粘贴下方的配对串"
+    esc-close
     @close="emit('close')"
   >
     <div v-if="loading" class="pairqr-state">读取中…</div>

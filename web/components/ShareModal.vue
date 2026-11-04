@@ -133,7 +133,7 @@ function fmtLeft(expiresAt: number): string {
 </script>
 
 <template>
-  <ModalShell :open="open" title="分享链接" description="免登录、限时、单文件只读;撤销或到期立即失效" @close="emit('close')">
+  <ModalShell :open="open" title="分享链接" description="免登录、限时、单文件只读;撤销或到期立即失效" esc-close @close="emit('close')">
     <template v-if="!enabled">
       <p class="confirm-note-extra">
         分享功能当前<strong>未启用</strong>。这是默认状态:开启后可为单个文件生成免登录的限时下载链接,

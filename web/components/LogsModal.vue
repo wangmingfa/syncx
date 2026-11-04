@@ -88,6 +88,7 @@ async function copyLogs(): Promise<void> {
     :description="file"
     description-mono
     wide
+    esc-close
     class="logs-modal"
     @close="emit('close')"
   >

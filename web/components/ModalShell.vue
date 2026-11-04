@@ -1,5 +1,6 @@
 <script setup lang="ts">
 import { useId } from 'vue';
+import { useEscStackTop } from '../utils/escStack';
 import ModalCloseButton from './ModalCloseButton.vue';
 
 /**
@@ -27,11 +28,13 @@ import ModalCloseButton from './ModalCloseButton.vue';
  *    宽度排、整组靠右、窄屏换行」的规则不会因为某个弹窗忘了套而失效(footer 为空时连容器
  *    都不渲染,省掉 18px 的 `margin-top`)。
  *
- * 刻意**不做**的一件事:
- *  - 不管 Esc。看着该由外壳统一处理,但弹窗可以叠加(同步记录弹窗里点「清空记录」会再开一层
- *    确认弹窗),挂在 window 上的 keydown 一响就会把两层一起关掉。要做得先定「只关最上面
- *    那层」的规则,那是另一件事。今天只有对比弹窗自己处理 Esc(它还兼着「先撤销覆盖确认」
- *    的语义,不是单纯的关闭),维持原样。
+ * Esc 关闭是**可选**能力(`escClose` prop,默认关):规则在 `web/utils/escStack.ts` 里统一
+ * 定死 —— 全局一个 keydown,只派发给「开着的弹窗」里最上层那个,底下那层听不见;忙碌
+ * (closeDisabled)时栈顶把按键整个吞掉。默认不开是因为它是行为变更:该不该让 Esc 关由
+ * 调用方按场景决定。场景判据:**没有待保存输入的才开** —— 纯查看(日志/报告/拓扑)、
+ * 取消即安全的确认层开;设置表单(全局设置/目录设置/忽略规则/E2E/登录密码)不开,
+ * 半填的表单被一次误触 Esc 收走比少一个快捷键更伤。FileDiffModal 的「Esc 先撤覆盖
+ * 确认、不关窗」特殊语义也走同一条登记,与别的弹窗公平竞争「最上层」。
  *
  * 样式在文件末尾的 `<style>` 里(组件自有样式放组件内),但**不带 scoped** —— 两条理由写在那块
  * 注释里:类名由调用方模板共写(`.modal-lead`、`#footer` 里的按钮),而 scoped 抬的那一档特异度
@@ -46,7 +49,7 @@ import ModalCloseButton from './ModalCloseButton.vue';
  */
 defineOptions({ inheritAttrs: false });
 
-withDefaults(
+const props = withDefaults(
   defineProps<{
     /** 是否展示。由调用方按自己的条件算(可以是 `!!state` 这种从可空对象投出来的布尔)。 */
     open: boolean;
@@ -65,14 +68,31 @@ withDefaults(
     closeDisabled?: boolean;
     /**
      * 彻底不可关闭:不渲染右上角 ×,且遮罩点击不再触发 close(与 closeDisabled 同挡遮罩)。
-     * 用于「版本不一致」这类用户没有退出余地的强制弹窗;Esc 本就不由外壳处理,天然关不掉。
+     * 用于「版本不一致」这类用户没有退出余地的强制弹窗;开了 escClose 也不参与 Esc 登记,
+     * Esc 同样关不掉。
      */
     hideClose?: boolean;
+    /**
+     * 允许按 Esc 关闭(默认关)。只在自己是最上层弹窗时生效(见 utils/escStack),
+     * 忙碌(closeDisabled)时按键被吞掉 —— 与 × 禁用、遮罩挡点击同一把锁。
+     */
+    escClose?: boolean;
   }>(),
-  { description: '', descriptionMono: false, wide: false, closeDisabled: false, hideClose: false },
+  { description: '', descriptionMono: false, wide: false, closeDisabled: false, hideClose: false, escClose: false },
 );
 
 const emit = defineEmits<{ close: [] }>();
+
+/**
+ * Esc 关闭的登记:开着且调用方开了 escClose 时进栈;收到派发还得看 closeDisabled ——
+ * 忙碌时吞掉,语义与「× 禁用 + 遮罩挡点击」完全一致。
+ */
+useEscStackTop(
+  () => props.open && props.escClose && !props.hideClose,
+  () => {
+    if (!props.closeDisabled) emit('close');
+  },
+);
 
 /** 标题 id。用 useId() 而不是手写常量:同时开两个弹窗也不会撞(FileIcon 里同一套做法)。 */
 const titleId = `modal-title-${useId()}`;

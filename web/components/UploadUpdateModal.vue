@@ -56,7 +56,7 @@ function onConfirm(): void {
 </script>
 
 <template>
-  <ModalShell :open="props.open" title="上传安装包升级" @close="emit('close')">
+  <ModalShell :open="props.open" title="上传安装包升级" esc-close @close="emit('close')">
     <p class="modal-lead">
       选择 <code class="mono">npm run pack:local[:rust|:moonbit]</code> 打出的安装包
       （node 的 <code class="mono">.tgz</code> 或后端的 <code class="mono">.tar.gz</code>），

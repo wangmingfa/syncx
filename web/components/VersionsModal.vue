@@ -315,6 +315,7 @@ const planEmpty = computed(() => {
     :description="lastPath"
     description-mono
     wide
+    esc-close
     @close="emit('close')"
   >
     <p class="modal-lead">
@@ -417,6 +418,7 @@ const planEmpty = computed(() => {
     title="删除版本留档"
     :description="askConfirmDelete?.path"
     description-mono
+    esc-close
     @close="askConfirmDelete = null"
   >
     <p class="modal-lead">删除后该留档不可恢复。共享目录里的当前文件不受影响。</p>
@@ -431,6 +433,7 @@ const planEmpty = computed(() => {
     :open="rbConfirm"
     title="执行整目录回滚"
     :description="plan ? `目标时刻 ${fmtTime(plan.targetTs)}` : ''"
+    esc-close
     @close="rbConfirm = false"
   >
     <p v-if="plan" class="modal-lead">

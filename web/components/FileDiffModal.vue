@@ -4,6 +4,7 @@ import { NButton, NTooltip } from 'naive-ui';
 import { applyHunk, countChanged, diffText, type DiffHunk } from '../utils/text-diff';
 import { formatBytes } from '../utils/bytes';
 import { fileIconKind } from '../utils/file-icon';
+import { useEscStackTop } from '../utils/escStack';
 import { escapeHtml, highlightLines, languageFor } from '../utils/syntax';
 import { useToast } from '../composables/useToast';
 import type { DiffActionCtx, DiffFooterAction, DiffHunkApply, DiffPaneData, FileSideData } from '../types';
@@ -526,30 +527,31 @@ watch(
 );
 
 /**
- * Esc 关窗。挂在 window 而不是弹窗元素上:焦点通常在窗格里的滚动区,或者压根没进过
- * 弹窗(点遮罩打开后直接按键),挂元素上会漏掉。
+ * Esc 走共享登记表(utils/escStack):只有自己是最上层弹窗才收到派发 —— 从同步记录/
+ * 改动列表弹窗叠开本窗时,一响 Esc 只收本窗,不会穿透到底下那层。全局那个 keydown 挂在
+ * window 上,焦点在哪、进没进过弹窗都不影响收到。
  *
  * 正在等待某个动作的二次确认时,Esc 先撤掉那一步(等价于点「取消」),不关窗:
  * 那一按键的语义是「打消这次危险操作」,若顺手把弹窗也收了,用户反而丢了上下文。
  */
-function onKeydown(e: KeyboardEvent): void {
-  if (e.key !== 'Escape' || !props.open) return;
-  if (pendingAction.value) {
-    pendingAction.value = null;
-    return;
-  }
-  emit('close');
-}
+useEscStackTop(
+  () => props.open,
+  () => {
+    if (pendingAction.value) {
+      pendingAction.value = null;
+      return;
+    }
+    emit('close');
+  },
+);
 // 窗格高度随弹窗(即视口)尺寸走:窗口下沿 = scrollTopY + paneH,尺寸变了要跟着量
 function onResize(): void {
   measurePane();
 }
 onMounted(() => {
-  window.addEventListener('keydown', onKeydown);
   window.addEventListener('resize', onResize);
 });
 onUnmounted(() => {
-  window.removeEventListener('keydown', onKeydown);
   window.removeEventListener('resize', onResize);
 });
 

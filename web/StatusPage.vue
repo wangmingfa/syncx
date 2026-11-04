@@ -144,17 +144,6 @@ function closeHistoryModal(): void {
   historyGlobal.value = false;
 }
 
-// Esc 关闭使用指南 / 日志弹窗(其余弹窗自行处理 Esc)
-function onKeydown(e: KeyboardEvent): void {
-  if (e.key !== 'Escape') return;
-  if (showGuide.value) showGuide.value = false;
-  if (logsOpen.value) logsOpen.value = false;
-  if (topoOpen.value) topoOpen.value = false;
-  if (uploadOpen.value) uploadOpen.value = false;
-}
-onMounted(() => window.addEventListener('keydown', onKeydown));
-onUnmounted(() => window.removeEventListener('keydown', onKeydown));
-
 // 向整棵子树注入共享上下文,子组件用 useStatusContext() 取用,无需层层 props 透传
 provide(StatusContextKey, {
   status,

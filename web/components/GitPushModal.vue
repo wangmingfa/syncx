@@ -197,6 +197,7 @@ async function runPush(): Promise<void> {
     descriptionMono
     wide
     :close-disabled="pushing"
+    esc-close
     class="git-push-modal"
     @close="emit('close')"
   >
@@ -259,6 +260,7 @@ async function runPush(): Promise<void> {
     :description="`共 ${affectedCount} 个提交将剔除 Co-Authored-By 行`"
     wide
     :close-disabled="stripping"
+    esc-close
     @close="stripConfirm = false"
   >
     <p class="confirm-note-extra confirm-note-extra--flush">

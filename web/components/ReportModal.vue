@@ -46,6 +46,7 @@ async function copyReport(): Promise<void> {
     :description="folderPath"
     description-mono
     wide
+    esc-close
     class="report-modal"
     @close="emit('close')"
   >

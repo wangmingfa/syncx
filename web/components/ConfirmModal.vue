@@ -41,11 +41,13 @@ async function runConfirm(): Promise<void> {
 <template>
   <!-- 「打开」的条件本来就是一个可空对象 —— 投影成布尔交给外壳,内容自己再判一次 state
        (外壳的 open 只负责显隐,拿不到 state 的类型信息)。
-       busy 期间既禁用 × 也挡住遮罩点击:那正是外壳 closeDisabled 一个开关的两件事。 -->
+       busy 期间既禁用 × 也挡住遮罩点击:那正是外壳 closeDisabled 一个开关的两件事;
+       Esc 也吃同一把锁(escClose 关的是最上层,叠在别的弹窗上时只收自己这层)。 -->
   <ModalShell
     :open="!!state"
     :title="state?.title ?? ''"
     :close-disabled="busy"
+    esc-close
     @close="emit('closed')"
   >
     <template v-if="state">

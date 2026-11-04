@@ -222,6 +222,7 @@ const diffPanes = computed<{ left: DiffPaneData; right: DiffPaneData } | null>((
     :description="notARepo ? '' : '双击文件查看与 HEAD 的对比'"
     descriptionMono
     wide
+    esc-close
     class="git-changes-modal"
     @close="emit('close')"
   >
