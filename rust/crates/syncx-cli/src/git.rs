@@ -639,10 +639,19 @@ pub struct AutoCommitResult {
     pub error: Option<String>,
 }
 
-/// 执行自动提交:`git add -A && git commit -m <message>`。
+/// 执行自动提交:`git add -A -- <清单|SCRATCH排除> && git commit -m <message>`。
 ///
 /// `--allow-empty` 是兜底:判定有无变更与 add 之间工作树可能被其他程序改回,
 /// 保证提交命令本身不因竞态失败。
+///
+/// 范围收敛(changedFiles,与 Node 侧 55b1c35 同款根治):镜像提交只 stage 通知
+/// 宣称的那批文件(含删除 —— `add -A -- path` 同样登记删除),绝不再 `add -A`
+/// 全吞 —— 否则「回声通知未结清 + 用户并发改动」时,用户的未提交修改会被旧通知
+/// 的镜像消息打包带走(实测事故:脚本改名被 devices 快照的镜像消息吞掉)。
+/// 清单为空(`None` 或全空白串,旧对端没给清单)才退回全量 SCRATCH 排除兜底。
+/// 内容已在本地(staged 无差异)时仍落一笔 `--allow-empty` 空提交:两端提交链
+/// 对齐是既有契约(git-sync 链路测试锚定),范围收敛后空提交不再吞任何内容,
+/// 链上多一笔镜像记录无害。
 ///
 /// 超时后探测(与 Node 侧 `src/git-monitor.ts` 的 autoCommit 同款):spawn 超时只
 /// 保证「进程没在期限内退出」,不保证「提交没发生」—— 慢盘 fsync、post-commit hook
@@ -650,14 +659,33 @@ pub struct AutoCommitResult {
 /// 重试前的 has_uncommitted_changes 判定会被「同步仍在继续」的新变更糊弄过去,
 /// 同一镜像消息再吞一笔(把第一次提交之后到达的修改也提交进去)。因此提交失败
 /// 路径先比对 HEAD:前进了且消息与本次一致 = 实际成功,按成功结算。
-pub fn auto_commit(folder_path: &Path, message: &str) -> AutoCommitResult {
+pub fn auto_commit(
+    folder_path: &Path,
+    message: &str,
+    changed_files: Option<&[String]>,
+) -> AutoCommitResult {
     // 调用前先记 HEAD 基线。空仓库(还没有任何提交)时为 None:首次提交落地后
     // after(Some) ≠ before(None) 同样判「前进」,首次提交的超时探测也能覆盖。
     let before_head = get_last_commit_hash(folder_path);
 
-    let specs = scratch_pathspecs();
+    // stage:有清单按清单精确 stage,清单为空退回全量;两种路径都把 syncx 的
+    // 在途中间态挡在外面(见 scratch_pathspecs)。过滤空白串与 Node 的
+    // `filter(s => s.trim())` 同口径,原串原样入参(pathspec 匹配是精确比对)。
     let mut add_args: Vec<&str> = vec!["add", "-A", "--"];
-    add_args.extend(specs.iter().map(String::as_str));
+    let paths: Vec<&str> = changed_files
+        .unwrap_or_default()
+        .iter()
+        .filter(|path| !path.trim().is_empty())
+        .map(String::as_str)
+        .collect();
+    // 两条路径的串借用都来自活到函数尾的绑定(specs 若在分支内创建,add_args
+    // 里的借用会越过其作用域)
+    let specs = scratch_pathspecs();
+    if paths.is_empty() {
+        add_args.extend(specs.iter().map(String::as_str));
+    } else {
+        add_args.extend(paths.iter().copied());
+    }
 
     let staged = run_git(folder_path, &add_args, 10_000, 1024 * 1024);
     let stage_error = match &staged {
@@ -1290,7 +1318,7 @@ mod tests {
         assert_eq!(entries[0].path, "a.txt");
         assert_eq!(entries[0].status, "added");
 
-        let committed = auto_commit(&dir, "first");
+        let committed = auto_commit(&dir, "first", None);
         assert!(committed.success, "{:?}", committed.error);
         let head = committed.hash.expect("提交后应有哈希");
         assert!(is_commit_hash(&head));
@@ -1359,7 +1387,7 @@ mod tests {
             return;
         }
         std::fs::write(root.join("a.txt"), "first snapshot\n").unwrap();
-        let base = auto_commit(&root, "base");
+        let base = auto_commit(&root, "base", None);
         assert!(base.success, "{:?}", base.error);
 
         let hooks = root.join(".git").join("hooks");
@@ -1373,7 +1401,7 @@ mod tests {
         }
 
         let started = std::time::Instant::now();
-        let result = auto_commit(&root, "镜像提交 from DEV-A");
+        let result = auto_commit(&root, "镜像提交 from DEV-A", None);
         // 走满 10s 超时才可能触发探测;hook 没生效(比如权限没加上)时这里兜底
         // 拦住,避免测试在「根本没超时」的路径上假绿
         assert!(
@@ -1410,10 +1438,111 @@ mod tests {
         assert_eq!(before, None, "前置:仓库还没有提交");
 
         std::fs::write(root.join(".git").join("index.lock"), "").unwrap();
-        let result = auto_commit(&root, "镜像提交 from DEV-B");
+        let result = auto_commit(&root, "镜像提交 from DEV-B", None);
         assert!(!result.success, "index.lock 残留必须仍按失败上报");
         assert!(result.error.is_some(), "失败要带原因:{:?}", result.error);
         assert_eq!(get_last_commit_hash(&root), None, "HEAD 不动");
+
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn auto_commit_stages_only_listed_files() {
+        // 范围收敛:镜像提交只 stage 通知宣称的文件 —— 用户并发的未提交改动
+        // (不在清单)绝不能被 add -A 顺手打包;清单里的删除同样登记
+        // (`add -A -- path` 对删除同义)。没有 git 的环境直接跳过(不算失败)。
+        let root = probe_temp_root("scope");
+        if init_probe_repo(&root).is_none() {
+            let _ = std::fs::remove_dir_all(&root);
+            return;
+        }
+        std::fs::write(root.join("keep.txt"), "one\n").unwrap();
+        std::fs::write(root.join("listed.txt"), "old\n").unwrap();
+        assert!(auto_commit(&root, "base", None).success);
+
+        // 用户并发改动 keep.txt(不在清单);清单宣称:new.txt 新增 + listed.txt 删除
+        std::fs::write(root.join("keep.txt"), "dirty\n").unwrap();
+        std::fs::write(root.join("new.txt"), "fresh\n").unwrap();
+        std::fs::remove_file(root.join("listed.txt")).unwrap();
+
+        let listed = ["new.txt".to_string(), "listed.txt".to_string()];
+        let result = auto_commit(&root, "镜像提交 from DEV-A", Some(&listed));
+        assert!(result.success, "{:?}", result.error);
+        let head = result.hash.expect("成功应带回新哈希");
+
+        // 提交里只有清单宣称的两笔:新增 + 删除;keep.txt 的脏改动不在其中
+        let files = list_commit_files(&root, &head).unwrap();
+        assert_eq!(files.len(), 2, "只该吞清单内的文件:{files:?}");
+        assert!(files.iter().any(|file| file.path == "new.txt" && file.status == "A"));
+        assert!(files.iter().any(|file| file.path == "listed.txt" && file.status == "D"));
+
+        // keep.txt 原样留在工作树,等用户自己的提交
+        assert!(has_uncommitted_changes(&root), "脏文件必须不被吞");
+        let (entries, truncated) = get_uncommitted_changes(&root).unwrap();
+        assert!(!truncated);
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0].path, "keep.txt");
+        assert_eq!(entries[0].status, "modified");
+
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn auto_commit_lands_empty_commit_when_content_already_in_head() {
+        // 回声:通知宣称的文件内容已在本地 HEAD 里(staged 无差异)—— 仍要落一笔
+        // --allow-empty 空提交:两端提交链对齐是既有契约;范围收敛后空提交不再吞
+        // 任何内容,链上多一笔镜像记录无害。
+        let root = probe_temp_root("echo");
+        if init_probe_repo(&root).is_none() {
+            let _ = std::fs::remove_dir_all(&root);
+            return;
+        }
+        std::fs::write(root.join("a.txt"), "same\n").unwrap();
+        let base = auto_commit(&root, "base", None);
+        assert!(base.success, "{:?}", base.error);
+        let base_hash = base.hash.expect("base 应有哈希");
+
+        // 工作树干净,再按通知口径提交同一文件:只落链对齐空提交
+        assert!(!has_uncommitted_changes(&root), "前置:工作树干净");
+        let result = auto_commit(&root, "镜像提交 from DEV-A", Some(&["a.txt".to_string()]));
+        assert!(result.success, "{:?}", result.error);
+        let head = result.hash.expect("成功应带回新哈希");
+        assert_ne!(head, base_hash, "空提交也要推进 HEAD");
+
+        // HEAD 就是那笔镜像提交:subject 一致、不携带任何文件变更
+        let log = list_recent_commits(&root, GIT_LOG_LIMIT).unwrap().unwrap();
+        assert_eq!(log.len(), 2, "base + 一笔空镜像提交");
+        assert_eq!(log[0].subject, "镜像提交 from DEV-A");
+        assert!(list_commit_files(&root, &head).unwrap().is_empty(), "空提交不应携带文件");
+
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn auto_commit_falls_back_to_full_stage_when_list_empty() {
+        // 清单为空(旧对端没给清单)退回全量兜底:add -A 只挡在途中间态,
+        // 工作树里的变更照旧全吞 —— 与旧版行为一致。`Some(&[])` 与 `None`
+        // 语义相同,两条路径都锚住。
+        let root = probe_temp_root("fallback");
+        if init_probe_repo(&root).is_none() {
+            let _ = std::fs::remove_dir_all(&root);
+            return;
+        }
+        std::fs::write(root.join("a.txt"), "one\n").unwrap();
+        let result = auto_commit(&root, "镜像提交 from DEV-A", Some(&[]));
+        assert!(result.success, "{:?}", result.error);
+        let files = list_commit_files(&root, &result.hash.expect("成功应带回新哈希")).unwrap();
+        assert_eq!(files.len(), 1);
+        assert_eq!(files[0].path, "a.txt");
+
+        std::fs::write(root.join("b.txt"), "two\n").unwrap();
+        std::fs::write(root.join("c.txt"), "three\n").unwrap();
+        let result = auto_commit(&root, "镜像提交 from DEV-B", None);
+        assert!(result.success, "{:?}", result.error);
+        let files = list_commit_files(&root, &result.hash.expect("成功应带回新哈希")).unwrap();
+        assert_eq!(files.len(), 2, "None 同样走全量兜底:{files:?}");
+        assert!(files.iter().any(|file| file.path == "b.txt"));
+        assert!(files.iter().any(|file| file.path == "c.txt"));
 
         let _ = std::fs::remove_dir_all(&root);
     }

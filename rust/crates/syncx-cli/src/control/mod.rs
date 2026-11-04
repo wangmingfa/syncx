@@ -771,7 +771,11 @@ impl RuntimeOps {
         if folder.git_strip_co_authored == Some(true) {
             message = strip_co_authored_lines(&message);
         }
-        let outcome = crate::git::auto_commit(root, &message);
+        // 范围收敛:只 stage 通知宣称的文件 —— 工作树里用户并发的未提交改动
+        // 不属于这笔镜像提交,绝不能被 add -A 顺手打包(与 Node 55b1c35 同根治)。
+        // 旧对端的通知可能没有清单(changed_files 为空),auto_commit 内部会退回
+        // 全量 SCRATCH 排除兜底。
+        let outcome = crate::git::auto_commit(root, &message, Some(&notice.changed_files));
         let mut state = match self.git_state.lock() {
             Ok(state) => state,
             Err(_) => return Err(OpError::Failed("提交台账不可用".to_string())),
