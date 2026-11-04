@@ -30,6 +30,7 @@ import {
   filterIndexedEntries,
   HARD_IGNORE_NAMES,
   isHardIgnored,
+  isIgnoredPath,
   parseIgnoreRules,
   readFolderIgnoreLines,
   composeIgnoreLines,
@@ -1539,6 +1540,9 @@ export class SyncSessionManager {
       folder.localIndex = new Map(
         filterIndexedEntries(parseIgnoreRules(folder.ignoreLines), folder.index.listEntries()).map((e) => [e.path, e]),
       );
+      // 规则变了,watch 事件的过滤谓词也要跟着换(syncWatchers 每次对账重建谓词、
+      // hub 侧换表项热替换,见 fs-watcher.syncFolders)
+      if (this.watchHub) this.syncWatchers();
     }
   }
 
@@ -1860,6 +1864,11 @@ export class SyncSessionManager {
    * watcher 集合对账:为每个「未暂停且身份校验通过」的目录保持一个监听。
    * 调用时机:启动、每轮扫描开头(自愈:目录恢复挂载/身份重采后自动补建)、
    * 暂停状态翻转、配置热重载。暂停目录不建 watcher(恢复时由本函数再建)。
+   *
+   * 每次对账同时为目录注入最新的事件过滤谓词(见 WatchableFolder.filterEvent):
+   * 2026-10 实测事故 —— WebStorm 后台 git 集成每 ~2s 刷一次 .git/index,macOS 递归
+   * fs.watch 把 .git 子树事件照单全收,旧实现「事件只当触发器」让 daemon 以 ~95% CPU
+   * 连续全量重扫 36243 轮。`.git` 对同步语义是硬忽略,监听层同样不该看见它。
    */
   private syncWatchers(): void {
     if (!this.watchHub) return;
@@ -1871,7 +1880,18 @@ export class SyncSessionManager {
         // 防止对「可能被换掉的盘」的事件反复触发重扫(重扫本身有门禁,这里省掉无谓 IO)
         const verdict = checkFolderIdentity(folder.path, folder.config.folderIdentity);
         if (verdict === 'missing' || verdict === 'changed' || verdict === 'remounted') continue;
-        watchables.push({ id: folder.id, path: folder.path });
+        // 谓词闭包捕获规则对象:与扫描器同一来源(folder.ignoreLines,scanOnce 每轮
+        // 重读、规则保存/热重载时刷新)+ 同一判据(isIgnoredPath = 硬忽略闸门 +
+        // gitignore 语义)。每次对账都重建谓词,hub 侧换表项即可热替换,不会陈旧。
+        // isDir 一律按 false 传:fs.watch 的 filename 分不出文件还是目录,按文件语义
+        // 判最保守 —— 目录规则仍经前缀回溯命中「被忽略目录下的文件」(node_modules/x),
+        // 而「被忽略目录自身」的孤立事件放行,宁可多扫也不冒吞掉整棵子树变化的风险。
+        const rules = parseIgnoreRules(folder.ignoreLines);
+        watchables.push({
+          id: folder.id,
+          path: folder.path,
+          filterEvent: (rel) => isIgnoredPath(rules, rel, false),
+        });
       }
     }
     this.watchHub.syncFolders(watchables);
@@ -5017,6 +5037,9 @@ export class SyncSessionManager {
       ]),
     );
     this.logger.info(`ignore rules updated: ${folderId} (${lines.length} lines)`);
+    // 规则变了,watch 事件的过滤谓词也要跟着换(syncWatchers 每次对账重建谓词、
+    // hub 侧换表项热替换,见 fs-watcher.syncFolders)
+    if (this.watchHub) this.syncWatchers();
     this.notifyStatus();
   }
 

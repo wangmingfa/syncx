@@ -2,7 +2,7 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { watch } from 'node:fs';
+import { watch, type FSWatcher } from 'node:fs';
 
 // 记录每轮真实扫描的根路径(mock 转发原实现,行为不变只加观测):
 // 「watch 事件只重扫脏目录、其他目录未被扫」直接以扫描调用清单断言。
@@ -19,7 +19,8 @@ vi.mock('../src/scanner.js', async (importOriginal) => {
   };
 });
 
-import { FolderWatchHub } from '../src/fs-watcher.js';
+import { FolderWatchHub, normalizeWatchFilename } from '../src/fs-watcher.js';
+import { isIgnoredPath, parseIgnoreRules } from '../src/ignore.js';
 import { SyncSessionManager, type SessionManagerDeps } from '../src/session-manager.js';
 import { loadConfig, type SharedFolderConfig } from '../src/config.js';
 import { loadOrCreateIdentity } from '../src/identity.js';
@@ -46,6 +47,38 @@ function errWithCode(code: string): Error {
   const e = new Error(`injected failure (${code})`);
   (e as NodeJS.ErrnoException).code = code;
   return e;
+}
+
+/**
+ * 注入式假 watcher:hub 的 watchFn 换成它,测试直接投喂 (event, filename) 事件,
+ * 不经过真实 fs.watch(过滤判定单测不掺 OS 噪声)。emitters[i] 对应第 i 个建出的
+ * watcher;created 保留实例引用,供「谓词热替换不重建 watcher」断言。
+ */
+function fakeWatchFactory(): {
+  watchFn: (path: string, opts: { recursive: true }) => FSWatcher;
+  emitters: Array<(filename: string | null) => void>;
+  created: FSWatcher[];
+} {
+  const emitters: Array<(filename: string | null) => void> = [];
+  const created: FSWatcher[] = [];
+  const watchFn = (): FSWatcher => {
+    const handlers = new Map<string, (eventType: string, filename: string | null) => void>();
+    const fake = {
+      on: (event: string, cb: (eventType: string, filename: string | null) => void) => {
+        handlers.set(event, cb);
+        return fake;
+      },
+      close: () => {},
+    };
+    created.push(fake as unknown as FSWatcher);
+    emitters.push((filename) => handlers.get('change')?.('change', filename));
+    return fake as unknown as FSWatcher;
+  };
+  return { watchFn, emitters, created };
+}
+
+function sleep(ms: number): Promise<void> {
+  return new Promise((r) => setTimeout(r, ms));
 }
 
 async function waitFor(cond: () => boolean, timeoutMs = 8000, stepMs = 25): Promise<void> {
@@ -266,6 +299,167 @@ describe('FolderWatchHub:失效重建与降级', () => {
   });
 });
 
+describe('FolderWatchHub:忽略规则过滤(事件在聚合前丢弃)', () => {
+  /** 与 manager 注入同构的 .git 谓词(硬忽略路径段命中即丢)。 */
+  const GIT_FILTER = (rel: string) => rel === '.git' || rel.startsWith('.git/');
+
+  it('命中谓词的事件被丢弃(不打脏位),普通文件照常触发;聚合摘要带丢弃计数', async () => {
+    const dirA = tmp('filter-hub');
+    mkdirSync(dirA, { recursive: true });
+    const { watchFn, emitters } = fakeWatchFactory();
+    const calls: string[][] = [];
+    const logs: string[] = [];
+    const hub = new FolderWatchHub({
+      debounceMs: 60,
+      onScanDirty: (ids) => calls.push(ids),
+      watchFn,
+      log: (_level, line) => logs.push(line),
+    });
+    try {
+      hub.syncFolders([{ id: 'a', path: dirA, filterEvent: GIT_FILTER }]);
+      await waitFor(() => hub.hasWatcher('a'));
+      const emit = emitters[0]!;
+
+      // 实测事故复现:WebStorm 后台 git 集成持续刷 .git/index —— 这些事件必须
+      // 全部丢弃,不打脏位、不触发重扫
+      for (let i = 0; i < 5; i++) emit('.git/index');
+      emit('.git/config');
+      await sleep(150); // 超过一个防抖窗口
+      expect(calls).toEqual([]);
+
+      // 普通文件照常触发(语义红线:过滤仅限忽略范围)
+      emit('src/a.txt');
+      await waitFor(() => calls.length > 0);
+      expect(calls[0]).toEqual(['a']);
+
+      // 聚合 debug 一行带上丢弃计数(6 = 5×.git/index + 1×.git/config),绝不逐事件打日志
+      expect(logs.filter((l) => l.includes('dropped 6 ignored fs event'))).toHaveLength(1);
+    } finally {
+      hub.close();
+    }
+  });
+
+  it('null filename 与归一失败的路径保留原语义照常触发(宁可多扫不可漏扫)', async () => {
+    const dirA = tmp('filter-null');
+    mkdirSync(dirA, { recursive: true });
+    const { watchFn, emitters } = fakeWatchFactory();
+    const calls: string[][] = [];
+    const hub = new FolderWatchHub({ debounceMs: 60, onScanDirty: (ids) => calls.push(ids), watchFn });
+    try {
+      hub.syncFolders([{ id: 'a', path: dirA, filterEvent: GIT_FILTER }]);
+      await waitFor(() => hub.hasWatcher('a'));
+      const emit = emitters[0]!;
+
+      // null filename(部分平台的 rename 形态)→ 照常触发
+      emit(null);
+      await waitFor(() => calls.length > 0);
+      expect(calls[0]).toEqual(['a']);
+      calls.length = 0;
+
+      // 绝对路径剥不上监听根 / 含 '..' 段 → 归一失败 → 当 null 处理,保留触发
+      emit('/somewhere/else/x');
+      emit('..\\escape');
+      await waitFor(() => calls.length > 0);
+      expect(calls[0]).toEqual(['a']);
+    } finally {
+      hub.close();
+    }
+  });
+
+  it('被忽略目录下的文件丢弃(node_modules/x);被忽略目录自身的孤立事件放行', async () => {
+    const dirA = tmp('filter-nm');
+    mkdirSync(dirA, { recursive: true });
+    const { watchFn, emitters } = fakeWatchFactory();
+    const calls: string[][] = [];
+    const hub = new FolderWatchHub({ debounceMs: 60, onScanDirty: (ids) => calls.push(ids), watchFn });
+    try {
+      // 与 session-manager 注入完全同构的谓词:isIgnoredPath = 硬忽略 + gitignore 语义
+      const rules = parseIgnoreRules(['node_modules/']);
+      hub.syncFolders([{ id: 'a', path: dirA, filterEvent: (rel) => isIgnoredPath(rules, rel, false) }]);
+      await waitFor(() => hub.hasWatcher('a'));
+      const emit = emitters[0]!;
+
+      emit('node_modules/x');
+      emit('node_modules/deep/pkg/file.js'); // 目录规则经前缀回溯命中任意深度
+      await sleep(150);
+      expect(calls).toEqual([]);
+
+      // 目录规则按 isDir=false 判定是刻意保守:node_modules 自身的孤立 rename 事件放行,
+      // 宁可多扫一轮也不冒「吞掉整棵子树变化」的风险(文件级事件才可靠地被前缀命中)
+      emit('node_modules');
+      await waitFor(() => calls.length > 0);
+      expect(calls[0]).toEqual(['a']);
+    } finally {
+      hub.close();
+    }
+  });
+
+  it('无谓词时一切照旧(向后兼容):.git 事件也照常触发', async () => {
+    const dirA = tmp('filter-none');
+    mkdirSync(dirA, { recursive: true });
+    const { watchFn, emitters } = fakeWatchFactory();
+    const calls: string[][] = [];
+    const hub = new FolderWatchHub({ debounceMs: 60, onScanDirty: (ids) => calls.push(ids), watchFn });
+    try {
+      hub.syncFolders([{ id: 'a', path: dirA }]); // 没有 filterEvent
+      await waitFor(() => hub.hasWatcher('a'));
+      emitters[0]!('.git/index');
+      await waitFor(() => calls.length > 0);
+      expect(calls[0]).toEqual(['a']);
+    } finally {
+      hub.close();
+    }
+  });
+
+  it('谓词热替换:syncFolders 换入新谓词即刻生效,且不重建 watcher', async () => {
+    const dirA = tmp('filter-hot');
+    mkdirSync(dirA, { recursive: true });
+    const { watchFn, emitters, created } = fakeWatchFactory();
+    const calls: string[][] = [];
+    const hub = new FolderWatchHub({ debounceMs: 60, onScanDirty: (ids) => calls.push(ids), watchFn });
+    try {
+      hub.syncFolders([{ id: 'a', path: dirA, filterEvent: () => true }]); // 全部丢弃
+      await waitFor(() => hub.hasWatcher('a'));
+      const emit = emitters[0]!;
+      emit('a.txt');
+      await sleep(120);
+      expect(calls).toEqual([]);
+
+      // 规则重载:换入新谓词(不过滤)—— 即刻生效,watcher 未重建(回调按 id 查表)
+      hub.syncFolders([{ id: 'a', path: dirA, filterEvent: () => false }]);
+      emit('a.txt');
+      await waitFor(() => calls.length > 0);
+      expect(created).toHaveLength(1);
+
+      // 谓词整体撤下:回到不过滤的旧行为
+      hub.syncFolders([{ id: 'a', path: dirA }]);
+      emit('.git/index');
+      await waitFor(() => calls.length > 1);
+      expect(created).toHaveLength(1);
+    } finally {
+      hub.close();
+    }
+  });
+});
+
+describe('normalizeWatchFilename:filename 归一化防御', () => {
+  it('相对 POSIX 原样、反斜杠转正、绝对路径剥监听根、剥不出来当 null', () => {
+    expect(normalizeWatchFilename('.git/index')).toBe('.git/index');
+    expect(normalizeWatchFilename('src/a.txt')).toBe('src/a.txt');
+    expect(normalizeWatchFilename('.git\\index')).toBe('.git/index');
+    expect(normalizeWatchFilename('/root/sub/.git/index', '/root/sub')).toBe('.git/index');
+    expect(normalizeWatchFilename('C:\\repo\\.git\\index', 'C:\\repo')).toBe('.git/index');
+    // 绝对路径剥不上监听根 → 归一失败 → null(调用方按 null 处理:保留触发)
+    expect(normalizeWatchFilename('/elsewhere/x', '/root/sub')).toBeNull();
+    expect(normalizeWatchFilename('C:/other/x', '/root/sub')).toBeNull();
+    expect(normalizeWatchFilename('/abs/path', undefined)).toBeNull();
+    // '..' 段不可信;'./' 前缀剥掉;空串
+    expect(normalizeWatchFilename('../escape/x')).toBeNull();
+    expect(normalizeWatchFilename('./tmp/x')).toBe('tmp/x');
+    expect(normalizeWatchFilename('')).toBeNull();
+  });
+});
+
 describe('manager 集成:watch 驱动的单目录重扫与兜底间隔', () => {
   it('watch 事件只重扫脏目录,其他目录不被扫;全扫兜底照旧走全部', async () => {
     const dirA = tmp('scan-a');
@@ -412,6 +606,81 @@ describe('manager 集成:watch 驱动的单目录重扫与兜底间隔', () => {
       expect(manager.isFolderWatched('fa')).toBe(false);
       expect(manager.fallbackScanIntervalMs()).toBe(5000);
       expect(intervalChanges).toContain(5000);
+    } finally {
+      await shutdown(manager);
+    }
+  });
+});
+
+describe('manager 集成:syncWatchers 注入的谓词对真实目录规则生效', () => {
+  it('实测风暴复现:.git 子树事件不再触发重扫,普通文件照常触发', async () => {
+    const dirA = tmp('storm-a');
+    mkdirSync(join(dirA, '.git'), { recursive: true });
+    writeFileSync(join(dirA, '.git/index'), 'seed');
+    const { manager } = makeManager('storm', {
+      sharedFolders: [{ id: 'fa', path: dirA, devices: [] }],
+    });
+    try {
+      await manager.runScan(); // 基线:.git 硬忽略,不进索引
+      mockScanCalls.length = 0;
+      process.env.SYNCX_FS_WATCH_DEBOUNCE_MS = '60';
+      manager.startFolderWatchers();
+      await waitFor(() => manager.isFolderWatched('fa'));
+      // 等启动期噪声(macOS FSEvents 建流重放)平息,之后的记录才是干净样本
+      await waitQuiet(mockScanCalls, 500);
+      const baseline = mockScanCalls.length;
+
+      // WebStorm 每 ~2s 刷 .git/index 的形态:连续写入,全部应被谓词丢弃
+      for (let i = 0; i < 3; i++) {
+        writeFileSync(join(dirA, '.git/index'), `tick ${i}`);
+        await sleep(80); // 超过防抖窗口
+      }
+      await sleep(200);
+      expect(mockScanCalls.length).toBe(baseline);
+
+      // 对照组:普通文件照常触发单目录重扫(过滤仅限忽略范围)
+      writeFileSync(join(dirA, 'a.txt'), 'v');
+      await waitFor(() => mockScanCalls.length > baseline);
+    } finally {
+      await shutdown(manager);
+    }
+  });
+
+  it('规则保存后谓词热更新:新忽略目录下的事件不再触发扫描', async () => {
+    const dirA = tmp('rules-a');
+    mkdirSync(join(dirA, 'logs'), { recursive: true }); // 目录先建好,避免创建事件噪声
+    const { manager } = makeManager('rules', {
+      sharedFolders: [{ id: 'fa', path: dirA, devices: [] }],
+    });
+    try {
+      await manager.runScan();
+      mockScanCalls.length = 0;
+      process.env.SYNCX_FS_WATCH_DEBOUNCE_MS = '60';
+      manager.startFolderWatchers();
+      await waitFor(() => manager.isFolderWatched('fa'));
+      await waitQuiet(mockScanCalls, 500);
+
+      // 规则未生效前:logs 下的写入照常触发
+      writeFileSync(join(dirA, 'logs/a.log'), 'v');
+      await waitFor(() => mockScanCalls.length > 0);
+      await waitQuiet(mockScanCalls);
+
+      // 保存规则:setFolderIgnoreLines 刷新 ignoreLines 并对账 watcher(谓词热替换)
+      manager.setFolderIgnoreLines('fa', ['logs/']);
+      await waitQuiet(mockScanCalls);
+      const armed = mockScanCalls.length;
+
+      // 新忽略目录下的写入:被谓词丢弃,不触发扫描
+      for (let i = 0; i < 3; i++) {
+        writeFileSync(join(dirA, 'logs/b.log'), `tick ${i}`);
+        await sleep(80);
+      }
+      await sleep(200);
+      expect(mockScanCalls.length).toBe(armed);
+
+      // 对照组:非忽略文件照常触发
+      writeFileSync(join(dirA, 'c.txt'), 'v');
+      await waitFor(() => mockScanCalls.length > armed);
     } finally {
       await shutdown(manager);
     }

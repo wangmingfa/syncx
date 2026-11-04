@@ -18,12 +18,55 @@ import { existsSync, statSync, watch, type FSWatcher } from 'node:fs';
  *    删除常无 error 事件而是 watcher 静默死亡 —— syncFolders 对账时发现「目录 inode
  *    与建 watch 时不一致」即视为失效,主动 close 重建(同一 protection 对 macOS 上
  *    「FSEvents 反而存活」的场景无害,换新 watcher 总是安全的)。
+ *  - 忽略范围的事件在**聚合之前**就丢弃(filterEvent 谓词,见 onFsEvent)—— 2026-10
+ *    实测事故的根治:生产 daemon 自某晚起持续 ~95% CPU,共享目录被每 ~2s 全量重扫
+ *    一轮(639 条目、1.7s/轮、事件循环卡顿 ~1s),36243 轮不断。根因链:WebStorm
+ *    后台 git 集成持续刷新 .git/index(实测 .git 目录 mtime 每 2s 跳动)→ macOS 递归
+ *    fs.watch 把 .git 子树事件也报上来 → 旧设计「事件只当触发器、回调不看参数、
+ *    不过滤」让每次刷新都触发重扫。`.git` 对**同步语义**是硬忽略,监听层没有理由
+ *    再看见它;谓词由 manager 注入(与扫描同源判据),语义红线:过滤仅限忽略范围,
+ *    自己写入同步文件产生的事件照常触发,daemon 自己写 .git 的场景(git 镜像提交)
+ *    同样被滤 —— 这正是目的。
  */
 
 /** 一个被监听的共享目录:wire id + 共享根绝对路径。 */
 export interface WatchableFolder {
   id: string;
   path: string;
+  /**
+   * 事件过滤谓词(可选):入参是「相对共享根的 POSIX 路径」(hub 已归一化,见
+   * normalizeWatchFilename),返回 true = 丢弃该事件(不打脏位、不触发重扫)。
+   * 由 manager 用该目录的硬忽略 + 忽略规则生成,与扫描同源判据(见 session-manager
+   * 的 syncWatchers);hub 在每次 syncFolders 对账时换入最新谓词,规则热重载即时生效。
+   * 缺省 = 不过滤,行为与无谓词时代完全一致(向后兼容)。
+   */
+  filterEvent?: (filename: string) => boolean;
+}
+
+/**
+ * 把 fs.watch 回调给的 filename 归一化成「相对监听根的 POSIX 路径」;归一不出来
+ * 返回 null(调用方按 null 语义处理:保留触发,不过滤 —— 宁可多扫不可漏扫)。
+ *
+ * 防御背景:filename 形态跨平台不一 —— macOS/Linux 递归 watch 给根相对 POSIX 路径,
+ * Windows 可能给反斜杠分隔甚至盘符绝对路径;直接拿原始串做规则匹配会漏判(漏判 =
+ * 事件照旧触发,退化回扫描风暴),所以先归一化再判:
+ *  - 反斜杠一律替换为 '/';
+ *  - 绝对路径(POSIX '/' 开头或 Windows 盘符)尝试用监听根剥前缀,剥不上 → null;
+ *  - './' 前缀剥掉;含 '..' 段的路径不可信 → null;空串 → null。
+ */
+export function normalizeWatchFilename(filename: string, watchRoot?: string): string | null {
+  let s = filename.includes('\\') ? filename.replace(/\\/g, '/') : filename;
+  if (s === '') return null;
+  const root = watchRoot !== undefined ? watchRoot.replace(/\\/g, '/').replace(/\/+$/, '') : undefined;
+  const isAbsolute = s.startsWith('/') || /^[A-Za-z]:\//.test(s);
+  if (isAbsolute) {
+    if (root === undefined || !s.startsWith(root + '/')) return null;
+    s = s.slice(root.length + 1);
+  }
+  while (s.startsWith('./')) s = s.slice(2);
+  if (s === '') return null;
+  if (s.split('/').includes('..')) return null;
+  return s;
 }
 
 export type WatchLogLevel = 'info' | 'warn' | 'debug';
@@ -79,6 +122,10 @@ export class FolderWatchHub {
   private readonly creationFailures = new Map<string, number>();
   /** 脏目录聚合窗口:窗口内任意数量的事件只把目录 id 放进来。 */
   private readonly dirty = new Set<string>();
+  /** 各目录当前生效的事件过滤谓词(见 WatchableFolder.filterEvent);缺条目 = 不过滤。 */
+  private readonly filters = new Map<string, (filename: string) => boolean>();
+  /** 本防抖窗口内被谓词丢弃的忽略事件数(聚合进 debug 摘要,绝不逐事件打日志)。 */
+  private droppedEvents = 0;
   private debounceTimer?: ReturnType<typeof setTimeout>;
   private platformDegraded = false;
   private closed = false;
@@ -114,21 +161,28 @@ export class FolderWatchHub {
    */
   syncFolders(watchables: WatchableFolder[]): void {
     if (this.closed) return;
-    const wanted = new Map(watchables.map((w) => [w.id, w.path]));
+    const wanted = new Map(watchables.map((w) => [w.id, w]));
     // 快照遍历:closeOne 会原地改 map
     for (const id of [...this.watchers.keys()]) {
-      const path = wanted.get(id);
-      if (path === undefined) {
+      const w = wanted.get(id);
+      if (w === undefined) {
         this.closeOne(id);
+        this.filters.delete(id);
         continue;
       }
+      // 谓词新鲜度:每次对账都换入最新谓词。事件回调按 id 现查表(见 onFsEvent),
+      // 换表项即换谓词 —— 规则热重载/规则保存后的新鲜度因此**不需要重建 watcher**
+      // (重建徒留事件空窗 + announce 触发的多余扫描);manager 侧每轮对账用最新
+      // 规则对象重建谓词闭包,两侧配合保证谓词永不陈旧。
+      if (w.filterEvent !== undefined) this.filters.set(id, w.filterEvent);
+      else this.filters.delete(id);
       // 静默失效检测:目录被删后重建(inode/dev 变了),Linux 上旧 inotify watch 已死且
       // 常无 error 事件;macOS 上旧 watch 反而可能存活,换新总是安全的。ino 为 0(部分
       // 网络文件系统不提供)时无从判断,跳过该检测。
       const created = this.watchedIdentity.get(id);
       let current: { dev: number; ino: number } | undefined;
       try {
-        const st = statSync(path);
+        const st = statSync(w.path);
         current = { dev: st.dev, ino: st.ino };
       } catch {
         current = undefined; // stat 失败(刚好被删?)交由 error 事件/退避重建兜
@@ -142,13 +196,13 @@ export class FolderWatchHub {
       ) {
         this.log?.('info', `[fs-watch] folder ${id}: root identity changed since watch, rebuilding watcher`);
         this.closeOne(id);
-        this.createOne(id, path, { announce: true });
+        this.createOne(id, w.path, { announce: true, filterEvent: w.filterEvent });
       }
     }
     if (this.platformDegraded) return;
-    for (const [id, path] of wanted) {
+    for (const [id, w] of wanted) {
       if (!this.watchers.has(id) && !this.rebuildTimers.has(id)) {
-        this.createOne(id, path, { announce: false });
+        this.createOne(id, w.path, { announce: false, filterEvent: w.filterEvent });
       }
     }
   }
@@ -160,6 +214,12 @@ export class FolderWatchHub {
   markDirty(folderId: string): void {
     if (this.closed || this.platformDegraded) return;
     this.dirty.add(folderId);
+    this.ensureWindow();
+  }
+
+  /** 开一个防抖窗口(已在窗口中则复用);真实事件与被丢弃的忽略事件共用同一个窗口。 */
+  private ensureWindow(): void {
+    if (this.closed || this.platformDegraded) return;
     if (this.debounceTimer) return;
     this.debounceTimer = setTimeout(() => {
       this.debounceTimer = undefined;
@@ -169,20 +229,57 @@ export class FolderWatchHub {
     this.debounceTimer.unref?.();
   }
 
+  /**
+   * fs.watch 事件入口(带 filename 形态):过滤挂点在聚合之前 —— filename 能归一化
+   * 且命中该目录谓词 → 丢弃(不打脏位、不触发重扫)。filename 为 null(部分平台的
+   * rename 形态)、归一失败、或没有谓词 → 保留原语义照常触发(向后兼容:谓词缺省时
+   * 本函数与旧的「直接 markDirty」完全一致)。
+   */
+  private onFsEvent(id: string, filename: string | null): void {
+    if (this.closed || this.platformDegraded) return;
+    const filter = this.filters.get(id);
+    if (filter !== undefined && filename !== null) {
+      const rel = normalizeWatchFilename(filename, this.paths.get(id));
+      if (rel !== null && filter(rel)) {
+        this.droppedEvents += 1;
+        // 纯丢弃也要开窗口:窗口结算时给一条聚合 debug(风暴被压制的观测证据),
+        // 否则事件全被丢弃时连计时器都没有,丢弃计数永远无处汇报
+        this.ensureWindow();
+        return;
+      }
+      // rel === null:归一不出来,当 null 处理 —— 保留触发
+    }
+    this.markDirty(id);
+  }
+
   /** 立即结算聚合窗口(watcher 失效/重建后立刻触发扫描,不等防抖)。 */
   private flushDirty(): void {
     if (this.debounceTimer) {
       clearTimeout(this.debounceTimer);
       this.debounceTimer = undefined;
     }
-    if (this.closed || this.dirty.size === 0) return;
+    if (this.closed) return;
+    const dropped = this.droppedEvents;
+    this.droppedEvents = 0;
+    if (this.dirty.size === 0) {
+      // 本窗口全是被忽略的事件:没有可重扫的目录,但丢弃计数要给一条聚合 debug
+      // (排查「风暴是否还在」的依据:这行持续滚动 = 事件源仍在刷,只是不再触发扫描)
+      if (dropped > 0) this.log?.('debug', `[fs-watch] dropped ${dropped} ignored fs event(s) in window, nothing to rescan`);
+      return;
+    }
     const ids = [...this.dirty];
     this.dirty.clear();
-    this.log?.('debug', `[fs-watch] aggregated ${ids.length} dirty folder(s), rescanning: ${ids.join(', ')}`);
+    let line = `[fs-watch] aggregated ${ids.length} dirty folder(s), rescanning: ${ids.join(', ')}`;
+    if (dropped > 0) line += `, dropped ${dropped} ignored fs event(s)`;
+    this.log?.('debug', line);
     this.onScanDirty(ids);
   }
 
-  private createOne(id: string, path: string, opts: { announce: boolean }): void {
+  private createOne(
+    id: string,
+    path: string,
+    opts: { announce: boolean; filterEvent?: (filename: string) => boolean },
+  ): void {
     let watcher: FSWatcher;
     try {
       watcher = this.watchFn(path, { recursive: true });
@@ -190,10 +287,15 @@ export class FolderWatchHub {
       this.handleCreationFailure(id, path, err);
       return;
     }
-    watcher.on('change', () => this.markDirty(id));
+    // 事件入口带 filename:过滤判定挂这里、聚合之前(见 onFsEvent)。Buffer 形态
+    // (编码异常的文件名)按 null 处理 —— 保留触发,不过滤。
+    watcher.on('change', (_eventType, filename) => {
+      this.onFsEvent(id, typeof filename === 'string' ? filename : null);
+    });
     watcher.on('error', (err) => this.handleWatchError(id, watcher, err));
     this.watchers.set(id, watcher);
     this.paths.set(id, path);
+    if (opts.filterEvent !== undefined) this.filters.set(id, opts.filterEvent);
     try {
       const st = statSync(path);
       this.watchedIdentity.set(id, { dev: st.dev, ino: st.ino });
@@ -240,6 +342,8 @@ export class FolderWatchHub {
     this.log?.('warn', `[fs-watch] recursive fs.watch unavailable (${String(err)}); degraded to periodic-only scanning`);
     for (const id of [...this.watchers.keys()]) this.closeOne(id);
     this.dirty.clear();
+    this.filters.clear();
+    this.droppedEvents = 0;
     if (this.debounceTimer) {
       clearTimeout(this.debounceTimer);
       this.debounceTimer = undefined;
@@ -297,6 +401,9 @@ export class FolderWatchHub {
     this.paths.delete(id);
     this.creationFailures.delete(id);
     this.rebuildAttempts.delete(id);
+    // 注意:filters 条目**刻意不在这里删** —— error 事件驱动的 close+退避重建会复用
+    // 同一谓词(事件按 id 查表),删了反而让重建空窗期的事件漏过滤。摘除目录时由
+    // syncFolders 的移除分支显式删除,降级/关闭时统一 clear。
   }
 
   /** daemon 优雅关闭:清定时器、关全部 watcher,不留悬挂句柄。 */
@@ -304,6 +411,8 @@ export class FolderWatchHub {
     this.closed = true;
     for (const id of [...this.watchers.keys()]) this.closeOne(id);
     this.dirty.clear();
+    this.filters.clear();
+    this.droppedEvents = 0;
     if (this.debounceTimer) {
       clearTimeout(this.debounceTimer);
       this.debounceTimer = undefined;
