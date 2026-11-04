@@ -60,6 +60,7 @@ async function applyOverride(value: number): Promise<void> {
   <div v-if="shown" class="sched-banner" :class="{ 'sched-banner--live': overriding }">
     <div class="sched-banner__row">
       <span class="sched-banner__text">
+        <span v-if="overriding" class="sched-banner__pulse" aria-hidden="true"></span>
         <template v-if="overriding">
           临时放行中,剩余 {{ remainText }} —— 到时按同步时段自动暂停
         </template>
@@ -69,7 +70,7 @@ async function applyOverride(value: number): Promise<void> {
       </span>
 
       <span class="sched-banner__actions">
-        <n-button v-if="overriding" size="tiny" quaternary :disabled="busy" @click="applyOverride(0)">取消放行</n-button>
+        <button v-if="overriding" class="sched-banner__cancel" :disabled="busy" @click="applyOverride(0)">取消放行</button>
         <n-button v-else size="tiny" :disabled="busy" @click="panelOpen = !panelOpen">
           {{ panelOpen ? '收起' : '临时开启同步' }}
         </n-button>
@@ -98,16 +99,28 @@ async function applyOverride(value: number): Promise<void> {
   display: flex;
   flex-direction: column;
   gap: 6px;
-  margin: 8px 0 0;
-  padding: 8px 10px;
-  border: 1px solid var(--border);
+  /* 上下都留间距:之前只有上边距,横幅贴住下方的概览胶囊 */
+  margin: 10px 0;
+  padding: 9px 12px;
+  border: 1px solid color-mix(in srgb, var(--accent) 45%, var(--border));
+  border-left: 4px solid var(--accent);
   border-radius: 10px;
-  background: var(--surface, rgba(127, 127, 127, 0.08));
+  background: color-mix(in srgb, var(--accent) 10%, var(--card-hi));
+  color: var(--text);
   font-size: 13px;
+  font-weight: 500;
 }
+
+/* 放行中是「例外状态正在生效」,用品牌渐变高亮:一眼能从页面里认出来 */
 .sched-banner--live {
-  border-color: var(--selected-bg);
+  border: none;
+  border-left: 4px solid rgb(255 255 255 / 0.55);
+  background: linear-gradient(90deg, var(--accent), var(--accent-2));
+  color: #fff;
+  font-weight: 600;
+  box-shadow: 0 2px 10px color-mix(in srgb, var(--accent) 35%, transparent);
 }
+
 .sched-banner__row {
   display: flex;
   align-items: center;
@@ -117,7 +130,55 @@ async function applyOverride(value: number): Promise<void> {
 }
 .sched-banner__text {
   min-width: 0;
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
 }
+
+/* 白色脉冲点:纯色彩之外再给一个「活着」的动态线索 */
+.sched-banner__pulse {
+  flex: none;
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: #fff;
+  animation: sched-pulse 1.4s ease-in-out infinite;
+}
+
+@keyframes sched-pulse {
+  0%,
+  100% {
+    opacity: 1;
+    box-shadow: 0 0 0 0 rgb(255 255 255 / 0.6);
+  }
+  50% {
+    opacity: 0.55;
+    box-shadow: 0 0 0 5px rgb(255 255 255 / 0);
+  }
+}
+
+/* 渐变底上的幽灵按钮:naive-ui 的主题色在这里会看不见,直接用原生按钮自绘 */
+.sched-banner__cancel {
+  flex: none;
+  border: 1px solid rgb(255 255 255 / 0.7);
+  border-radius: 6px;
+  background: transparent;
+  color: #fff;
+  font-size: 12px;
+  line-height: 18px;
+  padding: 1px 10px;
+  cursor: pointer;
+}
+
+.sched-banner__cancel:hover:not(:disabled) {
+  background: rgb(255 255 255 / 0.18);
+}
+
+.sched-banner__cancel:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
 .sched-banner__actions {
   flex: none;
 }
