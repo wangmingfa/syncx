@@ -25,18 +25,34 @@ fn watch_test_options() -> @daemon.FsWatchOptions {
 /// 起一个「真实 actor + 监督器」的最小装配并在任务组内跑 body;返回前投递
 /// Shutdown(actor 退出关队列),watcher 任务随组收尾取消。清理放在任务组
 /// 结束之后 —— watcher 已停值,删除目录不再触发扫描事件/墓碑落地。
+/// `ignore_lines` 给 actor 扫描器与默认过滤谓词同一套规则行(同源判据);
+/// `folders_of` 供谓词热替换测试注入自管清单(谓词可随时间变化),给出时
+/// 忽略 ignore_lines 的谓词侧,由清单自带 filter。
 async fn watch_run(
   root : String,
   options : @daemon.FsWatchOptions,
   body : async (@daemon.ActorHandle, @daemon.WatchStats) -> Unit,
+  ignore_lines~ : Array[String] = [],
+  folders_of~ : (() -> Array[@daemon.FsWatchFolder])? = None,
 ) -> Unit raise {
   @async.with_task_group() <| group => {
-    let spec = actor_make_spec(root)
+    let spec = actor_make_spec(root, ignore_lines~)
     let handle = @daemon.start_session_actor(group, "watch-test-device", [spec])
     let folders : Array[@daemon.FsWatchFolder] = [
-      { id: "f1", root, paused: false },
+      {
+        id: "f1",
+        root,
+        paused: false,
+        filter: Some(
+          @daemon.event_ignore_filter(@core.IgnoreRuleset::from_lines(ignore_lines)),
+        ),
+      },
     ]
-    let stats = @daemon.start_fs_watch(group, handle, () => folders, options)
+    let supplier : () -> Array[@daemon.FsWatchFolder] = match folders_of {
+      Some(f) => f
+      None => () => folders
+    }
+    let stats = @daemon.start_fs_watch(group, handle, supplier, options)
     body(handle, stats)
     let _ = handle.send(@daemon.Cmd::Shutdown)
   }
@@ -256,4 +272,223 @@ async test "fsWatch:配置关闭后为纯定时全扫,不建 watcher" {
       msg="周期全扫应追上后续写入",
     )
   })
+}
+
+///|
+/// 轮询等待某路径的索引内容块与基线不同(事件驱动的重扫会更新指纹;
+/// 无重扫则指纹冻结 —— 过滤压制的可观测判据)。
+async fn watch_poll_blocks_changed(
+  handle : @daemon.ActorHandle,
+  path : String,
+  baseline : Array[String],
+  timeout_ms~ : Int = 5_000,
+) -> Bool {
+  let deadline = @daemon.now_ms() + timeout_ms.to_int64()
+  while @daemon.now_ms() < deadline {
+    for entry in handle.entry_lookup("f1", [path]) {
+      if entry.path == path && entry.blocks != baseline {
+        return true
+      }
+    }
+    @async.sleep(20)
+  }
+  false
+}
+
+///|
+/// 取某路径当前索引条目的内容块哈希(无条目返回空表)。
+async fn watch_blocks_of(handle : @daemon.ActorHandle, path : String) -> Array[String] {
+  for entry in handle.entry_lookup("f1", [path]) {
+    if entry.path == path {
+      return entry.blocks
+    }
+  }
+  []
+}
+
+///|
+test "normalize_watch_event_path:事件路径形态防御归一化(对齐 Node normalizeWatchFilename)" {
+  // 常规根相对路径原样通过
+  assert_eq(
+    @daemon.normalize_watch_event_path("a.txt", "/tmp/x"),
+    Some("a.txt"),
+  )
+  assert_eq(
+    @daemon.normalize_watch_event_path("src/a.txt", "/tmp/x"),
+    Some("src/a.txt"),
+  )
+  // 反斜杠一律转 '/'
+  assert_eq(
+    @daemon.normalize_watch_event_path("src\\a.txt", "/tmp/x"),
+    Some("src/a.txt"),
+  )
+  // 绝对路径:挂在监听根之下则剥前缀;剥不上(别的根/别的盘)→ None
+  assert_eq(
+    @daemon.normalize_watch_event_path("/tmp/x/src/a.txt", "/tmp/x"),
+    Some("src/a.txt"),
+  )
+  assert_eq(@daemon.normalize_watch_event_path("/tmp/y/a.txt", "/tmp/x"), None)
+  assert_eq(@daemon.normalize_watch_event_path("C:/x/a.txt", "/tmp/x"), None)
+  // './' 前缀剥掉
+  assert_eq(
+    @daemon.normalize_watch_event_path("./a.txt", "/tmp/x"),
+    Some("a.txt"),
+  )
+  assert_eq(
+    @daemon.normalize_watch_event_path("././a.txt", "/tmp/x"),
+    Some("a.txt"),
+  )
+  // '..' 段 / 空串不可信 → None(调用方按「无路径」放行)
+  assert_eq(@daemon.normalize_watch_event_path("a/../b.txt", "/tmp/x"), None)
+  assert_eq(@daemon.normalize_watch_event_path("..", "/tmp/x"), None)
+  assert_eq(@daemon.normalize_watch_event_path("", "/tmp/x"), None)
+  // 监听根自身的尾斜杠剥掉后再比对
+  assert_eq(
+    @daemon.normalize_watch_event_path("/tmp/x/a.txt", "/tmp/x/"),
+    Some("a.txt"),
+  )
+}
+
+///|
+test "event_ignore_filter:硬忽略闸门 + 目录规则一套判据(与扫描同源)" {
+  let rules = @core.IgnoreRuleset::from_lines(["node_modules/", "!.git", "logs"])
+  let filter = @daemon.event_ignore_filter(rules)
+  // 硬忽略闸门独立于规则:.git 命中硬忽略,`!.git` 负向规则解不开
+  // (Node 同红线:必须走含硬忽略闸门的 isIgnoredPath,否则 `!.git`
+  // 会把 .git 重新放开)
+  assert_true(filter(".git/index"), msg=".git/index 必须被硬忽略闸门滤掉")
+  assert_true(filter(".git"), msg=".git 自身必须被滤")
+  // 目录规则经前缀回溯命中被忽略目录下的文件
+  assert_true(filter("node_modules/x"), msg="node_modules/x 应被目录规则滤掉")
+  assert_true(filter("node_modules/a/b.js"), msg="更深层的文件同样滤掉")
+  // 被忽略目录自身的孤立事件:dir-only 规则按文件语义判 → 放行
+  // (宁可多扫,不冒吞掉整棵子树变化的风险)
+  assert_false(filter("node_modules"), msg="node_modules 自身的孤立事件应放行")
+  // 非 dir-only 规则按任意段命中
+  assert_true(filter("logs"), msg="logs 应被非目录规则滤掉")
+  assert_true(filter("logs/a.txt"), msg="logs 下的文件应被滤掉")
+  // 同步文件照常放行(过滤仅限忽略范围)
+  assert_false(filter("a.txt"), msg="同步文件自身写入的事件必须放行")
+  assert_false(filter("src/a.txt"), msg="普通路径必须放行")
+}
+
+///|
+async test "fsWatch:忽略规则命中的事件在触发前被丢弃,同步文件照常触发" {
+  let root = watch_fresh_root("filter")
+  // 被忽略目录在 watcher 启动**前**建好:init 扫描即把它纳入监视树
+  // (用户级规则不做树级剪枝),写入其内文件的事件因此确定到达 ——
+  // 随后验证的是「事件到达但被谓词丢弃」,而不是「根本没有事件」
+  @fs.mkdir("\{root}/node_modules", recursive=true, allow_exist=true)
+  // 目录规则 node_modules/:扫描器与过滤谓词同源(actor 不索引该子树,
+  // 监听层滤掉它的事件)
+  watch_run(
+    root,
+    watch_test_options(),
+    (handle, stats) => {
+      assert_true(
+        watch_poll(() => stats.start_count() >= 1, timeout_ms=5_000),
+        msg="watcher 应在 5s 内启动",
+      )
+      @fs.write_file("\{root}/a.txt", "alpha", create_mode=CreateOrTruncate)
+      assert_true(
+        watch_poll_entries(handle, 1L, timeout_ms=1_500),
+        msg="写入 a.txt 后应经事件触发扫描入索引",
+      )
+      // 被忽略目录内的文件:事件到达但被谓词丢弃,不打脏位、不触发重扫
+      @fs.write_file("\{root}/node_modules/x", "x", create_mode=CreateOrTruncate)
+      assert_true(
+        watch_poll(() => stats.drop_count() >= 1, timeout_ms=3_000),
+        msg="node_modules/x 的事件应被谓词丢弃并计数",
+      )
+      assert_true(
+        watch_poll_entries(handle, 1L, timeout_ms=500),
+        msg="忽略子树写入不得改变索引条目数",
+      )
+      // 再写一个忽略文件:丢弃计数继续上涨(事件源仍在刷,只是不再触发扫描)
+      let before = stats.drop_count()
+      @fs.write_file("\{root}/node_modules/y", "y", create_mode=CreateOrTruncate)
+      assert_true(
+        watch_poll(() => stats.drop_count() > before, timeout_ms=3_000),
+        msg="继续写忽略文件应继续计入丢弃",
+      )
+      // 语义红线:过滤仅限忽略范围,同步文件自身写入照常触发
+      @fs.write_file("\{root}/b.txt", "beta", create_mode=CreateOrTruncate)
+      assert_true(
+        watch_poll_entries(handle, 2L, timeout_ms=1_500),
+        msg="丢弃发生后,同步文件写入仍应照常触发扫描",
+      )
+    },
+    ignore_lines=["node_modules/"],
+  )
+}
+
+///|
+async test "fsWatch:谓词对账热替换,规则修改即刻生效" {
+  let root = watch_fresh_root("hotswap")
+  // 被忽略目录在 watcher 启动前建好:init 扫描即纳入监视树,后续写入其内
+  // 文件的事件确定到达(用户级规则不做树级剪枝,事件级谓词才是过滤挂点)
+  @fs.mkdir("\{root}/node_modules", recursive=true, allow_exist=true)
+  // 谓词格子由测试持有:对账循环每拍把供应者清单里的最新谓词换进格子,
+  // 值守任务按批现查 —— 换内容即换谓词,不重建 watcher(对齐 Node
+  // 「回调现查表、对账换入」的热替换语义)
+  let filter_cell : Ref[((String) -> Bool)?] = Ref(None)
+  let supplier : () -> Array[@daemon.FsWatchFolder] = () => [
+    { id: "f1", root, paused: false, filter: filter_cell.val },
+  ]
+  // 兜底全扫抬高到断言窗口之外:指纹冻结断言不允许任何额外扫描源干扰
+  let options : @daemon.FsWatchOptions = {
+    ..watch_test_options(),
+    fallback_scan_ms: 60_000,
+  }
+  // actor 扫描规则为空:node_modules/x 会被正常索引,「重扫是否发生」
+  // 因此可以通过内容指纹直接观测
+  watch_run(
+    root,
+    options,
+    (handle, stats) => {
+      assert_true(
+        watch_poll(() => stats.start_count() >= 1, timeout_ms=5_000),
+        msg="watcher 应在 5s 内启动",
+      )
+      // 阶段一:谓词缺省(不过滤),node_modules/x 照常入索引
+      @fs.write_file("\{root}/a.txt", "alpha", create_mode=CreateOrTruncate)
+      @fs.write_file("\{root}/node_modules/x", "v1", create_mode=CreateOrTruncate)
+      assert_true(
+        watch_poll_entries(handle, 2L, timeout_ms=5_000),
+        msg="不过滤阶段 node_modules/x 应照常入索引",
+      )
+      let baseline = watch_blocks_of(handle, "node_modules/x")
+      let a_before = watch_blocks_of(handle, "a.txt")
+      // 阶段二:热替换谓词为「忽略 node_modules/」,等对账拍换入格子
+      filter_cell.val = Some(
+        @daemon.event_ignore_filter(
+          @core.IgnoreRuleset::from_lines(["node_modules/"]),
+        ),
+      )
+      @async.sleep(500)
+      // 阶段三:改写 node_modules/x —— 事件被新谓词丢弃,重扫不发生,
+      // 内容指纹定格在旧值
+      @fs.write_file(
+        "\{root}/node_modules/x",
+        "v2-much-longer-content",
+        create_mode=CreateOrTruncate,
+      )
+      assert_true(
+        watch_poll(() => stats.drop_count() >= 1, timeout_ms=3_000),
+        msg="热替换后 node_modules/x 的事件应被丢弃",
+      )
+      @async.sleep(300)
+      assert_true(
+        watch_blocks_of(handle, "node_modules/x") == baseline,
+        msg="热替换后 node_modules/x 的内容指纹应冻结(重扫被过滤压制)",
+      )
+      // 阶段四:同步文件写入照常触发,指纹照常更新(过滤仅限忽略范围)
+      @fs.write_file("\{root}/a.txt", "alpha-v2", create_mode=CreateOrTruncate)
+      assert_true(
+        watch_poll_blocks_changed(handle, "a.txt", a_before),
+        msg="热替换后同步文件写入仍应触发重扫并更新指纹",
+      )
+    },
+    folders_of=Some(supplier),
+  )
 }

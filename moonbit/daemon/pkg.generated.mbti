@@ -65,6 +65,8 @@ pub async fn count_unpushed_commits(String) -> Int32?
 
 pub fn entry_fingerprint(Entry) -> String
 
+pub fn event_ignore_filter(@core.IgnoreRuleset) -> (String) -> Bool
+
 pub async fn get_commit_info(String, String, String) -> CommitInfo?
 
 pub async fn get_last_commit_hash(String) -> String?
@@ -92,6 +94,8 @@ pub async fn mtime_ms(String) -> Int64?
 pub fn new_session_actor(String, Array[FolderSpec], on_git_notify? : async (@net.ControlMessage) -> Unit) -> SessionActor raise IndexStoreError
 
 pub fn normalize_path(String) -> String
+
+pub fn normalize_watch_event_path(String, String) -> String?
 
 pub fn now_ms() -> Int64
 
@@ -277,6 +281,7 @@ pub(all) struct FsWatchFolder {
   id : String
   root : String
   paused : Bool
+  filter : ((String) -> Bool)?
 }
 
 pub(all) struct FsWatchOptions {
@@ -497,6 +502,7 @@ pub struct WatchStats {
   // private fields
 }
 pub fn WatchStats::degrade_count(Self) -> Int32
+pub fn WatchStats::drop_count(Self) -> Int32
 pub fn WatchStats::rebuild_count(Self) -> Int32
 pub fn WatchStats::start_count(Self) -> Int32
 

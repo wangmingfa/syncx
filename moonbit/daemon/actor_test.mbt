@@ -40,10 +40,13 @@ async fn actor_write_file(
 ///|
 /// 构造目录参数:状态目录(index.db / 回收站)放共享树之外,
 /// 否则它们自己也会被扫进 changed。每个测试独占一份,不互串。
-/// `kbps` 供限速测试设置目录级 maxBandwidthKbps(None = 不限)。
+/// `kbps` 供限速测试设置目录级 maxBandwidthKbps(None = 不限);
+/// `ignore_lines` 是目录忽略规则行(fs-watch 过滤测试用它让扫描与
+/// 监听谓词同源,缺省空 = 只剩硬忽略闸门)。
 async fn actor_make_spec(
   root : String,
   kbps~ : Int32? = None,
+  ignore_lines~ : Array[String] = [],
 ) -> @daemon.FolderSpec {
   let state = "\{root}-state"
   @fs.mkdir(state, recursive=true, allow_exist=true)
@@ -58,7 +61,7 @@ async fn actor_make_spec(
     trash_dir: "\{state}/trash",
     versions_dir: None,
     versions_per_path: None,
-    rules: @core.IgnoreRuleset::from_lines([]),
+    rules: @core.IgnoreRuleset::from_lines(ignore_lines),
     receive_only: false,
     conflict_policy: @daemon.ConflictPolicy::KeepBoth,
     paused: false,

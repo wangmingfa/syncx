@@ -319,6 +319,13 @@ pub async fn run_start(args : StartArgs) -> Unit {
     // 配置热重载后目录增删/暂停切换即插即拔;watcher 正常时按
     // fsWatchFallbackScanSecs(缺省 600s)兜底全扫,创建失败退回原扫描间隔
     // (30s)并 warn 一次;fsWatchEnabled=false 时为纯定时全扫。
+    // 事件过滤谓词与扫描同源(对齐 Node 7419b03):忽略范围的事件在触发
+    // 重扫之前丢弃。规则集与 build_folder_specs 里喂给 actor 的完全一致
+    // (当前同为空规则集 + 硬忽略闸门;那个 TODO 落地时此处必须一并换,
+    // 两处共用同一套行来源,绝不允许监听层判据漂移出扫描管线)。
+    let watch_event_filter = @daemon.event_ignore_filter(
+      @core.IgnoreRuleset::from_lines([]),
+    )
     let _watch_stats = @daemon.start_fs_watch(
       group,
       handle,
@@ -329,6 +336,7 @@ pub async fn run_start(args : StartArgs) -> Unit {
             id: folder.folder_id(),
             root: folder.path,
             paused: folder.is_paused() || config_cell.val.is_paused(),
+            filter: Some(watch_event_filter),
           })
         }
         folders

@@ -8,11 +8,18 @@
 ///    即插即拔。身份校验门禁(folderIdentity 收养)落地前暂以 paused 为闸;
 ///  - 事件只当**触发器**:判定(相对路径拼接、diff、墓碑、忽略、嵌套共享根)
 ///    完全走 scanner.mbt 现有管线,这里不复制任何判定逻辑;
+///  - 忽略范围的事件在**触发之前**丢弃(FsWatchFolder.filter 谓词,见
+///    event_ignore_filter):2026-11 生产事故根治,对齐 Node 7419b03 ——
+///    WebStorm 后台 git 集成每 ~2s 刷一次 .git/index,递归监听把忽略子树的
+///    事件照单全收 → 每次刷新都触发全量重扫,daemon ~95% CPU。`.git` 对
+///    同步语义是硬忽略,监听层没有理由再看见它。语义红线:过滤仅限忽略
+///    范围 —— 自己写入同步文件产生的事件照常触发;daemon 自己写 .git
+///    (git 镜像提交)的事件同样被滤,这正是目的;
 ///  - 事件聚合防抖靠 `@fs.Watcher` 自带的 debounce(debounce_timeout = 事件静默
 ///    满这么久才把这批交给 wait();max_debounce_delay = 自首批事件起的强制冲刷
 ///    上限,连续事件流不能一直憋着):wait() 返回的一批事件塌缩成该目录**一次**
 ///    重扫。重入闸与现有语义一致 —— actor 单线程命令循环串行处理 ScanFolder,
-///    重扫天然互斥;自己写入也产生事件,不过滤,聚合后重扫幂等;
+///    重扫天然互斥;自己写入也产生事件(忽略范围除外,见上),聚合后重扫幂等;
 ///  - 定时兜底全扫:watcher 正常时按 fsWatchFallbackScanSecs(缺省 600s,可配置)
 ///    对一次总账;watcher 创建失败/不可用 → 该目录进降级名册,按原扫描间隔
 ///    (DEGRADED_SCAN_INTERVAL_MS,接 watcher 之前的 30s 节奏)周期全扫并
@@ -75,6 +82,13 @@ pub(all) struct FsWatchFolder {
   id : String
   root : String
   paused : Bool
+  /// 事件过滤谓词(可选):入参是「相对监听根的 POSIX 路径」(已按
+  /// normalize_watch_event_path 归一化),返回 true = 丢弃该事件(不打脏位、
+  /// 不触发该目录重扫)。由供应者用该目录的忽略规则生成,与扫描同源判据
+  /// (见 event_ignore_filter);对账循环每拍把最新谓词换进共享格子热替换,
+  /// 规则修改即刻生效,不需要重建 watcher。缺省 None = 不过滤,行为与无谓词
+  /// 时代完全一致(向后兼容)。
+  filter : ((String) -> Bool)?
 }
 
 ///|
@@ -134,6 +148,9 @@ pub struct WatchStats {
   priv mut starts : Int
   priv mut rebuilds : Int
   priv mut degrades : Int
+  /// 被过滤谓词丢弃的忽略范围事件累计数(风暴压制的观测证据;每批聚合
+  /// 结算一次,绝不逐事件打日志)。
+  priv mut drops : Int
 }
 
 ///|
@@ -152,6 +169,13 @@ pub fn WatchStats::rebuild_count(self : WatchStats) -> Int {
 /// 进入降级扫描的失效期次数(每次失效期 warn 一次;诊断用)。
 pub fn WatchStats::degrade_count(self : WatchStats) -> Int {
   self.degrades
+}
+
+///|
+/// 被过滤谓词丢弃的忽略范围事件累计数(诊断与测试观测:计数上涨 = 事件源
+/// 仍在刷忽略子树,只是不再触发扫描)。
+pub fn WatchStats::drop_count(self : WatchStats) -> Int {
+  self.drops
 }
 
 ///|
@@ -174,7 +198,7 @@ pub fn start_fs_watch(
   folders_of : () -> Array[FsWatchFolder],
   options : FsWatchOptions,
 ) -> WatchStats {
-  let stats : WatchStats = { starts: 0, rebuilds: 0, degrades: 0 }
+  let stats : WatchStats = { starts: 0, rebuilds: 0, degrades: 0, drops: 0 }
   if !options.enabled {
     // 配置关闭:纯定时全扫,节奏 = 原扫描间隔,行为与接 watcher 之前一致
     @log.info(
@@ -254,7 +278,9 @@ async fn degraded_scan_loop(
 ///  - 新目录(未暂停):建 watcher → 记 starts → 起值守任务;
 ///  - 消失/暂停目录:从名册摘除并 close watcher —— 值守任务随 Broken 退出
 ///    (retired 闸把这次主动撤销与「失效重建」区分开,不刷 rebuilds/不补扫);
-///  - 建不出 watcher:进降级名册(每段失效期 warn 一次),降级扫描循环顶着。
+///  - 建不出 watcher:进降级名册(每段失效期 warn 一次),降级扫描循环顶着;
+///  - 在值目录:把供应者清单里的最新事件过滤谓词换进共享格子热替换(见
+///    filters 注释)—— 谓词与 watcher 生命周期解耦,规则热重载无事件空窗。
 async fn watch_reconcile_loop(
   group : @async.TaskGroup[Unit],
   handle : ActorHandle,
@@ -267,6 +293,11 @@ async fn watch_reconcile_loop(
   // folder_id → 该目录的在值值守(active watcher 与 retired 闸)
   let active : Map[String, @fs.Watcher] = Map([])
   let retired : Map[String, Ref[Bool]] = Map([])
+  // folder_id → 当前生效的事件过滤谓词格子:对账循环每拍把供应者清单里的
+  // 最新谓词换进格子,值守任务按批现查 —— 换格子内容即换谓词(对齐 Node
+  // 7419b03 的「回调按 id 现查 filters 表、syncFolders 对账换入」),规则
+  // 热重载即刻生效,不需要重建 watcher(重建徒留事件空窗)。
+  let filters : Map[String, Ref[((String) -> Bool)?]] = Map([])
   // 降级 warn 只发一次:同一段失效期内不刷屏;建出 watcher 后清旗,再次
   // 失效会重新 warn 并计入新的失效期
   let warned : Map[String, Bool] = Map([])
@@ -280,12 +311,20 @@ async fn watch_reconcile_loop(
     // 新目录接入
     for id, folder in desired {
       if active.contains(id) {
+        // 谓词新鲜度:每次对账都换入最新谓词。事件过滤按格子现查(见
+        // watch_until_broken),换内容即换谓词 —— 规则热重载/规则保存后
+        // 的新鲜度因此不需要重建 watcher。
+        match filters.get(id) {
+          Some(cell) => cell.val = folder.filter
+          None => ()
+        }
         continue
       }
       match make_folder_watcher(folder.root, options) {
         Some(watcher) => {
           active.set(id, watcher)
           retired.set(id, Ref(false))
+          filters.set(id, Ref(folder.filter))
           warned.remove(id)
           stats.starts += 1
           @log.info("目录 {Folder} 的文件系统监听已启动({Root})", [
@@ -293,13 +332,16 @@ async fn watch_reconcile_loop(
           ])
           let stop = retired.get(id).unwrap_or(Ref(false))
           let f = folder
+          let filter_cell = filters.get(id).unwrap_or(Ref(None))
           group.spawn_bg(allow_failure=true, no_wait=true) <| () => {
-            watch_until_broken(handle, f, watcher, options, stats, stop)
+            watch_until_broken(handle, f, watcher, options, stats, stop, filter_cell)
             // 值守结束(失效断裂;主动撤除的对账侧已摘过名册,幂等):把
             // 名册条目摘掉 —— 对账循环下一拍发现「还在配置里但已不在值」,
             // 重建接管。摘除与返回之间无 await 点,不会插进新一轮重建。
+            // 谓词格子一并摘掉:重建时按最新清单另起新格子,不背旧谓词。
             active.remove(f.id)
             retired.remove(f.id)
+            filters.remove(f.id)
           }
         }
         None => {
@@ -341,6 +383,7 @@ async fn watch_reconcile_loop(
       }
       active.remove(id)
       retired.remove(id)
+      filters.remove(id)
     }
     @async.sleep(reconcile_ms)
   }
@@ -351,6 +394,11 @@ async fn watch_reconcile_loop(
 /// 在途中间态、冲突副本等)直接不进监视树 —— 与扫描管线同一道闸,既省
 /// watch 描述符,也免掉自家接收中间态写入的噪声。失败(目录不存在/不是
 /// 目录/平台不支持)如实返回 None,由调用方降级重试。
+///
+/// 这是**树级**硬忽略(库在建树时剪枝);事件级过滤(FsWatchFolder.filter,
+/// 硬忽略闸门兜底 + 目录忽略规则)是独立的一道闸 —— 树级剪不掉的漏网
+/// (父目录事件带出的忽略项增删、树级剪枝的建树竞态)与用户级忽略规则
+/// (node_modules 等)都在事件批里按谓词丢弃,见 watch_until_broken。
 async fn make_folder_watcher(
   root : String,
   options : FsWatchOptions,
@@ -373,6 +421,137 @@ async fn make_folder_watcher(
 /// watcher 的 ignored_paths 回调:相对路径(`/` 分隔)按硬忽略口径判定。
 fn hard_ignored_rel(rel : String) -> Bool {
   @core.is_hard_ignored(rel)
+}
+
+///|
+/// 构建某目录的事件过滤谓词(与扫描**同源同判据**,绝不造第二套):入参是
+/// 「相对监听根的 POSIX 路径」(已归一化,见 normalize_watch_event_path),
+/// 返回 true = 丢弃该事件。判定 = 硬忽略闸门 + 目录忽略规则,与 scanner.mbt
+/// 扫描管线用的是同一对调用(is_hard_ignored + rules.is_ignored 一套真相;
+/// 硬忽略闸门必须独立于规则 —— 否则 `!.git` 这类负向规则会把 .git 重新放开)。
+/// isDir 一律按 false(文件语义)传:事件路径分不出文件还是目录,按文件语义
+/// 判最保守 —— 目录规则仍经前缀回溯命中「被忽略目录下的文件」(node_modules/x),
+/// 而「被忽略目录自身」的孤立事件放行,宁可多扫也不冒吞掉整棵子树变化的风险。
+pub fn event_ignore_filter(rules : @core.IgnoreRuleset) -> (String) -> Bool {
+  rel => @core.is_hard_ignored(rel) || rules.is_ignored(rel, false)
+}
+
+///|
+/// 把 fs 事件携带的路径归一化成「相对监听根的 POSIX 路径」;归一不出来返回
+/// None(调用方按 None 语义处理:保留触发,不过滤 —— 宁可多扫不可漏扫)。
+/// 对齐 Node 7419b03 的 normalizeWatchFilename。
+///
+/// 防御背景:事件路径形态跨平台/跨后端不一 —— @fs.Watcher 的契约是根相对
+/// POSIX 路径,但直接信契约不如先归一化再判(漏判 = 事件照旧触发,退化回
+/// 扫描风暴):
+///  - 反斜杠一律替换为 '/';
+///  - 绝对路径(POSIX '/' 开头或 Windows 盘符)尝试用监听根剥前缀,剥不上
+///    → None;
+///  - './' 前缀剥掉;含 '..' 段的路径不可信 → None;空串 → None。
+pub fn normalize_watch_event_path(path : String, root : String) -> String? {
+  let mut s = posix_separators(path)
+  if s.is_empty() {
+    return None
+  }
+  let root_norm = posix_separators(root).trim_end(chars="/").to_owned()
+  let is_absolute = s.has_prefix("/") || is_windows_drive_path(s)
+  if is_absolute {
+    // 绝对路径:必须挂在监听根之下才可归一;剥不上(另一个根/另一个盘)
+    // 的路径不可信
+    let prefix = "\{root_norm}/"
+    if !s.has_prefix(prefix) {
+      return None
+    }
+    s = s[prefix.length():].to_owned()
+  }
+  while s.has_prefix("./") {
+    s = s[2:].to_owned()
+  }
+  if s.is_empty() {
+    return None
+  }
+  for seg in s.split("/") {
+    if seg.to_owned() == ".." {
+      return None
+    }
+  }
+  Some(s)
+}
+
+///|
+/// 反斜杠一律替换为 '/'(Windows 形态的路径;其余原样返回,不付拷贝)。
+fn posix_separators(s : String) -> String {
+  if !s.contains("\\") {
+    return s
+  }
+  let buf = StringBuilder()
+  for ch in s.to_array() {
+    if ch == '\\' {
+      buf.write_char('/')
+    } else {
+      buf.write_char(ch)
+    }
+  }
+  buf.to_string()
+}
+
+///|
+/// 是否为 Windows 盘符绝对路径形态(如 `C:/...`;对齐 Node 的
+/// /^[A-Za-z]:\// 探测)。
+fn is_windows_drive_path(s : String) -> Bool {
+  let chars = s.to_array()
+  if chars.length() < 3 {
+    return false
+  }
+  let head = chars[0]
+  let is_letter = (head >= 'a' && head <= 'z') || (head >= 'A' && head <= 'Z')
+  is_letter && chars[1] == ':' && chars[2] == '/'
+}
+
+///|
+/// 单个事件是否命中过滤谓词(可丢弃):提取事件携带的全部路径 —— Rename
+/// 携带新旧两径,语义对齐 Node 的「逐事件判」:任一路径归一失败 → 保留;
+/// 没有任何路径可归一 → 当「无路径」保留原语义;全部路径可归一且全部命中
+/// 谓词 → 丢弃(同步文件自身的改动不会走到这一步)。
+fn event_is_ignored(event : @fs.FsEvent, root : String, filter : (String) -> Bool) -> Bool {
+  let paths : Array[String] = match event {
+    Modify(p) | Create(p) | Remove(p) => [p]
+    Rename(old~, new~) => [old, new]
+  }
+  let mut saw_path = false
+  for p in paths {
+    match normalize_watch_event_path(p, root) {
+      Some(rel) => {
+        saw_path = true
+        if !filter(rel) {
+          return false
+        }
+      }
+      // 归一不出来:当「无路径」处理 —— 保留触发
+      None => return false
+    }
+  }
+  saw_path
+}
+
+///|
+/// 一批事件按谓词过滤:返回 (放行数, 丢弃数)。过滤挂点在触发之前 ——
+/// 放行数 0 的批次不投 ScanFolder(忽略事件对重扫而言不存在)。
+fn filter_event_batch(
+  events : Array[@fs.FsEvent],
+  root : String,
+  filter : (String) -> Bool,
+) -> (Int, Int) {
+  let mut live = 0
+  let mut dropped = 0
+  for event in events {
+    if event_is_ignored(event, root, filter) {
+      dropped += 1
+    } else {
+      live += 1
+    }
+  }
+  (live, dropped)
 }
 
 ///|
@@ -434,7 +613,8 @@ async fn watch_wait_slice(
 /// 一个 watcher 实例的值守周期:批量取事件并触发该目录重扫,直到失效或被
 /// 对账循环撤除(retired)才返回;重建职责在对账循环。任何一批事件只投一条
 /// ScanFolder —— wait() 已经在静默窗口内做过聚合,一批 = 一次该目录重扫;
-/// 事件路径一律不看,判定完全交给现有扫描管线。失效(非撤除)时记一次
+/// 事件路径不做任何同步判定,判定完全交给现有扫描管线,唯独「忽略范围」
+/// 在触发之前按谓词丢弃(见 Events 分支注释)。失效(非撤除)时记一次
 /// rebuilds 并补一扫对账(目录若被原地重建,这一刀把存量对上账)。
 async fn watch_until_broken(
   handle : ActorHandle,
@@ -443,14 +623,25 @@ async fn watch_until_broken(
   options : FsWatchOptions,
   stats : WatchStats,
   stop : Ref[Bool],
+  filter_cell : Ref[((String) -> Bool)?],
 ) -> Unit {
   defer watcher.close()
   let slice_ms = watch_slice_ms(options)
   for ;; {
     match watch_wait_slice(watcher, folder.root, slice_ms) {
-      Events(events) =>
-        // 空批(创建+删除在同窗口内互相抵消)什么都不用做
-        if events.length() > 0 {
+      Events(events) => {
+        // 忽略范围的事件在触发之前丢弃:事件路径可归一化且命中谓词 → 丢弃
+        // (不打脏位、不触发重扫);归一失败/空串 → 当「无路径」处理,保留
+        // 原语义照常触发(宁可多扫不可漏扫);无谓词 → 整批照旧(向后兼容,
+        // 与无谓词时代的「直接 markDirty」完全一致)。挂点语义对齐 Node
+        // onFsEvent(聚合之前):@fs.Watcher 的防抖聚合在库内部不可插手,
+        // 这里的「之前」指绝不进入 ScanFolder 触发链 —— 忽略事件对重扫
+        // 而言不存在。
+        let (live, dropped) = match filter_cell.val {
+          Some(filter) => filter_event_batch(events, folder.root, filter)
+          None => (events.length(), 0)
+        }
+        if live > 0 {
           if events.length() >= WATCH_EVENT_LOG_THRESHOLD {
             @log.debug("目录 {Folder} 一批聚合了 {Count} 个文件事件,触发重扫", [
               Json::string(folder.id),
@@ -461,6 +652,29 @@ async fn watch_until_broken(
             return // actor 已退出(队列已关)
           }
         }
+        // 丢弃计数的聚合观测点:本批丢过忽略事件就记一条 debug,绝不逐事件
+        // 打日志。纯丢弃批不投 ScanFolder —— 对应 Node「纯丢弃窗口也开防抖
+        // 计时器」:这行持续滚动 = 事件源仍在刷,只是不再触发扫描(风暴
+        // 压制的观测证据);计数进 WatchStats 供测试与诊断。
+        if dropped > 0 {
+          stats.drops += dropped
+          if live > 0 {
+            @log.debug(
+              "目录 {Folder} 一批丢弃 {Dropped} 个忽略范围文件事件,其余 {Live} 个照常触发重扫",
+              [
+                Json::string(folder.id),
+                Json::number(dropped.to_double()),
+                Json::number(live.to_double()),
+              ],
+            )
+          } else {
+            @log.debug(
+              "目录 {Folder} 一批 {Dropped} 个文件事件全部命中忽略规则,已丢弃不触发重扫",
+              [Json::string(folder.id), Json::number(dropped.to_double())],
+            )
+          }
+        }
+      }
       Quiet => continue
       Broken => {
         if stop.val {
