@@ -178,6 +178,7 @@ function fmtDate(iso: string): string {
       v-for="c in commits"
       :key="c.hash"
       class="commit-list__item is-expandable"
+      :class="{ 'is-open': isExpanded(c.hash) }"
       :tabindex="0"
       @click="toggle(c)"
       @keydown.enter="toggle(c)"
@@ -289,6 +290,16 @@ function fmtDate(iso: string): string {
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
+}
+
+/* 展开态解除单行截断:subject 长的提交(镜像消息带文件清单后缀)展开后要完整
+   可读,收起时保留 ellipsis 便于扫列表。正文( body)本就完整渲染,这里补齐
+   subject 一侧的「不打点」。 */
+.commit-list__item.is-open .commit-list__subject {
+  overflow: visible;
+  text-overflow: clip;
+  white-space: normal;
+  word-break: break-word;
 }
 
 .commit-list__chev {
