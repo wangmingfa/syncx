@@ -13,9 +13,17 @@
 ///     设备记账 —— 在线即发、离线不耗次数、重连补投、ack 销账、上限放弃;
 ///     待回执目标落在 config.json 的 gitBroadcastPending / gitRelayPending
 ///     (core 字段透传),重启/热重载后从盘上恢复(attempts 只在内存)。
+///   - 结算内容对齐 + 漂移台账自愈(对齐 Node 1122fbc / Rust 8767648):
+///     结算把 changedFiles 按「工作树内容 vs 本机索引」拆成对齐/未对齐,只有
+///     落齐的文件进镜像提交(宁缺勿错,半途内容绝不定格);未对齐的记入
+///     gitDeferredMirror 漂移台账(core 字段透传,与两份待投递台账同一套
+///     「内存与配置同值」不变式),结算轮尾逐文件复查,内容到齐即补一笔收敛
+///     提交 —— 这些文件从此不在任何通知的 changedFiles 里,不记台账就永久
+///     挂起(2026-11-04 实测残留脏文件的事故形态)。台账为空零开销。
 ///   - 与 Node 的差异(有意收窄,后续包):基线不落盘(重启后首轮只记基线,
-///     绝不重放历史);目录身份拦阻(gitBlockedByIdentity)与「未推送清单
-///     UI」不做。
+///     绝不重放历史);目录身份拦阻(gitBlockedByIdentity)、git 重写闸
+///     (gitRewriteRunning)与「未推送清单 UI」不做 —— 自愈与结算的闸门口径
+///     因此同为「模式 + 暂停」,身份/重写闸在 MoonBit 面上尚无对应物。
 
 ///|
 /// 自动重试上限(Node GIT_AUTO_COMMIT_MAX_ATTEMPTS 同值):次数用尽后停止
@@ -189,6 +197,25 @@ pub(all) struct PushOutcome {
 }
 
 ///|
+/// 镜像提交结算时「内容尚未落齐」文件的漂移台账(**仅本机使用,不进 wire、
+/// 不跨设备对齐**;与 Node `GitDeferredMirrorRecord` / Rust `GitDeferredMirror`
+/// 同一份落盘契约,字段名不得改)。
+///
+/// 镜像提交按范围收敛只 stage 通知宣称的文件,而其中内容尚未与本机索引对齐的
+/// 部分不能一并定格(宁缺勿错,见 daemon 的 work_tree_content_aligned);它们
+/// 记入本台账,由结算轮尾的自愈(heal_deferred)在内容到齐后补一笔收敛提交。
+/// 落盘同 gitRelayPending / gitBroadcastPending 的「内存与配置同值」口径:
+/// daemon 重启后台账还在,漂移文件不会因为重启而永远没人提交。
+pub(all) struct GitDeferredMirror {
+  /// 来源通知的提交哈希(供收敛提交信息与日志)。
+  hash : String
+  /// 来源通知的原始提交消息(供收敛提交信息与日志)。
+  message : String
+  /// 尚未对齐、等待内容到齐后补提交的相对路径('/' 分隔,与索引同形)。
+  files : Array[String]
+}
+
+///|
 /// git 镜像循环主体:配置供应者(每次 flush 现读 —— 配置热重载下模式/
 /// 共享名单/剔除开关即插即拔)+ 会话注册表(drain 闸对账)+ 发送闭包表
 /// (中继)+ actor 句柄(基线回填与在途接收读数)+ 去重集合。
@@ -208,6 +235,8 @@ pub struct GitMirror {
   priv broadcast_ledger : Map[String, GitCommitLedger]
   /// folder_id → 中继台账(镜像成功后向其余对端转发)。
   priv relay_ledger : Map[String, GitCommitLedger]
+  /// folder_id → 漂移台账(结算后「内容尚未落齐」的欠账;每拍结算轮尾自愈)。
+  priv deferred : Map[String, GitDeferredMirror]
   /// 已收未销的投递回执:handle_peer_message 是同步回调,而销账要异步落盘
   /// —— 先入此队列,flush 每拍开头统一结算(单线程 async 下无锁)。
   priv mut acks : Array[(String, String, String)]
@@ -231,6 +260,7 @@ pub fn GitMirror::new(
     slots: Map([]),
     broadcast_ledger: Map([]),
     relay_ledger: Map([]),
+    deferred: Map([]),
     acks: [],
   }
 }
@@ -304,6 +334,16 @@ fn GitMirror::ledger_map_of(
   } else {
     self.relay_ledger
   }
+}
+
+///|
+/// 观测:某目录的漂移台账(None = 无欠账;测试/观测用)。返回内存引用,
+/// 只读勿改。
+pub fn GitMirror::deferred_of(
+  self : GitMirror,
+  folder_id : String,
+) -> GitDeferredMirror? {
+  self.deferred.get(folder_id)
 }
 
 ///|
@@ -542,6 +582,72 @@ pub async fn GitMirror::flush(self : GitMirror) -> Unit {
       }
       continue
     }
+    // ── 机制一:结算前逐文件内容对齐(宁缺勿错,对齐 Node 1122fbc)──
+    // 台账排空只证明「没有在途接收」,不证明「内容已经落齐」:对端镜像提交把
+    // 半途内容定格(消息对、内容错)的事故里,认领早已释放、结算闸门一路放行
+    // (60s 强推),差的就是这一道内容比对。把 changedFiles 拆成两份:工作树
+    // 内容与本机索引逐块一致的(或索引墓碑 + 盘上已删的)才进本次镜像提交;
+    // 未对齐的不提交,记入漂移台账(gitDeferredMirror),由结算轮尾的自愈
+    // (heal_deferred)在内容到齐后补提交 —— 这些文件从此不在任何通知的
+    // changedFiles 里,不记台账就永久挂起。旧版对端的通知没有文件清单
+    // (changedFiles 为空),无从逐文件判定,保持既有全量兜底不变。
+    let mut stage_files = changed
+    let deferred_files : Array[String] = []
+    if changed.length() > 0 {
+      let entries = self.handle.entry_lookup(folder_id, changed)
+      let by_path : Map[String, @daemon.Entry] = Map([])
+      for entry in entries {
+        by_path.set(entry.path, entry)
+      }
+      let aligned : Array[String] = []
+      for rel in changed {
+        if @daemon.work_tree_content_aligned(folder.path, rel, by_path.get(rel)) {
+          aligned.push(rel)
+        } else {
+          deferred_files.push(rel)
+        }
+      }
+      stage_files = aligned
+      if stage_files.is_empty() {
+        // 全都不对齐:一笔也不提交 —— 半途内容绝不能被定格;但通知照常结算 +
+        // 基线推进(沿用「干净工作树跳过提交但推进基线」的口径,通知本身不能
+        // 卡住),剩余文件交给漂移台账的自愈。
+        @log.warn(
+          "git auto-commit settled without commit (no changed file content aligned with the local index): {Folder} (from {Device}) \"{Subject}\" — {N} 个文件进漂移台账: {Files}{Tail}",
+          [
+            Json::string(folder_id),
+            Json::string(from_id),
+            Json::string(first_line(message)),
+            Json::number(deferred_files.length().to_double()),
+            Json::string(preview_of(deferred_files)),
+            Json::string(if deferred_files.length() > 10 { " …" } else { "" }),
+          ],
+        )
+        self.record_deferred(folder_id, hash, message, deferred_files)
+        let _ = self.slots.remove(folder_id)
+        match @daemon.get_last_commit_hash(folder.path) {
+          Some(h) => {
+            let _ = self.handle.send(
+              @daemon.Cmd::GitBaseline(folder=folder_id, hash=h),
+            )
+          }
+          None => ()
+        }
+        continue
+      }
+      if deferred_files.length() > 0 {
+        @log.info(
+          "git mirror commit narrowed to content-aligned files: {Folder} — committing {M}, deferring {N} to the drift ledger ({Files}{Tail})",
+          [
+            Json::string(folder_id),
+            Json::number(stage_files.length().to_double()),
+            Json::number(deferred_files.length().to_double()),
+            Json::string(preview_of(deferred_files)),
+            Json::string(if deferred_files.length() > 10 { " …" } else { "" }),
+          ],
+        )
+      }
+    }
     slot.attempts = slot.attempts + 1
     @log.info(
       "auto-committing: {Folder} (from {Device}) \"{Subject}\" — {Files}",
@@ -549,7 +655,7 @@ pub async fn GitMirror::flush(self : GitMirror) -> Unit {
         Json::string(folder_id),
         Json::string(from_id),
         Json::string(first_line(message)),
-        Json::string(@daemon.git_files_desc(changed)),
+        Json::string(@daemon.git_files_desc(stage_files)),
       ],
     )
     // 目录级开关 gitStripCoAuthored:开启时在组装出的最终消息上剔除
@@ -562,11 +668,12 @@ pub async fn GitMirror::flush(self : GitMirror) -> Unit {
     )
     // 范围收敛:只 stage 通知宣称的文件 —— 工作树里用户并发的未提交改动
     // 不属于这笔镜像提交,绝不能被 add -A 顺手打包(根治 2026-11-04 的
-    // 「回声吞掉用户并发改动」事故;契约见 Node 55b1c35)
+    // 「回声吞掉用户并发改动」事故;契约见 Node 55b1c35);机制一再此之上
+    // 再按内容对齐收窄(见上),内容未落齐的文件绝不定格进提交
     let result = @daemon.auto_commit(
       folder.path,
       mirror_message,
-      changed_files=changed,
+      changed_files=stage_files,
     )
     if result.success {
       @log.info("auto-commit success: {Folder} -> {Hash8}", [
@@ -591,6 +698,37 @@ pub async fn GitMirror::flush(self : GitMirror) -> Unit {
       // 镜像提交真的落成才中继:一笔提交每经一台真正落了提交的设备才多走一跳,
       // 链路因此不成环;'receive' 只进不出,不中继
       self.relay(plan, folder, from_id, slot.notify, hash)
+      // 未对齐的文件进漂移台账(提交失败则不动台账:通知还挂着,下轮结算会
+      // 重新判定)
+      if deferred_files.length() > 0 {
+        self.record_deferred(folder_id, hash, message, deferred_files)
+      }
+      // 本笔镜像提交已把「此前欠着、这次对齐了」的文件一并提交:从台账摘除,
+      // 否则自愈会对着 HEAD 里已有的内容再补一笔空收敛提交。stage_files 为空
+      // 只发生在「旧对端无清单走全量兜底」,无从对应台账文件,不摘。
+      if stage_files.length() > 0 {
+        match self.deferred.get(folder_id) {
+          Some(ledger) => {
+            let remaining : Array[String] = []
+            for rel in ledger.files {
+              if !stage_files.contains(rel) {
+                remaining.push(rel)
+              }
+            }
+            if remaining.length() != ledger.files.length() {
+              match remaining.is_empty() {
+                true => self.set_deferred(folder_id, None)
+                false =>
+                  self.set_deferred(
+                    folder_id,
+                    Some({ hash: ledger.hash, message: ledger.message, files: remaining }),
+                  )
+              }
+            }
+          }
+          None => ()
+        }
+      }
     } else {
       let error = match result.error {
         Some(e) => e
@@ -616,6 +754,180 @@ pub async fn GitMirror::flush(self : GitMirror) -> Unit {
       } else {
         slot.retry_at = Some(now + GIT_AUTO_COMMIT_RETRY_MS)
       }
+    }
+  }
+  // 结算轮尾的漂移台账自愈(机制二):刻意放在结算**之后**(对齐 Node
+  // 「checkGitCommits 开头、flushPendingGitNotify 之后、新提交检测之前」的
+  // 次序)—— 先结算后自愈,自愈补的收敛提交再交给 actor 心跳的新提交检测
+  // 正常广播,次序倒了就会把半途内容当「落齐」回弹。
+  self.heal_deferred()
+}
+
+// ==================== 漂移台账(结算对齐的另一半:自愈) ====================
+
+///|
+/// 更新某目录的漂移台账并落盘(None = 台账已收敛清空)。与 relay/broadcast
+/// 台账同一套「内存与配置同值」不变式:内存只由这里写入,盘上记录随每次
+/// persist_ledgers 同值落盘,重启后由 adopt_pending 还原。
+async fn GitMirror::set_deferred(
+  self : GitMirror,
+  folder_id : String,
+  ledger : GitDeferredMirror?,
+) -> Unit {
+  match ledger {
+    Some(l) => self.deferred.set(folder_id, l)
+    None => {
+      let _ = self.deferred.remove(folder_id)
+    }
+  }
+  self.persist_ledgers(folder_id)
+}
+
+///|
+/// 把结算时未对齐的文件并入该目录的漂移台账。多笔通知的欠账合并去重
+/// (files 取并集,旧账在前),hash/message 取最新一笔 —— 台账只描述
+/// 「这些内容还没提交」,收敛提交的信息引用最新的来源即可(对应 Node
+/// recordGitDeferredMirror / Rust record_git_deferred_mirror)。
+async fn GitMirror::record_deferred(
+  self : GitMirror,
+  folder_id : String,
+  hash : String,
+  message : String,
+  files : Array[String],
+) -> Unit {
+  let merged : Array[String] = match self.deferred.get(folder_id) {
+    Some(prev) => {
+      let acc : Array[String] = []
+      for rel in prev.files {
+        if !acc.contains(rel) {
+          acc.push(rel)
+        }
+      }
+      for rel in files {
+        if !acc.contains(rel) {
+          acc.push(rel)
+        }
+      }
+      acc
+    }
+    None => {
+      let acc : Array[String] = []
+      for rel in files {
+        if !acc.contains(rel) {
+          acc.push(rel)
+        }
+      }
+      acc
+    }
+  }
+  self.set_deferred(folder_id, Some({ hash, message, files: merged }))
+}
+
+///|
+/// 漂移台账自愈:结算后经数据面落齐/回落的内容,补一笔收敛提交(机制二)。
+///
+/// 镜像提交按内容对齐收窄后,未对齐的文件进了台账 —— 而它们从此不在任何通知的
+/// changedFiles 里(范围收敛拒绝扫荡),没人再提交就永久脏着。这里在每轮结算
+/// 轮尾逐文件复查「工作树内容 vs 本机索引」:已对齐的收集起来,非空则
+/// auto_commit 一笔**本地新提交**(消息 `chore: 收敛镜像提交后到达的内容
+/// (<hash8> <原消息首行>)`),成功后从台账摘除;失败只告警记日志,台账保留
+/// 下轮再试 —— 不设上限次数,内容不到齐就一直脏着,反正对齐判据保证了提交
+/// 内容不会错。中途叠加的暂停/模式闸与结算闸门同口径:中场休息,不自愈;
+/// receive-only 目录同样自愈(只要求模式不是 off)。
+///
+/// 收敛提交不在这里推基线:actor 心跳(GIT_CHECK_TICKS)的新提交检测会把它
+/// 当作新 HEAD 正常广播给对端 —— 对端工作树内容一致 → 对端结算走「nothing to
+/// commit」跳过并推进基线,可接受(内容早已一致,只欠一笔提交记录)。链路
+/// 因此不成环。台账为空时零开销(不读盘不比文件)。
+async fn GitMirror::heal_deferred(self : GitMirror) -> Unit {
+  if self.deferred.length() == 0 {
+    return
+  }
+  // 键快照:自愈过程中台账可能增删(收敛摘除 / 合并)
+  let ids : Array[String] = []
+  for id, _ in self.deferred {
+    ids.push(id)
+  }
+  for folder_id in ids {
+    let ledger = match self.deferred.get(folder_id) {
+      Some(l) => l
+      None => continue
+    }
+    let folder = match self.folder_of(folder_id) {
+      Some(f) => f
+      None => {
+        // 目录已被移除:欠账随目录走,不替死人收敛
+        self.set_deferred(folder_id, None)
+        continue
+      }
+    }
+    // 关了 git 同步不再动它的仓库(有改档入口的后端会在改档时清台账,这里
+    // 兜手改配置的底);receive-only 也自愈
+    let mode = @daemon.git_sync_mode_of(folder.git_sync)
+    if !mode.sends() && !mode.receives() {
+      continue
+    }
+    // 暂停闸:中场休息(与结算同口径)
+    if folder.is_paused() {
+      continue
+    }
+    if !@daemon.is_git_repo(folder.path) {
+      continue
+    }
+    // 逐文件复查「工作树内容 vs 本机索引」:已对齐的收集起来
+    let entries = self.handle.entry_lookup(folder_id, ledger.files)
+    let by_path : Map[String, @daemon.Entry] = Map([])
+    for entry in entries {
+      by_path.set(entry.path, entry)
+    }
+    let aligned : Array[String] = []
+    for rel in ledger.files {
+      if @daemon.work_tree_content_aligned(folder.path, rel, by_path.get(rel)) {
+        aligned.push(rel)
+      }
+    }
+    if aligned.length() == 0 {
+      continue // 内容还没到齐:下轮再试(不设上限)
+    }
+    let heal_message = "chore: 收敛镜像提交后到达的内容 (\{hash8(ledger.hash)} \{@daemon.truncate_git_subject(first_line(ledger.message))})"
+    let result = @daemon.auto_commit(folder.path, heal_message, changed_files=aligned)
+    if result.success {
+      let remaining : Array[String] = []
+      for rel in ledger.files {
+        if !aligned.contains(rel) {
+          remaining.push(rel)
+        }
+      }
+      match remaining.is_empty() {
+        true => self.set_deferred(folder_id, None)
+        false =>
+          self.set_deferred(
+            folder_id,
+            Some({ hash: ledger.hash, message: ledger.message, files: remaining }),
+          )
+      }
+      @log.info(
+        "git drift healed: {Folder} -> {Hash8} ({N} 个文件: {Files}{Tail})",
+        [
+          Json::string(folder_id),
+          Json::string(match result.hash {
+            Some(h) => hash8(h)
+            None => "?"
+          }),
+          Json::number(aligned.length().to_double()),
+          Json::string(preview_of(aligned)),
+          Json::string(if aligned.length() > 10 { " …" } else { "" }),
+        ],
+      )
+    } else {
+      let error = match result.error {
+        Some(e) => e
+        None => "git auto-commit failed"
+      }
+      @log.warn("git drift heal commit failed: {Folder}: {Error}", [
+        Json::string(folder_id),
+        Json::string(error),
+      ])
     }
   }
 }
@@ -1015,10 +1327,11 @@ async fn GitMirror::clear_ack_target(
 
 ///|
 /// 台账落盘:现读盘上配置 → 只改该目录的 gitBroadcastPending /
-/// gitRelayPending 两位 → 原子写回。targets 为空(或台账已不在内存)= 记录
-/// 位清空;attempts 不落盘(仅内存,重启重新计数)。已知取舍:与 API 写
-/// 路由的整文件保存之间存在丢更新小竞态 —— 单线程 async 的交错只发生在
-/// await 点之间,窗口极小,且台账记录本身幂等可重建(Node 整文件回写同源)。
+/// gitRelayPending / gitDeferredMirror 三位 → 原子写回。targets/files 为空
+/// (或台账已不在内存)= 记录位清空;attempts 不落盘(仅内存,重启重新
+/// 计数)。已知取舍:与 API 写路由的整文件保存之间存在丢更新小竞态 ——
+/// 单线程 async 的交错只发生在 await 点之间,窗口极小,且台账记录本身幂等
+/// 可重建(Node 整文件回写同源)。
 async fn GitMirror::persist_ledgers(self : GitMirror, folder_id : String) -> Unit {
   // 读路径不失败(坏文件按全新配置处理,api 包内部兜底),只有写可能失败
   let config = load_config_file(self.config_file)
@@ -1030,6 +1343,10 @@ async fn GitMirror::persist_ledgers(self : GitMirror, folder_id : String) -> Uni
     Some(l) => ledger_record_to_json(l)
     None => None
   }
+  let deferred_json = match self.deferred.get(folder_id) {
+    Some(l) => Some(deferred_record_to_json(l))
+    None => None
+  }
   let mut found = false
   for i, folder in config.shared_folders {
     if folder.folder_id() == folder_id {
@@ -1038,6 +1355,7 @@ async fn GitMirror::persist_ledgers(self : GitMirror, folder_id : String) -> Uni
         ..folder,
         git_broadcast_pending: broadcast_json,
         git_relay_pending: relay_json,
+        git_deferred_mirror: deferred_json,
       }
     }
   }
@@ -1056,9 +1374,10 @@ async fn GitMirror::persist_ledgers(self : GitMirror, folder_id : String) -> Uni
 
 ///|
 /// 台账恢复(重启 / 配置热重载时调用):盘上 gitBroadcastPending /
-/// gitRelayPending → 内存台账。内存已有的目录跳过(以内存为准);attempts
-/// 不恢复(重新计数);坏记录警告跳过不掀桌。对应 Node readGitPending 在
-/// 目录构建与热重载两处恢复的语义。
+/// gitRelayPending / gitDeferredMirror → 内存台账。内存已有的目录跳过
+/// (以内存为准);attempts 不恢复(重新计数);坏记录警告跳过不掀桌。
+/// 对应 Node readGitPending / readGitDeferredMirror 在目录构建与热重载两处
+/// 恢复的语义。
 pub async fn GitMirror::adopt_pending(self : GitMirror) -> Unit {
   // 读路径不失败(坏文件按全新配置处理),恢复只读不写
   let config = load_config_file(self.config_file)
@@ -1100,6 +1419,29 @@ pub async fn GitMirror::adopt_pending(self : GitMirror) -> Unit {
             }
             None => {
               @log.warn("git relay ledger record malformed, ignored: {Folder}", [
+                Json::string(id),
+              ])
+            }
+          }
+        }
+      None => ()
+    }
+    // 漂移台账恢复(重启后台账还在,自愈继续)。防御性读:字段不全或文件
+    // 清单已空都视为无 —— 台账本来就是「等内容到齐」的暂记,残缺记录宁可
+    // 不认,不能凭它对工作树乱下判断(配置可被手改)。
+    match folder.git_deferred_mirror {
+      Some(json) =>
+        if !self.deferred.contains(id) {
+          match deferred_record_from_json(json) {
+            Some(ledger) => {
+              self.deferred.set(id, ledger)
+              @log.info(
+                "git deferred mirror restored: {Folder} -> {Files}",
+                [Json::string(id), Json::string(ledger.files.join(", "))],
+              )
+            }
+            None => {
+              @log.warn("git deferred mirror record malformed, ignored: {Folder}", [
                 Json::string(id),
               ])
             }
@@ -1197,6 +1539,48 @@ fn ledger_record_from_json(
 }
 
 ///|
+/// 漂移台账 → Json(落盘形状 { hash, message, files },camelCase 与 Node /
+/// Rust 的 gitDeferredMirror 同键 —— 同一份 config.json 跨后端互读)。
+fn deferred_record_to_json(ledger : GitDeferredMirror) -> Json {
+  let map : Map[String, Json] = Map([])
+  map.set("hash", Json::string(ledger.hash))
+  map.set("message", Json::string(ledger.message))
+  map.set("files", json_strings(ledger.files))
+  Json::object(map)
+}
+
+///|
+/// Json → 漂移台账(deferred_record_to_json 的逆变换)。防御性读:hash 为空 /
+/// message 缺失 / files 已空一律视为无 —— 残缺记录宁可不认(与 Node
+/// readGitDeferredMirror / Rust GitDeferredMirror::from_record 同口径)。
+fn deferred_record_from_json(value : Json) -> GitDeferredMirror? {
+  let obj : Map[String, Json] = match value {
+    Json::Object(map) => map
+    _ => return None
+  }
+  let hash = match obj.get("hash") {
+    Some(Json::String(s)) => if s == "" { return None } else { s }
+    _ => return None
+  }
+  let message = match obj.get("message") {
+    Some(Json::String(s)) => s
+    _ => return None
+  }
+  // 空串剔除(对齐 Node readGitDeferredMirror / Rust from_record 的过滤口径);
+  // 剔完已空 = 记录残缺,宁可不认
+  let files : Array[String] = []
+  for rel in json_array_of_strings(obj.get("files")) {
+    if rel != "" {
+      files.push(rel)
+    }
+  }
+  if files.is_empty() {
+    return None
+  }
+  Some({ hash, message, files })
+}
+
+///|
 /// 字符串数组 → Json 数组(台账记录编码用)。
 fn json_strings(items : Array[String]) -> Json {
   let arr : Array[Json] = []
@@ -1275,6 +1659,19 @@ pub async fn mirror_flush_loop(mirror : GitMirror) -> Unit {
 /// 哈希展示短形(8 位,日志用;哈希是 hex ASCII,直接切片)。
 fn hash8(hash : String) -> String {
   hash[0:8].to_owned()
+}
+
+///|
+/// 长清单的日志预览:前 10 条逗号连接(尾部省略号由调用方按长度补)。
+fn preview_of(files : Array[String]) -> String {
+  let head : Array[String] = []
+  for i in 0..<files.length() {
+    if i >= 10 {
+      break
+    }
+    head.push(files[i])
+  }
+  head.join(", ")
 }
 
 ///|

@@ -542,3 +542,117 @@ async test "auto_commit:index.lock 残留 → 失败路径不变" {
   assert_true(result.error is Some(_))
   assert_eq(@daemon.get_last_commit_hash(repo), Some(before))
 }
+
+///|
+/// 按内容构造活条目(块哈希与 content 逐块一致)——「索引声明的内容」与盘上
+/// 字节比对的夹具(与 Node 测试 entryFor / Rust entry_for 同形;测试内容都
+/// 小于 BLOCK_SIZE,单块即整文件)。
+fn align_entry(rel : String, content : String) -> @daemon.Entry {
+  {
+    path: rel,
+    version: Map([]),
+    size: @utf8.encode(content).length().to_int64(),
+    deleted: false,
+    blocks: [@core.hash_block(@utf8.encode(content))],
+    cdh: None,
+    clens: None,
+    mtime: None,
+    placeholder: false,
+  }
+}
+
+///|
+/// 墓碑条目:索引已标记删除、块列表为空(与接收侧落墓碑同形)。
+fn align_tombstone(rel : String) -> @daemon.Entry {
+  {
+    path: rel,
+    version: Map([]),
+    size: 0L,
+    deleted: true,
+    blocks: [],
+    cdh: None,
+    clens: None,
+    mtime: None,
+    placeholder: false,
+  }
+}
+
+///|
+/// 结算对齐判据(work_tree_content_aligned):判定必须用内容本身,不看
+/// mtime —— 落齐 / 半途(含同长不同内容)/ 墓碑±盘上 / 无条目 / 幽灵占位,
+/// 逐形态对齐 Node workTreeContentAligned 的口径。
+async test "结算对齐判据:按内容判定,不看 mtime" {
+  let dir = git_tmp_dir("align")
+  // 落齐:盘上字节与索引逐块一致 → 对齐
+  @fs.write_file("\{dir}/a.txt", "landed-a")
+  assert_true(
+    @daemon.work_tree_content_aligned(dir, "a.txt", Some(align_entry("a.txt", "landed-a"))),
+  )
+  // 半途:索引宣告 'final-b',盘上还是 'half-way' → 未对齐(消息对内容错的
+  // 事故形态)
+  @fs.write_file("\{dir}/b.txt", "half-way")
+  assert_false(
+    @daemon.work_tree_content_aligned(dir, "b.txt", Some(align_entry("b.txt", "final-b"))),
+  )
+  // 同长度不同内容:必须真的逐块哈希,大小短路兜不住
+  @fs.write_file("\{dir}/b2.txt", "aaaa")
+  assert_false(
+    @daemon.work_tree_content_aligned(dir, "b2.txt", Some(align_entry("b2.txt", "aaab"))),
+  )
+  // 大小不同:短路,不切块
+  @fs.write_file("\{dir}/b3.txt", "short")
+  assert_false(
+    @daemon.work_tree_content_aligned(
+      dir,
+      "b3.txt",
+      Some(align_entry("b3.txt", "a-much-longer-content")),
+    ),
+  )
+  // 墓碑 + 盘上缺失 = 对齐(删除语义);墓碑 + 盘上还在 = 删除尚未落地,未对齐
+  assert_true(
+    @daemon.work_tree_content_aligned(dir, "missing.txt", Some(align_tombstone("missing.txt"))),
+  )
+  @fs.write_file("\{dir}/still-there.txt", "x")
+  assert_false(
+    @daemon.work_tree_content_aligned(
+      dir,
+      "still-there.txt",
+      Some(align_tombstone("still-there.txt")),
+    ),
+  )
+  // 索引无条目(从未收到过该路径的内容)→ 未对齐
+  @fs.write_file("\{dir}/c.txt", "anything")
+  assert_false(@daemon.work_tree_content_aligned(dir, "c.txt", None))
+  // 盘上根本没有文件(按需同步占位条目的形态)→ 未对齐
+  assert_false(
+    @daemon.work_tree_content_aligned(dir, "ghost.txt", Some(align_entry("ghost.txt", "never landed"))),
+  )
+}
+
+///|
+test "收敛提交消息的 subject 截断:64 码点一刀" {
+  // 两侧 trim:收敛消息里引用的是干净的首行
+  assert_eq(@daemon.truncate_git_subject("  feat: 短主题  "), "feat: 短主题")
+  let mut fits = "feat: "
+  for _ in 0..<58 {
+    fits = fits + "长"
+  }
+  assert_eq(fits.char_length(), 64)
+  assert_eq(@daemon.truncate_git_subject(fits), fits)
+  // 按码点截:64 个码点处一刀,接省略号;多字节字符不劈半
+  let mut over = "feat: "
+  for _ in 0..<70 {
+    over = over + "字"
+  }
+  let builder = StringBuilder()
+  let mut count = 0
+  for ch in over {
+    if count >= 64 {
+      break
+    }
+    builder.write_char(ch)
+    count = count + 1
+  }
+  assert_eq(@daemon.truncate_git_subject(over), "\{builder.to_string()}…")
+  assert_eq(@daemon.truncate_git_subject(""), "")
+}

@@ -131,7 +131,11 @@ pub fn strip_co_authored_lines(String) -> String
 
 pub fn tombstone_of(Entry, String) -> Entry
 
+pub fn truncate_git_subject(String, max? : Int32) -> String
+
 pub fn version_original_path(String) -> String
+
+pub async fn work_tree_content_aligned(String, String, Entry?) -> Bool
 
 pub async fn write_manifest(String, PartialManifest) -> Unit raise PartialError
 
@@ -171,6 +175,7 @@ pub fn PartialError::to_repr(Self) -> @debug.Repr
 pub struct ActorHandle {
   // private fields
 }
+pub async fn ActorHandle::entry_lookup(Self, String, Array[String]) -> Array[Entry]
 pub fn ActorHandle::send(Self, Cmd) -> Bool
 pub fn ActorHandle::snapshot(Self) -> StatusSnapshot
 pub async fn ActorHandle::sync_snapshot(Self) -> StatusSnapshot
@@ -191,6 +196,7 @@ pub(all) enum Cmd {
   PeerMessage(folder~ : String, remote_device_id~ : String, message~ : @net.WireMessage)
   PeerClose(folder~ : String, remote_device_id~ : String)
   Snapshot(reply~ : @aqueue.Queue[StatusSnapshot])
+  EntryLookup(folder~ : String, paths~ : Array[String], reply~ : @aqueue.Queue[Array[Entry]])
   DrainEvents(folder~ : String, reply~ : @aqueue.Queue[Array[SyncEventRecord]])
   PollTimeouts(now~ : Int64)
   BlockSent(folder~ : String, remote_device_id~ : String, bytes~ : Int32)

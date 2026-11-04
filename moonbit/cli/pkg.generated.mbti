@@ -178,10 +178,17 @@ pub(all) struct GitCommitLedger {
   broadcast : Bool
 }
 
+pub(all) struct GitDeferredMirror {
+  hash : String
+  message : String
+  files : Array[String]
+}
+
 pub struct GitMirror {
   // private fields
 }
 pub async fn GitMirror::adopt_pending(Self) -> Unit
+pub fn GitMirror::deferred_of(Self, String) -> GitDeferredMirror?
 pub async fn GitMirror::flush(Self) -> Unit
 pub fn GitMirror::has_slot(Self, String) -> Bool
 pub fn GitMirror::ledger_attempt_of(Self, String, String, broadcast? : Bool) -> Int32?

@@ -115,6 +115,10 @@ pub(all) enum Cmd {
   PeerClose(folder~ : String, remote_device_id~ : String)
   /// 生成只读快照并经回执队列送回。
   Snapshot(reply~ : @async.Queue[StatusSnapshot])
+  /// 按路径清单取某目录的本机索引条目(cli 镜像结算的内容对齐与漂移自愈
+  /// 的准入判据数据源;索引无该路径的文件不回 —— 缺位即「索引无条目 →
+  /// 未对齐」,含墓碑/占位在内的真实条目原样带回)。
+  EntryLookup(folder~ : String, paths~ : Array[String], reply~ : @async.Queue[Array[Entry]])
   /// 取走某目录各会话的运行期事件(同步记录)。
   DrainEvents(folder~ : String, reply~ : @async.Queue[Array[SyncEventRecord]])
   /// 周期泵:处理到期的块重试、租约衰减与限速重放。驱动层接 WS 后由
@@ -345,6 +349,22 @@ pub async fn ActorHandle::sync_snapshot(self : ActorHandle) -> StatusSnapshot {
 }
 
 ///|
+/// 与 actor 往返一次取某目录指定路径的本机索引条目(cli 镜像结算的内容
+/// 对齐与漂移自愈的数据源;actor 已退出返回空表)。回执到达即此前的命令
+/// (如 ScanFolder 落地)都已处理完,读数是确定性的。
+pub async fn ActorHandle::entry_lookup(
+  self : ActorHandle,
+  folder : String,
+  paths : Array[String],
+) -> Array[Entry] {
+  let reply : @async.Queue[Array[Entry]] = @async.Queue(kind=Unbounded)
+  if !self.send(EntryLookup(folder~, paths~, reply~)) {
+    return []
+  }
+  reply.get()
+}
+
+///|
 /// 按一份目录参数构造运行期目录态:打开/复用索引库、载入内存索引、建执行器
 /// 与限速器。启动(启动失败 = fatal)与热重载(单个目录失败 = 记日志跳过,
 /// actor 存活)共用;索引库按 index_path 命名 —— 同一目录重载后原库原索引
@@ -488,6 +508,8 @@ async fn SessionActor::dispatch(self : SessionActor, cmd : Cmd) -> Bool {
     Snapshot(reply~) => {
       let _ : Bool = reply.try_put(self.cell.snapshot()) catch { _ => false }
     }
+    EntryLookup(folder~, paths~, reply~) =>
+      self.do_entry_lookup(folder, paths, reply)
     DrainEvents(folder~, reply~) => self.do_drain_events(folder, reply)
     PollTimeouts(now~) => self.do_poll_timeouts(now)
     BlockSent(folder~, remote_device_id~, bytes~) =>
@@ -703,6 +725,31 @@ fn SessionActor::do_git_baseline(
     Some(folder) => folder.git_watcher.last_hash = Some(hash)
     None => ()
   }
+}
+
+///|
+/// 按路径清单查本机索引条目(镜像结算的内容对齐与漂移自愈用;见
+/// Cmd::EntryLookup)。一次往返整批取 —— 逐条查询会把一次 actor 往返放大成
+/// 一次每文件。
+fn SessionActor::do_entry_lookup(
+  self : SessionActor,
+  folder_id : String,
+  paths : Array[String],
+  reply : @async.Queue[Array[Entry]],
+) -> Unit {
+  let out : Array[Entry] = []
+  match self.folder_by_id(folder_id) {
+    Some(folder) => {
+      for path in paths {
+        match folder.local_index.get(path) {
+          Some(entry) => out.push(entry)
+          None => ()
+        }
+      }
+    }
+    None => ()
+  }
+  let _ : Bool = reply.try_put(out) catch { _ => false }
 }
 
 ///|

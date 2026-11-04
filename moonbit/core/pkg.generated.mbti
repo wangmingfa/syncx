@@ -300,6 +300,7 @@ pub(all) struct SharedFolder {
   git_last_commit_hash : String?
   git_relay_pending : @json.Json?
   git_broadcast_pending : @json.Json?
+  git_deferred_mirror : @json.Json?
   e2e_key : @json.Json?
   e2e_untrusted : Array[String]?
   mut extra : Map[String, @json.Json]

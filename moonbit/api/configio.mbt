@@ -126,6 +126,7 @@ pub fn add_folder_to_config(
     git_last_commit_hash: None,
     git_relay_pending: None,
     git_broadcast_pending: None,
+    git_deferred_mirror: None,
     e2e_key: None,
     e2e_untrusted: None,
     extra: Map([]),

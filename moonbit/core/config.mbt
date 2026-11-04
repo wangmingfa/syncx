@@ -51,6 +51,12 @@ pub(all) struct SharedFolder {
   git_relay_pending : Json?
   /// gitBroadcastPending
   git_broadcast_pending : Json?
+  /// gitDeferredMirror:镜像提交结算后「内容尚未落齐」文件的漂移台账
+  /// (形状 { hash, message, files };仅本机使用,不进 wire、不跨设备对齐)。
+  /// 未对齐的部分不进镜像提交、记入台账,内容到齐后由镜像循环每拍补一笔
+  /// 收敛提交 —— 这些文件从此不在任何通知的 changedFiles 里,丢了台账就
+  /// 永久没人提交。gitSync 改档时随其余台账一并清除。
+  git_deferred_mirror : Json?
   /// e2eKey
   e2e_key : Json?
   /// e2eUntrusted
@@ -531,6 +537,7 @@ fn parse_shared_folder(value : Json) -> SharedFolder? {
         git_last_commit_hash: string_of(take(obj, "gitLastCommitHash")),
         git_relay_pending: take(obj, "gitRelayPending"),
         git_broadcast_pending: take(obj, "gitBroadcastPending"),
+        git_deferred_mirror: take(obj, "gitDeferredMirror"),
         e2e_key: take(obj, "e2eKey"),
         e2e_untrusted: match take(obj, "e2eUntrusted") {
           Some(v) => Some(string_array_of(Some(v)))
@@ -830,6 +837,7 @@ pub fn SharedFolder::to_json(self : SharedFolder) -> Json {
   set_string(map, "gitLastCommitHash", self.git_last_commit_hash)
   set_json(map, "gitRelayPending", self.git_relay_pending)
   set_json(map, "gitBroadcastPending", self.git_broadcast_pending)
+  set_json(map, "gitDeferredMirror", self.git_deferred_mirror)
   set_json(map, "e2eKey", self.e2e_key)
   set_string_array(map, "e2eUntrusted", self.e2e_untrusted)
   // e2eKeySet / gitRepo 是「只出站 / 非持久化」字段,落盘前清掉

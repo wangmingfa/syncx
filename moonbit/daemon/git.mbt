@@ -297,6 +297,76 @@ pub async fn has_uncommitted_changes(folder : String) -> Bool {
 }
 
 ///|
+/// 工作树内容是否与本机索引条目「对齐」—— 镜像提交结算的逐文件准入判据
+/// (对应 Node `workTreeContentAligned` / Rust `work_tree_content_aligned`)。
+///
+/// 事故还原(2026-11-04,契约动机):本地提交被广播后遭改写(reset + 重做),对端
+/// 13 秒内就镜像了旧通知(范围收敛:只 stage changedFiles),此刻部分文件的内容
+/// 尚未经数据面落齐 → 对端把半途内容定格成一笔提交(消息对、内容错);随后本地
+/// revert 的内容又同步过去 → 对端工作树 ≠ HEAD,而这些文件再也不在任何通知的
+/// changedFiles 里(范围收敛拒绝扫荡)→ 残留脏文件永久挂起,无人再提交。
+///
+/// 解法是「宁缺勿错」:结算前逐文件问一遍「盘上字节是否就是索引宣告的那份内容」,
+/// 对齐的才准进本次镜像提交;未对齐(半途/在途/被改写)的不提交,交漂移台账
+/// (见 cli/gitmirror 的 gitDeferredMirror)等内容到齐后自愈补提交。判定必须
+/// 用内容本身,不看 mtime —— 定格半途内容的代价是永久性历史污染,比对一次
+/// 块哈希的代价只是几毫秒 IO。
+///
+/// 对齐口径(与扫描器 contentChanged / drift 哨兵共用 blocks_match_on_disk
+/// 同一条「块哈希还代表不代表盘上字节」的判定):
+///  - 索引无条目(从未收到过该路径的内容)→ 未对齐;
+///  - 索引是墓碑:盘上文件也缺失才算对齐(墓碑/删除语义);盘上还在 = 删除尚未
+///    落地,此刻提交会把「该删未删」定格;
+///  - 索引是活条目:盘上须有实体文件(按需同步占位条目盘上无文件 → 未对齐),
+///    且大小一致、按 BLOCK_SIZE 切块哈希逐一相等(首块不符立刻短路,不整读)。
+pub async fn work_tree_content_aligned(
+  folder : String,
+  rel : String,
+  entry : Entry?,
+) -> Bool {
+  let entry = match entry {
+    Some(e) => e
+    None => return false
+  }
+  let abs = join_path(folder, rel)
+  if entry.deleted {
+    let on_disk = @fs.exists(abs) catch { _ => true }
+    return !on_disk
+  }
+  let kind = @fs.kind(abs) catch { _ => @fs.FileKind::Unknown }
+  if !(kind is Regular) {
+    return false // 盘上没有实体文件(含按需同步占位条目)→ 未对齐
+  }
+  let size = @fs.file_size(abs) catch { _ => return false }
+  if size != entry.size {
+    return false // 大小先短路:省掉整文件切块哈希
+  }
+  blocks_match_on_disk(abs, entry.blocks)
+}
+
+///|
+/// 收敛提交信息里引用的原消息首行截断:超长的提交主题截到 64 个码点(整个
+/// subject 连前缀仍在一行内可读)。按码点切,避免劈开代理对(与 Node
+/// `truncateGitSubject` / Rust `truncate_git_subject` 同口径)。
+pub fn truncate_git_subject(line : String, max~ : Int = 64) -> String {
+  let trimmed = line.trim().to_owned()
+  if trimmed.char_length() <= max {
+    return trimmed
+  }
+  let builder = StringBuilder()
+  let mut count = 0
+  for ch in trimmed {
+    if count >= max {
+      break
+    }
+    builder.write_char(ch)
+    count = count + 1
+  }
+  builder.write_char('…')
+  builder.to_string()
+}
+
+///|
 /// 解析 `git log -z --format=<GIT_LOG_FORMAT>` 的输出:记录以 NUL 分隔,
 /// 字段以 0x1f 分隔;正文放最后一个字段,消息里真混入 0x1f 时也只是把多余
 /// 分隔符并回正文而不是丢内容(照 Node 的 parseCommitRecords)。

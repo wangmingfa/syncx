@@ -48,6 +48,42 @@ async fn gm_git(cwd : String, args : Array[String]) -> Unit {
 }
 
 ///|
+/// 仓库提交笔数(rev-list --count 的手工十进制解析;解析失败 -1 显形)。
+async fn gm_commit_count(repo : String) -> Int {
+  let (_, out, _) : (Int32, String, String) = @daemon.run_git("git", repo, [
+    "rev-list", "--count", "HEAD",
+  ]) catch { _ => (1, "", "") }
+  let mut n = 0
+  for c in out.trim().to_owned() {
+    if c < '0' || c > '9' {
+      return -1
+    }
+    n = n * 10 + (c.to_int() - '0'.to_int())
+  }
+  n
+}
+
+///|
+/// HEAD 一笔提交的文件清单(git show --name-only;夹具)。
+async fn gm_head_files(repo : String) -> Array[String] {
+  let out = gm_git_out(repo, ["show", "--name-only", "--format="])
+  let files : Array[String] = []
+  for line in out.split("\n") {
+    let t = line.trim().to_owned()
+    if t != "" {
+      files.push(t)
+    }
+  }
+  files
+}
+
+///|
+/// HEAD 的 subject 行(git log -1 --format=%s;夹具)。
+async fn gm_head_subject(repo : String) -> String {
+  gm_git_out(repo, ["log", "-1", "--format=%s"]).trim().to_owned()
+}
+
+///|
 /// 初始化一个可提交的空仓库(配好 user.name/email)。
 async fn gm_fresh_repo(tag : String) -> String {
   let dir = "/tmp/syncx-mb-mirror-\{tag}-\{@daemon.now_ms()}"
@@ -123,6 +159,83 @@ async fn gm_mirror(
 async fn gm_disk_broadcast_pending(file : String) -> Json? {
   let text = @fs.read_file(file).text()
   @core.parse_config(text).shared_folders[0].git_broadcast_pending
+}
+
+///|
+/// 读盘上配置里首个目录的 gitDeferredMirror 记录(漂移台账落盘断言用)。
+async fn gm_disk_deferred(file : String) -> Json? {
+  let text = @fs.read_file(file).text()
+  @core.parse_config(text).shared_folders[0].git_deferred_mirror
+}
+
+///|
+/// 模拟「内容已经数据面落地」:写盘 + 扫描入库(索引宣告与盘上字节一致)。
+/// 真实链路里接收侧落地即写索引,测试走真实扫描管线同语义;sync_snapshot
+/// 作屏障 —— 回执到达即 ScanFolder 已处理完,读数是确定性的。
+async fn gm_land(
+  handle : @daemon.ActorHandle,
+  folder_id : String,
+  repo : String,
+  rel : String,
+  content : String,
+) -> Unit {
+  @fs.write_file("\{repo}/\{rel}", content)
+  let _ = handle.send(@daemon.Cmd::ScanFolder(folder_id))
+  let _ = handle.sync_snapshot()
+}
+
+///|
+/// 镜像夹具(带目录态):actor 持有该仓库的目录 —— 结算内容对齐与漂移自愈
+/// 的判据数据源是 actor 的本机索引(folder.local_index),夹具必须把目录注册
+/// 进 actor 才能表达「索引宣告 vs 盘上字节」的两态。目录按 receive 模式装配:
+/// 心跳静默扫描(watch_local)随之关闭,扫描时机全部由测试显式控制 —— 否则
+/// 周期泵的静默扫描会把「盘上半途内容」重新索引回对齐态,欠账前提被冲掉。
+async fn gm_mirror_repo(
+  group : @async.TaskGroup[Unit],
+  config : @core.Config,
+  registry : @cli.PeerSessionRegistry,
+  senders : @cli.PeerSenders,
+  repo : String,
+  folder_id : String,
+) -> (@cli.GitMirror, @daemon.ActorHandle, String) {
+  gm_seq.val = gm_seq.val + 1
+  let dir = "/tmp/syncx-mb-gm-\{@daemon.now_ms()}-\{gm_seq.val}"
+  let file = "\{dir}.json"
+  @fs.write_file(file, config.to_json().stringify() + "\n")
+  let spec : @daemon.FolderSpec = {
+    id: folder_id,
+    root: repo,
+    index_path: "\{dir}-index.db",
+    trash_dir: "\{dir}-trash",
+    versions_dir: None,
+    versions_per_path: None,
+    rules: @core.IgnoreRuleset::from_lines([]),
+    receive_only: false,
+    conflict_policy: @daemon.ConflictPolicy::KeepBoth,
+    paused: false,
+    paused_files: [],
+    baseline_pending: false,
+    max_bandwidth_kbps: None,
+    git_sync: @daemon.GitSyncMode::Receive,
+    git_strip_co_authored: false,
+  }
+  let handle = @daemon.start_session_actor(group, "SELF-DEV", [spec]) catch {
+    e => {
+      println("start_session_actor 失败: \{@daemon.IndexStoreError::to_text(e)}")
+      panic()
+    }
+  }
+  (
+    @cli.GitMirror::new(
+      config_of=() => config,
+      config_file=file,
+      registry~,
+      senders~,
+      handle~,
+    ),
+    handle,
+    file,
+  )
 }
 
 ///|
@@ -271,7 +384,10 @@ async test "镜像 flush:范围收敛 + 多笔脉络消息 + 中继与回声登�
       }
       true
     })
-    let (mirror, handle, _) = gm_mirror(group, config, registry, senders)
+    let (mirror, handle, _) = gm_mirror_repo(group, config, registry, senders, repo, "f1")
+    // a.txt 的通知内容落进本机索引(结算对齐判据的数据源;扫描入库与生产
+    // 接收侧同语义)—— 不落索引就是「索引无条目 → 未对齐」,只会进台账
+    gm_land(handle, "f1", repo, "a.txt", "v2")
     // 多行消息 + 多笔 subjects:镜像提交的 body 要带整批脉络(旧→新,
     // 末笔的 subject 是正文本身,不重复附)
     let message = "syncx: 镜像远端提交\n\n远端正文第二行"
@@ -327,7 +443,9 @@ async test "镜像 flush:提交失败退避,通知不丢" {
       "DEV-A",
       { version: None, platform: None, hostname: None, url: None },
     )
-    let (mirror, handle, _) = gm_mirror(group, config, registry, @cli.PeerSenders::new())
+    let (mirror, handle, _) = gm_mirror_repo(group, config, registry, @cli.PeerSenders::new(), repo, "f1")
+    // 通知内容落齐(索引有 a.txt 的 v2 条目),失败夹具是残留锁而非内容
+    gm_land(handle, "f1", repo, "a.txt", "v2")
     mirror.on_notify(gm_notify("DEV-A", "f1", "aaaa2222"), Some("DEV-A"))
     mirror.flush()
     // 失败:计数 +1、退避记账,通知槽保留(内容还在工作树里,到点再试)
@@ -510,6 +628,330 @@ async test "发送台账:盘上遗留记录恢复后,模式关断即作废清账
     mirror2.flush()
     assert_true(gm_is_none(mirror2.ledger_targets("f1")))
     assert_true(gm_is_none(gm_disk_broadcast_pending(file)))
+    let _ = handle.send(@daemon.Cmd::Shutdown)
+  }
+}
+
+///|
+/// 结算内容对齐 + 漂移自愈(对齐 Node 1122fbc / Rust 8767648)的集成测试。
+/// 2026-11-04 实测事故的契约:结算把 changedFiles 按「工作树内容 vs 本机
+/// 索引」拆分,只提交对齐的(宁缺勿错);未对齐的进漂移台账
+/// gitDeferredMirror,由结算轮尾的自愈在内容到齐后补一笔收敛提交。测试走
+/// 真实 actor + 真实仓库:结算与自愈的完整闸门链都在 flush 一条路径上,
+/// 单测替不了。
+
+///|
+async test "结算对齐:混合批次只提交落齐文件,半途进漂移台账" {
+  @async.with_task_group() <| group => {
+    let repo = gm_fresh_repo("align-mixed")
+    gm_commit(repo, "seed.txt", "seed", "init")
+    let config = @core.parse_config(
+      "{\"sharedFolders\":[{\"path\":\"\{repo}\",\"id\":\"f1\",\"gitSync\":\"full\"}]}",
+    )
+    let registry = @cli.PeerSessionRegistry::new()
+    let (mirror, handle, file) = gm_mirror_repo(
+      group,
+      config,
+      registry,
+      @cli.PeerSenders::new(),
+      repo,
+      "f1",
+    )
+    // a.txt 已落齐;b.txt 半途(索引宣告 'final-b',盘上还是 'half-way')
+    gm_land(handle, "f1", repo, "a.txt", "landed-a")
+    gm_land(handle, "f1", repo, "b.txt", "final-b")
+    @fs.write_file("\{repo}/b.txt", "half-way")
+    registry.register(
+      "DEV-A",
+      { version: None, platform: None, hostname: None, url: None },
+    )
+    mirror.on_notify(
+      gm_notify(
+        "DEV-A",
+        "f1",
+        "aaaa1111aaaa1111aaaa1111aaaa1111aaaa1111",
+        message="feat: 半途事故",
+        changed=["a.txt", "b.txt"],
+      ),
+      Some("DEV-A"),
+    )
+    mirror.flush()
+    // 镜像提交只含 a.txt;b.txt 没有被定格进去(宁缺勿错)
+    // 初始提交 + 只含 a.txt 的镜像提交
+    assert_eq(gm_commit_count(repo), 2)
+    assert_eq(gm_head_files(repo), ["a.txt"])
+    // 通知照常结算,槽位清空
+    assert_false(mirror.has_slot("f1"))
+    // b.txt 进漂移台账(内存),信息来自来源通知
+    let ledger = match mirror.deferred_of("f1") {
+      Some(l) => l
+      None => panic()
+    }
+    assert_eq(ledger.hash, "aaaa1111aaaa1111aaaa1111aaaa1111aaaa1111")
+    assert_eq(ledger.message, "feat: 半途事故")
+    assert_eq(ledger.files, ["b.txt"])
+    // 台账与磁盘同值(camelCase 契约,与 Node/Rust 同一份 config.json 互读)
+    match gm_disk_deferred(file) {
+      Some(Json::Object(d)) => {
+        match d.get("hash") {
+          Some(Json::String(h)) => assert_eq(h, "aaaa1111aaaa1111aaaa1111aaaa1111aaaa1111")
+          _ => panic()
+        }
+        match d.get("message") {
+          Some(Json::String(m)) => assert_eq(m, "feat: 半途事故")
+          _ => panic()
+        }
+        match d.get("files") {
+          Some(Json::Array(items)) => assert_eq(items.length(), 1)
+          _ => panic()
+        }
+      }
+      _ => panic()
+    }
+    let _ = handle.send(@daemon.Cmd::Shutdown)
+  }
+}
+
+///|
+async test "结算对齐:全不对齐不提交但照常结算" {
+  @async.with_task_group() <| group => {
+    let repo = gm_fresh_repo("align-none")
+    gm_commit(repo, "seed.txt", "seed", "init")
+    let config = @core.parse_config(
+      "{\"sharedFolders\":[{\"path\":\"\{repo}\",\"id\":\"f1\",\"gitSync\":\"full\"}]}",
+    )
+    let registry = @cli.PeerSessionRegistry::new()
+    let (mirror, handle, file) = gm_mirror_repo(
+      group,
+      config,
+      registry,
+      @cli.PeerSenders::new(),
+      repo,
+      "f1",
+    )
+    // 两份内容都半途:盘上字节与索引宣告不符(先落齐两份索引声明再写盘半途
+    // 内容 —— 扫描是全树入库,后一次扫描会把先写的半途内容重新索引回对齐态)
+    gm_land(handle, "f1", repo, "a.txt", "final-a")
+    gm_land(handle, "f1", repo, "b.txt", "final-b")
+    @fs.write_file("\{repo}/a.txt", "half-a")
+    @fs.write_file("\{repo}/b.txt", "half-b")
+    registry.register(
+      "DEV-A",
+      { version: None, platform: None, hostname: None, url: None },
+    )
+    mirror.on_notify(
+      gm_notify(
+        "DEV-A",
+        "f1",
+        "bbbb2222bbbb2222bbbb2222bbbb2222bbbb2222",
+        message="feat: 全半途",
+        changed=["a.txt", "b.txt"],
+      ),
+      Some("DEV-A"),
+    )
+    mirror.flush()
+    // 宁缺勿错:一笔也不提交;但通知照常结算(槽位清空,不卡队列)
+    assert_eq(gm_commit_count(repo), 1)
+    assert_false(mirror.has_slot("f1"))
+    // 台账收全(内存与磁盘同值)
+    let ledger = match mirror.deferred_of("f1") {
+      Some(l) => l
+      None => panic()
+    }
+    assert_eq(ledger.files, ["a.txt", "b.txt"])
+    assert_eq(ledger.hash, "bbbb2222bbbb2222bbbb2222bbbb2222bbbb2222")
+    match gm_disk_deferred(file) {
+      Some(Json::Object(d)) =>
+        match d.get("files") {
+          Some(Json::Array(items)) => assert_eq(items.length(), 2)
+          _ => panic()
+        }
+      _ => panic()
+    }
+    let _ = handle.send(@daemon.Cmd::Shutdown)
+  }
+}
+
+///|
+async test "漂移自愈:落齐补收敛提交,剩余保留,收敛清空台账" {
+  @async.with_task_group() <| group => {
+    let repo = gm_fresh_repo("heal")
+    gm_commit(repo, "seed.txt", "seed", "init")
+    let config = @core.parse_config(
+      "{\"sharedFolders\":[{\"path\":\"\{repo}\",\"id\":\"f1\",\"gitSync\":\"full\"}]}",
+    )
+    let registry = @cli.PeerSessionRegistry::new()
+    let (mirror, handle, file) = gm_mirror_repo(
+      group,
+      config,
+      registry,
+      @cli.PeerSenders::new(),
+      repo,
+      "f1",
+    )
+    registry.register(
+      "DEV-A",
+      { version: None, platform: None, hostname: None, url: None },
+    )
+    // 先把两份索引声明落齐,再统一写盘半途内容(扫描是全树入库,后一次扫描
+    // 会把先写的半途内容重新索引回对齐态,欠账前提会被冲掉)
+    gm_land(handle, "f1", repo, "b.txt", "final-b")
+    gm_land(handle, "f1", repo, "c.txt", "final-c")
+    // 先欠 b.txt 的账(内容半途 → 结算不提交但照常结算)
+    @fs.write_file("\{repo}/b.txt", "half-way")
+    mirror.on_notify(
+      gm_notify(
+        "DEV-A",
+        "f1",
+        "cccc3333cccc3333cccc3333cccc3333cccc3333",
+        message="feat: 台账里的欠账\n\n正文第二行",
+        changed=["b.txt"],
+      ),
+      Some("DEV-A"),
+    )
+    mirror.flush()
+    assert_eq(gm_commit_count(repo), 1)
+    // 再欠 c.txt:两笔通知的欠账合并(files 取并集),hash/message 取最新一笔
+    @fs.write_file("\{repo}/c.txt", "half-c")
+    mirror.on_notify(
+      gm_notify(
+        "DEV-A",
+        "f1",
+        "dddd4444dddd4444dddd4444dddd4444dddd4444",
+        message="feat: 第二笔欠账",
+        changed=["c.txt"],
+      ),
+      Some("DEV-A"),
+    )
+    mirror.flush()
+    let ledger = match mirror.deferred_of("f1") {
+      Some(l) => l
+      None => panic()
+    }
+    assert_eq(ledger.files, ["b.txt", "c.txt"])
+    assert_eq(ledger.hash, "dddd4444dddd4444dddd4444dddd4444dddd4444")
+    // b.txt 内容落齐:下一拍产生只含 b.txt 的收敛提交,剩余 c.txt 保留。
+    // 台账合并后 hash/message 取最新一笔(第二笔欠账),收敛消息引用它。
+    @fs.write_file("\{repo}/b.txt", "final-b")
+    mirror.flush()
+    assert_eq(gm_commit_count(repo), 2)
+    assert_eq(
+      gm_head_subject(repo),
+      "chore: 收敛镜像提交后到达的内容 (dddd4444 feat: 第二笔欠账)",
+    )
+    assert_eq(gm_head_files(repo), ["b.txt"])
+    let ledger = match mirror.deferred_of("f1") {
+      Some(l) => l
+      None => panic()
+    }
+    // 未落齐的 c.txt 应保留在台账;剩余欠账保留原来源信息
+    assert_eq(ledger.files, ["c.txt"])
+    assert_eq(ledger.hash, "dddd4444dddd4444dddd4444dddd4444dddd4444")
+    // c.txt 也落齐:再一拍清空台账(内存与磁盘同值)
+    @fs.write_file("\{repo}/c.txt", "final-c")
+    mirror.flush()
+    assert_eq(gm_commit_count(repo), 3)
+    // 收敛成功应清空台账(内存与磁盘同值)
+    assert_true(gm_is_none(mirror.deferred_of("f1")))
+    assert_true(gm_is_none(gm_disk_deferred(file)))
+    let _ = handle.send(@daemon.Cmd::Shutdown)
+  }
+}
+
+///|
+async test "漂移台账:盘上残缺记录宁可不认(防御性读)" {
+  @async.with_task_group() <| group => {
+    // 残缺形态:hash 空 / message 缺失 / files 空 / files 全空串 —— 一律视为无
+    // (台账本来就是「等内容到齐」的暂记,残缺记录不能凭它对工作树乱下判断)
+    let bads : Array[String] = [
+      "{\"hash\":\"\",\"message\":\"x\",\"files\":[\"a.txt\"]}",
+      "{\"hash\":\"h\",\"files\":[\"a.txt\"]}",
+      "{\"hash\":\"h\",\"message\":\"x\",\"files\":[]}",
+      "{\"hash\":\"h\",\"message\":\"x\",\"files\":[\"\"]}",
+    ]
+    let handle = @daemon.start_session_actor(group, "SELF-DEV", []) catch {
+      _ => panic()
+    }
+    let registry = @cli.PeerSessionRegistry::new()
+    let senders = @cli.PeerSenders::new()
+    for i, bad in bads {
+      gm_seq.val = gm_seq.val + 1
+      let file = "/tmp/syncx-mb-gm-\{@daemon.now_ms()}-\{gm_seq.val}-\{i}.json"
+      let cfg = "{\"sharedFolders\":[{\"path\":\"/tmp/nope-defer\",\"id\":\"f1\",\"gitSync\":\"full\",\"gitDeferredMirror\":\{bad}}]}"
+      @fs.write_file(file, cfg)
+      let m = @cli.GitMirror::new(
+        config_of=() => @core.parse_config(cfg),
+        config_file=file,
+        registry~,
+        senders~,
+        handle~,
+      )
+      m.adopt_pending()
+      assert_true(gm_is_none(m.deferred_of("f1")))
+    }
+    let _ = handle.send(@daemon.Cmd::Shutdown)
+  }
+}
+
+///|
+async test "漂移台账:重启后从盘上恢复,自愈继续" {
+  @async.with_task_group() <| group => {
+    let repo = gm_fresh_repo("heal-restore")
+    gm_commit(repo, "seed.txt", "seed", "init")
+    let config = @core.parse_config(
+      "{\"sharedFolders\":[{\"path\":\"\{repo}\",\"id\":\"f1\",\"gitSync\":\"full\"}]}",
+    )
+    let registry = @cli.PeerSessionRegistry::new()
+    let (mirror, handle, file) = gm_mirror_repo(
+      group,
+      config,
+      registry,
+      @cli.PeerSenders::new(),
+      repo,
+      "f1",
+    )
+    registry.register(
+      "DEV-A",
+      { version: None, platform: None, hostname: None, url: None },
+    )
+    gm_land(handle, "f1", repo, "b.txt", "final-b")
+    @fs.write_file("\{repo}/b.txt", "half-way")
+    mirror.on_notify(
+      gm_notify(
+        "DEV-A",
+        "f1",
+        "eeee6666eeee6666eeee6666eeee6666eeee6666",
+        message="feat: 重启前的欠账",
+        changed=["b.txt"],
+      ),
+      Some("DEV-A"),
+    )
+    mirror.flush()
+    assert_true(!gm_is_none(mirror.deferred_of("f1")))
+    // 「重启」:同一份配置文件上新建镜像(内存台账为空)从盘上记录恢复 ——
+    // 与既有 ledger 持久化同一条不变式:内存与 config.json 同值
+    let mirror2 = @cli.GitMirror::new(
+      config_of=() => config,
+      config_file=file,
+      registry~,
+      senders=@cli.PeerSenders::new(),
+      handle~,
+    )
+    mirror2.adopt_pending()
+    let restored = match mirror2.deferred_of("f1") {
+      Some(l) => l
+      None => panic()
+    }
+    assert_eq(restored.hash, "eeee6666eeee6666eeee6666eeee6666eeee6666")
+    assert_eq(restored.message, "feat: 重启前的欠账")
+    assert_eq(restored.files, ["b.txt"])
+    // 恢复后自愈继续:内容落齐 → 收敛提交,台账收敛清空
+    @fs.write_file("\{repo}/b.txt", "final-b")
+    mirror2.flush()
+    assert_eq(gm_commit_count(repo), 2)
+    assert_true(gm_head_subject(repo).contains("chore: 收敛镜像提交后到达的内容"))
+    assert_true(gm_is_none(mirror2.deferred_of("f1")))
+    assert_true(gm_is_none(gm_disk_deferred(file)))
     let _ = handle.send(@daemon.Cmd::Shutdown)
   }
 }
