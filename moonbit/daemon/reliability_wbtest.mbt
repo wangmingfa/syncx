@@ -20,6 +20,8 @@ fn wb_session() -> PeerSession {
     deferred_keys: Map([]),
     initial_deadline: None,
     initial_settled: false,
+    serving: Map([]),
+    rate_samples: [],
     events: [],
   }
 }

@@ -12,6 +12,12 @@
 ///   6. 常驻运行。信号退出尚未接线(TODO:moonbitlang/async/signal)。
 
 ///|
+/// status 数据面镜像的拉取节拍(ms):后台任务每秒经 Cmd 与 actor 往返一次
+/// 拉快照。取 1s:前端状态帧由差异驱动的 ws 推送 + 兜底 tick 消费,1–2s 的
+/// 镜像滞后不可感知(任务书给的窗口是 1–2s),而聚合开销随会话空闲趋近于零。
+const STATUS_MIRROR_TICK_MS : Int = 1000
+
+///|
 /// 进程退出(致命错误的统一出口;参数错误/闸门失败必须非零退出)。
 extern "C" fn c_exit(code : Int32) -> Unit = "syncx_exit"
 
@@ -123,11 +129,18 @@ pub async fn run_start(args : StartArgs) -> Unit {
   @async.with_task_group() <| group => {
     // 本地提交通知的注入点(actor 创建早于镜像循环,先挂占位回调,镜像循环
     // 就绪后换上真投递):actor 检测到新提交 → 这里 → 镜像台账广播
-    let git_notify_sink : Ref[async (@net.ControlMessage) -> Unit] = Ref(_ => ())
-    let handle = @daemon.start_session_actor(group, identity.device_id, specs, on_git_notify=notify => {
-      let emit = git_notify_sink.val
-      emit(notify)
-    }) catch {
+    let git_notify_sink : Ref[async (@net.ControlMessage) -> Unit] = Ref(
+      _ => (),
+    )
+    let handle = @daemon.start_session_actor(
+      group,
+      identity.device_id,
+      specs,
+      on_git_notify=notify => {
+        let emit = git_notify_sink.val
+        emit(notify)
+      },
+    ) catch {
       e => fatal("索引库打开失败:\{@daemon.IndexStoreError::to_text(e)}")
     }
     // 数据面:Secure 两阶段握手;server 引用由 handlers 的闭包在注册后补挂。
@@ -160,28 +173,19 @@ pub async fn run_start(args : StartArgs) -> Unit {
           Some(server) => {
             // 发送闭包登记(镜像中继与会话面重建都按它寻址;断开钩子摘除)
             senders.register(device, msg => {
-              server.send_message(device, msg) catch {
-                _ => return false
-              }
+              server.send_message(device, msg) catch { _ => return false }
               true
             })
             // 该设备被指派的每个目录各挂一条会话 + 一个出站泵(投递走本条
             // 入站连接;目录清单现读配置单元格 —— 热重载后新连接自动带上新目录)
-            spawn_session_pumps(
-              group,
-              handle,
-              config_cell.val,
-              device,
-              session_sinks,
-              msg => senders.send_to(device, msg),
-            )
-            // 会话登记 + 主动 hello 宣告(版本/平台/主机名;生命周期跟随会话)
-            registry.register(device, {
-              version: None,
-              platform: None,
-              hostname: None,
-              url: None,
+            spawn_session_pumps(group, handle, config_cell.val, device, session_sinks, msg => {
+              senders.send_to(device, msg)
             })
+            // 会话登记 + 主动 hello 宣告(版本/平台/主机名;生命周期跟随会话)
+            registry.register(
+              device,
+              { version: None, platform: None, hostname: None, url: None },
+            )
             server.send_message(
               device,
               @net.WireMessage::Control(
@@ -191,9 +195,7 @@ pub async fn run_start(args : StartArgs) -> Unit {
                   Some(@api.platform_name()),
                 ),
               ),
-            ) catch {
-              _ => ()
-            }
+            ) catch { _ => () }
           }
           None => ()
         }
@@ -212,10 +214,7 @@ pub async fn run_start(args : StartArgs) -> Unit {
           msg => {
             match server_ref {
               Some(server) =>
-                server.send_message(
-                  device,
-                  @net.WireMessage::Control(payload=msg),
-                ) catch {
+                server.send_message(device, @net.WireMessage::Control(payload=msg)) catch {
                   _ => ()
                 }
               None => ()
@@ -241,9 +240,7 @@ pub async fn run_start(args : StartArgs) -> Unit {
         senders.unregister(device)
         registry.unregister(device)
       },
-      on_error: reason => {
-        @log.error("peer 连接错误 {Reason}", [Json::string(reason)])
-      },
+      on_error: reason => @log.error("peer 连接错误 {Reason}", [Json::string(reason)]),
     }
     let peer_server = @net.start_peer_server(
       @net.PeerHandshakeMode::Secure(identity),
@@ -294,9 +291,10 @@ pub async fn run_start(args : StartArgs) -> Unit {
       @net.advertise(peer_port, identity.device_id),
     ) catch {
       e => {
-        @log.warn("mDNS 广播不可用:{Detail}", [
-          Json::string(@net.DiscoveryError::to_text(e)),
-        ])
+        @log.warn(
+          "mDNS 广播不可用:{Detail}",
+          [Json::string(@net.DiscoveryError::to_text(e))],
+        )
         None
       }
     }
@@ -344,9 +342,7 @@ pub async fn run_start(args : StartArgs) -> Unit {
     // 看绝对路径才好核对;realpath 失败(目录异常)回退原值
     let lan = @api.lan_addresses()
     let banner = build_banner_lines(
-      @fs.realpath(config_dir) catch {
-        _ => config_dir
-      },
+      @fs.realpath(config_dir) catch { _ => config_dir },
       control_host,
       control_port,
       peer_port,
@@ -393,9 +389,31 @@ pub async fn run_start(args : StartArgs) -> Unit {
     )
     // 设备清单动态提供器:静态快照 + 会话注册表的合并视图(先构造后回填,
     // 打破闭包对 api_options 的自引用;单线程 async 无锁)
-    api_options.device_status = Some(() => {
-      merge_device_status(api_options.device_infos, registry)
+    api_options.device_status = Some(() =>
+      merge_device_status(api_options.device_infos, registry))
+    // status 数据面镜像(syncProgress / traffic):供块租约、在途接收与流量
+    // 账本都只在 actor 任务上,而 status_json 是同步函数 —— 后台任务每
+    // STATUS_MIRROR_TICK_MS 经 Cmd 与 actor 往返一次拉快照(带回执,确保此前的
+    // 命令都已结算)写进单元格,下面的 provider 读单元格折算。开销:每秒一次
+    // 队列往返 + 聚合读(聚合是 actor 既有 publish 产物,只遍历会话内存表,
+    // 空闲时近乎零,不额外扫盘)。镜像初值:空数组 / 零值 —— 首帧到达前的
+    // 兜底,与「未接 provider」的 api 单测口径一致。
+    let progress_cell : Ref[Array[@daemon.SyncProgress]] = Ref([])
+    let traffic_cell : Ref[@daemon.TrafficStats] = Ref({
+      sent: 0L,
+      received: 0L,
+      samples: [],
     })
+    group.spawn_bg(allow_failure=true, no_wait=true) <| () => {
+      for ;; {
+        @async.sleep(STATUS_MIRROR_TICK_MS)
+        let snap = handle.sync_snapshot()
+        progress_cell.val = snap.progress
+        traffic_cell.val = snap.traffic
+      }
+    }
+    api_options.sync_progress = Some(() => progress_cell.val)
+    api_options.traffic = Some(() => traffic_cell.val)
     // 配置热重载回调:任何写路由成功落盘后触发(Node 的 configWatcher +
     // reload 语义收拢成一个同步入口)。职责面:
     //   1. 重读盘上配置灌进共享单元格 —— 镜像循环 / fs-watch 对账 / 拨号
@@ -421,9 +439,8 @@ pub async fn run_start(args : StartArgs) -> Unit {
       mirror.adopt_pending()
       for device in registry.devices() {
         close_session_sinks(session_sinks, device)
-        spawn_session_pumps(group, handle, fresh, device, session_sinks, msg => {
-          senders.send_to(device, msg)
-        })
+        spawn_session_pumps(group, handle, fresh, device, session_sinks, msg =>
+          senders.send_to(device, msg))
       }
       let shared : Map[String, Bool] = Map([])
       for folder in fresh.shared_folders {
@@ -503,9 +520,7 @@ pub fn build_banner_lines(
     }
     None => ()
   }
-  lines.push(
-    "syncx daemon started (device \{device_id}, peer port \{peer_port})",
-  )
+  lines.push("syncx daemon started (device \{device_id}, peer port \{peer_port})")
   // peer sync 列表(数据面):localhost + LAN 无条件,Node 不对称口径照抄
   lines.push("peer sync (ws://ip:port):")
   lines.push("  ws://localhost:\{peer_port}")
@@ -559,8 +574,7 @@ async fn load_or_create_identity(
     _ => ()
   }
   @log.info("设备身份已生成 {DeviceId}({Path})", [
-    Json::string(identity.device_id),
-    Json::string(path),
+    Json::string(identity.device_id), Json::string(path),
   ])
   identity
 }

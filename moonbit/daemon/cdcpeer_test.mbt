@@ -10,28 +10,19 @@ async fn cdc_read_bytes(path : String) -> Bytes? {
 }
 
 ///|
-/// 造一段伪随机但仍确定性的内容:重复单元 + 位置扰动,避免整周期重复
-/// 让 CDC 边界退化。返回可变副本,便于构造「同长改写」的 v2。
+/// 造一段伪随机但仍确定性的内容:**不能用周期性重复文本** —— 周期字节流会让
+/// 滚动指纹进入固定轨道,几十个状态里可能没有一个命中边界条件,几 MiB 也切
+/// 不出第二块(实测 3MiB 单块),CDC 差集随之失效。返回可变副本,便于构造
+/// 「同长改写」的 v2。
 fn cdc_make_content(total : Int32) -> FixedArray[Byte] {
-  let unit = @utf8.encode(
-    "The quick brown fox jumps over the lazy dog. CDC-block-test 0123456789",
-  )
-  let buf : FixedArray[Byte] = FixedArray::make(total, b'\x00')
-  let mut written = 0
-  while written < total {
-    let n = if unit.length() < total - written {
-      unit.length()
-    } else {
-      total - written
-    }
-    FixedArray::blit_from_bytes(buf, written, unit, 0, n)
-    written += n
+  let fa : FixedArray[Byte] = FixedArray::make(total, b'\x00')
+  // 线性同余生成器(deterministic LCG),字节流无长周期重复
+  let mut seed : UInt32 = 0x9E3779B9U
+  for i in 0..<total {
+    seed = seed * 1664525U + 1013904223U
+    fa[i] = (seed >> 24).reinterpret_as_int().to_byte()
   }
-  // 每 4096 字节放一个位置标记:破坏长周期重复,让滚动指纹处处不同
-  for i in 0..<(total / 4096) {
-    buf[i * 4096] = (i % 251).to_byte()
-  }
-  buf
+  fa
 }
 
 ///|
@@ -125,6 +116,16 @@ async test "cdc 接收: 本地预填差集,只对变化槽位发请求" {
       @daemon.Cmd::PeerOpen(folder="f1", remote_device_id="dev-b", sink~),
     )
     let _ = sink.get() // 指纹帧
+    // 初始交换兜底由真实墙钟驱动:单实例测试无人应答指纹,PeerOpen 2s 后
+    // 周期泵必发一次兜底全量;慢步骤(如 2MiB 异或改写)会让它插进后面
+    // 「出站只许某类帧」的严格断言。注入一拍快进让它确定性地发完并消费掉
+    // (恰此一帧),后续计数窗口内不再有协议帧。
+    let _ = handle.send(@daemon.Cmd::PollTimeouts(now=@daemon.now_ms() + 3000L))
+    let _ = handle.sync_snapshot()
+    match sink.get() {
+      @daemon.Outbound::Entries(..) => () // 兜底全量帧,恰此一帧
+      _ => fail("兜底快进后应恰有一帧全量索引")
+    }
     let remote : Array[@net.WireEntry] = [
       {
         path: "big.bin",
@@ -222,6 +223,16 @@ async test "cdc 接收: 本地文件被改写后预填失败,整份回退网络�
       @daemon.Cmd::PeerOpen(folder="f1", remote_device_id="dev-b", sink~),
     )
     let _ = sink.get() // 指纹帧
+    // 初始交换兜底由真实墙钟驱动:单实例测试无人应答指纹,PeerOpen 2s 后
+    // 周期泵必发一次兜底全量;慢步骤(如 2MiB 异或改写)会让它插进后面
+    // 「出站只许某类帧」的严格断言。注入一拍快进让它确定性地发完并消费掉
+    // (恰此一帧),后续计数窗口内不再有协议帧。
+    let _ = handle.send(@daemon.Cmd::PollTimeouts(now=@daemon.now_ms() + 3000L))
+    let _ = handle.sync_snapshot()
+    match sink.get() {
+      @daemon.Outbound::Entries(..) => () // 兜底全量帧,恰此一帧
+      _ => fail("兜底快进后应恰有一帧全量索引")
+    }
     let remote : Array[@net.WireEntry] = [
       {
         path: "big.bin",
@@ -281,6 +292,16 @@ async test "cdc 供应: 按前缀和供块回填真实哈希,无视图与墓碑�
       @daemon.Cmd::PeerOpen(folder="f1", remote_device_id="dev-b", sink~),
     )
     let _ = sink.get() // 指纹帧
+    // 初始交换兜底由真实墙钟驱动:单实例测试无人应答指纹,PeerOpen 2s 后
+    // 周期泵必发一次兜底全量;慢步骤(如 2MiB 异或改写)会让它插进后面
+    // 「出站只许某类帧」的严格断言。注入一拍快进让它确定性地发完并消费掉
+    // (恰此一帧),后续计数窗口内不再有协议帧。
+    let _ = handle.send(@daemon.Cmd::PollTimeouts(now=@daemon.now_ms() + 3000L))
+    let _ = handle.sync_snapshot()
+    match sink.get() {
+      @daemon.Outbound::Entries(..) => () // 兜底全量帧,恰此一帧
+      _ => fail("兜底快进后应恰有一帧全量索引")
+    }
     // 选中间槽位(内容 2MiB 期望 ≥1 个 CDC 块;槽数随内容浮动,取末槽兜底)
     let slot = if cdh1.length() > 1 { 1 } else { 0 }
     let req : @net.WireBlockRequest = {
@@ -391,6 +412,16 @@ async test "cdc 接收: 越界 / 哈希不符 / 超长响应被拒,不污染中�
       @daemon.Cmd::PeerOpen(folder="f1", remote_device_id="dev-b", sink~),
     )
     let _ = sink.get() // 指纹帧
+    // 初始交换兜底由真实墙钟驱动:单实例测试无人应答指纹,PeerOpen 2s 后
+    // 周期泵必发一次兜底全量;慢步骤(如 2MiB 异或改写)会让它插进后面
+    // 「出站只许某类帧」的严格断言。注入一拍快进让它确定性地发完并消费掉
+    // (恰此一帧),后续计数窗口内不再有协议帧。
+    let _ = handle.send(@daemon.Cmd::PollTimeouts(now=@daemon.now_ms() + 3000L))
+    let _ = handle.sync_snapshot()
+    match sink.get() {
+      @daemon.Outbound::Entries(..) => () // 兜底全量帧,恰此一帧
+      _ => fail("兜底快进后应恰有一帧全量索引")
+    }
     let remote : Array[@net.WireEntry] = [
       {
         path: "big.bin",
@@ -436,7 +467,7 @@ async test "cdc 接收: 越界 / 哈希不符 / 超长响应被拒,不污染中�
         }),
       ),
     )
-    // 哈希不符:拿定长块哈希冒充 CDC 块哈希
+    // 哈希不符:拿一个不可能成立的哈希冒充期望哈希
     let _ = handle.send(
       @daemon.Cmd::PeerMessage(
         folder="f1",
@@ -445,7 +476,7 @@ async test "cdc 接收: 越界 / 哈希不符 / 超长响应被拒,不污染中�
           device_id: "dev-b",
           path: "big.bin",
           block_index: first.block_index,
-          hash: blocks2[slot],
+          hash: "not-the-expected-hash",
           data: @base64.encode(cdc_chunk(v2, clens2, slot)),
           cdc: Some(true),
         }),
@@ -532,6 +563,9 @@ async test "cdc 回环冒烟: 第二轮只传变化槽位" {
     }
     assert_true(landed_v1, msg="首轮应完整落地 v1")
     env.requests.clear()
+    // 等过扫描器的 mtime 容忍窗口(MTIME_TOLERANCE_MS=2s,FAT32 兼容):
+    // 同尺寸改写若落在窗口内会被 is_unchanged 吞掉,第二轮扫描就检测不到
+    @async.sleep(2300)
     // 第二轮:中部同长改写 64 字节 → 只传变化的 CDC 槽位
     let v2_fa = v1_fa.copy()
     for i in 0..<64 {

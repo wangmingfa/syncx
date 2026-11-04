@@ -158,11 +158,17 @@ pub(all) struct FolderStatus {
 }
 
 ///|
-/// 全局只读状态快照(对应 Rust `StatusSnapshot`)。
+/// 全局只读状态快照(对应 Rust `StatusSnapshot`)。progress / traffic 是
+/// status 数据面字段(syncProgress / traffic 的结构化形态,JSON 折算在 api
+/// 包),随 publish 每条命令后刷新 —— 聚合只遍历会话内存表,空闲时近乎零开销。
 pub(all) struct StatusSnapshot {
   folders : Array[FolderStatus]
   total_entries : Int64
   total_tombstones : Int64
+  /// 各目录进行中的同步进度(每目录每会话一条,仅非零项;见 progress.mbt)。
+  progress : Array[SyncProgress]
+  /// 传输字节账本快照(累计 + 已完成窗口采样;见 traffic.mbt)。
+  traffic : TrafficStats
 }
 
 ///|
@@ -249,6 +255,12 @@ priv struct PeerSession {
   mut initial_deadline : Int64?
   /// 初始交换已结算(应答到达或兜底已发),结算后兜底不再触发。
   mut initial_settled : Bool
+  /// 供块租约台账(路径 → 租约):「发送中」显示与文件级发送进度的真相源
+  /// (serve_block 落账,聚合时懒清理过期项;见 progress.mbt)。
+  serving : Map[String, ServeLease]
+  /// 速率采样环:每块「真正发出/真正收下」记一笔,读时按滚动窗口平均
+  /// (本地预填不记;见 progress.mbt 的 record_rate)。
+  rate_samples : Array[RatePoint]
   /// 运行期事件(上层经 DrainEvents 取走)。
   events : Array[SyncEventRecord]
 }
@@ -294,6 +306,9 @@ pub struct SessionActor {
   /// (按目标设备记台账、离线补投、ack 销账)在装配层镜像循环实现;daemon
   /// 单测不注入时为空操作。
   priv on_git_notify : async (@net.ControlMessage) -> Unit
+  /// 全局传输字节账本(累计 + 采样环;重启清零):发送在 serve_block 落账、
+  /// 接收在 on_block_response 落账,快照随 publish 刷新(见 traffic.mbt)。
+  priv traffic : TrafficLedger
 }
 
 ///|
@@ -370,13 +385,23 @@ pub fn new_session_actor(
   for spec in specs {
     folders.push(make_folder(spec))
   }
+  let now = now_ms()
   let actor : SessionActor = {
     rx: @async.Queue(kind=Unbounded),
     device_id,
     folders,
-    cell: { value: { folders: [], total_entries: 0L, total_tombstones: 0L, }, },
+    cell: {
+      value: {
+        folders: [],
+        total_entries: 0L,
+        total_tombstones: 0L,
+        progress: [],
+        traffic: TrafficLedger::new(now).snapshot(now),
+      },
+    },
     git_tick: 0,
     on_git_notify,
+    traffic: TrafficLedger::new(now),
   }
   actor.publish()
   actor
@@ -812,6 +837,8 @@ fn SessionActor::do_peer_open(
     deferred_keys: Map([]),
     initial_deadline: None,
     initial_settled: false,
+    serving: Map([]),
+    rate_samples: [],
     events: [],
   }
   folder.peers.set(device, session)
@@ -1010,7 +1037,7 @@ async fn SessionActor::do_peer_message(
       send_full_snapshot(folder, session)
     }
     BlockRequest(payload~, ..) => self.serve_block(folder, session, payload)
-    BlockResponse(payload~, ..) => on_block_response(folder, session, payload)
+    BlockResponse(payload~, ..) => self.on_block_response(folder, session, payload)
     Control(..) => () // 控制面不进会话层(由上层全局路由)
   }
 }
@@ -1515,7 +1542,10 @@ async fn SessionActor::request_missing_chunks(
 /// 回填自洽但错误的块),收齐即落地。槽位与期望哈希按 open_receive 规划
 /// 定下的口径取(store.hashes:CDC 口径是 cdh,定长是 blocks),不看
 /// entry.blocks —— 否则 CDC 响应会被定长布局整批拒掉。
-async fn on_block_response(
+/// 接收字节记账也在这里:块真的收下了才记(重复响应不记;本地预填不走
+/// 这条路径,记的都是网络量),喂瞬时速率与全局流量账本。
+async fn SessionActor::on_block_response(
+  self : SessionActor,
   folder : Folder,
   session : PeerSession,
   response : @net.WireBlockResponse,
@@ -1551,7 +1581,9 @@ async fn on_block_response(
   if @core.hash_block(data) != expected {
     return
   }
-  // 重复响应不重复落盘(append 幂等);store 落盘前再验一次哈希与长度
+  // 重复响应不重复落盘(append 幂等)、也不重复记账:槽位已有即视为重复
+  // (对齐 Node 的 handle.has 早退闸);store 落盘前再验一次哈希与长度
+  let fresh = !pending.store.has(slot)
   pending.store.append(slot, data) catch {
     e => {
       println(
@@ -1562,6 +1594,13 @@ async fn on_block_response(
   }
   // 该块有了着落:重试台账出队(口径与请求发出时一致,即 store 的规划口径)
   untrack_block_response(session, response.path, index, pending.store.cdc)
+  // 该块真的收下了(重复响应已被上面挡掉):记一笔接收字节 —— 瞬时速率与
+  // 全局流量账本共用这一笔(对齐 Node recordBytes(0, response.data.length))
+  if fresh {
+    let now = now_ms()
+    record_rate(session, 0L, data.length().to_int64(), now)
+    self.traffic.add_received(data.length().to_int64())
+  }
   if pending.store.is_full() {
     complete_receive(folder, session, response.path, pending)
   }
@@ -1788,8 +1827,23 @@ async fn SessionActor::serve_block(
           }
         None => ()
       }
+      let now = now_ms()
       let wire = wire_bytes_estimate(bytes.length())
-      acquire_send_window(session, wire, now_ms())
+      acquire_send_window(session, wire, now)
+      // 供块租约续期 + 文件级发送进度(按块去重,对端重试不重复计),随后发送
+      // 字节落账:瞬时速率(每会话)与全局流量账本。帧已产出站队列即视为
+      // 「真发出去了」—— 与 Node 在 handleBlockRequest 里 recordBytes 的位置
+      // 同口径;延迟队列的重放也走这条路径,不重复不遗漏。
+      mark_served(
+        session,
+        request.path,
+        serve.slot.to_int64(),
+        bytes.length().to_int64(),
+        entry.size,
+        now,
+      )
+      record_rate(session, bytes.length().to_int64(), 0L, now)
+      self.traffic.add_sent(bytes.length().to_int64())
       push_outbound(
         session,
         BlockResponse({
@@ -1922,7 +1976,29 @@ fn SessionActor::publish(self : SessionActor) -> Unit {
       in_flight_receives: in_flight,
     })
   }
-  self.cell.value = { folders, total_entries, total_tombstones, }
+  // syncProgress 聚合(status 数据面):每目录每会话一条、仅非零项(对齐
+  // Node manager.getSyncProgress 的「仅非零项」过滤)。过期供块租约在聚合内
+  // 懒清理;publish 随每条命令运行(周期泵 500ms 一拍),聚合只遍历会话的
+  // pending/serving 两张内存表,空闲时近乎零开销。
+  let now = now_ms()
+  let progress : Array[SyncProgress] = []
+  for folder in self.folders {
+    for _, session in folder.peers {
+      let item = aggregate_sync_progress(folder.id, session, now)
+      if item.pending > 0 || item.sending > 0 || item.receiving > 0 {
+        progress.push(item)
+      }
+    }
+  }
+  // 流量快照:顺手推进采样窗口 —— 跨过边界的已完成窗口闭合为样本(空闲窗口
+  // 补零保持时间轴连续),未闭合的当前窗口不进 samples(见 traffic.mbt)
+  self.cell.value = {
+    folders,
+    total_entries,
+    total_tombstones,
+    progress,
+    traffic: self.traffic.snapshot(now),
+  }
 }
 
 // ==================== 小工具 ====================

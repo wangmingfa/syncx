@@ -750,6 +750,20 @@ async test "actor 回环: 块请求超时重发,达上限放弃并记录事件" 
     assert_true(
       actor_wait_until(() => env.handle_b.snapshot().folders[0].peers == 1),
     )
+    // 初始交换兜底与计数共用真实墙钟:极端调度下「指纹无应答」的兜底帧会在
+    // 2s 后由周期泵发出(每会话恰一次),其引发的「对端重规划 → 重发增量 →
+    // 本端重开接收」会多出一条块请求,冲掉下面的精确计数。先在两侧各快进
+    // 一拍把它确定性地消耗掉(已结算则为空操作),再进入计数窗口。
+    let _ = env.handle_a.send(
+      @daemon.Cmd::PollTimeouts(now=@daemon.now_ms() + 3000L),
+    )
+    let _ = env.handle_a.sync_snapshot()
+    let _ = env.handle_b.send(
+      @daemon.Cmd::PollTimeouts(now=@daemon.now_ms() + 3000L),
+    )
+    let _ = env.handle_b.sync_snapshot()
+    @async.sleep(200)
+    let _ = env.handle_a.sync_snapshot()
     let _ = env.handle_b.send(@daemon.Cmd::ScanFolder("f1"))
     assert_true(actor_wait_until(() => env.requests.length() >= 1))
     let t0 = @daemon.now_ms()
@@ -900,6 +914,99 @@ async test "配置热重载:Reconfigure 对账重建目录集" {
       }),
       msg="f1 重新添加后恢复未暂停态",
     )
+    let _ = handle.send(@daemon.Cmd::Shutdown)
+  }
+}
+
+///|
+/// status 数据面接线(冒烟):供块 → 发送字节落账 + 租约进「发送中」;收块 →
+/// 接收字节落账 + 落地。断言对象是 sync_snapshot 带回的 progress / traffic,
+/// 口径与 api 层折算前的结构化形态一致(逐字段 JSON 形态在 api 包单测)。
+async test "actor: 供块/收块字节落账 syncProgress 与 traffic" {
+  let root = actor_fresh_root("progress-wire")
+  let content = "0123456789ABCDEF"
+  let _ = actor_write_file(root, "send.bin", content)
+  let spec = actor_make_spec(root)
+  @async.with_task_group() <| group => {
+    let handle = @daemon.start_session_actor(group, "dev-a", [spec])
+    let _ = handle.send(@daemon.Cmd::ScanFolder("f1"))
+    let _ = handle.sync_snapshot()
+    let sink : @async.Queue[@daemon.Outbound] = @async.Queue(kind=Unbounded)
+    let _ = handle.send(
+      @daemon.Cmd::PeerOpen(folder="f1", remote_device_id="dev-b", sink~),
+    )
+    let _ = sink.get() // 指纹帧
+    // —— 供块:对端来要 send.bin 第 0 块 → 出一条 BlockResponse,发送落账
+    let send_hash = @core.hash_block(@utf8.encode(content))
+    let _ = handle.send(
+      @daemon.Cmd::PeerMessage(
+        folder="f1",
+        remote_device_id="dev-b",
+        message=@net.WireMessage::BlockRequest(folder="f1", payload={
+          device_id: "dev-b",
+          path: "send.bin",
+          block_index: 0L,
+          hash: send_hash,
+          priority: None,
+          cdc: None,
+        }),
+      ),
+    )
+    match sink.get() {
+      @daemon.Outbound::BlockResponse(resp) => assert_eq(resp.hash, send_hash)
+      _ => fail("应为 send.bin 的块响应")
+    }
+    let snap1 = handle.sync_snapshot()
+    // 发送字节 = 16(块真发出去了才记);租约内 send.bin 进「发送中」,
+    // 文件行按块精确累计(done=16,total=16);速率有采样即非空
+    assert_eq(snap1.traffic.sent, 16L)
+    assert_eq(snap1.traffic.received, 0L)
+    assert_eq(snap1.progress.length(), 1)
+    assert_eq(snap1.progress[0].folder, "f1")
+    assert_eq(snap1.progress[0].pending, 0)
+    assert_eq(snap1.progress[0].sending, 1)
+    assert_eq(snap1.progress[0].receiving, 0)
+    let send_row = snap1.progress[0].files.unwrap()[0]
+    assert_eq(send_row.direction, "send")
+    assert_eq(send_row.bytes_done, 16L)
+    assert_eq(send_row.bytes_total, 16L)
+    assert_true(snap1.progress[0].send_rate is Some(_))
+    assert_true(snap1.progress[0].receive_rate is None)
+    // —— 收块:对端宣告本机没有的 receive.bin → 规划出在途接收并索块,
+    // 回以块响应 → 落地 + 接收字节落账
+    let remote : Array[@net.WireEntry] = [
+      actor_wire_entry("receive.bin", "recv-xyz", [("dev-b", 1L)]),
+    ]
+    let _ = handle.send(
+      @daemon.Cmd::PeerMessage(
+        folder="f1",
+        remote_device_id="dev-b",
+        message=actor_index_message("f1", remote, full=false),
+      ),
+    )
+    let _ = handle.send(@daemon.Cmd::ApplyPlan("f1"))
+    match sink.get() {
+      @daemon.Outbound::BlockRequest(req) => assert_eq(req.path, "receive.bin")
+      _ => fail("应为 receive.bin 的块请求")
+    }
+    let _ = handle.send(
+      @daemon.Cmd::PeerMessage(
+        folder="f1",
+        remote_device_id="dev-b",
+        message=actor_block_response("f1", "receive.bin", @core.hash_block(@utf8.encode("recv-xyz")), "recv-xyz"),
+      ),
+    )
+    let snap2 = handle.sync_snapshot()
+    // 接收字节 = 8;两方向独立累计;receive.bin 已落地(索引两条)
+    assert_eq(snap2.traffic.sent, 16L)
+    assert_eq(snap2.traffic.received, 8L)
+    assert_eq(snap2.folders[0].entries, 2L)
+    // 落地后进度只剩发送行(pending/receiving 归零,租约内的发送仍在)
+    assert_eq(snap2.progress.length(), 1)
+    assert_eq(snap2.progress[0].pending, 0)
+    assert_eq(snap2.progress[0].receiving, 0)
+    assert_eq(snap2.progress[0].sending, 1)
+    assert_true(snap2.progress[0].receive_rate is Some(_))
     let _ = handle.send(@daemon.Cmd::Shutdown)
   }
 }

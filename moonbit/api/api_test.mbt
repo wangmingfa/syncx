@@ -39,6 +39,15 @@ fn require_object(body : Json) -> Map[String, Json] {
 }
 
 ///|
+/// 断言辅助:对象某键存在且是等于期望值的数字(字段名逐字断言用)。
+fn num_is(obj : Map[String, Json], key : String, expected : Double) -> Bool {
+  match obj.get(key) {
+    Some(Number(v, ..)) => v == expected
+    _ => false
+  }
+}
+
+///|
 async test "GET /health 免认证回 ok" {
   let app = @api.build_app(test_options())
   let response = @mocket.dispatch_http(app, "GET", "/health", {}, b"")
@@ -86,8 +95,16 @@ async test "GET /api/status 已认证回最小 camelCase 载荷" {
   assert_true(obj.get("devices") is Some(Array([])))
   assert_true(obj.get("syncProgress") is Some(Array([])))
   assert_true(obj.get("platform") is Some(String(_)))
+  // traffic 未接提供器时为零值缺省(账本未接线 = 没有可报的传输量)
+  let traffic = match obj.get("traffic") {
+    Some(Object(t)) => t
+    _ => panic()
+  }
+  assert_true(num_is(traffic, "sent", 0.0))
+  assert_true(num_is(traffic, "received", 0.0))
+  assert_true(traffic.get("samples") is Some(Array([])))
   // hostname/localAddresses 依赖宿主机环境(取得到才上线),键数按双口径折算
-  let mut expected = 11
+  let mut expected = 12
   if obj.get("hostname") is Some(_) {
     expected = expected + 1
   }
@@ -95,6 +112,111 @@ async test "GET /api/status 已认证回最小 camelCase 载荷" {
     expected = expected + 1
   }
   assert_eq(obj.length(), expected)
+}
+
+///|
+async test "GET /api/status syncProgress/traffic 提供器输出形态逐字对齐前端" {
+  // 模拟 cli 侧镜像:provider 直接返回 actor 快照里的结构化聚合
+  let progress : Array[@daemon.SyncProgress] = [
+    {
+      folder: "fold-1",
+      pending: 2,
+      sending: 1,
+      receiving: 2,
+      send_rate: Some(1024.0),
+      receive_rate: None, // 窗口内无接收字节 → 字段省略
+      files: Some([
+        {
+          path: "a.txt",
+          direction: "receive",
+          bytes_done: 5L,
+          bytes_total: 10L,
+          priority: false,
+        },
+        {
+          path: "b.txt",
+          direction: "send",
+          bytes_done: 100L,
+          bytes_total: 1000L,
+          priority: false,
+        },
+      ]),
+    },
+  ]
+  let traffic : @daemon.TrafficStats = {
+    sent: 2048L,
+    received: 4096L,
+    samples: [{ at: 300000L, sent: 2048L, received: 4096L }],
+  }
+  let options = test_options()
+  options.sync_progress = Some(() => progress)
+  options.traffic = Some(() => traffic)
+  let app = @api.build_app(options)
+  let response = @mocket.dispatch_http(
+    app,
+    "GET",
+    "/api/status",
+    { "Cookie": "syncx_session=\{mint_ticket()}" },
+    b"",
+  )
+  assert_eq(response.status_code.to_int(), 200)
+  let obj = require_object(response.read_body())
+  // 一行 = {folder, pending, sending, receiving, sendRate?, receiveRate?, files?}
+  let rows : Array[Json] = match obj.get("syncProgress") {
+    Some(Array(rows)) => rows
+    _ => panic()
+  }
+  assert_eq(rows.length(), 1)
+  let row = match rows[0] {
+    Object(m) => m
+    _ => panic()
+  }
+  assert_true(row.get("folder") is Some(String("fold-1")))
+  assert_true(num_is(row, "pending", 2.0))
+  assert_true(num_is(row, "sending", 1.0))
+  assert_true(num_is(row, "receiving", 2.0))
+  assert_true(num_is(row, "sendRate", 1024.0))
+  assert_true(row.get("receiveRate") is None) // 空窗口省略字段
+  // 文件行 = {path, direction, bytesDone, bytesTotal, priority?}
+  let files : Array[Json] = match row.get("files") {
+    Some(Array(files)) => files
+    _ => panic()
+  }
+  assert_eq(files.length(), 2)
+  let receive = match files[0] {
+    Object(m) => m
+    _ => panic()
+  }
+  assert_true(receive.get("path") is Some(String("a.txt")))
+  assert_true(receive.get("direction") is Some(String("receive")))
+  assert_true(num_is(receive, "bytesDone", 5.0))
+  assert_true(num_is(receive, "bytesTotal", 10.0))
+  assert_true(receive.get("priority") is None) // 未提队省略字段
+  let send = match files[1] {
+    Object(m) => m
+    _ => panic()
+  }
+  assert_true(send.get("direction") is Some(String("send")))
+  assert_true(num_is(send, "bytesDone", 100.0))
+  // traffic = {sent, received, samples:[{at, sent, received}]}
+  let stats = match obj.get("traffic") {
+    Some(Object(t)) => t
+    _ => panic()
+  }
+  assert_true(num_is(stats, "sent", 2048.0))
+  assert_true(num_is(stats, "received", 4096.0))
+  let samples : Array[Json] = match stats.get("samples") {
+    Some(Array(samples)) => samples
+    _ => panic()
+  }
+  assert_eq(samples.length(), 1)
+  let sample = match samples[0] {
+    Object(m) => m
+    _ => panic()
+  }
+  assert_true(num_is(sample, "at", 300000.0))
+  assert_true(num_is(sample, "sent", 2048.0))
+  assert_true(num_is(sample, "received", 4096.0))
 }
 
 ///|
@@ -316,19 +438,14 @@ test "status_json:本机信息三字段(注入 peerPort 必上线,主机名/局�
 ///|
 test "status_json:未注入 peerPort 则字段不上线" {
   let obj = require_object(
-    @api.status_json(
-      @api.ApiOptions::new(device_id="D", control_token="test-token"),
-    ),
+    @api.status_json(@api.ApiOptions::new(device_id="D", control_token="test-token")),
   )
   assert_true(obj.get("peerPort") is None)
 }
 
 ///|
 test "parse_lan_addresses:合法数组逐条收,非字符串与畸形输入丢弃" {
-  assert_eq(
-    @api.parse_lan_addresses("[\"192.168.1.5\",\"10.0.0.2\"]").length(),
-    2,
-  )
+  assert_eq(@api.parse_lan_addresses("[\"192.168.1.5\",\"10.0.0.2\"]").length(), 2)
   assert_true(@api.parse_lan_addresses("[]").length() == 0)
   // 畸形 JSON:解析失败视作取不到
   assert_true(@api.parse_lan_addresses("not json").length() == 0)
@@ -392,9 +509,7 @@ test "status_json:device_infos 快照透传(装配层/增删路由维护)" {
   }
   // 缺省注入 = 空数组(最小装配/旧形态),前端「还没有设备」兜底
   let bare = require_object(
-    @api.status_json(
-      @api.ApiOptions::new(device_id="D", control_token="test-token"),
-    ),
+    @api.status_json(@api.ApiOptions::new(device_id="D", control_token="test-token")),
   )
   match bare.get("devices") {
     Some(Array(items)) => assert_eq(items.length(), 0)

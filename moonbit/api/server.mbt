@@ -50,6 +50,14 @@ pub(all) struct ApiOptions {
   /// (单线程 async,无锁)。会话注册表在 cli 装配层,api 只见闭包不见类型;
   /// 装配层先构造 ApiOptions 再回填本字段(mut,打破闭包自引用)。
   mut device_status : (() -> Array[Json])?
+  /// `/api/status.syncProgress` 动态提供器(None = 空数组,保持现行为):
+  /// 会话在途状态(供块租约 / 在途接收 / 速率窗口)只在 actor 任务上,而
+  /// status_json 是同步函数 —— 装配层用后台任务周期性经 Cmd 拉快照写同步
+  /// 镜像,本回调读镜像折算(形态见 sync_progress_json;单线程 async,无锁)。
+  mut sync_progress : (() -> Array[@daemon.SyncProgress])?
+  /// `/api/status.traffic` 动态提供器(None = 零值缺省):传输字节账本在
+  /// actor 任务上,同经 cli 侧镜像读出(形态见 traffic_json)。
+  mut traffic : (() -> @daemon.TrafficStats)?
   /// 配置变更回调(None = 未接 daemon,落盘即止):任何写路由成功落盘后
   /// 触发一次,装配层借此重读配置并热重载 daemon 派生状态(目录集重建 /
   /// 设备清单快照 / fs-watch 对账 / 出站拨号对账)。回调在单线程事件循环里
@@ -111,6 +119,8 @@ pub fn ApiOptions::new(
     peer_port,
     device_infos,
     device_status: None,
+    sync_progress: None,
+    traffic: None,
     on_config_changed,
   }
 }
@@ -249,8 +259,22 @@ pub fn status_json(options : ApiOptions) -> Json {
     None => options.device_infos
   }
   map.set("devices", Json::array(devices))
-  map.set("syncProgress", Json::array([]))
+  // 同步进度:动态提供器(cli 装配的镜像回调,见 ApiOptions.sync_progress
+  // 注释);缺省空数组保持现行为(前端「同步中无待处理任务」兜底)。
+  // offers 保持占位空数组:邀请控制面未接,根因不在本包(勿动)。
+  let progress_rows : Array[Json] = match options.sync_progress {
+    Some(provider) => sync_progress_json(provider())
+    None => []
+  }
+  map.set("syncProgress", Json::array(progress_rows))
   map.set("offers", Json::array([]))
+  // 传输统计(流量面板):动态提供器,缺省零值 —— 账本未接线(最小装配 /
+  // 单测)= 没有可报的传输量,字段仍上线,形态恒完整
+  let traffic_stats : @daemon.TrafficStats = match options.traffic {
+    Some(provider) => provider()
+    None => { sent: 0L, received: 0L, samples: [] }
+  }
+  map.set("traffic", traffic_json(traffic_stats))
   // 编译目标 OS,口径对齐 Node 的 process.platform(前端 osIconKind 只认 darwin/win32/linux)
   map.set("platform", Json::string(c_status_platform()))
   // 本机主机名(顶栏本机信息浮层):C FFI gethostname;取不到(失败/空串)
@@ -307,6 +331,69 @@ pub fn status_json(options : ApiOptions) -> Json {
     }
     None => ()
   }
+  Json::object(map)
+}
+
+///|
+/// syncProgress 聚合行 → 前端 SyncProgressItem(字段名与形态逐字对齐
+/// web/types.ts,语义来源 Node src/status.ts 的 SyncProgress)。可选字段
+/// 只在有值时上线:窗口内该方向无字节则速率字段省略,无传输则 files 整个
+/// 省略 —— 空闲快照保持最小,差异驱动的 ws 推送不会多推帧。
+pub fn sync_progress_json(items : Array[@daemon.SyncProgress]) -> Array[Json] {
+  let rows : Array[Json] = []
+  for item in items {
+    let map : Map[String, Json] = Map([])
+    map.set("folder", Json::string(item.folder))
+    map.set("pending", Json::number(item.pending.to_double()))
+    map.set("sending", Json::number(item.sending.to_double()))
+    map.set("receiving", Json::number(item.receiving.to_double()))
+    match item.send_rate {
+      Some(rate) => map.set("sendRate", Json::number(rate))
+      None => ()
+    }
+    match item.receive_rate {
+      Some(rate) => map.set("receiveRate", Json::number(rate))
+      None => ()
+    }
+    match item.files {
+      Some(files) => {
+        let entries : Array[Json] = []
+        for f in files {
+          let row : Map[String, Json] = Map([])
+          row.set("path", Json::string(f.path))
+          row.set("direction", Json::string(f.direction))
+          row.set("bytesDone", Json::number(f.bytes_done.to_double()))
+          row.set("bytesTotal", Json::number(f.bytes_total.to_double()))
+          if f.priority {
+            row.set("priority", Json::boolean(true))
+          }
+          entries.push(Json::object(row))
+        }
+        map.set("files", Json::array(entries))
+      }
+      None => ()
+    }
+    rows.push(Json::object(map))
+  }
+  rows
+}
+
+///|
+/// 流量统计 → 前端 TrafficData(累计 + 已完成窗口的采样序列;samples 每条
+/// 是窗口内增量,sent/received 为 daemon 启动以来的累计)。
+pub fn traffic_json(stats : @daemon.TrafficStats) -> Json {
+  let map : Map[String, Json] = Map([])
+  map.set("sent", Json::number(stats.sent.to_double()))
+  map.set("received", Json::number(stats.received.to_double()))
+  let samples : Array[Json] = []
+  for sample in stats.samples {
+    let row : Map[String, Json] = Map([])
+    row.set("at", Json::number(sample.at.to_double()))
+    row.set("sent", Json::number(sample.sent.to_double()))
+    row.set("received", Json::number(sample.received.to_double()))
+    samples.push(Json::object(row))
+  }
+  map.set("samples", Json::array(samples))
   Json::object(map)
 }
 

@@ -130,6 +130,10 @@ pub fn status_json(ApiOptions) -> @json.Json
 
 pub fn sync_event_frame(String, @daemon.SyncEventRecord, Int64) -> String
 
+pub fn sync_progress_json(Array[@daemon.SyncProgress]) -> Array[@json.Json]
+
+pub fn traffic_json(@daemon.TrafficStats) -> @json.Json
+
 pub fn verify_password(AccountRecord, String, String) -> Bool
 
 pub fn verify_session(String, String) -> SessionPayload?
@@ -159,6 +163,8 @@ pub(all) struct ApiOptions {
   peer_port : Int32?
   mut device_infos : Array[@json.Json]
   mut device_status : (() -> Array[@json.Json])?
+  mut sync_progress : (() -> Array[@daemon.SyncProgress])?
+  mut traffic : (() -> @daemon.TrafficStats)?
   mut on_config_changed : (async () -> Unit)?
 }
 pub fn ApiOptions::new(device_id~ : String, control_token? : String, auth_file? : String?, config_file? : String?, actor? : @daemon.ActorHandle?, web_dist? : String?, on_shutdown? : (() -> Unit)?, dev_mode? : Bool, upload_inspect? : (async (Bytes) -> Result[InspectedPackage, String])?, upload_swap? : (async (Bytes) -> Result[String, String])?, settings? : @json.Json?, peer_port? : Int32?, device_infos? : Array[@json.Json], on_config_changed? : (async () -> Unit)?) -> Self

@@ -45,6 +45,10 @@ pub const SEND_WINDOW_BYTES : Int32 = 67108864
 
 pub const SERVE_LEASE_MS : Int64 = 15_000
 
+pub const TRAFFIC_RING_LEN : Int32 = 288
+
+pub const TRAFFIC_WINDOW_MS : Int64 = 300_000
+
 pub async fn auto_commit(String, String, changed_files? : Array[String]) -> AutoCommitResult
 
 pub async fn auto_commit_if_dirty(String, String) -> AutoCommitResult
@@ -415,12 +419,53 @@ pub(all) struct StatusSnapshot {
   folders : Array[FolderStatus]
   total_entries : Int64
   total_tombstones : Int64
+  progress : Array[SyncProgress]
+  traffic : TrafficStats
 }
 
 pub(all) struct SyncEventRecord {
   path : String
   direction : String
   action : String
+}
+
+pub(all) struct SyncProgress {
+  folder : String
+  pending : Int32
+  sending : Int32
+  receiving : Int32
+  send_rate : Double?
+  receive_rate : Double?
+  files : Array[TransferFileInfo]?
+}
+
+pub struct TrafficLedger {
+  // private fields
+}
+pub fn TrafficLedger::add_received(Self, Int64) -> Unit
+pub fn TrafficLedger::add_sent(Self, Int64) -> Unit
+pub fn TrafficLedger::flush_to(Self, Int64) -> Unit
+pub fn TrafficLedger::new(Int64) -> Self
+pub fn TrafficLedger::snapshot(Self, Int64) -> TrafficStats
+
+pub(all) struct TrafficSample {
+  at : Int64
+  sent : Int64
+  received : Int64
+}
+
+pub(all) struct TrafficStats {
+  sent : Int64
+  received : Int64
+  samples : Array[TrafficSample]
+}
+
+pub(all) struct TransferFileInfo {
+  path : String
+  direction : String
+  bytes_done : Int64
+  bytes_total : Int64
+  priority : Bool
 }
 
 pub struct WatchStats {
