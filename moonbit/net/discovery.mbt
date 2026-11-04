@@ -192,6 +192,7 @@ fn decode_utf8_range(buf : Bytes, start : Int32, len : Int32) -> String {
 
 ///|
 /// 发现到的对端。
+#derive(Eq, Debug)
 pub(all) struct DiscoveredPeer {
   device_id : String
   /// SRV target 的裸值(去掉结尾 `.local.` 的点),不保证可解析,只作展示。
@@ -200,7 +201,7 @@ pub(all) struct DiscoveredPeer {
   /// 收到这个 mDNS 包的**源 IP**(与 Node 的 rinfo.address、Rust 的发包源 IP 同语义);
   /// 空串表示未知(比如测试注入)。
   address : String
-} derive(Eq, Debug)
+}
 
 ///|
 pub extend DiscoveredPeer with Eq::{equal, not_equal}

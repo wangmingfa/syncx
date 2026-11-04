@@ -37,6 +37,7 @@ const PARTIAL_COMMIT_SLOTS : Int32 = 8
 /// 中间态相关错误(收拢为 String 消息,便于上层统一打日志)。
 /// 变体名刻意避开 ExecutorError / IndexStoreError 的既有名字
 /// (同包内构造器重名会让 `raise Io(...)` 这类裸构造产生歧义)。
+#derive(Debug)
 pub(all) suberror PartialError {
   /// 文件系统操作失败。
   IoFailed(String)
@@ -46,7 +47,7 @@ pub(all) suberror PartialError {
   UnsafeTarget(String)
   /// 块内容与声明的哈希不符。
   BlockMismatch(String)
-} derive(Debug)
+}
 
 ///|
 /// derive 出的 Debug 方法只作为 trait 实现使用,不隐式提升为普通方法。

@@ -27,10 +27,11 @@ pub fn Db::exec(Self, String) -> Unit raise SqliteError
 pub fn Db::last_insert_rowid(Self) -> Int64
 pub fn Db::prepare(Self, String) -> Stmt raise SqliteError
 
+#derive(Eq, @debug.Debug)
 pub(all) enum StepResult {
   Row
   Done
-} derive(Eq, @debug.Debug)
+}
 pub fn StepResult::equal(Self, Self) -> Bool
 pub fn StepResult::not_equal(Self, Self) -> Bool
 pub fn StepResult::to_repr(Self) -> @debug.Repr

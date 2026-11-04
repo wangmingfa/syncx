@@ -5,6 +5,7 @@ import {
   "moonbitlang/async/http",
   "moonbitlang/async/websocket",
   "moonbitlang/core/debug",
+  "moonbitlang/core/json",
 }
 
 // Values
@@ -109,6 +110,7 @@ pub fn WireError::to_text(Self) -> String
 // Types and methods
 type ConnState
 
+#derive(Eq, @debug.Debug)
 pub(all) enum ControlMessage {
   FolderInvitation(offer_id~ : String, from_device_id~ : String, folder_id~ : String, folder_name~ : String, version~ : String?, hostname~ : String?, platform~ : String?, runtime~ : String?)
   FolderInvitationAck(offer_id~ : String, from_device_id~ : String, accepted~ : Bool, version~ : String?, hostname~ : String?, platform~ : String?, runtime~ : String?)
@@ -120,40 +122,42 @@ pub(all) enum ControlMessage {
   SelfBinaryRequest(request_id~ : String, from_device_id~ : String, version~ : String?, hostname~ : String?, platform~ : String?, runtime~ : String?)
   SelfBinaryResponse(request_id~ : String, from_device_id~ : String, version~ : String, sha256~ : String, data~ : String?, hostname~ : String?, platform~ : String?, runtime~ : String?)
   FolderIndexRequest(request_id~ : String, from_device_id~ : String, folder_id~ : String, version~ : String?, hostname~ : String?, platform~ : String?, runtime~ : String?)
-  FolderIndexSnapshot(request_id~ : String, from_device_id~ : String, folder_id~ : String, seq~ : Int64, total~ : Int64, entries~ : String?, error~ : String?, ignore_lines~ : Array[String]?, progress~ : Json?, version~ : String?, hostname~ : String?, platform~ : String?, runtime~ : String?)
+  FolderIndexSnapshot(request_id~ : String, from_device_id~ : String, folder_id~ : String, seq~ : Int64, total~ : Int64, entries~ : String?, error~ : String?, ignore_lines~ : Array[String]?, progress~ : @json.Json?, version~ : String?, hostname~ : String?, platform~ : String?, runtime~ : String?)
   FileContentRequest(request_id~ : String, from_device_id~ : String, folder_id~ : String, path~ : String, version~ : String?, hostname~ : String?, platform~ : String?, runtime~ : String?)
   FileContentResponse(request_id~ : String, from_device_id~ : String, folder_id~ : String, path~ : String, data~ : String?, size~ : Int64?, entry_version~ : Array[(String, Int64)]?, error~ : String?, version~ : String?, hostname~ : String?, platform~ : String?, runtime~ : String?)
   FileContentWrite(request_id~ : String, from_device_id~ : String, folder_id~ : String, path~ : String, data~ : String, entry_version~ : Array[(String, Int64)], version~ : String?, hostname~ : String?, platform~ : String?, runtime~ : String?)
   FileContentWriteResult(request_id~ : String, from_device_id~ : String, folder_id~ : String, path~ : String, ok~ : Bool, error~ : String?, version~ : String?, hostname~ : String?, platform~ : String?, runtime~ : String?)
   GitCommitNotify(from_device_id~ : String, folder_id~ : String, commit_hash~ : String, commit_message~ : String, changed_files~ : Array[String], diff_stat~ : String?, commit_subjects~ : Array[String]?, parent_hash~ : String, version~ : String?, hostname~ : String?, platform~ : String?, runtime~ : String?)
   GitCommitAck(from_device_id~ : String, folder_id~ : String, commit_hash~ : String, version~ : String?, hostname~ : String?, platform~ : String?, runtime~ : String?)
-} derive(Eq, @debug.Debug)
+}
 pub fn ControlMessage::equal(Self, Self) -> Bool
-pub fn ControlMessage::from_json(Json) -> Self raise WireError
+pub fn ControlMessage::from_json(@json.Json) -> Self raise WireError
 pub fn ControlMessage::not_equal(Self, Self) -> Bool
-pub fn ControlMessage::to_json(Self) -> Json
+pub fn ControlMessage::to_json(Self) -> @json.Json
 pub fn ControlMessage::to_repr(Self) -> @debug.Repr
 
+#derive(Eq, @debug.Debug)
 pub(all) struct DeviceIdentity {
   device_id : String
   public_key_pem : String
   private_key_pem : String
-} derive(Eq, @debug.Debug)
+}
 pub fn DeviceIdentity::equal(Self, Self) -> Bool
-pub fn DeviceIdentity::from_json(Json) -> Self raise IdentityError
+pub fn DeviceIdentity::from_json(@json.Json) -> Self raise IdentityError
 pub fn DeviceIdentity::from_key_pems(String, String) -> Self raise IdentityError
 pub fn DeviceIdentity::from_secret_bytes(Bytes) -> Self raise IdentityError
 pub fn DeviceIdentity::generate() -> Self raise IdentityError
 pub fn DeviceIdentity::not_equal(Self, Self) -> Bool
-pub fn DeviceIdentity::to_json(Self) -> Json
+pub fn DeviceIdentity::to_json(Self) -> @json.Json
 pub fn DeviceIdentity::to_repr(Self) -> @debug.Repr
 
+#derive(Eq, @debug.Debug)
 pub(all) struct DiscoveredPeer {
   device_id : String
   host : String
   port : Int32
   address : String
-} derive(Eq, @debug.Debug)
+}
 pub fn DiscoveredPeer::equal(Self, Self) -> Bool
 pub fn DiscoveredPeer::not_equal(Self, Self) -> Bool
 pub fn DiscoveredPeer::to_repr(Self) -> @debug.Repr
@@ -168,18 +172,19 @@ pub fn Discovery::browse_wait(Self, Int32) -> DiscoveredPeer? raise DiscoveryErr
 pub fn Discovery::kick(Self) -> Unit
 pub fn Discovery::stop(Self) -> Unit
 
+#derive(Eq, @debug.Debug)
 pub(all) struct KxMessage {
   kind : String
   x25519 : String
   sig : String
   listen_port : Int32?
   caps : Array[String]?
-} derive(Eq, @debug.Debug)
+}
 pub fn KxMessage::equal(Self, Self) -> Bool
-pub fn KxMessage::from_json(Json) -> Self raise HandshakeError
+pub fn KxMessage::from_json(@json.Json) -> Self raise HandshakeError
 pub fn KxMessage::not_equal(Self, Self) -> Bool
 pub fn KxMessage::supports_binary(Self) -> Bool
-pub fn KxMessage::to_json(Self) -> Json
+pub fn KxMessage::to_json(Self) -> @json.Json
 pub fn KxMessage::to_repr(Self) -> @debug.Repr
 
 pub struct PeerClient {
@@ -262,6 +267,7 @@ pub(all) struct PeerServerOptions {
 }
 pub fn PeerServerOptions::new(bind_host? : String, port? : Int32, max_connections? : Int32, handshake_timeout_ms? : Int64) -> Self
 
+#derive(Eq, @debug.Debug)
 pub(all) struct WireBlockRequest {
   device_id : String
   path : String
@@ -269,13 +275,14 @@ pub(all) struct WireBlockRequest {
   hash : String
   priority : Bool?
   cdc : Bool?
-} derive(Eq, @debug.Debug)
+}
 pub fn WireBlockRequest::equal(Self, Self) -> Bool
-pub fn WireBlockRequest::from_json(Json) -> Self raise WireError
+pub fn WireBlockRequest::from_json(@json.Json) -> Self raise WireError
 pub fn WireBlockRequest::not_equal(Self, Self) -> Bool
-pub fn WireBlockRequest::to_json(Self) -> Json
+pub fn WireBlockRequest::to_json(Self) -> @json.Json
 pub fn WireBlockRequest::to_repr(Self) -> @debug.Repr
 
+#derive(Eq, @debug.Debug)
 pub(all) struct WireBlockResponse {
   device_id : String
   path : String
@@ -283,13 +290,14 @@ pub(all) struct WireBlockResponse {
   hash : String
   data : String
   cdc : Bool?
-} derive(Eq, @debug.Debug)
+}
 pub fn WireBlockResponse::equal(Self, Self) -> Bool
-pub fn WireBlockResponse::from_json(Json) -> Self raise WireError
+pub fn WireBlockResponse::from_json(@json.Json) -> Self raise WireError
 pub fn WireBlockResponse::not_equal(Self, Self) -> Bool
-pub fn WireBlockResponse::to_json(Self) -> Json
+pub fn WireBlockResponse::to_json(Self) -> @json.Json
 pub fn WireBlockResponse::to_repr(Self) -> @debug.Repr
 
+#derive(Eq, @debug.Debug)
 pub(all) struct WireEntry {
   path : String
   version : Array[(String, Int64)]
@@ -299,15 +307,16 @@ pub(all) struct WireEntry {
   mtime : Double
   cdh : Array[String]?
   clens : Array[Int64]?
-} derive(Eq, @debug.Debug)
+}
 pub fn WireEntry::cdc_view(Self) -> (Array[String]?, Array[Int64]?)
 pub fn WireEntry::equal(Self, Self) -> Bool
-pub fn WireEntry::from_json(Json) -> Self raise WireError
+pub fn WireEntry::from_json(@json.Json) -> Self raise WireError
 pub fn WireEntry::has_cdc_view(Self) -> Bool
 pub fn WireEntry::not_equal(Self, Self) -> Bool
-pub fn WireEntry::to_json(Self) -> Json
+pub fn WireEntry::to_json(Self) -> @json.Json
 pub fn WireEntry::to_repr(Self) -> @debug.Repr
 
+#derive(Eq, @debug.Debug)
 pub(all) enum WireMessage {
   Index(folder~ : String, payload~ : String, full~ : Bool?, relayed~ : Bool?)
   IndexFingerprint(folder~ : String, fingerprint~ : String)
@@ -316,12 +325,12 @@ pub(all) enum WireMessage {
   BlockRequest(folder~ : String, payload~ : WireBlockRequest)
   BlockResponse(folder~ : String, payload~ : WireBlockResponse)
   Control(payload~ : ControlMessage)
-} derive(Eq, @debug.Debug)
+}
 pub fn WireMessage::equal(Self, Self) -> Bool
-pub fn WireMessage::from_json(Json) -> Self raise WireError
+pub fn WireMessage::from_json(@json.Json) -> Self raise WireError
 pub fn WireMessage::is_full_index(Self) -> Bool
 pub fn WireMessage::not_equal(Self, Self) -> Bool
-pub fn WireMessage::to_json(Self) -> Json
+pub fn WireMessage::to_json(Self) -> @json.Json
 pub fn WireMessage::to_repr(Self) -> @debug.Repr
 
 pub(all) struct X25519KeyPair {

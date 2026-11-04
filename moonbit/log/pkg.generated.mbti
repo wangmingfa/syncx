@@ -2,19 +2,20 @@
 package "wangmingfa/syncx/log"
 
 import {
+  "moonbitlang/core/json",
   "moonrockz/moon-lander-logging",
 }
 
 // Values
-pub fn critical(String, Array[Json]) -> Unit
+pub fn critical(String, Array[@json.Json]) -> Unit
 
-pub fn debug(String, Array[Json]) -> Unit
+pub fn debug(String, Array[@json.Json]) -> Unit
 
-pub fn error(String, Array[Json]) -> Unit
+pub fn error(String, Array[@json.Json]) -> Unit
 
 pub fn get() -> &@moon-lander-logging.Logger
 
-pub fn info(String, Array[Json]) -> Unit
+pub fn info(String, Array[@json.Json]) -> Unit
 
 pub fn init_file(String, minimum? : @moon-lander-logging.Level) -> Unit
 
@@ -22,9 +23,9 @@ pub fn init_logger(&@moon-lander-logging.Logger) -> Unit
 
 pub fn init_print(minimum? : @moon-lander-logging.Level) -> Unit
 
-pub fn trace(String, Array[Json]) -> Unit
+pub fn trace(String, Array[@json.Json]) -> Unit
 
-pub fn warn(String, Array[Json]) -> Unit
+pub fn warn(String, Array[@json.Json]) -> Unit
 
 // Errors
 

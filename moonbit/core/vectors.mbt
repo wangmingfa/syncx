@@ -12,13 +12,14 @@ pub type VersionVector = Map[String, Int64]
 
 ///|
 /// 两个版本向量的偏序关系,逐字对应 Node 侧 `VersionRelation`。
+#derive(Eq)
 pub(all) enum VersionRelation {
   Equal
   ANewer
   BNewer
   /// 互不包含:并发修改,即冲突。
   Concurrent
-} derive(Eq)
+}
 
 ///|
 pub extend VersionRelation with Eq::{equal, not_equal}

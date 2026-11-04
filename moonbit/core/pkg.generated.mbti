@@ -1,6 +1,10 @@
 // Generated using `moon info`, DON'T EDIT IT
 package "wangmingfa/syncx/core"
 
+import {
+  "moonbitlang/core/json",
+}
+
 // Values
 pub const BLOCK_SIZE : Int32 = 1048576
 
@@ -68,7 +72,7 @@ pub fn normalize_peer_list(Array[String]) -> Array[String]
 
 pub fn normalize_peer_url(String) -> String
 
-pub fn normalize_schedule(Json) -> Array[ScheduleRule]?
+pub fn normalize_schedule(@json.Json) -> Array[ScheduleRule]?
 
 pub fn parse_config(String) -> Config
 
@@ -97,12 +101,13 @@ pub(all) suberror FormatVersionError {
 pub fn FormatVersionError::to_text(Self) -> String
 
 // Types and methods
+#derive(Eq)
 pub(all) struct CivilMoment {
   year : Int32
   month : Int32
   day : Int32
   minutes : Int32
-} derive(Eq)
+}
 pub fn CivilMoment::at(Int32, Int32, Int32, Int32, Int32) -> Self
 pub fn CivilMoment::day_of_week(Self) -> Int32
 pub fn CivilMoment::equal(Self, Self) -> Bool
@@ -127,7 +132,7 @@ pub(all) struct Config {
   mut pause_on_metered_network : Bool?
   mut pause_on_low_battery : Bool?
   mut battery_pause_threshold : Int32?
-  mut sync_schedule : Json?
+  mut sync_schedule : @json.Json?
   mut schedule_override_until : Int32?
   mut holiday_auto_fetch : Bool?
   mut holiday_source_url : String?
@@ -136,7 +141,7 @@ pub(all) struct Config {
   mut fs_watch_fallback_scan_secs : Int32?
   mut format_version : Int32
   mut generated_by : String?
-  mut extra : Map[String, Json]
+  mut extra : Map[String, @json.Json]
 }
 pub fn Config::add_known_device(Self, String) -> Bool
 pub fn Config::add_peer(Self, String) -> Bool
@@ -148,30 +153,32 @@ pub fn Config::is_paused(Self) -> Bool
 pub fn Config::new() -> Self
 pub fn Config::remove_known_device(Self, String) -> Bool
 pub fn Config::share_enabled(Self) -> Bool
-pub fn Config::to_json(Self) -> Json
+pub fn Config::to_json(Self) -> @json.Json
 pub fn Config::versions_per_path(Self) -> Int32
 
+#derive(Eq)
 pub(all) enum DayPredicate {
   Any
   Workday
   Offday
   Dow(Array[Int32])
-} derive(Eq)
+}
 pub fn DayPredicate::equal(Self, Self) -> Bool
 pub fn DayPredicate::not_equal(Self, Self) -> Bool
 
 pub(all) struct DeviceConfig {
   id : String
   name : String?
-  mut extra : Map[String, Json]
+  mut extra : Map[String, @json.Json]
 }
 
+#derive(Eq)
 pub(all) enum FileStateRelation {
   Equal
   LocalNewer
   RemoteNewer
   Conflict
-} derive(Eq)
+}
 pub fn FileStateRelation::equal(Self, Self) -> Bool
 pub fn FileStateRelation::not_equal(Self, Self) -> Bool
 
@@ -182,10 +189,11 @@ pub(all) struct FileViews {
   clens : Array[Int64]
 }
 
+#derive(Eq)
 pub(all) struct IgnoreRule {
   pattern : String
   negated : Bool
-} derive(Eq)
+}
 pub fn IgnoreRule::equal(Self, Self) -> Bool
 pub fn IgnoreRule::not_equal(Self, Self) -> Bool
 
@@ -197,12 +205,13 @@ pub fn IgnoreRuleset::from_lines(Array[String]) -> Self
 pub fn IgnoreRuleset::is_ignored(Self, String, Bool) -> Bool
 pub fn IgnoreRuleset::last_matched(Self, String, Bool) -> IgnoreRule?
 
+#derive(Eq)
 pub(all) struct IgnoreVerdict {
   ignored : Bool
   hard : Bool
   rule : String?
   negated_rule : String?
-} derive(Eq)
+}
 pub fn IgnoreVerdict::equal(Self, Self) -> Bool
 pub fn IgnoreVerdict::not_equal(Self, Self) -> Bool
 
@@ -227,7 +236,7 @@ pub(all) struct PendingOffer {
   from_ip : String?
   status : String
   created_at : Int32
-  mut extra : Map[String, Json]
+  mut extra : Map[String, @json.Json]
 }
 
 pub(all) enum PlanAction {
@@ -241,17 +250,19 @@ pub fn PlanAction::path(Self) -> String
 
 type RollingFingerprint
 
+#derive(Eq)
 pub(all) struct ScheduleRule {
   days : DayPredicate
   windows : Array[ScheduleWindow]
-} derive(Eq)
+}
 pub fn ScheduleRule::equal(Self, Self) -> Bool
 pub fn ScheduleRule::not_equal(Self, Self) -> Bool
 
+#derive(Eq)
 pub(all) struct ScheduleWindow {
   from : Int32
   to : Int32
-} derive(Eq)
+}
 pub fn ScheduleWindow::equal(Self, Self) -> Bool
 pub fn ScheduleWindow::not_equal(Self, Self) -> Bool
 
@@ -277,35 +288,36 @@ pub(all) struct SharedFolder {
   receive_only : Bool?
   instance_id : String?
   mut paused : Bool?
-  schedule : Json?
+  schedule : @json.Json?
   git_sync : String?
   conflict_policy : String?
   strip_co_authored : Bool?
   on_demand : Bool?
   on_demand_dirs : Array[String]?
   paused_files : Array[String]?
-  folder_identity : Json?
+  folder_identity : @json.Json?
   marker_checked : Bool?
   git_last_commit_hash : String?
-  git_relay_pending : Json?
-  git_broadcast_pending : Json?
-  e2e_key : Json?
+  git_relay_pending : @json.Json?
+  git_broadcast_pending : @json.Json?
+  e2e_key : @json.Json?
   e2e_untrusted : Array[String]?
-  mut extra : Map[String, Json]
+  mut extra : Map[String, @json.Json]
 }
 pub fn SharedFolder::folder_id(Self) -> String
 pub fn SharedFolder::index_key(Self) -> String
 pub fn SharedFolder::is_paused(Self) -> Bool
 pub fn SharedFolder::is_receive_only(Self) -> Bool
-pub fn SharedFolder::to_json(Self) -> Json
+pub fn SharedFolder::to_json(Self) -> @json.Json
 pub fn SharedFolder::use_gitignore_enabled(Self) -> Bool
 
+#derive(Eq)
 pub(all) enum VersionRelation {
   Equal
   ANewer
   BNewer
   Concurrent
-} derive(Eq)
+}
 pub fn VersionRelation::equal(Self, Self) -> Bool
 pub fn VersionRelation::not_equal(Self, Self) -> Bool
 

@@ -44,6 +44,12 @@ pub(all) struct ApiOptions {
   /// 每请求读配置(status 是高频端点)。其他进程改配置(两后端切换场景)
   /// 重启后可见。
   mut device_infos : Array[Json]
+  /// `/api/status.devices` 动态提供器(None = 走静态快照 device_infos):
+  /// 装配层把「静态快照 + 活跃会话元数据」的合并视图折算成设备数组返回。
+  /// 会话是动态的,静态字段不够用 —— 用 provider 回调在 status 时拉当前值
+  /// (单线程 async,无锁)。会话注册表在 cli 装配层,api 只见闭包不见类型;
+  /// 装配层先构造 ApiOptions 再回填本字段(mut,打破闭包自引用)。
+  mut device_status : (() -> Array[Json])?
 }
 
 ///|
@@ -83,6 +89,7 @@ pub fn ApiOptions::new(
     settings,
     peer_port,
     device_infos,
+    device_status: None,
   }
 }
 
@@ -142,6 +149,24 @@ pub fn lan_addresses() -> Array[String] {
 }
 
 ///|
+/// 本机主机名(gethostname;失败/空 = None)。hello 宣告与 /api/status
+/// 共用同一取数口径。
+pub fn local_hostname() -> String? {
+  let hostname = c_status_hostname()
+  if hostname == "" {
+    None
+  } else {
+    Some(hostname)
+  }
+}
+
+///|
+/// 编译目标 OS(process.platform 口径)。hello 宣告与 /api/status 共用。
+pub fn platform_name() -> String {
+  c_status_platform()
+}
+
+///|
 /// `/api/status.settings` 全局设置段(设置弹窗读取;键名与 config.json 顶层
 /// 字段逐字一致,camelCase 对齐 Node 的 GlobalSettingsStatus)。本里程碑只
 /// 透出 fsWatch 两键,其余全局设置随各自里程碑补齐;字段缺省不上线与既有
@@ -194,9 +219,14 @@ pub fn status_json(options : ApiOptions) -> Json {
   map.set("entries", Json::number(0))
   map.set("tombstones", Json::number(0))
   map.set("folders", Json::array([]))
-  // 设备清单:装配层/设备增删路由维护的快照(见 ApiOptions.device_infos 注释);
-  // 缺省空数组 = 未注入(测试/最小装配),前端「还没有设备」兜底
-  map.set("devices", Json::array(options.device_infos))
+  // 设备清单:动态提供器(静态快照 + 活跃会话元数据的合并视图)优先;
+  // 缺省走装配层/设备增删路由维护的静态快照(见 ApiOptions.device_infos
+  // 注释),空数组 = 未注入(测试/最小装配),前端「还没有设备」兜底
+  let devices = match options.device_status {
+    Some(provider) => provider()
+    None => options.device_infos
+  }
+  map.set("devices", Json::array(devices))
   map.set("syncProgress", Json::array([]))
   map.set("offers", Json::array([]))
   // 编译目标 OS,口径对齐 Node 的 process.platform(前端 osIconKind 只认 darwin/win32/linux)

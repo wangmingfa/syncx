@@ -3,6 +3,7 @@ package "wangmingfa/syncx/api"
 
 import {
   "moonbitlang/async/aqueue",
+  "moonbitlang/core/json",
   "oboard/mocket",
   "wangmingfa/syncx/core",
   "wangmingfa/syncx/daemon",
@@ -33,7 +34,7 @@ pub fn default_config_path() -> String
 
 pub fn derive_password_hash(String, Bytes) -> Bytes
 
-pub fn device_infos_json(@core.Config) -> Array[Json]
+pub fn device_infos_json(@core.Config) -> Array[@json.Json]
 
 pub async fn handle_add_device(ApiOptions, @mocket.MocketEvent) -> &@mocket.Responder
 
@@ -63,7 +64,7 @@ pub async fn handle_upload_inspect(ApiOptions, @mocket.MocketEvent) -> &@mocket.
 
 pub async fn handle_upload_swap(ApiOptions, @mocket.MocketEvent) -> &@mocket.Responder
 
-pub fn health_json() -> Json
+pub fn health_json() -> @json.Json
 
 pub fn index_html() -> String
 
@@ -75,6 +76,8 @@ pub async fn load_account(String) -> AccountRecord?
 
 pub async fn load_config(String) -> @core.Config
 
+pub fn local_hostname() -> String?
+
 pub fn mount_static(@mocket.App, String) -> Unit
 
 pub fn new_status_hub(ApiOptions, @daemon.ActorHandle) -> StatusHub
@@ -84,6 +87,8 @@ pub fn now_ms() -> Int64
 pub fn parse_lan_addresses(String) -> Array[String]
 
 pub fn ping_frame(Int64) -> String
+
+pub fn platform_name() -> String
 
 pub fn safe_equal(String, String) -> Bool
 
@@ -97,13 +102,13 @@ pub async fn session_cookie_value(SessionPayload, String, String?) -> String
 
 pub fn session_secret(String) -> String
 
-pub fn settings_json(@core.Config) -> Json
+pub fn settings_json(@core.Config) -> @json.Json
 
 pub fn sign_session(SessionPayload, String) -> String
 
-pub fn status_frame(Json) -> String
+pub fn status_frame(@json.Json) -> String
 
-pub fn status_json(ApiOptions) -> Json
+pub fn status_json(ApiOptions) -> @json.Json
 
 pub fn sync_event_frame(String, @daemon.SyncEventRecord, Int64) -> String
 
@@ -132,11 +137,12 @@ pub(all) struct ApiOptions {
   dev_mode : Bool
   upload_inspect : (async (Bytes) -> Result[InspectedPackage, String])?
   upload_swap : (async (Bytes) -> Result[String, String])?
-  settings : Json?
+  settings : @json.Json?
   peer_port : Int32?
-  mut device_infos : Array[Json]
+  mut device_infos : Array[@json.Json]
+  mut device_status : (() -> Array[@json.Json])?
 }
-pub fn ApiOptions::new(device_id~ : String, control_token? : String, auth_file? : String?, config_file? : String?, actor? : @daemon.ActorHandle?, web_dist? : String?, on_shutdown? : (() -> Unit)?, dev_mode? : Bool, upload_inspect? : (async (Bytes) -> Result[InspectedPackage, String])?, upload_swap? : (async (Bytes) -> Result[String, String])?, settings? : Json?, peer_port? : Int32?, device_infos? : Array[Json]) -> Self
+pub fn ApiOptions::new(device_id~ : String, control_token? : String, auth_file? : String?, config_file? : String?, actor? : @daemon.ActorHandle?, web_dist? : String?, on_shutdown? : (() -> Unit)?, dev_mode? : Bool, upload_inspect? : (async (Bytes) -> Result[InspectedPackage, String])?, upload_swap? : (async (Bytes) -> Result[String, String])?, settings? : @json.Json?, peer_port? : Int32?, device_infos? : Array[@json.Json]) -> Self
 
 type DistProvider
 pub async fn DistProvider::get_contents(Self, StringView) -> &@mocket.Responder

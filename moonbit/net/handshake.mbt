@@ -82,6 +82,7 @@ pub(all) struct X25519KeyPair {
 ///
 /// 字段名与线上 JSON 完全一致(`type` / `x25519` / `sig` / `listenPort` /
 /// `caps`),不要改成 camelCase 之外的写法。
+#derive(Eq, Debug)
 pub(all) struct KxMessage {
   /// 线上判别字段,恒为 `"kx"`。
   kind : String
@@ -94,7 +95,7 @@ pub(all) struct KxMessage {
   listen_port : Int32?
   /// 能力标签。缺省 = 旧版对端,数据面退回文本编码。
   caps : Array[String]?
-} derive(Eq, Debug)
+}
 
 ///|
 pub extend KxMessage with Eq::{equal, not_equal}

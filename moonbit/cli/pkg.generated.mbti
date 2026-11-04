@@ -2,6 +2,7 @@
 package "wangmingfa/syncx/cli"
 
 import {
+  "moonbitlang/core/json",
   "wangmingfa/syncx/api",
   "wangmingfa/syncx/core",
 }
@@ -28,6 +29,10 @@ pub const MAX_UPLOAD_PACKAGE_BYTES : Int32 = 67108864
 pub const MIN_UPLOAD_PACKAGE_BYTES : Int32 = 4096
 
 pub const OLD_EXIT_WAIT_MS : Int64 = 120_000
+
+pub const RECONNECT_BASE_MS : Int32 = 1000
+
+pub const RECONNECT_MAX_MS : Int32 = 30000
 
 pub const UPDATE_MARKER_ENV : String = "SYNCX_UPDATE_MARKER"
 
@@ -71,6 +76,8 @@ pub async fn load_config_file(String) -> @core.Config
 
 pub let loopback_hosts : Array[String]
 
+pub fn merge_device_status(Array[@json.Json], PeerSessionRegistry) -> Array[@json.Json]
+
 pub async fn mutate_config(String, (@core.Config) -> Bool) -> Result[Unit, String]
 
 pub fn normalize_upgrade_tag(String?) -> String raise UpdateError
@@ -89,7 +96,9 @@ pub async fn perform_upload_swap(Bytes, String, min_bytes? : Int32, npm_cmd? : S
 
 pub fn pick_mode(Array[String]) -> Result[CliMode, String]
 
-pub fn pick_release(Array[Json], String?) -> ReleaseAsset?
+pub fn pick_release(Array[@json.Json], String?) -> ReleaseAsset?
+
+pub fn reconnect_delay_ms(Int32) -> Int32
 
 pub fn resolve_config_path(StartArgs) -> String
 
@@ -131,6 +140,23 @@ pub(all) enum CliMode {
   Start(StartArgs)
   Version
 }
+
+pub(all) struct PeerSessionMeta {
+  version : String?
+  platform : String?
+  hostname : String?
+  url : String?
+}
+
+pub struct PeerSessionRegistry {
+  // private fields
+}
+pub fn PeerSessionRegistry::lookup(Self, String) -> PeerSessionMeta?
+pub fn PeerSessionRegistry::new() -> Self
+pub fn PeerSessionRegistry::register(Self, String, PeerSessionMeta) -> Unit
+pub fn PeerSessionRegistry::register_hello(Self, String, String, String?, String?) -> Unit
+pub fn PeerSessionRegistry::size(Self) -> Int32
+pub fn PeerSessionRegistry::unregister(Self, String) -> Unit
 
 pub(all) struct ReleaseAsset {
   version : String
@@ -174,8 +200,8 @@ pub(all) struct UpdateJob {
   kill_parent_ms : Int64
   health_url : String?
 }
-pub fn UpdateJob::from_json(Json) -> Self?
-pub fn UpdateJob::to_json(Self) -> Json
+pub fn UpdateJob::from_json(@json.Json) -> Self?
+pub fn UpdateJob::to_json(Self) -> @json.Json
 
 pub(all) struct UpdateRestart {
   args : Array[String]

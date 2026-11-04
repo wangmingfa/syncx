@@ -14,6 +14,7 @@
 
 ///|
 /// 日期条件。
+#derive(Eq)
 pub(all) enum DayPredicate {
   /// 每天。
   Any
@@ -23,27 +24,29 @@ pub(all) enum DayPredicate {
   Offday
   /// 指定星期几,0=周日 … 6=周六(与 JS `Date.getDay()` 同口径)。
   Dow(Array[Int32])
-} derive(Eq)
+}
 
 ///|
 pub extend DayPredicate with Eq::{equal, not_equal}
 
 ///|
 /// 一个时间窗口,单位是「当天第几分钟」;`from > to` 表示跨午夜。
+#derive(Eq)
 pub(all) struct ScheduleWindow {
   from : Int32
   to : Int32
-} derive(Eq)
+}
 
 ///|
 pub extend ScheduleWindow with Eq::{equal, not_equal}
 
 ///|
 /// 一条规则 = 日期条件 ∧ 若干窗口(窗口之间 OR)。
+#derive(Eq)
 pub(all) struct ScheduleRule {
   days : DayPredicate
   windows : Array[ScheduleWindow]
-} derive(Eq)
+}
 
 ///|
 pub extend ScheduleRule with Eq::{equal, not_equal}
@@ -68,12 +71,13 @@ pub type IsWorkday = (Int32, Int32, Int32) -> Bool
 
 ///|
 /// 民用时刻:年/月/日 + 当天第几分钟。不含时区,由调用方负责解释。
+#derive(Eq)
 pub(all) struct CivilMoment {
   year : Int32
   month : Int32
   day : Int32
   minutes : Int32
-} derive(Eq)
+}
 
 ///|
 pub extend CivilMoment with Eq::{equal, not_equal}

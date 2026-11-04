@@ -8,10 +8,11 @@
 
 ///|
 /// 一条规则。`negated` 来自 `!` 前缀。
+#derive(Eq)
 pub(all) struct IgnoreRule {
   pattern : String
   negated : Bool
-} derive(Eq)
+}
 
 ///|
 pub extend IgnoreRule with Eq::{equal, not_equal}
@@ -272,6 +273,7 @@ pub fn IgnoreRuleset::last_matched(
 
 ///|
 /// 忽略判定解释(忽略规则编辑器实时测试器的响应体)。
+#derive(Eq)
 pub(all) struct IgnoreVerdict {
   ignored : Bool
   /// 命中硬忽略闸门(任何规则都解不开)。
@@ -280,7 +282,7 @@ pub(all) struct IgnoreVerdict {
   rule : String?
   /// 决定「放行」的负向规则文本(如 `!logs/`)。
   negated_rule : String?
-} derive(Eq)
+}
 
 ///|
 pub extend IgnoreVerdict with Eq::{equal, not_equal}

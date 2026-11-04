@@ -137,12 +137,13 @@ pub(all) suberror IndexStoreError {
 }
 pub fn IndexStoreError::to_text(Self) -> String
 
+#derive(@debug.Debug)
 pub(all) suberror PartialError {
   IoFailed(String)
   CorruptState(String)
   UnsafeTarget(String)
   BlockMismatch(String)
-} derive(@debug.Debug)
+}
 pub fn PartialError::to_repr(Self) -> @debug.Repr
 
 // Types and methods
@@ -260,22 +261,24 @@ pub(all) struct GitPushResult {
   error : String?
 }
 
+#derive(Eq)
 pub(all) enum GitSyncMode {
   Off
   Send
   Receive
   Full
-} derive(Eq)
+}
 pub fn GitSyncMode::equal(Self, Self) -> Bool
 pub fn GitSyncMode::not_equal(Self, Self) -> Bool
 pub fn GitSyncMode::receives(Self) -> Bool
 pub fn GitSyncMode::sends(Self) -> Bool
 
+#derive(Eq)
 pub(all) struct GitSyncPlan {
   watch_local : Bool
   auto_commit_remote : Bool
   relay : Bool
-} derive(Eq)
+}
 pub fn GitSyncPlan::equal(Self, Self) -> Bool
 pub fn GitSyncPlan::not_equal(Self, Self) -> Bool
 

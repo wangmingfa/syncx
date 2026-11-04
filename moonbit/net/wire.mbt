@@ -392,6 +392,7 @@ fn opt_self_info(
 ///     所以 core 里没有它(内核只关心「要不要传」,不关心「谁更新」);
 ///   - 版本向量在线上是 `[[device, count], ...]` 数组而不是对象 —— JS 的 `Map`
 ///     序列化就是这个形态,写成对象会让旧对端的 `new Map(e.version)` 拿到 `[]`。
+#derive(Eq, Debug)
 pub(all) struct WireEntry {
   path : String
   /// `[[deviceId, counter], ...]`。**顺序有意义**:Node 侧按 Map 迭代顺序写,
@@ -408,7 +409,7 @@ pub(all) struct WireEntry {
   /// cdh:CDC 块哈希;clens:CDC 块长度。等长且非空才算有效的 CDC 视图。
   cdh : Array[String]?
   clens : Array[Int64]?
-} derive(Eq, Debug)
+}
 
 ///|
 pub extend WireEntry with Eq::{equal, not_equal}
@@ -527,6 +528,7 @@ pub fn decode_index(body : String) -> Array[WireEntry] raise WireError {
 
 ///|
 /// 块请求(文本信封)。`priority` 只是本端排队决策,收到即忽略,可缺省。
+#derive(Eq, Debug)
 pub(all) struct WireBlockRequest {
   /// deviceId
   device_id : String
@@ -536,7 +538,7 @@ pub(all) struct WireBlockRequest {
   hash : String
   priority : Bool?
   cdc : Bool?
-} derive(Eq, Debug)
+}
 
 ///|
 pub extend WireBlockRequest with Eq::{equal, not_equal}
@@ -550,6 +552,7 @@ pub extend WireBlockRequest with @moonbitlang/core/debug.Debug::{to_repr}
 /// 这里是线上视角(data: String,base64)。`cdc` 缺省时整个键不出现 ——
 /// Node 侧是 `cdc?: boolean` + `...(cdc === true ? {cdc: true} : {})`,
 /// 发 `null` 会让旧对端的 `typeof` 判断走进非预期分支。
+#derive(Eq, Debug)
 pub(all) struct WireBlockResponse {
   /// deviceId
   device_id : String
@@ -559,7 +562,7 @@ pub(all) struct WireBlockResponse {
   hash : String
   data : String
   cdc : Bool?
-} derive(Eq, Debug)
+}
 
 ///|
 pub extend WireBlockResponse with Eq::{equal, not_equal}
@@ -643,6 +646,7 @@ fn WireBlockResponse::from_map(
 /// 线上格式:顶层 `kind` 判别字段(kebab-case),字段名 camelCase
 /// (`offerId`/`fromDeviceId`/`entryVersion`…)。未知 `kind` 解析抛错,
 /// 由调用方整条跳过 —— 旧对端会发本端不认识的 kind,连接不能被它掀翻。
+#derive(Eq, Debug)
 pub(all) enum ControlMessage {
   /// offerId
   FolderInvitation(
@@ -900,7 +904,7 @@ pub(all) enum ControlMessage {
     platform~ : String?,
     runtime~ : String?
   )
-} derive(Eq, Debug)
+}
 
 ///|
 pub extend ControlMessage with Eq::{equal, not_equal}
@@ -1491,6 +1495,7 @@ fn ControlMessage::from_map(
 /// 顶层 wire 消息(文本信封的明文体)。`index` 的 `full` 刻意做成 `Bool?`
 /// 而不是 `Bool`,让「缺省」这一状态在类型上就可见,调用方必须显式决定
 /// 怎么解释它(见文件头第 1 条)。
+#derive(Eq, Debug)
 pub(all) enum WireMessage {
   Index(
     folder~ : String,
@@ -1506,7 +1511,7 @@ pub(all) enum WireMessage {
   BlockRequest(folder~ : String, payload~ : WireBlockRequest)
   BlockResponse(folder~ : String, payload~ : WireBlockResponse)
   Control(payload~ : ControlMessage)
-} derive(Eq, Debug)
+}
 
 ///|
 pub extend WireMessage with Eq::{equal, not_equal}

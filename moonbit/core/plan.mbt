@@ -32,12 +32,13 @@ pub fn IndexEntry::has_cdc_view(self : IndexEntry) -> Bool {
 
 ///|
 /// 单路径的状态关系,逐字对应 Node 侧 `FileStateRelation`。
+#derive(Eq)
 pub(all) enum FileStateRelation {
   Equal
   LocalNewer
   RemoteNewer
   Conflict
-} derive(Eq)
+}
 
 ///|
 pub extend FileStateRelation with Eq::{equal, not_equal}

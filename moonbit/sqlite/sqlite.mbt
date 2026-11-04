@@ -241,10 +241,11 @@ pub fn Stmt::bind_null(self : Stmt, idx : Int32) -> Unit raise SqliteError {
 
 ///|
 /// step 的两种结局。
+#derive(Eq, Debug)
 pub(all) enum StepResult {
   Row
   Done
-} derive(Eq, Debug)
+}
 
 ///|
 /// 显式方法提升(消除 implicit_impl_as_method 警告)

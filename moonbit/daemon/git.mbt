@@ -62,12 +62,13 @@ const GIT_LOG_SENTINEL : String = "---SYNCX-END---"
 ///  - Send:检测并广播本地提交,但不自动提交对端通知
 ///  - Receive:收到通知时自动提交,但不广播本地提交(只进不出)
 ///  - Full:双向 —— 广播本地提交、自动提交对端通知,并向其余对端中继
+#derive(Eq)
 pub(all) enum GitSyncMode {
   Off
   Send
   Receive
   Full
-} derive(Eq)
+}
 
 ///|
 /// 显式暴露派生的 Eq 方法(避免隐式提升告警)。
@@ -103,6 +104,7 @@ pub fn GitSyncMode::receives(self : GitSyncMode) -> Bool {
 ///|
 /// 依 gitSync 模式推导的同步策略面:三个开关对应 Node session-manager 里
 /// checkGitCommits / flushPendingGitNotify / relayGitCommitNotify 的三处闸门。
+#derive(Eq)
 pub(all) struct GitSyncPlan {
   /// 扫描末尾检测本地新提交并广播(send / full)。
   watch_local : Bool
@@ -110,7 +112,7 @@ pub(all) struct GitSyncPlan {
   auto_commit_remote : Bool
   /// 镜像提交成功后向其余对端中继原始通知(仅 full;receive 只进不出)。
   relay : Bool
-} derive(Eq)
+}
 
 ///|
 /// 显式暴露派生的 Eq 方法(避免隐式提升告警)。

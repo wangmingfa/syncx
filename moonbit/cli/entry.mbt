@@ -120,80 +120,49 @@ pub async fn run_start(args : StartArgs) -> Unit {
     let handle = @daemon.start_session_actor(group, identity.device_id, specs) catch {
       e => fatal("索引库打开失败:\{@daemon.IndexStoreError::to_text(e)}")
     }
-    // 数据面:Secure 两阶段握手;server 引用由 handlers 的闭包在注册后补挂
+    // 数据面:Secure 两阶段握手;server 引用由 handlers 的闭包在注册后补挂。
+    // 会话注册表:对端元数据(hello 宣告)生命周期跟随会话,/api/status.devices
+    // 的在线态从这里拉(device_status provider 在装配段回填)。
+    let registry : PeerSessionRegistry = PeerSessionRegistry::new()
     let mut server_ref : @net.PeerServer? = None
     let session_sinks : Map[String, Map[String, @async.Queue[@daemon.Outbound]]] = Map([],
     )
     let handlers : @net.PeerServerHandlers = {
       on_connect: device => {
-        // 该设备被指派的每个目录各挂一条会话 + 一个出站泵
         match server_ref {
           Some(server) => {
-            let per_device : Map[String, @async.Queue[@daemon.Outbound]] = Map([])
-            session_sinks.set(device, per_device)
-            for folder in config.shared_folders {
-              if !folder.devices.contains(device) {
-                continue
-              }
-              let folder_id = folder.folder_id()
-              let sink : @async.Queue[@daemon.Outbound] = @async.Queue(
-                kind=Unbounded,
-              )
-              per_device.set(folder_id, sink)
-              let _ = handle.send(
-                @daemon.Cmd::PeerOpen(
-                  folder=folder_id,
-                  remote_device_id=device,
-                  sink~,
+            // 该设备被指派的每个目录各挂一条会话 + 一个出站泵(投递走本条入站连接)
+            spawn_session_pumps(group, handle, config, device, session_sinks, msg => {
+              server.send_message(device, msg) catch { _ => return false }
+              true
+            })
+            // 会话登记 + 主动 hello 宣告(版本/平台/主机名;生命周期跟随会话)
+            registry.register(
+              device,
+              { version: None, platform: None, hostname: None, url: None },
+            )
+            server.send_message(
+              device,
+              @net.WireMessage::Control(
+                payload=@net.make_hello(
+                  identity.device_id,
+                  @api.local_hostname(),
+                  Some(@api.platform_name()),
                 ),
-              )
-              // 出站泵:Outbound 帧 → wire 消息(对齐 actor_test 的驱动层口径)
-              group.spawn_bg(allow_failure=true, no_wait=true) <| () => {
-                let mut running = true
-                while running {
-                  let frame : @daemon.Outbound? = Some(sink.get()) catch {
-                    _ => None
-                  }
-                  match frame {
-                    Some(f) =>
-                      server.send_message(
-                        device,
-                        outbound_to_wire(folder_id, f),
-                      ) catch {
-                        _ => running = false
-                      }
-                    None => running = false
-                  }
-                }
-              }
-            }
+              ),
+            ) catch { _ => () }
           }
           None => ()
         }
-        ()
       },
       on_message: (device, message) => {
-        // wire 消息按 folder 路由进 actor;Control(配对/hello)是另一里程碑
-        match message_folder(message) {
-          Some(folder) => {
-            let _ = handle.send(
-              @daemon.Cmd::PeerMessage(
-                folder~,
-                remote_device_id=device,
-                message~,
-              ),
-            )
-            // 索引到达后补一条 ApplyPlan(驱动层职责,同 actor_test)
-            if message is Index(..) {
-              let _ = handle.send(@daemon.Cmd::ApplyPlan(folder))
-            }
-          }
-          None => ()
-        }
+        // hello 解析进会话注册表;其余 Control 维持丢弃(TODO:notify/中继);
+        // 数据面消息按 folder 路由进 actor
+        handle_peer_message(registry, handle, device, message)
       },
       on_binary: (_device, _data) => (), // 二进制信封:后续里程碑
       on_disconnect: device => {
-        // 先关出站队列叫停泵,再摘会话
+        // 先关出站队列叫停泵(每目录补发 PeerClose),再摘会话(元数据随之失效)
         match session_sinks.get(device) {
           Some(per_device) => {
             for pair in per_device {
@@ -206,6 +175,7 @@ pub async fn run_start(args : StartArgs) -> Unit {
           }
           None => ()
         }
+        registry.unregister(device)
       },
       on_error: reason => @log.error("peer 连接错误 {Reason}", [Json::string(reason)]),
     }
@@ -219,6 +189,14 @@ pub async fn run_start(args : StartArgs) -> Unit {
     server_ref = Some(peer_server)
     group.spawn_bg(allow_failure=true, no_wait=true) <| () => {
       peer_server.listen()
+    }
+    // 出站拨号 + 断线重连:config.peers 每个 ws:// 地址一条常驻循环(地址
+    // 学习与 mDNS 建连是后续包,这里只拨配置地址)
+    for peer_url in config.peers {
+      let url = peer_url
+      group.spawn_bg(allow_failure=true, no_wait=true) <| () => {
+        outbound_peer_loop(registry, identity, config, handle, group, session_sinks, url, peer_port)
+      }
     }
     // mDNS 广播:组播环境不可用(沙箱/无网)只警告,不阻塞启动
     let discovery : @net.Discovery? = Some(
@@ -319,6 +297,10 @@ pub async fn run_start(args : StartArgs) -> Unit {
       upload_inspect=Some(upload_inspect_fn),
       upload_swap=Some(upload_swap_fn),
     )
+    // 设备清单动态提供器:静态快照 + 会话注册表的合并视图(先构造后回填,
+    // 打破闭包对 api_options 的自引用;单线程 async 无锁)
+    api_options.device_status = Some(() =>
+      merge_device_status(api_options.device_infos, registry))
     @api.serve(api_options, "\{control_host}:\{control_port}")
   }
 }

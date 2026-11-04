@@ -37,13 +37,14 @@ pub fn IdentityError::to_text(self : IdentityError) -> String {
 
 ///|
 /// 设备身份:Ed25519 密钥对 + 由公钥派生的 Device ID。
+#derive(Eq, Debug)
 pub(all) struct DeviceIdentity {
   device_id : String
   /// PEM 形态的公钥(`-----BEGIN PUBLIC KEY-----` 包裹的 SPKI)。
   public_key_pem : String
   /// PEM 形态的私钥(PKCS#8)。落盘与内存里都只传 PEM 文本,不含裸字节。
   private_key_pem : String
-} derive(Eq, Debug)
+}
 
 ///|
 pub extend DeviceIdentity with Eq::{equal, not_equal}
