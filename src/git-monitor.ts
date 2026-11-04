@@ -544,9 +544,17 @@ export interface AutoCommitResult {
 }
 
 /**
- * 执行自动提交:git add -A && git commit -m <message>。
+ * 执行自动提交:git add && git commit -m <message>。
  * 使用 --allow-empty 兜底:判定有无变更与 add 之间工作树可能被他程序改回,
  * 保证提交命令本身不因竞态失败。
+ *
+ * 范围收敛(changedFiles):镜像提交只 stage 通知宣称的那批文件,绝不再
+ * `add -A` 全吞 —— 否则「回声通知未结清 + 用户并发改动」时,用户的未提交
+ * 修改会被旧通知的消息打包带走(实测 2026-11-04:脚本改名被 devices 快照
+ * 的镜像消息吞掉)。changedFiles 为空(旧对端没给清单)才退回全量兜底。
+ * 内容已在本地(staged 无差异)时仍落一笔 --allow-empty 空提交:两端提交链
+ * 对齐是既有契约(git-sync 链路测试锚定),范围收敛后空提交不再吞任何内容,
+ * 链上多一笔镜像记录无害。
  *
  * 超时后探测:spawnSync 超时只保证「进程没在期限内退出」,不保证「提交没发生」
  * —— 慢盘 fsync、post-commit hook 卡顿都会让提交对象早已落盘而进程被杀。此时若
@@ -554,11 +562,13 @@ export interface AutoCommitResult {
  * 糊弄过去,同一镜像消息再吞一笔(把第一次提交之后到达的修改也提交进去)。
  * 因此失败路径先比对 HEAD:前进了且消息与本次一致 = 实际成功,按成功结算。
  */
-export function autoCommit(folderPath: string, message: string): AutoCommitResult {
+export function autoCommit(folderPath: string, message: string, changedFiles?: string[]): AutoCommitResult {
   const beforeHead = getLastCommitHash(folderPath);
   try {
-    // 先 stage 所有变更(含删除、新增),但把 syncx 的在途中间态挡在外面(见 SCRATCH_PATHSPECS)
-    gitSync(['add', '-A', '--', ...SCRATCH_PATHSPECS], {
+    // stage:有清单按清单精确 stage(含删除 —— `add -A -- path` 同样登记删除),
+    // 无清单退回全量;两种路径都把 syncx 的在途中间态挡在外面(见 SCRATCH_PATHSPECS)
+    const paths = (changedFiles ?? []).filter((s) => s.trim());
+    gitSync(['add', '-A', '--', ...(paths.length > 0 ? paths : SCRATCH_PATHSPECS)], {
       cwd: folderPath,
       stdio: ['ignore', 'ignore', 'pipe'],
       windowsHide: true,

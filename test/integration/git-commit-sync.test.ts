@@ -79,6 +79,17 @@ function git(repoPath: string, args: string[]): string {
   }).trim();
 }
 
+/** 工作树净断言:syncx 冲突副本(README.sync-conflict-*.md)是冲突处理流程的
+ *  合法残留 —— 镜像提交范围收敛后只 stage 通知清单文件,不再被 add -A 吞进镜像
+ *  历史,断言时排除这类副本行。 */
+function expectCleanExceptConflicts(repoPath: string): void {
+  const rest = git(repoPath, ['status', '--porcelain'])
+    .split('\n')
+    .filter((line) => line.trim() && !line.includes('sync-conflict-'))
+    .join('\n');
+  expect(rest).toBe('');
+}
+
 function commitAll(repoPath: string, message: string): string {
   git(repoPath, ['add', '-A']);
   git(repoPath, ['commit', '-qm', message]);
@@ -282,7 +293,7 @@ describe('git commit sync between two real daemons', () => {
       expect(autoCommitLines(b)).toBe(1);
       // 「不管本机有哪些改动,一次性全部提交」:B 的 HEAD 里应带上 a.txt,工作树干净
       expect(trackedFiles(b.share)).toContain('a.txt');
-      expect(git(b.share, ['status', '--porcelain'])).toBe('');
+      expectCleanExceptConflicts(b.share);
 
       // ---- 死循环防护:本用例的核心不变式 ----
       // B 的自动提交产生的是**另一个**哈希。若它被 B 的扫描当成「又有一次新提交」广播回
@@ -393,7 +404,7 @@ describe('git commit sync between two real daemons', () => {
       expect(autoCommitLines(b)).toBe(1);
       expect(trackedFiles(b.share)).toContain('big.bin');
       expect(git(b.share, ['cat-file', '-s', `HEAD:big.bin`])).toBe(String(size));
-      expect(git(b.share, ['status', '--porcelain'])).toBe('');
+      expectCleanExceptConflicts(b.share);
       expect(persistedBaseline(a)).toBe(git(a.share, ['rev-parse', 'HEAD']));
 
       await stopChildren();

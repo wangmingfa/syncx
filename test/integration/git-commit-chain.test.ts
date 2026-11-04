@@ -70,6 +70,17 @@ function git(repoPath: string, args: string[]): string {
   }).trim();
 }
 
+/** 工作树净断言:syncx 冲突副本(README.sync-conflict-*.md)是冲突处理流程的
+ *  合法残留 —— 镜像提交范围收敛后只 stage 通知清单文件,不再被 add -A 吞进镜像
+ *  历史,断言时排除这类副本行。 */
+function expectCleanExceptConflicts(repoPath: string): void {
+  const rest = git(repoPath, ['status', '--porcelain'])
+    .split('\n')
+    .filter((line) => line.trim() && !line.includes('sync-conflict-'))
+    .join('\n');
+  expect(rest).toBe('');
+}
+
 function commitAll(repoPath: string, message: string): string {
   git(repoPath, ['add', '-A']);
   git(repoPath, ['commit', '-qm', message]);
@@ -206,7 +217,7 @@ describe('git commit sync across a chain A—B—C', () => {
       // 第二跳:B 把**原始通知**中继给 C → C 也落一笔同样信息的提交
       await waitFor(() => headSubject(c.share) === message);
       expect(readFileSync(join(c.share, 'x.txt'), 'utf8')).toBe('hello from A');
-      expect(git(c.share, ['status', '--porcelain'])).toBe('');
+      expectCleanExceptConflicts(c.share);
 
       // 环路防护:C 提交后会向除来源(A)外的对端(= B)转发,但 B 入队前按原哈希去重,
       // 所以两边都到此为止 —— 再等十几轮扫描,三方提交数一律不再增长。

@@ -2045,6 +2045,10 @@ export class SyncSessionManager {
       const result = autoCommit(
         folder.path,
         folder.config.gitStripCoAuthored === true ? stripCoAuthoredBy(mirrorMessage) : mirrorMessage,
+        // 范围收敛:只 stage 通知宣称的文件 —— 工作树里用户并发的未提交改动
+        // 不属于这笔镜像提交,绝不能被 add -A 顺手打包(根治 2026-11-04 的
+        // 「脚本改名被回声镜像消息吞掉」事故)
+        msg.changedFiles,
       );
       if (result.success) {
         this.logger.info(`auto-commit success: ${folder.id} -> ${result.hash?.slice(0, 8)}`);
