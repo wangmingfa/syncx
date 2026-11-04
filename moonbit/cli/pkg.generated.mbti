@@ -32,6 +32,8 @@ pub const GIT_AUTO_COMMIT_RETRY_MS : Int64 = 60000
 
 pub const GIT_DRAIN_CAP_MS : Int64 = 60000
 
+pub const GIT_NOTIFY_MAX_RESENDS : Int32 = 5
+
 pub const HEALTH_MARKER_TIMEOUT_MS : Int64 = 30_000
 
 pub const MAX_UPLOAD_PACKAGE_BYTES : Int32 = 67108864
@@ -169,12 +171,24 @@ pub(all) struct DrainGate {
   blocked_since : Int64?
 }
 
+pub(all) struct GitCommitLedger {
+  notify : @net.ControlMessage
+  mut targets : Array[String]
+  mut attempts : Map[String, Int32]
+  broadcast : Bool
+}
+
 pub struct GitMirror {
   // private fields
 }
+pub async fn GitMirror::adopt_pending(Self) -> Unit
 pub async fn GitMirror::flush(Self) -> Unit
 pub fn GitMirror::has_slot(Self, String) -> Bool
-pub fn GitMirror::new(config_of~ : () -> @core.Config, registry~ : PeerSessionRegistry, senders~ : PeerSenders, handle~ : @daemon.ActorHandle) -> Self
+pub fn GitMirror::ledger_attempt_of(Self, String, String, broadcast? : Bool) -> Int32?
+pub fn GitMirror::ledger_targets(Self, String, broadcast? : Bool) -> Array[String]?
+pub fn GitMirror::new(config_of~ : () -> @core.Config, config_file~ : String, registry~ : PeerSessionRegistry, senders~ : PeerSenders, handle~ : @daemon.ActorHandle) -> Self
+pub fn GitMirror::on_git_ack(Self, String, String, String) -> Unit
+pub async fn GitMirror::on_local_git_notify(Self, @net.ControlMessage) -> Unit
 pub fn GitMirror::on_notify(Self, @net.ControlMessage, String?) -> Unit
 pub fn GitMirror::processed_size(Self) -> Int32
 pub fn GitMirror::slot_attempts(Self, String) -> Int32
@@ -213,6 +227,12 @@ pub(all) struct PendingGitNotify {
   mut retry_at : Int64?
   mut blocked_since : Int64?
   mut warned : Bool
+}
+
+pub(all) struct PushOutcome {
+  sent : Array[String]
+  offline : Array[String]
+  dropped : Array[String]
 }
 
 pub(all) struct ReleaseAsset {

@@ -83,7 +83,7 @@ pub async fn list_unpushed_commits(String, limit? : Int32) -> Array[GitCommitEnt
 
 pub async fn mtime_ms(String) -> Int64?
 
-pub fn new_session_actor(String, Array[FolderSpec]) -> SessionActor raise IndexStoreError
+pub fn new_session_actor(String, Array[FolderSpec], on_git_notify? : async (@net.ControlMessage) -> Unit) -> SessionActor raise IndexStoreError
 
 pub fn normalize_path(String) -> String
 
@@ -109,7 +109,7 @@ pub fn split_ext(String) -> (String, String)
 
 pub fn start_fs_watch(@async.TaskGroup[Unit], ActorHandle, () -> Array[FsWatchFolder], FsWatchOptions) -> WatchStats
 
-pub fn start_session_actor(@async.TaskGroup[Unit], String, Array[FolderSpec]) -> ActorHandle raise IndexStoreError
+pub fn start_session_actor(@async.TaskGroup[Unit], String, Array[FolderSpec], on_git_notify? : async (@net.ControlMessage) -> Unit) -> ActorHandle raise IndexStoreError
 
 pub fn strip_co_authored_lines(String) -> String
 

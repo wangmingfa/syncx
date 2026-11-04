@@ -255,7 +255,8 @@ fn close_session_sinks(
 ///     随后有没有真落成一笔镜像提交无关 —— 与 offer-receipt 同一口径;按
 ///     这一跳寻址而非消息署名来源,中继场景下署名来源在两跳之外没有会话),
 ///     随后通知交给镜像循环只入队不立即提交;
-///   - GitCommitAck:投递层回执,MoonBit 侧无台账,记日志销账;
+///   - GitCommitAck:投递层回执,按 (folderId, commitHash) 在台账上摘除
+///     该目标并落盘(同步回调入队,flush 每拍结算);
 ///   - 其余 Control 维持丢弃(TODO:notify 扫描触发 / 中继等后续包);
 ///   - 数据面消息路由进 actor。
 fn handle_peer_message(
@@ -290,7 +291,12 @@ fn handle_peer_message(
           }
         }
         GitCommitAck(from_device_id=sender, folder_id~, commit_hash~, ..) =>
-          log_git_commit_ack(sender, folder_id, commit_hash)
+          // 回执销账走台账(同步回调只能入队,摘账与落盘在 flush 每拍);
+          // 镜像不在场时降级为纯日志
+          match mirror {
+            Some(m) => m.on_git_ack(sender, folder_id, commit_hash)
+            None => log_git_commit_ack(sender, folder_id, commit_hash)
+          }
         // 其余 Control 维持丢弃(TODO:notify 扫描触发 / 中继等后续包)
         _ => ()
       }

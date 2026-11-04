@@ -8,15 +8,25 @@
 ///   - 镜像提交成功:回填检测基线(死循环防护)+ 记入去重集合 + 「full」
 ///     模式向其余对端**原样中继**(链式拓扑 A—B—C 的末端因此也能提交;
 ///     回到内容已齐的设备时工作树干净 → 跳过分支,链路不成环);
-///   - 与 Node 的差异(有意收窄,后续包):中继/广播不带待回执台账重发
-///     (投递一次,离线对端等下一条通知或人工干预);基线不落盘(重启后
-///     首轮只记基线,绝不重放历史);目录身份拦阻(gitBlockedByIdentity)
-///     与「未推送清单 UI」不做。
+///   - 发送侧可靠性台账(对齐 Node gitBroadcastPending / gitRelayPending +
+///     GIT_NOTIFY_MAX_RESENDS):本地提交的广播与镜像成功后的中继都按目标
+///     设备记账 —— 在线即发、离线不耗次数、重连补投、ack 销账、上限放弃;
+///     待回执目标落在 config.json 的 gitBroadcastPending / gitRelayPending
+///     (core 字段透传),重启/热重载后从盘上恢复(attempts 只在内存)。
+///   - 与 Node 的差异(有意收窄,后续包):基线不落盘(重启后首轮只记基线,
+///     绝不重放历史);目录身份拦阻(gitBlockedByIdentity)与「未推送清单
+///     UI」不做。
 
 ///|
 /// 自动重试上限(Node GIT_AUTO_COMMIT_MAX_ATTEMPTS 同值):次数用尽后停止
 /// 自动重试,通知槽保留 —— 手动重试与下一条通知都还要用它。
 pub const GIT_AUTO_COMMIT_MAX_ATTEMPTS : Int = 5
+
+///|
+/// git 通知补投上限(Node GIT_NOTIFY_MAX_RESENDS 同值):同一目标发送满
+/// 这个次数仍无回执就放弃并清账 —— 「本地写成功不等于送达」,但不回 ack 的
+/// 对端(旧版本/离线僵尸会话)不能无限占用台账。
+pub const GIT_NOTIFY_MAX_RESENDS : Int = 5
 
 ///|
 /// 失败退避间隔 ms(Node GIT_AUTO_COMMIT_RETRY_MS 同值):扫描/结算节拍
@@ -155,11 +165,37 @@ pub(all) struct PendingGitNotify {
 }
 
 ///|
+/// 发送侧待回执台账(单目录单笔,广播/中继两条槽各一;对应 Node
+/// GitCommitLedger):通知原样保存 + 仍未回执的目标设备 + 每目标尝试计数
+/// (仅内存,不落盘 —— 重启后重新计数,与 Node 同口径)。`broadcast` 区分
+/// 记账来源:true = 本地提交的广播槽,false = 镜像成功后的中继槽。
+pub(all) struct GitCommitLedger {
+  notify : @net.ControlMessage
+  /// 仍未销账的目标设备(拿到 ack 即摘;全部摘除即清账)。
+  mut targets : Array[String]
+  /// deviceId → 已发送次数(含首次投递;达到 GIT_NOTIFY_MAX_RESENDS 放弃)。
+  mut attempts : Map[String, Int]
+  broadcast : Bool
+}
+
+///|
+/// 一次按目标清单投递的结果(日志与落盘判断用):sent = 在线且写成功,
+/// offline = 无会话或写失败(离线不耗次数,继续挂账),dropped = 达到重发
+/// 上限被放弃(不再挂账)。
+pub(all) struct PushOutcome {
+  sent : Array[String]
+  offline : Array[String]
+  dropped : Array[String]
+}
+
+///|
 /// git 镜像循环主体:配置供应者(每次 flush 现读 —— 配置热重载下模式/
 /// 共享名单/剔除开关即插即拔)+ 会话注册表(drain 闸对账)+ 发送闭包表
 /// (中继)+ actor 句柄(基线回填与在途接收读数)+ 去重集合。
 pub struct GitMirror {
   priv config_of : () -> @core.Config
+  /// 配置文件路径(台账持久化:load → 改目录的 pending 位 → 原子写回)。
+  priv config_file : String
   priv registry : PeerSessionRegistry
   priv senders : PeerSenders
   priv handle : @daemon.ActorHandle
@@ -168,22 +204,34 @@ pub struct GitMirror {
   priv processed : Map[String, Bool]
   /// folder_id → 挂起通知槽(单笔)。
   priv slots : Map[String, PendingGitNotify]
+  /// folder_id → 广播台账(本地提交;本地检测回调经 entry 装配注入)。
+  priv broadcast_ledger : Map[String, GitCommitLedger]
+  /// folder_id → 中继台账(镜像成功后向其余对端转发)。
+  priv relay_ledger : Map[String, GitCommitLedger]
+  /// 已收未销的投递回执:handle_peer_message 是同步回调,而销账要异步落盘
+  /// —— 先入此队列,flush 每拍开头统一结算(单线程 async 下无锁)。
+  priv mut acks : Array[(String, String, String)]
 }
 
 ///|
 pub fn GitMirror::new(
   config_of~ : () -> @core.Config,
+  config_file~ : String,
   registry~ : PeerSessionRegistry,
   senders~ : PeerSenders,
   handle~ : @daemon.ActorHandle,
 ) -> GitMirror {
   {
     config_of,
+    config_file,
     registry,
     senders,
     handle,
     processed: Map([]),
     slots: Map([]),
+    broadcast_ledger: Map([]),
+    relay_ledger: Map([]),
+    acks: [],
   }
 }
 
@@ -199,6 +247,62 @@ pub fn GitMirror::slot_attempts(self : GitMirror, folder_id : String) -> Int {
   match self.slots.get(folder_id) {
     Some(s) => s.attempts
     None => -1
+  }
+}
+
+///|
+/// 观测:台账仍未销账的目标清单(None = 无台账;测试/观测用)。返回的是
+/// 内部数组的引用,只读勿改。
+pub fn GitMirror::ledger_targets(
+  self : GitMirror,
+  folder_id : String,
+  broadcast~ : Bool = true,
+) -> Array[String]? {
+  let ledger = self.ledger_of(folder_id, broadcast~)
+  match ledger {
+    Some(l) => Some(l.targets)
+    None => None
+  }
+}
+
+///|
+/// 观测:某目标已发送次数(无台账或无记录 = None;测试用)。
+pub fn GitMirror::ledger_attempt_of(
+  self : GitMirror,
+  folder_id : String,
+  device : String,
+  broadcast~ : Bool = true,
+) -> Int? {
+  match self.ledger_of(folder_id, broadcast~) {
+    Some(l) => l.attempts.get(device)
+    None => None
+  }
+}
+
+///|
+/// 按槽别取台账(broadcast=true 广播槽 / false 中继槽)。
+fn GitMirror::ledger_of(
+  self : GitMirror,
+  folder_id : String,
+  broadcast~ : Bool,
+) -> GitCommitLedger? {
+  if broadcast {
+    self.broadcast_ledger.get(folder_id)
+  } else {
+    self.relay_ledger.get(folder_id)
+  }
+}
+
+///|
+/// 按槽别摘台账引用(返回内存 Map 本体,调用方读写)。
+fn GitMirror::ledger_map_of(
+  self : GitMirror,
+  broadcast : Bool,
+) -> Map[String, GitCommitLedger] {
+  if broadcast {
+    self.broadcast_ledger
+  } else {
+    self.relay_ledger
   }
 }
 
@@ -298,9 +402,8 @@ pub fn GitMirror::on_notify(
 }
 
 ///|
-/// 收到投递回执:通知已到达并被对端**处理**。MoonBit 侧发送不带台账重发,
-/// 这里只销账记日志(与 Node onGitCommitAck 的台账摘除相比少了重发账本,
-/// 故为自由函数而非 GitMirror 方法)。
+/// 收到投递回执(mirror 不在场的降级路径;正常路径走 GitMirror::on_git_ack
+/// 入台账队列销账)。
 pub fn log_git_commit_ack(
   sender : String,
   folder_id : String,
@@ -317,6 +420,12 @@ pub fn log_git_commit_ack(
 /// 结算全部挂起通知(flush 轻量循环每拍调用;对应 Node flushPendingGitNotify,
 /// 逐槽闸门顺序与其一一对应)。目录条目在结算过程中可能被移除,先取键快照。
 pub async fn GitMirror::flush(self : GitMirror) -> Unit {
+  // 1) 回执销账先于补投:刚到的 ack 先摘目标,避免同一拍里对已送达设备
+  //    再补投一遍(竞态无害但白费流量)。
+  self.drain_acks()
+  // 2) 发送侧台账补投(广播/中继):在线才发、离线不耗次数、上限放弃。
+  self.retry_ledgers()
+  // 3) 既有挂起通知槽结算(接收侧;闸门顺序见下)。
   let ids : Array[String] = []
   for id, _ in self.slots {
     ids.push(id)
@@ -539,8 +648,9 @@ fn GitMirror::source_away(self : GitMirror, via : String?) -> Bool {
 ///|
 /// 把一笔远端提交通知**原样**中继给本机该目录的其余对端(不含通知来源)。
 /// 不改写消息任何字段:fromDeviceId 仍是最初那台提交设备,commitHash 仍是
-/// 它的哈希,中继设备自己的镜像哈希从头到尾不出门。MoonBit 不带台账重发:
-/// 离线对端记一条 deferred 日志,等下一条通知或人工干预。
+/// 它的哈希,中继设备自己的镜像哈希从头到尾不出门。中继走台账:目标记账
+/// 后补投/销账/放弃与广播槽同一套(push_targets);对端已从来源直收过同一
+/// 笔通知时靠 processedRemoteCommits 去重 + 干净树跳过兜底。
 async fn GitMirror::relay(
   self : GitMirror,
   plan : @daemon.GitSyncPlan,
@@ -553,42 +663,608 @@ async fn GitMirror::relay(
     // 'receive' 只进不出:这种模式的设备不向对端发任何 git 提交消息
     return
   }
-  let wire : @net.WireMessage = @net.WireMessage::Control(payload=notify)
-  let sent : Array[String] = []
-  let offline : Array[String] = []
+  // 目标 = 共享设备 − 通知来源(不回投来源;全部离线也记账,重连补投)
+  let targets : Array[String] = []
   for device in folder.devices {
-    if device == from_id {
-      continue
-    }
-    if self.senders.send_to(device, wire) {
-      sent.push(device)
-    } else {
-      offline.push(device)
+    if device != from_id {
+      targets.push(device)
     }
   }
+  if targets.is_empty() {
+    return
+  }
+  let folder_id = folder.folder_id()
+  let ledger : GitCommitLedger = {
+    notify,
+    targets,
+    attempts: Map([]),
+    broadcast: false,
+  }
+  self.relay_ledger.set(folder_id, ledger)
+  let outcome = self.push_targets(folder_id, ledger)
   let h = hash8(hash)
-  if sent.length() > 0 {
+  if outcome.sent.length() > 0 {
     @log.info("git commit relayed: {Folder} {Hash8} -> {Targets}", [
-      Json::string(folder.folder_id()),
+      Json::string(folder_id),
       Json::string(h),
-      Json::string(sent.join(", ")),
+      Json::string(outcome.sent.join(", ")),
     ])
   }
-  if offline.length() > 0 {
+  if outcome.offline.length() > 0 {
     @log.info(
       "git commit relay deferred: {Folder} {Hash8} (offline: {Targets})",
       [
-        Json::string(folder.folder_id()),
+        Json::string(folder_id),
         Json::string(h),
-        Json::string(offline.join(", ")),
+        Json::string(outcome.offline.join(", ")),
+      ],
+    )
+  }
+  // 全部目标当场放弃(上限清零的极端:targets 只有一个且已满 5 次)或仍有
+  // 挂账,都按现状落盘;挂账非空则保留台账等补投
+  if ledger.targets.is_empty() {
+    let _ = self.relay_ledger.remove(folder_id)
+  }
+  self.persist_ledgers(folder_id)
+}
+
+// ==================== 发送侧可靠性台账(补投/销账/恢复) ====================
+
+///|
+/// 本地提交的广播入口(actor 检测回调经 entry 装配注入):按该目录共享设备
+/// 全量记账后投递 —— 在线即发、离线挂账等补投;对应 Node broadcastGitCommit。
+/// 模式闸与本机共享目录现读:目录删除 / 不启用发送(gitSync off / receive)
+/// 的提交不广播。
+pub async fn GitMirror::on_local_git_notify(
+  self : GitMirror,
+  notify : @net.ControlMessage,
+) -> Unit {
+  let (folder_id, hash, message, changed) = match notify {
+    GitCommitNotify(
+      folder_id~,
+      commit_hash~,
+      commit_message~,
+      changed_files~,
+      ..
+    ) => (folder_id, commit_hash, commit_message, changed_files)
+    _ => return
+  }
+  let folder = match self.folder_of(folder_id) {
+    Some(f) => f
+    None => {
+      @log.debug("git commit broadcast for unknown folder {Folder}, ignored", [
+        Json::string(folder_id),
+      ])
+      return
+    }
+  }
+  let plan = @daemon.git_sync_plan(@daemon.git_sync_mode_of(folder.git_sync))
+  if !plan.watch_local {
+    // off / receive 只进不出:不广播
+    return
+  }
+  // 目标 = 该目录共享的全部设备(含当前离线的 —— 离线不耗次数,重连补投)
+  let targets : Array[String] = []
+  for device in folder.devices {
+    targets.push(device)
+  }
+  let ledger : GitCommitLedger = {
+    notify,
+    targets,
+    attempts: Map([]),
+    broadcast: true,
+  }
+  self.broadcast_ledger.set(folder_id, ledger)
+  let outcome = self.push_targets(folder_id, ledger)
+  let h = hash8(hash)
+  if outcome.sent.length() > 0 {
+    @log.info(
+      "git commit broadcast delivered: {Folder} {Hash8} \"{Subject}\" ({Files}) -> {Targets}",
+      [
+        Json::string(folder_id),
+        Json::string(h),
+        Json::string(first_line(message)),
+        Json::string(@daemon.git_files_desc(changed)),
+        Json::string(outcome.sent.join(", ")),
+      ],
+    )
+  }
+  if outcome.offline.length() > 0 {
+    @log.info(
+      "git commit broadcast pending (offline: {Targets}): {Folder} {Hash8}",
+      [
+        Json::string(outcome.offline.join(", ")),
+        Json::string(folder_id),
+        Json::string(h),
+      ],
+    )
+  }
+  // 目标全空(目录无共享设备)或全部当场放弃:不留台账,记录位清空
+  if ledger.targets.is_empty() {
+    let _ = self.broadcast_ledger.remove(folder_id)
+  }
+  self.persist_ledgers(folder_id)
+}
+
+///|
+/// 按台账的目标清单逐台投递(对应 Node pushGitNotifyTargets):在线且写成功
+/// → 计一次尝试并继续挂账等回执,达到上限即放弃;离线或写失败 → 挂账不动
+/// (离线不耗次数)。返回投递结果;调用方按 targets 空否决定清账落盘。
+async fn GitMirror::push_targets(
+  self : GitMirror,
+  folder_id : String,
+  ledger : GitCommitLedger,
+) -> PushOutcome {
+  let wire : @net.WireMessage = @net.WireMessage::Control(payload=ledger.notify)
+  let outcome : PushOutcome = { sent: [], offline: [], dropped: [] }
+  let pending : Array[String] = []
+  for device in ledger.targets {
+    if self.senders.send_to(device, wire) {
+      let tries = match ledger.attempts.get(device) {
+        Some(v) => v
+        None => 0
+      }
+      let tries = tries + 1
+      ledger.attempts.set(device, tries)
+      if tries >= GIT_NOTIFY_MAX_RESENDS {
+        outcome.dropped.push(device)
+        @log.warn(
+          "git commit notify abandoned after {Max} attempts: {Folder} {Hash8} -> {Device} (peer may not send acks)",
+          [
+            Json::number(GIT_NOTIFY_MAX_RESENDS.to_double()),
+            Json::string(folder_id),
+            Json::string(hash8(match ledger.notify {
+              GitCommitNotify(commit_hash~, ..) => commit_hash
+              _ => ""
+            })),
+            Json::string(device),
+          ],
+        )
+      } else {
+        outcome.sent.push(device)
+        pending.push(device)
+      }
+    } else {
+      // 离线:不耗次数,目标保留在账上,重连后由 retry_ledgers 补投
+      outcome.offline.push(device)
+      pending.push(device)
+    }
+  }
+  ledger.targets = pending
+  outcome
+}
+
+///|
+/// 台账补投(每拍 flush 开头跑;对应 Node retryGitCommitBroadcasts /
+/// retryGitCommitRelay 的合并版):逐槽对账 —— 目录删除/模式关断则整账作废,
+/// 共享名单收敛掉被移出的目标,暂停期间缓发(不耗次数),在线目标重发直至
+/// 销账或放弃。遍历用键快照,结算中可能增删。
+async fn GitMirror::retry_ledgers(self : GitMirror) -> Unit {
+  let keys : Array[(String, Bool)] = []
+  for id, _ in self.broadcast_ledger {
+    keys.push((id, true))
+  }
+  for id, _ in self.relay_ledger {
+    keys.push((id, false))
+  }
+  for (folder_id, is_broadcast) in keys {
+    let ledger = match self.ledger_of(folder_id, broadcast=is_broadcast) {
+      Some(l) => l
+      None => continue
+    }
+    let folder = match self.folder_of(folder_id) {
+      Some(f) => f
+      None => {
+        // 目录已从配置移除:没有共享名单可言,台账作废
+        let _ = self.ledger_map_of(is_broadcast).remove(folder_id)
+        self.persist_ledgers(folder_id)
+        continue
+      }
+    }
+    let plan = @daemon.git_sync_plan(@daemon.git_sync_mode_of(folder.git_sync))
+    // 模式闸:广播槽要 sends(本地提交外发),中继槽要 relay;模式关断即作废
+    // (热重载把 gitSync 改小后,存量台账不该再补投)
+    let needed = if is_broadcast { plan.watch_local } else { plan.relay }
+    if !needed {
+      let _ = self.ledger_map_of(is_broadcast).remove(folder_id)
+      self.persist_ledgers(folder_id)
+      continue
+    }
+    // 目标收敛:只剩仍在共享名单里的设备(被移出共享的目标不再补投)
+    let mut shrunk = false
+    let live : Array[String] = []
+    for device in ledger.targets {
+      if folder.devices.contains(device) {
+        live.push(device)
+      } else {
+        shrunk = true
+      }
+    }
+    if live.length() != ledger.targets.length() {
+      ledger.targets = live
+    }
+    if ledger.targets.is_empty() {
+      // 目标全被移出共享:清账落盘(WRN 不发 —— 名单变化是配置行为,不是故障)
+      let _ = self.ledger_map_of(is_broadcast).remove(folder_id)
+      self.persist_ledgers(folder_id)
+      continue
+    }
+    if shrunk {
+      self.persist_ledgers(folder_id)
+    }
+    // 暂停闸是中场休息:目录(或全局)暂停期间缓发,次数不涨
+    if folder.is_paused() {
+      continue
+    }
+    let _ = self.push_targets(folder_id, ledger)
+    if ledger.targets.is_empty() {
+      // 全部目标达到上限放弃:清账(WRN 已在 push_targets 逐台发出)
+      let _ = self.ledger_map_of(is_broadcast).remove(folder_id)
+      self.persist_ledgers(folder_id)
+    } else if self.any_dropped(ledger) {
+      self.persist_ledgers(folder_id)
+    }
+  }
+}
+
+///|
+/// 台账里是否存在已达上限的目标(决定是否需要把「少了目标」的现状落盘)。
+/// 判据与 push_targets 一致:attempts 记满即已放弃(目标已不在 targets)。
+fn GitMirror::any_dropped(
+  self : GitMirror,
+  ledger : GitCommitLedger,
+) -> Bool {
+  let _ = self
+  for _, tries in ledger.attempts {
+    if tries >= GIT_NOTIFY_MAX_RESENDS {
+      return true
+    }
+  }
+  false
+}
+
+///|
+/// 收到投递回执的入队口(handle_peer_message 同步回调调用):日志立即记,
+/// 台账摘除与落盘交给 flush 每拍的 drain_acks(销账需要异步写配置文件)。
+pub fn GitMirror::on_git_ack(
+  self : GitMirror,
+  sender : String,
+  folder_id : String,
+  commit_hash : String,
+) -> Unit {
+  @log.info("git commit acked by {Device}: {Folder} {Hash8}", [
+    Json::string(sender),
+    Json::string(folder_id),
+    Json::string(hash8(commit_hash)),
+  ])
+  self.acks.push((sender, folder_id, commit_hash))
+}
+
+///|
+/// 结算回执队列:广播槽优先、中继槽次之(同一笔通知只挂其中一条槽)。
+/// 按 (folderId, commitHash) 匹配台账,命中即从 targets 摘除该设备;摘空
+/// 即清账落盘。Node onGitCommitAck 同口径。
+async fn GitMirror::drain_acks(self : GitMirror) -> Unit {
+  let batch = self.acks
+  self.acks = []
+  for (sender, folder_id, commit_hash) in batch {
+    if self.clear_ack_target(self.broadcast_ledger, sender, folder_id, commit_hash) {
+      continue
+    }
+    if self.clear_ack_target(self.relay_ledger, sender, folder_id, commit_hash) {
+      continue
+    }
+    // 无台账可销:重复回执或来源已放弃/作废,debug 记录即可
+    @log.debug(
+      "git commit ack without pending ledger: {Folder} {Hash8} from {Device}",
+      [
+        Json::string(folder_id),
+        Json::string(hash8(commit_hash)),
+        Json::string(sender),
       ],
     )
   }
 }
 
 ///|
-/// flush 常驻轻量循环:每 MIRROR_FLUSH_PERIOD_MS 结算一轮挂起通知。
+/// 在指定槽里销一笔回执:目录 + 哈希都匹配且设备在 targets 上才摘。摘除
+/// 后 targets 为空 → 移除台账;无论是否摘空,凡有变化都落盘。返回是否命中。
+async fn GitMirror::clear_ack_target(
+  self : GitMirror,
+  map : Map[String, GitCommitLedger],
+  sender : String,
+  folder_id : String,
+  commit_hash : String,
+) -> Bool {
+  match map.get(folder_id) {
+    Some(ledger) => {
+      let hash = match ledger.notify {
+        GitCommitNotify(commit_hash~, ..) => commit_hash
+        _ => return false
+      }
+      if hash != commit_hash {
+        return false
+      }
+      let mut idx = -1
+      for i, device in ledger.targets {
+        if device == sender {
+          idx = i
+          break
+        }
+      }
+      if idx < 0 {
+        return false
+      }
+      // 摘目标(重建数组,避免依赖 Array::remove 的取值语义)
+      let rest : Array[String] = []
+      for i, device in ledger.targets {
+        if i != idx {
+          rest.push(device)
+        }
+      }
+      ledger.targets = rest
+      if ledger.targets.is_empty() {
+        let _ = map.remove(folder_id)
+      }
+      self.persist_ledgers(folder_id)
+      true
+    }
+    None => false
+  }
+}
+
+///|
+/// 台账落盘:现读盘上配置 → 只改该目录的 gitBroadcastPending /
+/// gitRelayPending 两位 → 原子写回。targets 为空(或台账已不在内存)= 记录
+/// 位清空;attempts 不落盘(仅内存,重启重新计数)。已知取舍:与 API 写
+/// 路由的整文件保存之间存在丢更新小竞态 —— 单线程 async 的交错只发生在
+/// await 点之间,窗口极小,且台账记录本身幂等可重建(Node 整文件回写同源)。
+async fn GitMirror::persist_ledgers(self : GitMirror, folder_id : String) -> Unit {
+  // 读路径不失败(坏文件按全新配置处理,api 包内部兜底),只有写可能失败
+  let config = load_config_file(self.config_file)
+  let broadcast_json = match self.broadcast_ledger.get(folder_id) {
+    Some(l) => ledger_record_to_json(l)
+    None => None
+  }
+  let relay_json = match self.relay_ledger.get(folder_id) {
+    Some(l) => ledger_record_to_json(l)
+    None => None
+  }
+  let mut found = false
+  for i, folder in config.shared_folders {
+    if folder.folder_id() == folder_id {
+      found = true
+      config.shared_folders[i] = {
+        ..folder,
+        git_broadcast_pending: broadcast_json,
+        git_relay_pending: relay_json,
+      }
+    }
+  }
+  if !found {
+    // 目录已不在配置:没有记录位可写(内存侧的作废由 retry_ledgers 收口)
+    return
+  }
+  save_config_atomic(self.config_file, config) catch {
+    e => {
+      @log.warn("git ledger persist failed: {Detail}", [
+        Json::string(CliError::to_text(e)),
+      ])
+    }
+  }
+}
+
+///|
+/// 台账恢复(重启 / 配置热重载时调用):盘上 gitBroadcastPending /
+/// gitRelayPending → 内存台账。内存已有的目录跳过(以内存为准);attempts
+/// 不恢复(重新计数);坏记录警告跳过不掀桌。对应 Node readGitPending 在
+/// 目录构建与热重载两处恢复的语义。
+pub async fn GitMirror::adopt_pending(self : GitMirror) -> Unit {
+  // 读路径不失败(坏文件按全新配置处理),恢复只读不写
+  let config = load_config_file(self.config_file)
+  for folder in config.shared_folders {
+    let id = folder.folder_id()
+    match folder.git_broadcast_pending {
+      Some(json) =>
+        if !self.broadcast_ledger.contains(id) {
+          match ledger_record_from_json(json, id, true) {
+            Some(ledger) => {
+              self.broadcast_ledger.set(id, ledger)
+              @log.info(
+                "git broadcast ledger restored: {Folder} -> {Targets}",
+                [
+                  Json::string(id),
+                  Json::string(ledger.targets.join(", ")),
+                ],
+              )
+            }
+            None => {
+              @log.warn("git broadcast ledger record malformed, ignored: {Folder}", [
+                Json::string(id),
+              ])
+            }
+          }
+        }
+      None => ()
+    }
+    match folder.git_relay_pending {
+      Some(json) =>
+        if !self.relay_ledger.contains(id) {
+          match ledger_record_from_json(json, id, false) {
+            Some(ledger) => {
+              self.relay_ledger.set(id, ledger)
+              @log.info(
+                "git relay ledger restored: {Folder} -> {Targets}",
+                [Json::string(id), Json::string(ledger.targets.join(", "))],
+              )
+            }
+            None => {
+              @log.warn("git relay ledger record malformed, ignored: {Folder}", [
+                Json::string(id),
+              ])
+            }
+          }
+        }
+      None => ()
+    }
+  }
+}
+
+///|
+/// 台账记录 → Json(对应 Node toGitPendingRecord 的落盘形状:通知原样字段
+/// + 顶层 targets 数组,camelCase 与 Node 同键 —— 同一份 config.json 跨后端
+/// 互读)。targets 为空返回 None(记录位清空)。
+fn ledger_record_to_json(ledger : GitCommitLedger) -> Json? {
+  if ledger.targets.is_empty() {
+    return None
+  }
+  let (from_id, folder_id, hash, message, changed, diff_stat, subjects, parent) =
+    match ledger.notify {
+      GitCommitNotify(
+        from_device_id~,
+        folder_id~,
+        commit_hash~,
+        commit_message~,
+        changed_files~,
+        diff_stat~,
+        commit_subjects~,
+        parent_hash~,
+        ..
+      ) =>
+        (
+          from_device_id,
+          folder_id,
+          commit_hash,
+          commit_message,
+          changed_files,
+          diff_stat,
+          commit_subjects,
+          parent_hash,
+        )
+      _ => return None
+    }
+  let map : Map[String, Json] = Map([])
+  map.set("fromDeviceId", Json::string(from_id))
+  map.set("folderId", Json::string(folder_id))
+  map.set("commitHash", Json::string(hash))
+  map.set("commitMessage", Json::string(message))
+  map.set("changedFiles", json_strings(changed))
+  match diff_stat {
+    Some(s) => map.set("diffStat", Json::string(s))
+    None => ()
+  }
+  match subjects {
+    Some(ss) => map.set("commitSubjects", json_strings(ss))
+    None => ()
+  }
+  map.set("parentHash", Json::string(parent))
+  map.set("targets", json_strings(ledger.targets))
+  Some(Json::object(map))
+}
+
+///|
+/// Json → 台账记录(ledger_record_to_json 的逆变换)。folderId 以槽键为准
+/// (记录里冗余存了一份,以 Map 键为准可容忍目录改名后的旧记录);坏字段
+/// 一律按缺失降级,调用方对 None 只警告不掀桌。
+fn ledger_record_from_json(
+  value : Json,
+  folder_id : String,
+  broadcast : Bool,
+) -> GitCommitLedger? {
+  let obj : Map[String, Json] = match value {
+    Json::Object(map) => map
+    _ => return None
+  }
+  let targets = json_array_of_strings(obj.get("targets"))
+  if targets.is_empty() {
+    return None
+  }
+  let notify = @net.ControlMessage::GitCommitNotify(
+    from_device_id=json_req(obj, "fromDeviceId"),
+    folder_id~,
+    commit_hash=json_req(obj, "commitHash"),
+    commit_message=json_req(obj, "commitMessage"),
+    changed_files=json_array_of_strings(obj.get("changedFiles")),
+    diff_stat=json_opt(obj, "diffStat"),
+    commit_subjects=json_opt_array(obj, "commitSubjects"),
+    parent_hash=json_req(obj, "parentHash"),
+    version=None,
+    hostname=None,
+    platform=None,
+    runtime=None,
+  )
+  Some({ notify, targets, attempts: Map([]), broadcast })
+}
+
+///|
+/// 字符串数组 → Json 数组(台账记录编码用)。
+fn json_strings(items : Array[String]) -> Json {
+  let arr : Array[Json] = []
+  for item in items {
+    arr.push(Json::string(item))
+  }
+  Json::array(arr)
+}
+
+///|
+/// Map 里取必填字符串(缺/型不对 = 空串;台账字段全是自产,降级即可)。
+fn json_req(obj : Map[String, Json], key : String) -> String {
+  match obj.get(key) {
+    Some(Json::String(s)) => s
+    _ => ""
+  }
+}
+
+///|
+/// Map 里取可选字符串(缺 = None;非字符串值也按缺失降级)。
+fn json_opt(obj : Map[String, Json], key : String) -> String? {
+  match obj.get(key) {
+    Some(Json::String(s)) => Some(s)
+    _ => None
+  }
+}
+
+///|
+/// Map 里取可选字符串数组(缺 = None)。
+fn json_opt_array(obj : Map[String, Json], key : String) -> Array[String]? {
+  match obj.get(key) {
+    Some(Json::Array(arr)) => {
+      let out : Array[String] = []
+      for item in arr {
+        match item {
+          Json::String(s) => out.push(s)
+          _ => ()
+        }
+      }
+      Some(out)
+    }
+    _ => None
+  }
+}
+
+///|
+/// Map 里取字符串数组(缺 = 空数组)。
+fn json_array_of_strings(value : Json?) -> Array[String] {
+  match value {
+    Some(Json::Array(arr)) => {
+      let out : Array[String] = []
+      for item in arr {
+        match item {
+          Json::String(s) => out.push(s)
+          _ => ()
+        }
+      }
+      out
+    }
+    _ => []
+  }
+}
+
+///|
+/// flush 常驻轻量循环:先恢复盘上台账(重启恢复语义),之后每
+/// MIRROR_FLUSH_PERIOD_MS 结算一轮(回执销账 → 台账补投 → 挂起通知槽)。
 pub async fn mirror_flush_loop(mirror : GitMirror) -> Unit {
+  mirror.adopt_pending()
   for ;; {
     @async.sleep(MIRROR_FLUSH_PERIOD_MS)
     mirror.flush()

@@ -121,7 +121,20 @@ pub async fn run_start(args : StartArgs) -> Unit {
   // 6. 装配:actor → PeerServer → API → mDNS → 常驻
   let specs = build_folder_specs(config_dir, config)
   @async.with_task_group() <| group => {
-    let handle = @daemon.start_session_actor(group, identity.device_id, specs) catch {
+    // 本地提交通知的注入点(actor 创建早于镜像循环,先挂占位回调,镜像循环
+    // 就绪后换上真投递):actor 检测到新提交 → 这里 → 镜像台账广播
+    let git_notify_sink : Ref[async (@net.ControlMessage) -> Unit] = Ref(
+      _ => (),
+    )
+    let handle = @daemon.start_session_actor(
+      group,
+      identity.device_id,
+      specs,
+      on_git_notify=notify => {
+        let emit = git_notify_sink.val
+        emit(notify)
+      },
+    ) catch {
       e => fatal("索引库打开失败:\{@daemon.IndexStoreError::to_text(e)}")
     }
     // 数据面:Secure 两阶段握手;server 引用由 handlers 的闭包在注册后补挂。
@@ -138,10 +151,13 @@ pub async fn run_start(args : StartArgs) -> Unit {
     let closers : Map[String, () -> Unit] = Map([])
     let mirror : GitMirror = GitMirror::new(
       config_of=() => config_cell.val,
+      config_file~,
       registry~,
       senders~,
       handle~,
     )
+    // 本地提交广播接到镜像台账:在线即发、离线挂账补投、ack 销账
+    git_notify_sink.val = notify => mirror.on_local_git_notify(notify)
     group.spawn_bg(allow_failure=true, no_wait=true) <| () => {
       mirror_flush_loop(mirror)
     }
@@ -389,6 +405,9 @@ pub async fn run_start(args : StartArgs) -> Unit {
       )
       api_options.settings = Some(@api.settings_json(fresh))
       api_options.device_infos = @api.device_infos_json(fresh)
+      // git 台账恢复:热重载写入的盘上 pending 记录采纳进内存(与重启同
+      // 语义;内存已有的目录以内存为准)
+      mirror.adopt_pending()
       for device in registry.devices() {
         close_session_sinks(session_sinks, device)
         spawn_session_pumps(group, handle, fresh, device, session_sinks, msg =>

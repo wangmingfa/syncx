@@ -279,6 +279,10 @@ pub struct SessionActor {
   priv cell : SnapshotCell
   /// git 提交检测心跳的节拍计数(见 GIT_CHECK_TICKS;周期泵每 500ms 一拍)。
   priv mut git_tick : Int
+  /// 本地提交通知的出口(装配层注入):检测到新提交后由它投递。送达保证
+  /// (按目标设备记台账、离线补投、ack 销账)在装配层镜像循环实现;daemon
+  /// 单测不注入时为空操作。
+  priv on_git_notify : async (@net.ControlMessage) -> Unit
 }
 
 ///|
@@ -349,6 +353,7 @@ fn make_folder(spec : FolderSpec) -> Folder raise IndexStoreError {
 pub fn new_session_actor(
   device_id : String,
   specs : Array[FolderSpec],
+  on_git_notify~ : async (@net.ControlMessage) -> Unit = _ => (),
 ) -> SessionActor raise IndexStoreError {
   let folders : Array[Folder] = []
   for spec in specs {
@@ -360,6 +365,7 @@ pub fn new_session_actor(
     folders,
     cell: { value: { folders: [], total_entries: 0L, total_tombstones: 0L, }, },
     git_tick: 0,
+    on_git_notify,
   }
   actor.publish()
   actor
@@ -379,8 +385,9 @@ pub fn start_session_actor(
   group : @async.TaskGroup[Unit],
   device_id : String,
   specs : Array[FolderSpec],
+  on_git_notify~ : async (@net.ControlMessage) -> Unit = _ => (),
 ) -> ActorHandle raise IndexStoreError {
-  let actor = new_session_actor(device_id, specs)
+  let actor = new_session_actor(device_id, specs, on_git_notify~)
   let handle = actor.handle()
   group.spawn_bg(allow_failure=true) <| () => { actor.run() }
   // 周期泵:驱动重试到期 / 租约衰减 / 限速重放。actor 退出关队列后停止。
@@ -616,9 +623,12 @@ async fn SessionActor::check_folder_git_commits(self : SessionActor, folder : Fo
         platform=None,
         runtime=None,
       )
-      for _, session in folder.peers {
-        push_outbound(session, GitCommitNotify(notify))
-      }
+      // 投递走装配层注入的回调(默认空操作):cli 镜像循环按目标设备记台账
+      // —— 在线即发、离线挂账重连补投、ack 销账、上限放弃(可靠性语义见
+      // cli/gitmirror.mbt);不再直接推会话出站队列,投递只有台账一条路,
+      // 避免在线/离线两套路径各投一遍。
+      let emit = self.on_git_notify
+      emit(notify)
       @log.info(
         "git commit broadcast: {Folder} {Hash8} \"{Subject}\" ({Files})",
         [

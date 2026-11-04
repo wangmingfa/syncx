@@ -81,23 +81,48 @@ async fn gm_git_out(cwd : String, args : Array[String]) -> String {
 }
 
 ///|
+/// 镜像夹具的临时配置文件序号(同毫秒防同名)。
+let gm_seq : Ref[Int] = Ref(0)
+
+///|
 /// 镜像夹具:空目录 actor(镜像测试不依赖 actor 的目录行为;句柄只承载
-/// 基线回填命令与在途读数)+ 注入的注册表与发送闭包表。actor 的常驻循环
-/// 由 group 接管 —— 测试收尾必须 `handle.send(Shutdown)` 收工,否则
-/// with_task_group 等它到天荒地老。
-fn gm_mirror(
+/// 基线回填命令与在途读数)+ 注入的注册表与发送闭包表 + 配置的盘上副本
+/// (台账落盘/恢复走真实文件,与生产同语义)。actor 的常驻循环由 group
+/// 接管 —— 测试收尾必须 `handle.send(Shutdown)` 收工,否则 with_task_group
+/// 等它到天荒地老。
+async fn gm_mirror(
   group : @async.TaskGroup[Unit],
   config : @core.Config,
   registry : @cli.PeerSessionRegistry,
   senders : @cli.PeerSenders,
-) -> (@cli.GitMirror, @daemon.ActorHandle) {
+) -> (@cli.GitMirror, @daemon.ActorHandle, String) {
+  gm_seq.val = gm_seq.val + 1
+  let file = "/tmp/syncx-mb-gm-\{@daemon.now_ms()}-\{gm_seq.val}.json"
+  @fs.write_file(file, config.to_json().stringify() + "\n")
   let handle = @daemon.start_session_actor(group, "SELF-DEV", []) catch {
     e => {
       println("start_session_actor 失败: \{@daemon.IndexStoreError::to_text(e)}")
       panic()
     }
   }
-  (@cli.GitMirror::new(config_of=() => config, registry~, senders~, handle~), handle)
+  (
+    @cli.GitMirror::new(
+      config_of=() => config,
+      config_file=file,
+      registry~,
+      senders~,
+      handle~,
+    ),
+    handle,
+    file,
+  )
+}
+
+///|
+/// 读盘上配置里首个目录的 gitBroadcastPending 记录(台账落盘断言用)。
+async fn gm_disk_broadcast_pending(file : String) -> Json? {
+  let text = @fs.read_file(file).text()
+  @core.parse_config(text).shared_folders[0].git_broadcast_pending
 }
 
 ///|
@@ -147,7 +172,7 @@ async test "镜像 intake:未知目录/模式闸/去重/槽位覆盖" {
     let config = @core.parse_config(
       "{\"sharedFolders\":[{\"path\":\"/tmp/nope-a\",\"id\":\"f-full\",\"gitSync\":\"full\"},{\"path\":\"/tmp/nope-b\",\"id\":\"f-send\",\"gitSync\":\"send\"},{\"path\":\"/tmp/nope-c\",\"id\":\"f-off\"}]}",
     )
-    let (mirror, handle) = gm_mirror(
+    let (mirror, handle, _) = gm_mirror(
       group,
       config,
       @cli.PeerSessionRegistry::new(),
@@ -194,7 +219,7 @@ async test "镜像 flush:来源会话不在则挂起,在线且树干净则跳过
       "{\"sharedFolders\":[{\"path\":\"\{repo}\",\"id\":\"f1\",\"gitSync\":\"full\"}]}",
     )
     let registry = @cli.PeerSessionRegistry::new()
-    let (mirror, handle) = gm_mirror(group, config, registry, @cli.PeerSenders::new())
+    let (mirror, handle, _) = gm_mirror(group, config, registry, @cli.PeerSenders::new())
     // 来源 DEV-A 会话不在:drain 闸挡道,槽位保留不结算(60s 封顶未到)
     mirror.on_notify(gm_notify("DEV-A", "f1", "deadbeef"), Some("DEV-A"))
     assert_true(mirror.has_slot("f1"))
@@ -246,7 +271,7 @@ async test "镜像 flush:范围收敛 + 多笔脉络消息 + 中继与回声登�
       }
       true
     })
-    let (mirror, handle) = gm_mirror(group, config, registry, senders)
+    let (mirror, handle, _) = gm_mirror(group, config, registry, senders)
     // 多行消息 + 多笔 subjects:镜像提交的 body 要带整批脉络(旧→新,
     // 末笔的 subject 是正文本身,不重复附)
     let message = "syncx: 镜像远端提交\n\n远端正文第二行"
@@ -302,7 +327,7 @@ async test "镜像 flush:提交失败退避,通知不丢" {
       "DEV-A",
       { version: None, platform: None, hostname: None, url: None },
     )
-    let (mirror, handle) = gm_mirror(group, config, registry, @cli.PeerSenders::new())
+    let (mirror, handle, _) = gm_mirror(group, config, registry, @cli.PeerSenders::new())
     mirror.on_notify(gm_notify("DEV-A", "f1", "aaaa2222"), Some("DEV-A"))
     mirror.flush()
     // 失败:计数 +1、退避记账,通知槽保留(内容还在工作树里,到点再试)
@@ -324,7 +349,7 @@ async test "镜像热重载:配置单元格现读,gitSync 关闭即刻生效" {
     let config = @core.parse_config(
       "{\"sharedFolders\":[{\"path\":\"/tmp/nope-m\",\"id\":\"f1\",\"gitSync\":\"full\"}]}",
     )
-    let (mirror, handle) = gm_mirror(
+    let (mirror, handle, _) = gm_mirror(
       group,
       config,
       @cli.PeerSessionRegistry::new(),
@@ -342,6 +367,149 @@ async test "镜像热重载:配置单元格现读,gitSync 关闭即刻生效" {
     // 已挂的槽在下一拍 flush 被模式闸结算(off 只出不进)
     mirror.flush()
     assert_false(mirror.has_slot("f1"))
+    let _ = handle.send(@daemon.Cmd::Shutdown)
+  }
+}
+
+///|
+/// 台账夹具配置:单目录 full 模式、共享给 DEV-B(路径不要求真实存在 ——
+/// 广播/台账路径不碰工作树,结算路径才需要仓库)。
+fn gm_ledger_config() -> @core.Config {
+  @core.parse_config(
+    "{\"sharedFolders\":[{\"path\":\"/tmp/nope-ledger\",\"id\":\"f1\",\"gitSync\":\"full\",\"devices\":[\"DEV-B\"]}]}",
+  )
+}
+
+///|
+/// 记录 DEV-B 收到的 Control 帧(测试夹具;返回登记好的发送表)。
+fn gm_inbox_senders() -> (@cli.PeerSenders, Ref[Array[@net.ControlMessage]]) {
+  let inbox : Ref[Array[@net.ControlMessage]] = Ref([])
+  let senders = @cli.PeerSenders::new()
+  senders.register("DEV-B", msg => {
+    match msg {
+      Control(payload=n) => inbox.val.push(n)
+      _ => ()
+    }
+    true
+  })
+  (senders, inbox)
+}
+
+///|
+async test "发送台账:离线不耗次数,重启恢复,重连补投,ack 销账" {
+  @async.with_task_group() <| group => {
+    let config = gm_ledger_config()
+    let notify = gm_notify("SELF-DEV", "f1", "aaaa1111")
+    // DEV-B 先离线(空发送表),重连时再往同一张表登记 —— PeerSenders 是
+    // 可变注册表,「上线」就是把闭包挂进去
+    let registry = @cli.PeerSessionRegistry::new()
+    let senders = @cli.PeerSenders::new()
+    let (mirror, handle, file) = gm_mirror(group, config, registry, senders)
+    mirror.on_local_git_notify(notify)
+    assert_eq(mirror.ledger_targets("f1"), Some(["DEV-B"]))
+    assert_true(gm_is_none(mirror.ledger_attempt_of("f1", "DEV-B")))
+    match gm_disk_broadcast_pending(file) {
+      Some(Json::Object(pending)) =>
+        match pending.get("targets") {
+          Some(Json::Array(items)) => assert_true(items.length() > 0)
+          _ => panic()
+        }
+      _ => panic()
+    }
+    // 重启语义:全新镜像(内存台账为空)从盘上记录恢复(attempts 不恢复)
+    let mirror2 = @cli.GitMirror::new(
+      config_of=() => config,
+      config_file=file,
+      registry~,
+      senders~,
+      handle~,
+    )
+    mirror2.adopt_pending()
+    assert_eq(mirror2.ledger_targets("f1"), Some(["DEV-B"]))
+    // 重连补投:DEV-B 上线后下一拍 flush 送达,计数 +1,继续挂账等回执
+    let inbox : Ref[Array[@net.ControlMessage]] = Ref([])
+    senders.register("DEV-B", msg => {
+      match msg {
+        Control(payload=n) => inbox.val.push(n)
+        _ => ()
+      }
+      true
+    })
+    mirror2.flush()
+    assert_eq(inbox.val.length(), 1)
+    assert_eq(mirror2.ledger_attempt_of("f1", "DEV-B"), Some(1))
+    assert_eq(mirror2.ledger_targets("f1"), Some(["DEV-B"]))
+    // 回执到达:入队(同步回调)→ 下一拍 flush 销账,内存台账清空、盘上
+    // 记录位清掉
+    mirror2.on_git_ack("DEV-B", "f1", "aaaa1111")
+    mirror2.flush()
+    assert_true(gm_is_none(mirror2.ledger_targets("f1")))
+    assert_true(gm_is_none(gm_disk_broadcast_pending(file)))
+    // 收尾:叫停 actor 常驻循环
+    let _ = handle.send(@daemon.Cmd::Shutdown)
+  }
+}
+
+///|
+async test "发送台账:在线不回执,重发满上限放弃并清账" {
+  @async.with_task_group() <| group => {
+    // DEV-B 在线但永不回执(旧版本对端形态)
+    let (senders, inbox) = gm_inbox_senders()
+    let (mirror, handle, file) = gm_mirror(
+      group,
+      gm_ledger_config(),
+      @cli.PeerSessionRegistry::new(),
+      senders,
+    )
+    mirror.on_local_git_notify(gm_notify("SELF-DEV", "f1", "aaaa2222"))
+    // 首投计 1 次;此后每拍补投一次(flush 开头即补投),第 5 次达到上限放弃
+    mirror.flush()
+    assert_eq(mirror.ledger_attempt_of("f1", "DEV-B"), Some(2))
+    let mut tick = 0
+    while tick < 2 {
+      mirror.flush()
+      tick = tick + 1
+    }
+    assert_eq(mirror.ledger_attempt_of("f1", "DEV-B"), Some(4))
+    mirror.flush()
+    // 上限到点:目标放弃,台账清空、盘上记录清掉;总投递 1 + 4 = 5 次
+    assert_eq(inbox.val.length(), 5)
+    assert_true(gm_is_none(mirror.ledger_targets("f1")))
+    assert_true(gm_is_none(gm_disk_broadcast_pending(file)))
+    let _ = handle.send(@daemon.Cmd::Shutdown)
+  }
+}
+
+///|
+async test "发送台账:盘上遗留记录恢复后,模式关断即作废清账" {
+  @async.with_task_group() <| group => {
+    // 上一实例遗留的待回执记录直接写在盘上配置里(重启场景);内存配置
+    // 则是同一目录的现行值(full 模式,无 pending)—— 两份刻意不同步,
+    // 恢复只认盘上记录,模式闸只认内存现值
+    let config = gm_ledger_config()
+    gm_seq.val = gm_seq.val + 1
+    let file = "/tmp/syncx-mb-gm-\{@daemon.now_ms()}-\{gm_seq.val}.json"
+    let legacy = "{\"sharedFolders\":[{\"path\":\"/tmp/nope-ledger\",\"id\":\"f1\",\"gitSync\":\"full\",\"devices\":[\"DEV-B\"],\"gitBroadcastPending\":{\"fromDeviceId\":\"SELF-DEV\",\"folderId\":\"f1\",\"commitHash\":\"aaaa9999\",\"commitMessage\":\"legacy\",\"changedFiles\":[\"a.txt\"],\"parentHash\":\"0000000\",\"targets\":[\"DEV-B\"]}}]}"
+    @fs.write_file(file, legacy)
+    // 恢复:遗留记录采纳进内存台账(镜像循环启动首拍的同款语义)
+    let handle = @daemon.start_session_actor(group, "SELF-DEV", []) catch {
+      _ => panic()
+    }
+    let mirror2 = @cli.GitMirror::new(
+      config_of=() => config,
+      config_file=file,
+      registry=@cli.PeerSessionRegistry::new(),
+      senders=@cli.PeerSenders::new(),
+      handle~,
+    )
+    mirror2.adopt_pending()
+    assert_eq(mirror2.ledger_targets("f1"), Some(["DEV-B"]))
+    // 热重载把 gitSync 改为 off(内存现值;供应者闭包每次现读):下一拍
+    // flush 模式闸作废台账,盘上记录一并清掉 —— 关掉发送的目录不该再补投
+    config.shared_folders[0] = { ..config.shared_folders[0], git_sync: Some("off") }
+    mirror2.flush()
+    assert_true(gm_is_none(mirror2.ledger_targets("f1")))
+    assert_true(gm_is_none(gm_disk_broadcast_pending(file)))
     let _ = handle.send(@daemon.Cmd::Shutdown)
   }
 }
