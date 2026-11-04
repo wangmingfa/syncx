@@ -39,7 +39,7 @@ use syncx_api::status::{
     ScheduleBanner, ScheduleState, StatusExtras,
 };
 use syncx_api::ws::{StatusHub, Timings};
-use syncx_core::ignore::IgnoreRuleset;
+use syncx_core::ignore::{is_hard_ignored, IgnoreRuleset};
 use syncx_core::schedule::{
     format_schedule_summary, next_schedule_change, within_schedule, CivilMoment,
 };
@@ -52,7 +52,7 @@ use syncx_daemon::watcher::{
 use syncx_net::wire::ControlMessage;
 use syncx_net::{connect_peer, start_discovery, start_peer_server, DeviceIdentity, Discovery};
 
-use super::{compare, git_sync, offers, selfheal, RuntimeOps};
+use super::{compare, composed_ignore_lines, git_sync, offers, selfheal, RuntimeOps};
 use crate::args;
 use crate::terminal::TerminalHub;
 use crate::update;
@@ -1101,6 +1101,11 @@ fn action_name(action: syncx_daemon::peer::SyncAction) -> &'static str {
 /// 监听没有意义;恢复后的重建由巡检完成。`unknown`(存量未采集)与
 /// `remounted-known` 放行,扫描管线的结构守卫照常兜底。目录级暂停已足够:
 /// 全局暂停时既有扫描管线照常运行(watcher 只是触发器,语义不需要额外收窄)。
+///
+/// 每个放行目录都注入事件过滤谓词(见 [`WatchFolderSpec::filter`]):2026-10 实测
+/// 事故 —— WebStorm 后台 git 集成每 ~2s 刷一次 .git/index,macOS 递归监听把 .git
+/// 子树事件照单全收,旧实现「事件只当触发器」让 daemon 以 ~95% CPU 连续全量重扫
+/// 数万轮。`.git` 对同步语义是硬忽略,监听层同样不该看见它。
 fn watch_specs(config: &Config) -> Vec<WatchFolderSpec> {
     if !config.fs_watch_enabled() {
         return Vec::new();
@@ -1115,9 +1120,28 @@ fn watch_specs(config: &Config) -> Vec<WatchFolderSpec> {
                     "missing" | "changed" | "remounted"
                 )
         })
-        .map(|folder| WatchFolderSpec {
-            id: folder.folder_id(),
-            root: PathBuf::from(&folder.path),
+        .map(|folder| {
+            // 谓词闭包捕获规则对象:与扫描同一来源(composed_ignore_lines = 内置 +
+            // .gitignore + .syncxignore,folder_specs 建扫描规则集用同一函数)+
+            // 同一判据(is_hard_ignored 硬闸门 + IgnoreRuleset 的 gitignore 语义,
+            // 见 syncx-core::ignore)。每次对账都重建谓词,hub 侧换表项即可热替换,
+            // 不会陈旧 —— 对齐 Node 7419b03 的 syncWatchers/filterEvent 注入。
+            //
+            // is_dir 一律按 false 传:fs 事件分不出文件还是目录,按文件语义判最保守
+            // —— 目录规则仍经前缀回溯命中「被忽略目录下的文件」(node_modules/x),
+            // 而「被忽略目录自身」的孤立事件放行,宁可多扫也不冒吞掉整棵子树变化的风险。
+            //
+            // daemon 自己写 .git 的场景(git 镜像提交)会被谓词滤掉 —— 这正是目的:
+            // .git 对同步语义是硬忽略,监听层没有理由再看见它;同步文件自身的写入
+            // 照常触发。
+            let rules = IgnoreRuleset::from_lines(&composed_ignore_lines(folder));
+            WatchFolderSpec {
+                id: folder.folder_id(),
+                root: PathBuf::from(&folder.path),
+                filter: Some(Arc::new(move |rel: &str| {
+                    is_hard_ignored(rel) || rules.is_ignored(rel, false)
+                })),
+            }
         })
         .collect()
 }
@@ -1867,6 +1891,39 @@ mod tests {
             ..Default::default()
         };
         assert!(watch_specs(&disabled).is_empty());
+    }
+
+    /// 谓词与扫描同源同判据的落点测试:watch_specs 注入的过滤闭包必须等于
+    /// 「硬忽略闸门 + composed_ignore_lines 规则集」(与 folder_specs 建扫描规则
+    /// 同一函数取行)。2026-10 事故的根治点 —— 见 watch_specs 的注释。
+    #[test]
+    fn watch_specs_injects_ignore_predicate_from_scan_source() {
+        let root = TempRoot::new("predicate");
+        // 盘上放一条目录规则:node_modules/ 应挡住子树事件、放行孤立目录事件
+        std::fs::write(root.0.join(".syncxignore"), "node_modules/\n").unwrap();
+        let config = Config {
+            shared_folders: vec![SharedFolder {
+                path: root.0.display().to_string(),
+                ..Default::default()
+            }],
+            ..Default::default()
+        };
+        let specs = watch_specs(&config);
+        assert_eq!(specs.len(), 1);
+        let filter = specs[0]
+            .filter
+            .as_ref()
+            .expect("放行目录必须注入过滤谓词");
+        // 硬忽略:任何规则都解不开,监听层与扫描同一闸门
+        assert!(filter(".git/index"), ".git 子树事件应丢弃(事故形态)");
+        assert!(filter(".GIT/config"), "硬忽略大小写不敏感");
+        assert!(!filter("src/a.txt"), "同步文件自身写入应照常触发");
+        // 目录规则按文件语义最保守:子树丢弃,孤立目录事件放行
+        assert!(filter("node_modules/x"), "被忽略目录下的事件应丢弃");
+        assert!(
+            !filter("node_modules"),
+            "被忽略目录自身的孤立事件放行(宁可多扫不可漏扫)"
+        );
     }
 
     #[test]

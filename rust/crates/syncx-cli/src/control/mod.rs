@@ -439,6 +439,22 @@ pub struct ControlLink {
     pub outbound: UnboundedSender<ControlMessage>,
 }
 
+/// 该目录此刻生效的忽略规则行(内置 + .gitignore + .syncxignore)。纯函数:只依赖
+/// 目录配置与磁盘内容。
+///
+/// 它是「与扫描同源」的落点:扫描管线的规则([`RuntimeOps::ignore_lines`] →
+/// actor 的 `FolderSpec.rules`)与 fs-watch 事件过滤谓词的装配
+/// (`assembly::watch_specs`)都从这里取行、都交给 `syncx_core::ignore` 判定 ——
+/// 两边一套真相,绝不造第二套判据。
+pub fn composed_ignore_lines(folder: &syncx_api::config::SharedFolder) -> Vec<String> {
+    let syncx_lines = syncx_api::ignorefile::read_syncx_ignore_lines(Path::new(&folder.path));
+    syncx_api::ignorefile::compose_ignore_lines(
+        Path::new(&folder.path),
+        folder.use_gitignore_enabled(),
+        &syncx_lines,
+    )
+}
+
 impl RuntimeOps {
     /// 当前进程的版本 / 主机名 / 平台。每条控制帧都带上,对端据此在状态页展示。
     pub fn self_info(&self) -> (String, Option<String>, Option<String>) {
@@ -653,12 +669,7 @@ impl RuntimeOps {
 
     /// 该目录此刻生效的忽略规则行(内置 + .gitignore + .syncxignore)。
     pub fn ignore_lines(&self, folder: &syncx_api::config::SharedFolder) -> Vec<String> {
-        let syncx_lines = syncx_api::ignorefile::read_syncx_ignore_lines(Path::new(&folder.path));
-        syncx_api::ignorefile::compose_ignore_lines(
-            Path::new(&folder.path),
-            folder.use_gitignore_enabled(),
-            &syncx_lines,
-        )
+        composed_ignore_lines(folder)
     }
 
     /// 从 actor 取某目录的整份索引(含墓碑)。目录不在 actor 里返回 `None`。

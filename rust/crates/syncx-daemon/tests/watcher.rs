@@ -5,10 +5,12 @@
 //! 断言用轮询 + 宽限期,不吃平台事件延迟的亏。
 
 use std::path::PathBuf;
+use std::sync::Arc;
 use std::time::Duration;
 
+use syncx_core::ignore::{is_hard_ignored, IgnoreRuleset};
 use syncx_daemon::watcher::{
-    FsWatchHub, RescanReason, RescanRequest, WatchFolderSpec, FS_WATCH_WINDOW,
+    EventFilter, FsWatchHub, RescanReason, RescanRequest, WatchFolderSpec, FS_WATCH_WINDOW,
 };
 
 /// 测试用短窗口。生产值是 [`FS_WATCH_WINDOW`](2 秒),这里缩 5 倍:
@@ -83,7 +85,15 @@ fn spec(id: &str, root: &std::path::Path) -> WatchFolderSpec {
     WatchFolderSpec {
         id: id.to_string(),
         root: root.to_path_buf(),
+        filter: None,
     }
+}
+
+/// 与生产装配(syncx-cli 的 watch_specs)同一套构造:硬忽略闸门 + 忽略规则集,
+/// isDir 按文件语义最保守(恒 false)。
+fn ignore_predicate(lines: &[&str]) -> EventFilter {
+    let rules = IgnoreRuleset::from_lines(&lines.iter().map(|s| s.to_string()).collect::<Vec<_>>());
+    Arc::new(move |rel: &str| is_hard_ignored(rel) || rules.is_ignored(rel, false))
 }
 
 #[tokio::test]
@@ -215,5 +225,91 @@ async fn sync_with_empty_specs_drops_all_watchers() {
         none.is_err(),
         "清单清空后不应再有重扫请求,实得 {:?}",
         none.ok().flatten()
+    );
+}
+
+/// 2026-10 实测事故的回归形态:WebStorm 后台 git 集成持续刷新 .git/index,macOS
+/// 递归监听把 .git 子树事件也报上来。忽略范围的事件必须在聚合之前被滤掉 ——
+/// 连写 .git/index 零重扫,同步文件自身写入照常触发(对齐 Node 7419b03)。
+#[tokio::test]
+async fn ignored_subtree_events_are_dropped_before_aggregation() {
+    let root = TempRoot::new("ignore-filter");
+    // 预置 .git 子树;监听挂上之后的全部 .git 事件都应被谓词丢弃
+    let git_dir = root.path().join(".git");
+    std::fs::create_dir_all(&git_dir).unwrap();
+    let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+    let hub = FsWatchHub::spawn(WINDOW, SWEEP, tx);
+    hub.sync(vec![WatchFolderSpec {
+        id: "f1".to_string(),
+        root: root.path().to_path_buf(),
+        filter: Some(ignore_predicate(&[])),
+    }]);
+    assert!(
+        wait_until(|| hub.health().healthy(), Duration::from_secs(5)).await,
+        "watcher 启动后应健康"
+    );
+
+    // 模拟风暴:批量连写 .git 子树 → 全部命中硬忽略,不应触发重扫
+    for index in 0..5 {
+        std::fs::write(git_dir.join("index"), format!("x{index}")).unwrap();
+        std::fs::write(git_dir.join("HEAD"), "y").unwrap();
+    }
+    let quiet = WINDOW + SWEEP + Duration::from_millis(700);
+    let none = tokio::time::timeout(quiet, rx.recv()).await;
+    assert!(
+        none.is_err(),
+        ".git 子树事件不应触发重扫,实得 {:?}",
+        none.ok().flatten()
+    );
+
+    // 同步文件自身的写入照常触发(语义红线:过滤仅限忽略范围)
+    std::fs::create_dir_all(root.path().join("src")).unwrap();
+    std::fs::write(root.path().join("src/a.txt"), "x").unwrap();
+    let request = next_matching(&mut rx, |r| r.reason == RescanReason::Watch)
+        .await
+        .expect("忽略范围之外的写入应照常触发重扫");
+    assert!(request.events >= 1, "保留事件应计入聚合,实得 {}", request.events);
+}
+
+/// 谓词热替换:hub 对账换入最新谓词即可,规则修改即刻生效,无事件空窗、
+/// 无重建风暴(重建会留下 Rebuild 请求 —— 用 reason 断言它没发生)。
+#[tokio::test]
+async fn predicate_hot_swap_takes_effect_without_rebuild() {
+    let root = TempRoot::new("hot-swap");
+    let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+    let hub = FsWatchHub::spawn(WINDOW, SWEEP, tx);
+    // 初版谓词丢弃一切(`**` 匹配任何相对路径)
+    hub.sync(vec![WatchFolderSpec {
+        id: "f1".to_string(),
+        root: root.path().to_path_buf(),
+        filter: Some(ignore_predicate(&["**"])),
+    }]);
+    assert!(
+        wait_until(|| hub.health().healthy(), Duration::from_secs(5)).await,
+        "watcher 启动后应健康"
+    );
+    std::fs::write(root.path().join("a.txt"), "x").unwrap();
+    let quiet = WINDOW + SWEEP + Duration::from_millis(700);
+    let none = tokio::time::timeout(quiet, rx.recv()).await;
+    assert!(
+        none.is_err(),
+        "谓词丢弃一切时不应触发重扫,实得 {:?}",
+        none.ok().flatten()
+    );
+
+    // 对账换入放宽后的谓词(规则热重载的形态):不改根、不拆 watcher
+    hub.sync(vec![WatchFolderSpec {
+        id: "f1".to_string(),
+        root: root.path().to_path_buf(),
+        filter: Some(ignore_predicate(&["nothing-real/"])),
+    }]);
+    std::fs::write(root.path().join("b.txt"), "y").unwrap();
+    let request = next_matching(&mut rx, |r| r.reason == RescanReason::Watch)
+        .await
+        .expect("换入新谓词后事件应照常触发");
+    assert!(request.events >= 1);
+    assert!(
+        hub.health().healthy(),
+        "热替换不应重建 watcher,健康度不应波动"
     );
 }
