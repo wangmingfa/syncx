@@ -6,6 +6,7 @@ import { afterEach, describe, expect, it } from 'vitest';
 
 import { loadOrCreateIdentity } from '../src/identity.js';
 import { createLogger } from '../src/logger.js';
+import type { Schedule } from '../src/schedule.js';
 import { SyncSessionManager } from '../src/session-manager.js';
 import { rmDir } from './helpers.js';
 
@@ -93,7 +94,7 @@ async function scanOnce(manager: SyncSessionManager): Promise<void> {
 }
 
 /** 「永远在窗口外」的目录时段:dow 空数组 = 没有任何一天命中。 */
-const NEVER_SCHEDULE = [{ days: { kind: 'dow', days: [] as number[] }, windows: [{ from: 1, to: 2 }] }];
+const NEVER_SCHEDULE: Schedule = [{ days: { kind: 'dow', days: [] }, windows: [{ from: 1, to: 2 }] }];
 
 afterEach(() => {
   for (const dir of cleanupDirs.splice(0)) {
