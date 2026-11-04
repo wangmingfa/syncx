@@ -628,6 +628,12 @@ pub fn build_app(options : ApiOptions) -> @mocket.App {
   app.get("/api/trash", event => handle_list_folder_trash(options, event))
   app.post("/api/trash/restore", event => handle_restore_folder_trash(options, event))
   app.post("/api/trash/purge", event => handle_purge_folder_trash(options, event))
+  // 空文件夹工具:盘点(只读)与删除(只 rmdir、绝不删文件;刻意不触发扫描、
+  // 不碰索引 —— 目录不是同步实体,删空目录没有任何东西需要广播,见 emptydirs.mbt)
+  app.get("/api/folders/empty-dirs", event => handle_list_empty_dirs(options, event))
+  app.post("/api/folders/empty-dirs/delete", event => {
+    handle_delete_empty_dirs(options, event)
+  })
   app.get("/api/devices", event => handle_list_devices(options, event))
   // 设备增删(前端添加/移除设备;POST 走 body,DELETE 走 ?deviceId= 查询参数)
   app.post("/api/devices", event => handle_add_device(options, event))

@@ -44,6 +44,8 @@ pub async fn handle_add_folder(ApiOptions, @mocket.MocketEvent) -> &@mocket.Resp
 
 pub async fn handle_auth_info(ApiOptions, @mocket.MocketEvent) -> &@mocket.Responder
 
+pub async fn handle_delete_empty_dirs(ApiOptions, @mocket.MocketEvent) -> &@mocket.Responder
+
 pub async fn handle_delete_folder_version(ApiOptions, @mocket.MocketEvent) -> &@mocket.Responder
 
 pub async fn handle_folder_git_strip_co_authored(ApiOptions, @mocket.MocketEvent) -> &@mocket.Responder
@@ -51,6 +53,8 @@ pub async fn handle_folder_git_strip_co_authored(ApiOptions, @mocket.MocketEvent
 pub async fn handle_folder_version_content(ApiOptions, @mocket.MocketEvent) -> &@mocket.Responder
 
 pub async fn handle_list_devices(ApiOptions, @mocket.MocketEvent) -> &@mocket.Responder
+
+pub async fn handle_list_empty_dirs(ApiOptions, @mocket.MocketEvent) -> &@mocket.Responder
 
 pub async fn handle_list_folder_trash(ApiOptions, @mocket.MocketEvent) -> &@mocket.Responder
 

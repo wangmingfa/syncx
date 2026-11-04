@@ -19,6 +19,8 @@ pub const DEFERRED_MAX : Int32 = 4096
 
 pub const DEGRADED_SCAN_INTERVAL_MS : Int32 = 30_000
 
+pub const EMPTY_DIRS_MAX : Int32 = 2000
+
 pub const FS_WATCH_ALIVE_PROBE_MS : Int32 = 1000
 
 pub const FS_WATCH_DEBOUNCE_MAX_MS : Int32 = 4000
@@ -101,13 +103,19 @@ pub fn partial_paths(String) -> PartialPaths
 
 pub async fn prune_scratch_file(String, String, now? : Int64) -> Bool
 
+pub async fn read_folder_ignore_lines(String, Bool) -> Array[String]
+
 pub async fn read_manifest(String, fingerprint~ : String, cdc~ : Bool, slots~ : Int32) -> PartialManifest?
+
+pub async fn remove_empty_dirs(String, Array[String], @core.IgnoreRuleset, Array[String]) -> Array[EmptyDirDeleteResult]
 
 pub async fn remove_partial(String) -> Unit
 
 pub async fn resolve_share_path(String, String, Bool) -> String raise ExecutorError
 
 pub async fn run_git(String, String, Array[String]) -> (Int32, String, String) raise GitError
+
+pub async fn scan_empty_dirs(String, @core.IgnoreRuleset, Array[String], limit? : Int32) -> EmptyDirScanResult
 
 pub async fn scan_folder(String, IndexStore, @core.IgnoreRuleset, String, Array[String]) -> ScanDiff
 
@@ -203,6 +211,17 @@ pub(all) enum ConflictPolicy {
   KeepBoth
   LocalWins
   NewestWins
+}
+
+pub(all) struct EmptyDirDeleteResult {
+  path : String
+  ok : Bool
+  reason : String?
+}
+
+pub(all) struct EmptyDirScanResult {
+  dirs : Array[String]
+  truncated : Bool
 }
 
 pub(all) struct Entry {
