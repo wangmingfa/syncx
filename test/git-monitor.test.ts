@@ -58,8 +58,8 @@ function commitAll(dir: string, message: string): string {
   return git(dir, ['rev-parse', 'HEAD']).trim();
 }
 
-describe('git repo detection', () => {
-  it.skipIf(!HAS_GIT)('recognizes a git repo and a plain directory', () => {
+describe('git repo detection', async () => {
+  it.skipIf(!HAS_GIT)('recognizes a git repo and a plain directory', async () => {
     const repo = tempGitRepo();
     const plain = mkdtempSync(join(tmpdir(), 'syncx-norepo-'));
     try {
@@ -74,27 +74,27 @@ describe('git repo detection', () => {
     }
   });
 
-  it.skipIf(!HAS_GIT)('returns null HEAD for a repo without any commit', () => {
+  it.skipIf(!HAS_GIT)('returns null HEAD for a repo without any commit', async () => {
     const repo = tempGitRepo();
     try {
-      expect(getLastCommitHash(repo)).toBe(null);
+      expect(await getLastCommitHash(repo)).toBe(null);
     } finally {
       rmDir(repo);
     }
   });
 
-  it('returns null for a directory that is not a repo at all', () => {
+  it('returns null for a directory that is not a repo at all', async () => {
     const plain = mkdtempSync(join(tmpdir(), 'syncx-norepo-'));
     try {
-      expect(getLastCommitHash(plain)).toBe(null);
+      expect(await getLastCommitHash(plain)).toBe(null);
     } finally {
       rmDir(plain);
     }
   });
 });
 
-describe('commit info collection', () => {
-  it.skipIf(!HAS_GIT)('gathers hash, parent, message and changed files of a new commit', () => {
+describe('commit info collection', async () => {
+  it.skipIf(!HAS_GIT)('gathers hash, parent, message and changed files of a new commit', async () => {
     const repo = tempGitRepo();
     try {
       writeFileSync(join(repo, 'a.txt'), 'A');
@@ -104,7 +104,7 @@ describe('commit info collection', () => {
       writeFileSync(join(repo, 'a.txt'), 'A-modified');
       const second = commitAll(repo, '新增 b 并修改 a');
 
-      const info = getCommitInfo(repo, first, second);
+      const info = await getCommitInfo(repo, first, second);
       expect(info).not.toBeNull();
       expect(info!.hash).toBe(second);
       expect(info!.parentHash).toBe(first);
@@ -115,7 +115,7 @@ describe('commit info collection', () => {
     }
   });
 
-  it.skipIf(!HAS_GIT)('collects the subjects of every commit in the batch, oldest first', () => {
+  it.skipIf(!HAS_GIT)('collects the subjects of every commit in the batch, oldest first', async () => {
     const repo = tempGitRepo();
     try {
       writeFileSync(join(repo, 'a.txt'), 'A');
@@ -127,19 +127,19 @@ describe('commit info collection', () => {
 
       // 一轮扫描攒下多笔:subjects 按旧→新收集,最后一笔就是 commitMessage 的来源。
       // 范围不含 fromHash(与 git 的 first..third 语义一致)
-      const info = getCommitInfo(repo, first, third)!;
+      const info = (await getCommitInfo(repo, first, third))!;
       expect(info.commitSubjects).toEqual(['第二步:加文件', '第三步:收尾']);
       expect(info.message).toBe('第三步:收尾');
 
       // 单笔批次:subjects 只有这一笔,不附加任何东西
-      const single = getCommitInfo(repo, second, third)!;
+      const single = (await getCommitInfo(repo, second, third))!;
       expect(single.commitSubjects).toEqual(['第三步:收尾']);
     } finally {
       rmDir(repo);
     }
   });
 
-  it.skipIf(!HAS_GIT)('carries the commit body through fullMessage while message stays the subject', () => {
+  it.skipIf(!HAS_GIT)('carries the commit body through fullMessage while message stays the subject', async () => {
     const repo = tempGitRepo();
     try {
       writeFileSync(join(repo, 'a.txt'), 'A');
@@ -152,7 +152,7 @@ describe('commit info collection', () => {
       });
       const second = git(repo, ['rev-parse', 'HEAD']).trim();
 
-      const info = getCommitInfo(repo, first, second)!;
+      const info = (await getCommitInfo(repo, first, second))!;
       expect(info.message).toBe('标题行');
       expect(info.fullMessage).toContain('标题行');
       expect(info.fullMessage).toContain('正文第一段');
@@ -162,7 +162,7 @@ describe('commit info collection', () => {
     }
   });
 
-  it.skipIf(!HAS_GIT)('reports a deleted file among changed files', () => {
+  it.skipIf(!HAS_GIT)('reports a deleted file among changed files', async () => {
     const repo = tempGitRepo();
     try {
       writeFileSync(join(repo, 'keep.txt'), 'K');
@@ -172,7 +172,7 @@ describe('commit info collection', () => {
       rmFile(join(repo, 'gone.txt'));
       const second = commitAll(repo, '删掉一个文件');
 
-      const info = getCommitInfo(repo, first, second)!;
+      const info = (await getCommitInfo(repo, first, second))!;
       expect(info.changedFiles).toEqual(['gone.txt']);
     } finally {
       rmDir(repo);
@@ -180,8 +180,8 @@ describe('commit info collection', () => {
   });
 });
 
-describe('auto commit', () => {
-  it.skipIf(!HAS_GIT)('stages new, modified and deleted files in one commit', () => {
+describe('auto commit', async () => {
+  it.skipIf(!HAS_GIT)('stages new, modified and deleted files in one commit', async () => {
     const repo = tempGitRepo();
     try {
       writeFileSync(join(repo, 'a.txt'), 'A');
@@ -193,10 +193,10 @@ describe('auto commit', () => {
       rmFile(join(repo, 'b.txt'));
       writeFileSync(join(repo, 'c.txt'), 'C');
 
-      const result = autoCommit(repo, '来自对端的提交信息');
+      const result = await autoCommit(repo, '来自对端的提交信息');
       expect(result.success).toBe(true);
       expect(result.hash).toBeTruthy();
-      expect(result.hash).toBe(getLastCommitHash(repo));
+      expect(result.hash).toBe(await getLastCommitHash(repo));
 
       expect(git(repo, ['status', '--porcelain']).trim()).toBe('');
       const tracked = git(repo, ['ls-files']).trim().split(/\r?\n/).sort();
@@ -211,7 +211,7 @@ describe('auto commit', () => {
    * 而自动提交常在**别的文件**落地时被触发 —— 放任 `git add -A` 就等于把几百 MB 的半截
    * 内容写进历史,还会经 git 提交同步镜像给对端。
    */
-  it.skipIf(!HAS_GIT)('leaves syncx 在途中间态 out of the commit, at any depth, while staging real changes', () => {
+  it.skipIf(!HAS_GIT)('leaves syncx 在途中间态 out of the commit, at any depth, while staging real changes', async () => {
     const repo = tempGitRepo();
     try {
       writeFileSync(join(repo, 'a.txt'), 'A');
@@ -223,7 +223,7 @@ describe('auto commit', () => {
       writeFileSync(join(repo, 'sub', 'nested.bin.syncx-tmp'), '半截内容');
       writeFileSync(join(repo, 'b.txt'), 'B');
 
-      const result = autoCommit(repo, '来自对端的提交信息');
+      const result = await autoCommit(repo, '来自对端的提交信息');
       expect(result.success).toBe(true);
       expect(git(repo, ['ls-files']).trim().split(/\r?\n/).sort()).toEqual(['a.txt', 'b.txt']);
 
@@ -235,15 +235,15 @@ describe('auto commit', () => {
     }
   });
 
-  it.skipIf(!HAS_GIT)('creates an empty commit when there is nothing to commit', () => {
+  it.skipIf(!HAS_GIT)('creates an empty commit when there is nothing to commit', async () => {
     const repo = tempGitRepo();
     try {
       writeFileSync(join(repo, 'a.txt'), 'A');
       const baseline = commitAll(repo, '基线');
-      expect(hasUncommittedChanges(repo)).toBe(false);
+      expect(await hasUncommittedChanges(repo)).toBe(false);
 
       // 用 --allow-empty:没有本地改动时也要让提交消息落到日志里,保持两端的提交链对齐
-      const result = autoCommit(repo, '对端的提交,本机恰好无改动');
+      const result = await autoCommit(repo, '对端的提交,本机恰好无改动');
       expect(result.success).toBe(true);
       expect(result.hash).not.toBe(baseline);
       expect(git(repo, ['log', '-1', '--format=%s']).trim()).toBe('对端的提交,本机恰好无改动');
@@ -252,7 +252,7 @@ describe('auto commit', () => {
     }
   });
 
-  it.skipIf(!HAS_GIT)('survives a message that would break shell quoting', () => {
+  it.skipIf(!HAS_GIT)('survives a message that would break shell quoting', async () => {
     const repo = tempGitRepo();
     try {
       writeFileSync(join(repo, 'a.txt'), 'A');
@@ -262,7 +262,7 @@ describe('auto commit', () => {
       // 反引号 / $() / 引号混排:实现用 execFileSync 的参数数组而非 shell 字符串,
       // 这条用例就是这个选择唯一的回归防线
       const nasty = 'fix: 处理 `backtick` 与 $(whoami) 以及 "双引号" 和 \'单引号\'';
-      const result = autoCommit(repo, nasty);
+      const result = await autoCommit(repo, nasty);
       expect(result.success).toBe(true);
       expect(git(repo, ['log', '-1', '--format=%s']).trim()).toBe(nasty);
     } finally {
@@ -270,10 +270,10 @@ describe('auto commit', () => {
     }
   });
 
-  it.skipIf(!HAS_GIT)('reports failure instead of throwing when the directory is not a repo', () => {
+  it.skipIf(!HAS_GIT)('reports failure instead of throwing when the directory is not a repo', async () => {
     const plain = mkdtempSync(join(tmpdir(), 'syncx-norepo-'));
     try {
-      const result = autoCommit(plain, '任意消息');
+      const result = await autoCommit(plain, '任意消息');
       expect(result.success).toBe(false);
       expect(result.error).toBeTruthy();
     } finally {
@@ -282,18 +282,18 @@ describe('auto commit', () => {
   });
 });
 
-describe('uncommitted changes probe', () => {
-  it.skipIf(!HAS_GIT)('detects modified and untracked files', () => {
+describe('uncommitted changes probe', async () => {
+  it.skipIf(!HAS_GIT)('detects modified and untracked files', async () => {
     const repo = tempGitRepo();
     try {
       writeFileSync(join(repo, 'a.txt'), 'A');
-      expect(hasUncommittedChanges(repo)).toBe(true); // 尚未提交过的全新文件
+      expect(await hasUncommittedChanges(repo)).toBe(true); // 尚未提交过的全新文件
 
       commitAll(repo, '基线');
-      expect(hasUncommittedChanges(repo)).toBe(false);
+      expect(await hasUncommittedChanges(repo)).toBe(false);
 
       writeFileSync(join(repo, 'a.txt'), 'A2');
-      expect(hasUncommittedChanges(repo)).toBe(true);
+      expect(await hasUncommittedChanges(repo)).toBe(true);
     } finally {
       rmDir(repo);
     }
@@ -303,7 +303,7 @@ describe('uncommitted changes probe', () => {
    * 断点续传让中间态在目标旁边躺上一整个传输过程,而自动提交是**接收别的文件**时触发的:
    * 若工作树里只剩这一对在途文件就判「有变更」,--allow-empty 会为它造一笔空提交并广播出去。
    */
-  it.skipIf(!HAS_GIT)('treats a worktree holding only syncx 在途中间态 as clean', () => {
+  it.skipIf(!HAS_GIT)('treats a worktree holding only syncx 在途中间态 as clean', async () => {
     const repo = tempGitRepo();
     try {
       writeFileSync(join(repo, 'a.txt'), 'A');
@@ -311,11 +311,11 @@ describe('uncommitted changes probe', () => {
 
       writeFileSync(join(repo, 'big.bin.syncx-tmp'), '半截内容');
       writeFileSync(join(repo, 'big.bin.syncx-partial'), '{"v":1,"bitmap":"gA=="}');
-      expect(hasUncommittedChanges(repo)).toBe(false);
+      expect(await hasUncommittedChanges(repo)).toBe(false);
 
       // 排除规则不能把闸门糊住:真改动来了必须照样看得见
       writeFileSync(join(repo, 'c.txt'), 'C');
-      expect(hasUncommittedChanges(repo)).toBe(true);
+      expect(await hasUncommittedChanges(repo)).toBe(true);
     } finally {
       rmDir(repo);
     }
@@ -340,8 +340,8 @@ function rmFile(path: string): void {
   }
 }
 
-describe('uncommitted changes inventory', () => {
-  it('classifies modified / added / deleted / untracked entries and excludes scratch files', () => {
+describe('uncommitted changes inventory', async () => {
+  it('classifies modified / added / deleted / untracked entries and excludes scratch files', async () => {
     const repo = tempGitRepo();
     writeFileSync(join(repo, 'a.txt'), 'one');
     writeFileSync(join(repo, 'b.txt'), 'two');
@@ -351,7 +351,7 @@ describe('uncommitted changes inventory', () => {
     unlinkSync(join(repo, 'b.txt'));
     writeFileSync(join(repo, 'new.txt'), 'fresh');
     writeFileSync(join(repo, 'a.txt.syncx-tmp'), 'in-flight');
-    const out = getUncommittedChanges(repo);
+    const out = await getUncommittedChanges(repo);
     expect(out).not.toBeNull();
     expect(out!.truncated).toBe(false);
     const byPath = new Map(out!.entries.map((e) => [e.path, e]));
@@ -365,9 +365,9 @@ describe('uncommitted changes inventory', () => {
     rmDir(repo);
   });
 
-  it('returns null outside a repo and reports rename with origPath', () => {
+  it('returns null outside a repo and reports rename with origPath', async () => {
     const plain = mkdtempSync(join(tmpdir(), 'syncx-nogit-'));
-    expect(getUncommittedChanges(plain)).toBeNull();
+    expect(await getUncommittedChanges(plain)).toBeNull();
     rmDir(plain);
 
     const repo = tempGitRepo();
@@ -378,14 +378,14 @@ describe('uncommitted changes inventory', () => {
     unlinkSync(join(repo, 'old.txt'));
     // rename 只有在暂存之后才会被 git status 识别为 R(纯工作区的「删+增」是两条)
     git(repo, ['add', '-A']);
-    const out = getUncommittedChanges(repo)!;
+    const out = (await getUncommittedChanges(repo))!;
     const renamed = out.entries.find((e) => e.status === 'renamed');
     expect(renamed?.origPath).toBe('old.txt');
     expect(renamed?.path).toBe('sub/old.txt');
     rmDir(repo);
   });
 
-  it('collapses a fully-untracked directory into one dir-marked entry without trailing slash', () => {
+  it('collapses a fully-untracked directory into one dir-marked entry without trailing slash', async () => {
     const repo = tempGitRepo();
     mkdirSync(join(repo, 'backends'), { recursive: true });
     writeFileSync(join(repo, 'backends', 'tracked.rs'), '// t');
@@ -395,7 +395,7 @@ describe('uncommitted changes inventory', () => {
     // 切出一个空名字的行(真机「增」徽标孤行的根因)。
     mkdirSync(join(repo, 'backends', 'native-common'), { recursive: true });
     writeFileSync(join(repo, 'backends', 'native-common', 'main.rs'), 'fn main() {}');
-    const out = getUncommittedChanges(repo)!;
+    const out = (await getUncommittedChanges(repo))!;
     expect(out.entries).toHaveLength(1);
     const entry = out.entries[0]!;
     expect(entry.path).toBe('backends/native-common');
@@ -405,22 +405,22 @@ describe('uncommitted changes inventory', () => {
     rmDir(repo);
   });
 
-  it('reads the HEAD version of a file for the diff baseline', () => {
+  it('reads the HEAD version of a file for the diff baseline', async () => {
     const repo = tempGitRepo();
     writeFileSync(join(repo, 'a.txt'), 'committed');
     commitAll(repo, 'init');
     writeFileSync(join(repo, 'a.txt'), 'dirty');
     writeFileSync(join(repo, 'untracked.txt'), 'never committed');
 
-    const tracked = readFileAtHead(repo, 'a.txt');
+    const tracked = await readFileAtHead(repo, 'a.txt');
     expect(tracked.kind).toBe('bytes');
     if (tracked.kind === 'bytes') expect(tracked.bytes.toString('utf8')).toBe('committed');
     // 新文件不在 HEAD:判 absent,而不是 error(不能谎报「读取失败」)。
-    expect(readFileAtHead(repo, 'untracked.txt').kind).toBe('absent');
+    expect((await readFileAtHead(repo, 'untracked.txt')).kind).toBe('absent');
     rmDir(repo);
   });
 
-  it('reports a corrupt HEAD object as an error, not as absent', () => {
+  it('reports a corrupt HEAD object as an error, not as absent', async () => {
     const repo = tempGitRepo();
     writeFileSync(join(repo, 'a.txt'), 'committed');
     commitAll(repo, 'init');
@@ -431,7 +431,7 @@ describe('uncommitted changes inventory', () => {
     chmodSync(objPath, 0o644);
     writeFileSync(objPath, 'GARBAGE_NOT_ZLIB');
 
-    const res = readFileAtHead(repo, 'a.txt');
+    const res = await readFileAtHead(repo, 'a.txt');
     // 关键:损坏必须判 error(文件在盘上),不能判 absent(那会谎报「HEAD 没有这个文件」)。
     expect(res.kind).toBe('error');
     if (res.kind === 'error') expect(res.error.length).toBeGreaterThan(0);
@@ -439,11 +439,11 @@ describe('uncommitted changes inventory', () => {
   });
 });
 
-describe('recent commit list', () => {
-  it.skipIf(!HAS_GIT)('returns null outside a repo and an empty list for a repo without commits', () => {
+describe('recent commit list', async () => {
+  it.skipIf(!HAS_GIT)('returns null outside a repo and an empty list for a repo without commits', async () => {
     const plain = mkdtempSync(join(tmpdir(), 'syncx-norepo-'));
     try {
-      expect(listRecentCommits(plain)).toBe(null);
+      expect(await listRecentCommits(plain)).toBe(null);
     } finally {
       rmDir(plain);
     }
@@ -452,13 +452,13 @@ describe('recent commit list', () => {
     try {
       // 空仓库让 git log 以 128 退出:这条路径必须由 getLastCommitHash 兜住,
       // 返回 [] 而不是把「还没有提交」当读取失败抛出去
-      expect(listRecentCommits(empty)).toEqual([]);
+      expect(await listRecentCommits(empty)).toEqual([]);
     } finally {
       rmDir(empty);
     }
   });
 
-  it.skipIf(!HAS_GIT)('lists at most 20 commits, newest first, matching git log itself', () => {
+  it.skipIf(!HAS_GIT)('lists at most 20 commits, newest first, matching git log itself', async () => {
     const repo = tempGitRepo();
     try {
       for (let i = 0; i < 25; i += 1) {
@@ -467,7 +467,7 @@ describe('recent commit list', () => {
       }
       git(repo, ['tag', 'v1']);
 
-      const list = listRecentCommits(repo)!;
+      const list = (await listRecentCommits(repo))!;
       expect(list).toHaveLength(20);
 
       // 用 git 自己的输出当尺子:顺序与条数都不对着实现里的常量验
@@ -490,7 +490,7 @@ describe('recent commit list', () => {
     }
   });
 
-  it.skipIf(!HAS_GIT)('pages with skip exactly like git log --skip does', () => {
+  it.skipIf(!HAS_GIT)('pages with skip exactly like git log --skip does', async () => {
     const repo = tempGitRepo();
     try {
       for (let i = 0; i < 25; i += 1) {
@@ -500,8 +500,8 @@ describe('recent commit list', () => {
 
       // 三页拼起来 = 全部,且与 git 自己的 --skip/-n 输出逐条相同(不跟实现里的
       // 分页算术对,直接拿 git 当尺子)
-      const page1 = listRecentCommits(repo, 20, 0)!;
-      const page2 = listRecentCommits(repo, 20, 20)!;
+      const page1 = (await listRecentCommits(repo, 20, 0))!;
+      const page2 = (await listRecentCommits(repo, 20, 20))!;
       expect(page1).toHaveLength(20);
       expect(page2).toHaveLength(5);
       expect([...page1, ...page2].map((c) => c.subject)).toEqual(
@@ -510,17 +510,17 @@ describe('recent commit list', () => {
       expect(page2[0]!.subject).toBe('分页 4');
 
       // 越过历史末尾 = 空页(前端据此收起「查看更多」),不是报错也不是重复最后一页
-      expect(listRecentCommits(repo, 20, 25)).toEqual([]);
-      expect(listRecentCommits(repo, 20, 500)).toEqual([]);
+      expect(await listRecentCommits(repo, 20, 25)).toEqual([]);
+      expect(await listRecentCommits(repo, 20, 500)).toEqual([]);
       // skip 的边界:0 与负数都等于「从头开始」(不把 -1 传给 git 的选项解析)
-      expect(listRecentCommits(repo, 2, 0)!.map((c) => c.subject)).toEqual(['分页 24', '分页 23']);
-      expect(listRecentCommits(repo, 2, -5)!.map((c) => c.subject)).toEqual(['分页 24', '分页 23']);
+      expect((await listRecentCommits(repo, 2, 0))!.map((c) => c.subject)).toEqual(['分页 24', '分页 23']);
+      expect((await listRecentCommits(repo, 2, -5))!.map((c) => c.subject)).toEqual(['分页 24', '分页 23']);
     } finally {
       rmDir(repo);
     }
   });
 
-  it.skipIf(!HAS_GIT)('honors a custom limit and keeps multi-line bodies verbatim', () => {
+  it.skipIf(!HAS_GIT)('honors a custom limit and keeps multi-line bodies verbatim', async () => {
     const repo = tempGitRepo();
     try {
       writeFileSync(join(repo, 'a.txt'), 'A');
@@ -532,7 +532,7 @@ describe('recent commit list', () => {
         stdio: 'ignore',
       });
 
-      const limited = listRecentCommits(repo, 1)!;
+      const limited = (await listRecentCommits(repo, 1))!;
       expect(limited).toHaveLength(1);
       const head = limited[0]!;
       expect(head.subject).toBe('标题行');
@@ -540,7 +540,7 @@ describe('recent commit list', () => {
       expect(head.body).toBe('正文第一段\n\n正文第二段');
 
       // 没有正文的提交给空串(前端据此决定是否给出「展开」)
-      const all = listRecentCommits(repo)!;
+      const all = (await listRecentCommits(repo))!;
       expect(all).toHaveLength(2);
       expect(all[1]!.subject).toBe('只有主题的一笔');
       expect(all[1]!.body).toBe('');
@@ -550,7 +550,7 @@ describe('recent commit list', () => {
   });
 });
 
-describe('unpushed commits (count / list / push)', () => {
+describe('unpushed commits (count / list / push)', async () => {
   /** 建一对「工作仓库 + 本地 bare 远程」:push 全程离线,不碰网络也不碰用户凭据。 */
   function tempRepoWithRemote(): { repo: string; remote: string } {
     const remote = mkdtempSync(join(tmpdir(), 'syncx-remote-'));
@@ -560,31 +560,31 @@ describe('unpushed commits (count / list / push)', () => {
     return { repo, remote };
   }
 
-  it('returns null outside a repo', () => {
+  it('returns null outside a repo', async () => {
     const plain = mkdtempSync(join(tmpdir(), 'syncx-norepo-'));
     try {
-      expect(countUnpushedCommits(plain)).toBe(null);
-      expect(listUnpushedCommits(plain)).toBe(null);
+      expect(await countUnpushedCommits(plain)).toBe(null);
+      expect(await listUnpushedCommits(plain)).toBe(null);
     } finally {
       rmDir(plain);
     }
   });
 
-  it.skipIf(!HAS_GIT)('returns null for a repo with a remote but no upstream', () => {
+  it.skipIf(!HAS_GIT)('returns null for a repo with a remote but no upstream', async () => {
     const { repo, remote } = tempRepoWithRemote();
     try {
       writeFileSync(join(repo, 'a.txt'), 'A');
       commitAll(repo, '第一笔');
       // 有远程、有提交,但当前分支没有上游:计数与列表口径 = null(不猜、不 fetch)
-      expect(countUnpushedCommits(repo)).toBe(null);
-      expect(listUnpushedCommits(repo)).toBe(null);
+      expect(await countUnpushedCommits(repo)).toBe(null);
+      expect(await listUnpushedCommits(repo)).toBe(null);
     } finally {
       rmDir(repo);
       rmDir(remote);
     }
   });
 
-  it.skipIf(!HAS_GIT)('returns null for a plain folder nested inside a repo (no upward walk)', () => {
+  it.skipIf(!HAS_GIT)('returns null for a plain folder nested inside a repo (no upward walk)', async () => {
     const { repo, remote } = tempRepoWithRemote();
     try {
       writeFileSync(join(repo, 'a.txt'), 'A');
@@ -592,22 +592,22 @@ describe('unpushed commits (count / list / push)', () => {
       git(repo, ['push', '-u', '-q', 'origin', 'HEAD']);
       writeFileSync(join(repo, 'b.txt'), 'B');
       commitAll(repo, '第二笔');
-      expect(countUnpushedCommits(repo)).toBe(1);
+      expect(await countUnpushedCommits(repo)).toBe(1);
 
       // 嵌套的 plain 目录自己没有 .git,git 从它出发会向上回溯到外层仓库 ——
       // 计数/列表都必须先过 isGitRepo 闸回 null,而不是把外层仓库的提交算到它头上。
       const nested = join(repo, 'sub');
       mkdirSync(nested);
       expect(isGitRepo(nested)).toBe(false);
-      expect(countUnpushedCommits(nested)).toBe(null);
-      expect(listUnpushedCommits(nested)).toBe(null);
+      expect(await countUnpushedCommits(nested)).toBe(null);
+      expect(await listUnpushedCommits(nested)).toBe(null);
     } finally {
       rmDir(repo);
       rmDir(remote);
     }
   });
 
-  it.skipIf(!HAS_GIT)('lists unpushed commits newest-first, synced range is an empty list', () => {
+  it.skipIf(!HAS_GIT)('lists unpushed commits newest-first, synced range is an empty list', async () => {
     const { repo, remote } = tempRepoWithRemote();
     try {
       writeFileSync(join(repo, 'a.txt'), 'A');
@@ -615,7 +615,7 @@ describe('unpushed commits (count / list / push)', () => {
       git(repo, ['push', '-u', '-q', 'origin', 'HEAD']);
 
       // 上游已同步:空范围回 [],不是错误(与「没有需要推送」的正常状态对应)
-      expect(listUnpushedCommits(repo)).toEqual([]);
+      expect(await listUnpushedCommits(repo)).toEqual([]);
 
       writeFileSync(join(repo, 'b.txt'), 'B');
       const second = commitAll(repo, '第二笔');
@@ -623,9 +623,9 @@ describe('unpushed commits (count / list / push)', () => {
       const third = commitAll(repo, '第三笔');
 
       // 新→旧;总数与 rev-list --count 互验(两把独立的尺子)
-      const commits = listUnpushedCommits(repo)!;
+      const commits = (await listUnpushedCommits(repo))!;
       expect(commits.map((c) => c.subject)).toEqual(['第三笔', '第二笔']);
-      expect(countUnpushedCommits(repo)).toBe(commits.length);
+      expect(await countUnpushedCommits(repo)).toBe(commits.length);
       // 短哈希是全哈希的前缀(解析字段没挪位)
       expect(third.startsWith(commits[0]!.hash)).toBe(true);
       expect(second.startsWith(commits[1]!.hash)).toBe(true);
@@ -640,7 +640,7 @@ describe('unpushed commits (count / list / push)', () => {
     }
   });
 
-  it.skipIf(!HAS_GIT)('caps the list at limit while the count stays exact', () => {
+  it.skipIf(!HAS_GIT)('caps the list at limit while the count stays exact', async () => {
     const { repo, remote } = tempRepoWithRemote();
     try {
       writeFileSync(join(repo, 'a.txt'), 'A');
@@ -652,12 +652,12 @@ describe('unpushed commits (count / list / push)', () => {
       }
 
       // 6 笔未推送、limit 2:列表截到 2 条(新→旧),count 仍为 6(截断互验)
-      const list = listUnpushedCommits(repo, 2)!;
+      const list = (await listUnpushedCommits(repo, 2))!;
       expect(list).toHaveLength(2);
       expect(list.map((c) => c.subject)).toEqual(['第6笔', '第5笔']);
-      expect(countUnpushedCommits(repo)).toBe(6);
+      expect(await countUnpushedCommits(repo)).toBe(6);
       // 默认上限下不截断:6 条全量
-      expect(listUnpushedCommits(repo)).toHaveLength(6);
+      expect(await listUnpushedCommits(repo)).toHaveLength(6);
     } finally {
       rmDir(repo);
       rmDir(remote);
@@ -674,20 +674,20 @@ describe('unpushed commits (count / list / push)', () => {
       // 建好上游、且远程已同步:0。负控:远程此刻确有这笔(HEAD 可解析)
       const synced = git(remote, ['rev-parse', 'HEAD']).trim();
       expect(synced).toBe(git(repo, ['rev-parse', 'HEAD']).trim());
-      expect(countUnpushedCommits(repo)).toBe(0);
+      expect(await countUnpushedCommits(repo)).toBe(0);
 
       // 新提交一笔但还没 push:本地 HEAD 往前走,远程没动 —— 计数 1
       writeFileSync(join(repo, 'b.txt'), 'B');
       commitAll(repo, '第二笔');
       expect(git(remote, ['rev-parse', 'HEAD']).trim()).toBe(synced);
-      expect(countUnpushedCommits(repo)).toBe(1);
+      expect(await countUnpushedCommits(repo)).toBe(1);
 
       // push 之后归零,且远程 HEAD 与本地一致(计数与盘上事实同源)
       const r = await gitPush(repo);
       expect(r).toEqual({ ok: true });
       expect(git(remote, ['rev-parse', 'HEAD']).trim()).toBe(git(repo, ['rev-parse', 'HEAD']).trim());
-      expect(countUnpushedCommits(repo)).toBe(0);
-      expect(listUnpushedCommits(repo)).toEqual([]);
+      expect(await countUnpushedCommits(repo)).toBe(0);
+      expect(await listUnpushedCommits(repo)).toEqual([]);
     } finally {
       rmDir(repo);
       rmDir(remote);
@@ -720,8 +720,8 @@ describe('unpushed commits (count / list / push)', () => {
   });
 });
 
-describe('commit file list', () => {
-  it.skipIf(!HAS_GIT)('lists modified / added / deleted files of a commit', () => {
+describe('commit file list', async () => {
+  it.skipIf(!HAS_GIT)('lists modified / added / deleted files of a commit', async () => {
     const repo = tempGitRepo();
     try {
       writeFileSync(join(repo, 'a.txt'), 'v1');
@@ -732,19 +732,19 @@ describe('commit file list', () => {
       writeFileSync(join(repo, 'c.txt'), 'new');
       const second = commitAll(repo, '第二笔');
 
-      const files = listCommitFiles(repo, second);
+      const files = await listCommitFiles(repo, second);
       expect(files.map((f) => [f.status, f.path]).sort())
         .toEqual([['A', 'c.txt'], ['D', 'b.txt'], ['M', 'a.txt']]);
 
       // 根提交:没有更早的版本可比,全部文件都是 A
-      const rootFiles = listCommitFiles(repo, root);
+      const rootFiles = await listCommitFiles(repo, root);
       expect(rootFiles.map((f) => f.status[0])).toEqual(['A', 'A']);
     } finally {
       rmDir(repo);
     }
   });
 
-  it.skipIf(!HAS_GIT)('pairs old and new paths for a rename (z-format R record)', () => {
+  it.skipIf(!HAS_GIT)('pairs old and new paths for a rename (z-format R record)', async () => {
     const repo = tempGitRepo();
     try {
       writeFileSync(join(repo, '旧文件.txt'), '内容');
@@ -752,7 +752,7 @@ describe('commit file list', () => {
       git(repo, ['mv', '旧文件.txt', '改名后.txt']);
       const hash = commitAll(repo, '改名');
 
-      const files = listCommitFiles(repo, hash);
+      const files = await listCommitFiles(repo, hash);
       expect(files).toHaveLength(1);
       expect(files[0]!.status[0]).toBe('R');
       expect(files[0]!.path).toBe('改名后.txt');
@@ -762,7 +762,7 @@ describe('commit file list', () => {
     }
   });
 
-  it.skipIf(!HAS_GIT)('returns an empty list for a clean merge commit', () => {
+  it.skipIf(!HAS_GIT)('returns an empty list for a clean merge commit', async () => {
     const repo = tempGitRepo();
     try {
       writeFileSync(join(repo, 'base.txt'), 'base');
@@ -775,12 +775,12 @@ describe('commit file list', () => {
       writeFileSync(join(repo, 'main.txt'), 'main');
       commitAll(repo, 'main');
       git(repo, ['merge', '-q', '--no-ff', 'feat', '-m', 'merge']);
-      const mergeHash = getLastCommitHash(repo)!;
+      const mergeHash = (await getLastCommitHash(repo))!;
 
       // 合并提交各取了一侧的内容:相对**所有**父提交都没有独立变更 → git 输出为空。
       // 空清单是「干净合并」这一事实,不是读取失败。
-      expect(listCommitFiles(repo, mergeHash)).toEqual([]);
-      const parents = getCommitParents(repo, mergeHash);
+      expect(await listCommitFiles(repo, mergeHash)).toEqual([]);
+      const parents = await getCommitParents(repo, mergeHash);
       expect(parents).toHaveLength(2);
       expect(parents).toContain(featHash);
     } finally {
@@ -788,26 +788,26 @@ describe('commit file list', () => {
     }
   });
 
-  it.skipIf(!HAS_GIT)('throws for a malformed hash and for an unknown one', () => {
+  it.skipIf(!HAS_GIT)('throws for a malformed hash and for an unknown one', async () => {
     const repo = tempGitRepo();
     try {
       // 选项样式的输入在形状闸就被拒,到不了 git(git 会把它当选项解析)
-      expect(() => listCommitFiles(repo, '--upload-pack=x')).toThrow('非法的提交哈希');
-      expect(() => listCommitFiles(repo, '')).toThrow('非法的提交哈希');
-      expect(() => listCommitFiles(repo, 'zzzzzzz')).toThrow('非法的提交哈希');
-      expect(() => getCommitParents(repo, '--exec')).toThrow('非法的提交哈希');
+      await expect(listCommitFiles(repo, '--upload-pack=x')).rejects.toThrow('非法的提交哈希');
+      await expect(listCommitFiles(repo, '')).rejects.toThrow('非法的提交哈希');
+      await expect(listCommitFiles(repo, 'zzzzzzz')).rejects.toThrow('非法的提交哈希');
+      await expect(getCommitParents(repo, '--exec')).rejects.toThrow('非法的提交哈希');
 
       // 形状合法但不存在的哈希:git 失败,抛出(带 stderr 首行)
-      expect(() => listCommitFiles(repo, 'a'.repeat(40))).toThrow();
-      expect(() => getCommitParents(repo, 'a'.repeat(40))).toThrow();
+      await expect(listCommitFiles(repo, 'a'.repeat(40))).rejects.toThrow();
+      await expect(getCommitParents(repo, 'a'.repeat(40))).rejects.toThrow();
     } finally {
       rmDir(repo);
     }
   });
 });
 
-describe('read file at an arbitrary rev', () => {
-  it.skipIf(!HAS_GIT)('reads content at a given commit and reports absence in both message forms', () => {
+describe('read file at an arbitrary rev', async () => {
+  it.skipIf(!HAS_GIT)('reads content at a given commit and reports absence in both message forms', async () => {
     const repo = tempGitRepo();
     try {
       writeFileSync(join(repo, 'a.txt'), 'v1');
@@ -817,30 +817,30 @@ describe('read file at an arbitrary rev', () => {
       const second = commitAll(repo, '第二笔');
 
       // 指定提交版本(不只是 HEAD):第一笔里 a.txt 还是 v1
-      const atFirst = readFileAt(repo, first, 'a.txt');
+      const atFirst = await readFileAt(repo, first, 'a.txt');
       expect(atFirst.kind).toBe('bytes');
       if (atFirst.kind === 'bytes') expect(atFirst.bytes.toString('utf8')).toBe('v1');
 
       // 缺路径形态一:「后来才有」的文件不在第一笔里
-      expect(readFileAt(repo, first, 'later.txt').kind).toBe('absent');
+      expect((await readFileAt(repo, first, 'later.txt')).kind).toBe('absent');
       // 缺路径形态二:git 对「盘上存在但该 rev 没有」的路径(目录)换一套说法
-      expect(readFileAt(repo, first, '.').kind).toBe('absent');
+      expect((await readFileAt(repo, first, '.')).kind).toBe('absent');
 
       // readFileAtHead 是 HEAD 的薄壳:行为与 readFileAt(repo, 'HEAD', …) 一致
-      const head = readFileAtHead(repo, 'a.txt');
+      const head = await readFileAtHead(repo, 'a.txt');
       expect(head.kind).toBe('bytes');
       if (head.kind === 'bytes') expect(head.bytes.toString('utf8')).toBe('v2');
 
       // 未知 rev + 盘上存在的路径:git 换用「exists on disk, but not in」措辞,
       // 落在 absent 判定里 —— 这套口径只服务「提交已验证存在后的路径读取」
       // (manager 先经 rev-list 验提交再读文件),rev 不存在的形态到不了 UI。
-      expect(readFileAt(repo, 'a'.repeat(40), 'a.txt').kind).toBe('absent');
+      expect((await readFileAt(repo, 'a'.repeat(40), 'a.txt')).kind).toBe('absent');
     } finally {
       rmDir(repo);
     }
   });
 
-  it.skipIf(!HAS_GIT)('maps commit parents: root → [], normal → [parent]', () => {
+  it.skipIf(!HAS_GIT)('maps commit parents: root → [], normal → [parent]', async () => {
     const repo = tempGitRepo();
     try {
       writeFileSync(join(repo, 'a.txt'), '1');
@@ -848,41 +848,41 @@ describe('read file at an arbitrary rev', () => {
       writeFileSync(join(repo, 'a.txt'), '2');
       const second = commitAll(repo, '第二笔');
 
-      expect(getCommitParents(repo, root)).toEqual([]);
-      expect(getCommitParents(repo, second)).toEqual([root]);
+      expect(await getCommitParents(repo, root)).toEqual([]);
+      expect(await getCommitParents(repo, second)).toEqual([root]);
     } finally {
       rmDir(repo);
     }
   });
 });
 
-describe('index.lock residue', () => {
-  it.skipIf(!HAS_GIT)('finds and removes the repo index.lock, idempotently', () => {
+describe('index.lock residue', async () => {
+  it.skipIf(!HAS_GIT)('finds and removes the repo index.lock, idempotently', async () => {
     const repo = tempGitRepo();
     try {
       writeFileSync(join(repo, 'a.txt'), '1');
       commitAll(repo, '初始');
       const lock = join(repo, '.git', 'index.lock');
 
-      expect(findGitIndexLock(repo)).toBeNull();
+      expect(await findGitIndexLock(repo)).toBeNull();
       writeFileSync(lock, '');
-      expect(findGitIndexLock(repo)).toMatchObject({ path: lock, size: 0 });
-      expect(findGitIndexLock(repo)?.mtimeMs).toBeGreaterThan(0);
+      expect(await findGitIndexLock(repo)).toMatchObject({ path: lock, size: 0 });
+      expect((await findGitIndexLock(repo))?.mtimeMs).toBeGreaterThan(0);
 
-      expect(removeGitIndexLock(repo)).toEqual({ ok: true, path: lock, removed: true });
+      expect(await removeGitIndexLock(repo)).toEqual({ ok: true, path: lock, removed: true });
       expect(existsSync(lock)).toBe(false);
       // 已经不在也算目的达成(弹窗连点两下不出错)
-      expect(removeGitIndexLock(repo)).toEqual({ ok: true, path: lock, removed: false });
+      expect(await removeGitIndexLock(repo)).toEqual({ ok: true, path: lock, removed: false });
     } finally {
       rmDir(repo);
     }
   });
 
-  it.skipIf(!HAS_GIT)('reports no lock and refuses deletion outside a git repo', () => {
+  it.skipIf(!HAS_GIT)('reports no lock and refuses deletion outside a git repo', async () => {
     const dir = mkdtempSync(join(tmpdir(), 'syncx-plain-'));
     try {
-      expect(findGitIndexLock(dir)).toBeNull();
-      expect(removeGitIndexLock(dir)).toEqual({ ok: false, error: '该目录不是 git 仓库' });
+      expect(await findGitIndexLock(dir)).toBeNull();
+      expect(await removeGitIndexLock(dir)).toEqual({ ok: false, error: '该目录不是 git 仓库' });
     } finally {
       rmDir(dir);
     }

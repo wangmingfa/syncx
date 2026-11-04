@@ -5,7 +5,7 @@ import { mkdtempSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { instrumentRequest, pickSink, processPerfSink, setProcessPerfSink, slowRequestMs, startLoopLagSampler } from '../src/api/perf.js';
-import { gitSync } from '../src/git-monitor.js';
+import { getLastCommitHash } from '../src/git-monitor.js';
 
 /** 假 res:只实现 finish 事件语义,触发即回调注册的监听。 */
 function fakeRes(): { statusCode: number; on: (ev: 'finish', cb: () => void) => unknown; finish(): void } {
@@ -80,20 +80,20 @@ describe('api/perf 探针', () => {
     expect(processPerfSink()).toBeNull();
   });
 
-  it('gitSync:真实 git 调用超过阈值时记一笔(命令 + 仓库名)', () => {
+  it('git 调用超过阈值时记一笔(命令 + 仓库名)', async () => {
     process.env.SYNCX_SLOW_REQ_MS = '0'; // 全部记,便于确定性断言
     const lines: string[] = [];
     setProcessPerfSink((l) => lines.push(l));
     try {
       const repo = mkdtempSync(join(tmpdir(), 'syncx-gitperf-'));
       execFileSync('git', ['init', '-q'], { cwd: repo });
-      const out = gitSync(['rev-parse', '--git-dir'], { cwd: repo, encoding: 'utf8' });
-      expect(String(out)).toContain('.git');
+      // 空仓库 getLastCommitHash 回 null,但调用发生了、perf 记账照记
+      expect(await getLastCommitHash(repo)).toBeNull();
       expect(lines).toHaveLength(1);
       expect(lines[0]).toContain('git rev-parse');
       expect(lines[0]).toContain('ms');
       setProcessPerfSink(null);
-      gitSync(['rev-parse', '--git-dir'], { cwd: repo, encoding: 'utf8' });
+      await getLastCommitHash(repo);
       expect(lines).toHaveLength(1); // 撤销后不再记
     } finally {
       delete process.env.SYNCX_SLOW_REQ_MS;

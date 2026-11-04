@@ -1050,7 +1050,7 @@ export async function tryFolderRoutes(
       return true;
     }
     try {
-      const result = listGitChanges(folderId);
+      const result = await listGitChanges(folderId);
       // null = 不是 git 仓库:如实告诉前端(徽标不出现是配置问题,弹窗要能解释)
       sendJson(res, 200, result ?? { gitRepo: false });
     } catch (e) {
@@ -1070,7 +1070,7 @@ export async function tryFolderRoutes(
       return true;
     }
     try {
-      sendJson(res, 200, readGitDiff(folderId, filePath));
+      sendJson(res, 200, await readGitDiff(folderId, filePath));
     } catch (e) {
       sendJson(res, 400, { error: e instanceof Error ? e.message : '读取变更对比失败' });
     }
@@ -1097,7 +1097,7 @@ export async function tryFolderRoutes(
       return true;
     }
     try {
-      const commits = listGitLog(folderId, Math.min(Math.floor(limit), MAX_GIT_LOG_LIMIT), Math.floor(skip));
+      const commits = await listGitLog(folderId, Math.min(Math.floor(limit), MAX_GIT_LOG_LIMIT), Math.floor(skip));
       // null = 不是 git 仓库:与 git-changes 同一约定,如实告诉前端
       sendJson(res, 200, commits === null ? { commits: [], gitRepo: false } : { commits, gitRepo: true });
     } catch (e) {
@@ -1117,7 +1117,7 @@ export async function tryFolderRoutes(
       return true;
     }
     try {
-      const files = listGitCommitFiles(folderId, hash);
+      const files = await listGitCommitFiles(folderId, hash);
       // null = 不是 git 仓库:与 git-log 同一约定,如实告诉前端
       sendJson(res, 200, files === null ? { files: [], gitRepo: false } : { files, gitRepo: true });
     } catch (e) {
@@ -1140,7 +1140,7 @@ export async function tryFolderRoutes(
       return true;
     }
     try {
-      sendJson(res, 200, readGitCommitDiff(folderId, hash, filePath, origPath));
+      sendJson(res, 200, await readGitCommitDiff(folderId, hash, filePath, origPath));
     } catch (e) {
       sendJson(res, 400, { error: e instanceof Error ? e.message : '读取提交对比失败' });
     }
@@ -1155,7 +1155,7 @@ export async function tryFolderRoutes(
     // 空串视同缺省(全量):单目录调用方一律带非空 id,空串只可能来自手写请求
     const folderId = url.searchParams.get('folderId') || undefined;
     try {
-      sendJson(res, 200, { folders: listUnpushedByFolder(folderId) });
+      sendJson(res, 200, { folders: await listUnpushedByFolder(folderId) });
     } catch (e) {
       sendJson(res, 400, { error: e instanceof Error ? e.message : '读取未推送提交失败' });
     }
@@ -1210,7 +1210,7 @@ export async function tryFolderRoutes(
       return true;
     }
     try {
-      sendJson(res, 200, getGitAutoCommitStatus(folderId));
+      sendJson(res, 200, await getGitAutoCommitStatus(folderId));
     } catch (e) {
       sendJson(res, 400, { error: e instanceof Error ? e.message : '读取自动提交状态失败' });
     }
@@ -1228,7 +1228,7 @@ export async function tryFolderRoutes(
         sendJson(res, 400, { error: 'folderId is required' });
         return true;
       }
-      sendJson(res, 200, deleteGitIndexLock(folderId));
+      sendJson(res, 200, await deleteGitIndexLock(folderId));
     } catch (e) {
       sendJson(res, 400, { error: e instanceof Error ? e.message : '删除锁文件失败' });
     }
@@ -1246,7 +1246,7 @@ export async function tryFolderRoutes(
         sendJson(res, 400, { error: 'folderId is required' });
         return true;
       }
-      sendJson(res, 200, retryGitAutoCommit(folderId));
+      sendJson(res, 200, await retryGitAutoCommit(folderId));
     } catch (e) {
       sendJson(res, 400, { error: e instanceof Error ? e.message : '重试自动提交失败' });
     }

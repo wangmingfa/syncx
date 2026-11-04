@@ -786,6 +786,12 @@ export class SyncSessionManager {
   private heartbeatTimer: ReturnType<typeof setInterval> | undefined;
   /** git 提交检测心跳定时器句柄;close() 时清除(见 startGitCheckTimer)。 */
   private gitCheckTimer: ReturnType<typeof setInterval> | undefined;
+  /**
+   * git 结算/检测一轮的进行中标志。git 调用异步化后 checkGitCommits 会让出主线程,
+   * 5s 定时器与扫描节拍可能并发重入 —— 两轮叠加会对同一批通知重复结算/重复提交。
+   * 重入直接跳过(下一轮心跳自然会补上),与旧同步版「天然原子」行为对齐。
+   */
+  private gitCheckRunning = false;
   /** 最近的中转活动环形缓冲(ADR-0014 遥测);上限 100,溢出丢弃最旧。仅供拓扑视图展示。 */
   private readonly relayActivity: RelayActivity[] = [];
   private static readonly RELAY_ACTIVITY_CAP = 100;
@@ -896,6 +902,15 @@ export class SyncSessionManager {
    * 自动提交都会互相踩踏(自动提交的新提交会悬在被替换的旧链上、随重写孤儿化)。
    */
   private gitRewriteRunning = false;
+  /**
+   * 剔除重写的**入场闸**(异步化配套):git 调用改异步后,stripGitCoAuthoredUnpushed
+   * 的预检(上游/消息/工作区)会让出主线程,真正的 gitRewriteRunning 置位被推迟到
+   * 重写启动那一刻 —— 预检期间第二个并发调用会穿过闸门跟着跑 filter-branch,两个
+   * 重写进程在同一个 .git-rewrite 工作目录上相撞(实测 cd: .git-rewrite: No such file)。
+   * 入场闸在方法入口**同步**置位、finally 清除,把「剔除进行中」的判定提前到第一个
+   * await 之前,语义与旧同步版一致。
+   */
+  private gitRewriteStarting = false;
   /**
    * 全局发送带宽上限(config.maxSendKbps 的内存镜像,KB/s):目录未单独配置
    * maxBandwidthKbps 时的兜底默认。构造时读取,热重载 / setGlobalSettings 时同步;
@@ -1706,13 +1721,13 @@ export class SyncSessionManager {
       // Git 改动徽标:工作区未提交变更条数(只对 git 仓库盘点;详情弹窗按需现查,
       // 这里只维持徽标的量级)。暂停/身份闸门挡住的目录不刷新,徽标保持旧值。
       folder.gitChangeCount = isGitRepo(folder.path)
-        ? (getUncommittedChanges(folder.path)?.entries.length ?? 0)
+        ? ((await getUncommittedChanges(folder.path))?.entries.length ?? 0)
         : 0;
       // 「未推送 N」徽标:与上游分支比较的提交数(只对 git 仓库盘点;未设置上游时 0,
       // 徽标不出现)。与 gitChangeCount 同一份节奏 —— 本机的自动提交/推送都会在下一轮
       // 扫描内反映出来,status 高频推送时绝不现跑 git。
       folder.gitUnpushedCount = isGitRepo(folder.path)
-        ? (countUnpushedCommits(folder.path) ?? 0)
+        ? ((await countUnpushedCommits(folder.path)) ?? 0)
         : 0;
       // 结构性守卫:目录身份无法校验时(平台不提供 inode / 配置里尚未采集指纹),把
       // 「一个文件都没看到、却要删东西」当作目录不可信的形态,拒绝执行这批删除。
@@ -1943,46 +1958,54 @@ export class SyncSessionManager {
    * 出站广播与中继由 flushPendingGitNotify 开头补投,同一节拍。
    */
   private async checkGitCommits(): Promise<void> {
-    // 先结算挂起的对端提交通知(见 pendingGitNotify),再检测本地新提交:
-    // 结算里的自动提交会把基线同步推到新 HEAD,下面的比对因此不会把
-    // 镜像提交误判成本地新提交而回弹给对端(死循环防护不变)。
-    this.flushPendingGitNotify();
-    // 漂移台账自愈(机制二):结算时未落齐的文件内容到位后,在这里补一笔收敛提交。
-    // 刻意放在下方新提交检测**之前**:收敛提交是一笔本地新提交,下面的循环会把它
-    // 当作新 HEAD 正常广播给对端并对齐基线 —— 自愈自己不推基线,广播这一跳免了。
-    this.healDeferredGitMirror();
-    for (const folder of this.folderStates) {
-      if (this.folderPausedNow(folder)) continue;
-      if (this.gitBlockedByIdentity(folder)) continue;
-      const mode = folder.config.gitSync;
-      // 只处理启用了发送的模式('send' 或 'full')
-      if (!mode || mode === 'off' || mode === 'receive') continue;
+    // git 调用异步化后本轮会让出主线程:重入(定时器 × 扫描节拍叠加)直接跳过,
+    // 交给下一轮心跳;不做这层闸,两轮并发会对同一批通知重复结算/重复提交。
+    if (this.gitCheckRunning) return;
+    this.gitCheckRunning = true;
+    try {
+      // 先结算挂起的对端提交通知(见 pendingGitNotify),再检测本地新提交:
+      // 结算里的自动提交会把基线同步推到新 HEAD,下面的比对因此不会把
+      // 镜像提交误判成本地新提交而回弹给对端(死循环防护不变)。
+      await this.flushPendingGitNotify();
+      // 漂移台账自愈(机制二):结算时未落齐的文件内容到位后,在这里补一笔收敛提交。
+      // 刻意放在下方新提交检测**之前**:收敛提交是一笔本地新提交,下面的循环会把它
+      // 当作新 HEAD 正常广播给对端并对齐基线 —— 自愈自己不推基线,广播这一跳免了。
+      await this.healDeferredGitMirror();
+      for (const folder of this.folderStates) {
+        if (this.folderPausedNow(folder)) continue;
+        if (this.gitBlockedByIdentity(folder)) continue;
+        const mode = folder.config.gitSync;
+        // 只处理启用了发送的模式('send' 或 'full')
+        if (!mode || mode === 'off' || mode === 'receive') continue;
 
-      if (!isGitRepo(folder.path)) {
-        this.setGitBaseline(folder, null);
-        continue;
-      }
+        if (!isGitRepo(folder.path)) {
+          this.setGitBaseline(folder, null);
+          continue;
+        }
 
-      const currentHash = getLastCommitHash(folder.path);
-      if (!currentHash) continue;
+        const currentHash = await getLastCommitHash(folder.path);
+        if (!currentHash) continue;
 
-      if (folder.lastCommitHash === null) {
-        // 无基线(首次启用 / 重启后配置里没有):只记录基线,不广播。
-        // 这是「绝不重放历史提交」的兜底 —— 停机期间漏掉的提交最多只有一次(见
-        // gitLastCommitHash 的持久化),而首次启用时把整段历史推出去才是真灾难。
+        if (folder.lastCommitHash === null) {
+          // 无基线(首次启用 / 重启后配置里没有):只记录基线,不广播。
+          // 这是「绝不重放历史提交」的兜底 —— 停机期间漏掉的提交最多只有一次(见
+          // gitLastCommitHash 的持久化),而首次启用时把整段历史推出去才是真灾难。
+          this.setGitBaseline(folder, currentHash);
+          continue;
+        }
+
+        if (currentHash === folder.lastCommitHash) continue;
+
+        // 检测到新提交,收集信息并广播(逐目标记账,见 broadcastGitCommit)
+        const info = await getCommitInfo(folder.path, folder.lastCommitHash, currentHash);
+        if (info) this.broadcastGitCommit(folder, info);
+        // 基线照常在检测当轮推进:送达保证已经交给待回执台账(未回执者在每轮扫描开头补投)。
+        // 不再靠「冻住基线等下次全离线重试」—— 那种判据只要有一个对端在线就把基线推走了,
+        // 其余离线对端永久收不到这一笔(内容同步了、提交少一笔,2026-09-28 实测)。
         this.setGitBaseline(folder, currentHash);
-        continue;
       }
-
-      if (currentHash === folder.lastCommitHash) continue;
-
-      // 检测到新提交,收集信息并广播(逐目标记账,见 broadcastGitCommit)
-      const info = getCommitInfo(folder.path, folder.lastCommitHash, currentHash);
-      if (info) this.broadcastGitCommit(folder, info);
-      // 基线照常在检测当轮推进:送达保证已经交给待回执台账(未回执者在每轮扫描开头补投)。
-      // 不再靠「冻住基线等下次全离线重试」—— 那种判据只要有一个对端在线就把基线推走了,
-      // 其余离线对端永久收不到这一笔(内容同步了、提交少一笔,2026-09-28 实测)。
-      this.setGitBaseline(folder, currentHash);
+    } finally {
+      this.gitCheckRunning = false;
     }
   }
 
@@ -2018,7 +2041,7 @@ export class SyncSessionManager {
    * 链式拓扑 A—B—C 的末端因此也能提交;开头先补投两份未拿到回执的台账 —— 上一轮的
    * 中继(替别人转发)与本机的出站广播(自己那笔提交,见 gitBroadcast)。
    */
-  private flushPendingGitNotify(): void {
+  private async flushPendingGitNotify(): Promise<void> {
     const CLAIM_IDLE_MAX_MS = 60_000;
     // 「交换未落定 / 来源会话不在」这两类挡法的封顶 —— 它们没有认领那样的自愈时钟
     const INITIAL_CATCH_UP_MAX_MS = 60_000;
@@ -2107,12 +2130,12 @@ export class SyncSessionManager {
         );
       }
       const { msg } = pending;
-      if (!hasUncommittedChanges(folder.path)) {
+      if (!(await hasUncommittedChanges(folder.path))) {
         this.logger.info(
           `git auto-commit skipped (nothing to commit): ${folder.id} (from ${msg.fromDeviceId}) "${msg.commitMessage.split('\n')[0]}"`,
         );
         this.settlePendingGitNotify(folder);
-        this.setGitBaseline(folder, getLastCommitHash(folder.path));
+        this.setGitBaseline(folder, await getLastCommitHash(folder.path));
         continue;
       }
       /* ── 机制一:结算前逐文件内容对齐(宁缺勿错)──
@@ -2142,7 +2165,7 @@ export class SyncSessionManager {
           );
           this.recordGitDeferredMirror(folder, msg, deferredFiles);
           this.settlePendingGitNotify(folder);
-          this.setGitBaseline(folder, getLastCommitHash(folder.path));
+          this.setGitBaseline(folder, await getLastCommitHash(folder.path));
           continue;
         }
         if (deferredFiles.length > 0) {
@@ -2162,7 +2185,7 @@ export class SyncSessionManager {
       // 尾注(缺省关闭 = 行为不变)。中继给其余对端的仍是原始通知,只有本机落库的
       // 这笔镜像提交信息被剔除。
       const mirrorMessage = composeMirrorCommitMessage(msg);
-      const result = autoCommit(
+      const result = await autoCommit(
         folder.path,
         folder.config.gitStripCoAuthored === true ? stripCoAuthoredBy(mirrorMessage) : mirrorMessage,
         // 范围收敛:只 stage 通知宣称的文件 —— 工作树里用户并发的未提交改动
@@ -2175,7 +2198,7 @@ export class SyncSessionManager {
         this.logger.info(`auto-commit success: ${folder.id} -> ${result.hash?.slice(0, 8)}`);
         this.settlePendingGitNotify(folder);
         // 更新基线并落盘:防止扫描循环把这个自动提交误判为「新提交」再广播回去(死循环防护)
-        this.setGitBaseline(folder, result.hash ?? getLastCommitHash(folder.path));
+        this.setGitBaseline(folder, result.hash ?? (await getLastCommitHash(folder.path)));
         // 同时把本机产生的新哈希也加入去重集合
         if (folder.lastCommitHash) {
           folder.processedRemoteCommits.add(folder.lastCommitHash);
@@ -2266,7 +2289,7 @@ export class SyncSessionManager {
    * 对端结算走「nothing to commit」跳过并推进基线,可接受 —— 内容早已一致,只欠
    * 一笔提交记录)。中途叠加的暂停/身份闸/重写闸与结算闸门同口径:中场休息,不自愈。
    */
-  private healDeferredGitMirror(): void {
+  private async healDeferredGitMirror(): Promise<void> {
     for (const folder of this.folderStates) {
       const ledger = folder.gitDeferredMirror;
       if (!ledger) continue; // 台账为空:零开销(不读盘不比文件)
@@ -2280,7 +2303,7 @@ export class SyncSessionManager {
       if (aligned.length === 0) continue; // 内容还没到齐:下轮再试(不设上限)
       const subject = ledger.message.split('\n')[0] ?? '';
       const message = `chore: 收敛镜像提交后到达的内容 (${ledger.hash.slice(0, 8)} ${truncateGitSubject(subject)})`;
-      const result = autoCommit(folder.path, message, aligned);
+      const result = await autoCommit(folder.path, message, aligned);
       if (result.success) {
         const remaining = ledger.files.filter((rel) => !aligned.includes(rel));
         this.setGitDeferredMirror(
@@ -4253,7 +4276,7 @@ export class SyncSessionManager {
    * 打开弹窗那一刻的清单是准的(徽标计数有最多一轮扫描的滞后)。
    * 返回 null = 目录不是 git 仓库。
    */
-  listGitChanges(folderId: string): { entries: GitChangeEntry[]; truncated: boolean } | null {
+  async listGitChanges(folderId: string): Promise<{ entries: GitChangeEntry[]; truncated: boolean } | null> {
     const folder = this.folderStates.find((f) => f.id === folderId);
     if (!folder) throw new Error('共享目录不存在(可能刚被移除)');
     return getUncommittedChanges(folder.path);
@@ -4265,7 +4288,7 @@ export class SyncSessionManager {
    * 锁是**现查**的(打开弹窗 / 每次操作后都要反映盘上事实),不使用错误文案里
    * 那一刻的路径快照;错误只认 kind = git-auto-commit,别的目录错误不混进来。
    */
-  getGitAutoCommitStatus(folderId: string): GitAutoCommitStatus {
+  async getGitAutoCommitStatus(folderId: string): Promise<GitAutoCommitStatus> {
     const folder = this.folderStates.find((f) => f.id === folderId);
     if (!folder) throw new Error('共享目录不存在(可能刚被移除)');
     const pending = folder.pendingGitNotify;
@@ -4281,7 +4304,7 @@ export class SyncSessionManager {
       givenUp:
         folder.gitAutoCommitAttempts >= GIT_AUTO_COMMIT_MAX_ATTEMPTS && folder.gitAutoCommitRetryAt === undefined,
       ...(err?.kind === 'git-auto-commit' ? { error: { message: err.message, ts: err.ts } } : {}),
-      lock: findGitIndexLock(folder.path),
+      lock: await findGitIndexLock(folder.path),
     };
   }
 
@@ -4290,10 +4313,10 @@ export class SyncSessionManager {
    * 只删 git 指认的那一个文件,不接收调用方路径;删完不清错误横幅 ——
    * 这一笔仍未提交,等手动提交成功或下一条通知结算后再自清。
    */
-  deleteGitIndexLock(folderId: string): GitIndexLockRemoveResult {
+  async deleteGitIndexLock(folderId: string): Promise<GitIndexLockRemoveResult> {
     const folder = this.folderStates.find((f) => f.id === folderId);
     if (!folder) throw new Error('共享目录不存在(可能刚被移除)');
-    const r = removeGitIndexLock(folder.path);
+    const r = await removeGitIndexLock(folder.path);
     if (r.ok) {
       this.logger.info(`git index.lock ${r.removed === false ? 'already gone' : 'removed'}: ${folder.id} (${r.path})`);
     } else {
@@ -4309,13 +4332,13 @@ export class SyncSessionManager {
    * 仍走完整结算闸门(在途接收 / 索引交换 / 暂停),不因为「用户点的」就跳过 ——
    * 半套文件被定格正是这些闸门要防的事;被挡时如实回报「仍被延后」。
    */
-  retryGitAutoCommit(folderId: string): GitAutoCommitRetryResult {
+  async retryGitAutoCommit(folderId: string): Promise<GitAutoCommitRetryResult> {
     const folder = this.folderStates.find((f) => f.id === folderId);
     if (!folder) throw new Error('共享目录不存在(可能刚被移除)');
     if (!folder.pendingGitNotify) return { ok: false, error: '没有待提交的通知', attempts: folder.gitAutoCommitAttempts };
     folder.gitAutoCommitAttempts = 0;
     folder.gitAutoCommitRetryAt = undefined;
-    this.flushPendingGitNotify();
+    await this.flushPendingGitNotify();
     if (folder.pendingGitNotify) {
       const err = this.folderErrorsState.get(folderId);
       return {
@@ -4383,12 +4406,12 @@ export class SyncSessionManager {
    * 复用对比弹窗的读盘口径(缺失/过大/二进制/图片都如实标记)。
    * 只读,不碰索引、不碰暂存区。
    */
-  readGitDiff(folderId: string, relPath: string): { path: string; head: FileSideState; worktree: FileSideState } {
+  async readGitDiff(folderId: string, relPath: string): Promise<{ path: string; head: FileSideState; worktree: FileSideState }> {
     const folder = this.folderStates.find((f) => f.id === folderId);
     if (!folder) throw new Error('共享目录不存在(可能刚被移除)');
     // `git show` 不经 resolveSharePath,这里必须自己把好这道门。
     this.assertSafeRelPath(relPath);
-    const headRead = readFileAtHead(folder.path, relPath);
+    const headRead = await readFileAtHead(folder.path, relPath);
     return { path: relPath, head: this.sideFromRevRead(headRead, relPath), worktree: this.readLocalFileForCompare(folder, relPath) };
   }
 
@@ -4398,7 +4421,7 @@ export class SyncSessionManager {
    * limit/skip 是「查看更多」的分页参数(默认第一页 20 条):由 git log 自己截取,
    * 不在这里读全量再切。范围校验交给调用方(路由),非法值转 400 而不是静默当全量。
    */
-  listGitLog(folderId: string, limit?: number, skip?: number): GitCommitEntry[] | null {
+  async listGitLog(folderId: string, limit?: number, skip?: number): Promise<GitCommitEntry[] | null> {
     const folder = this.folderStates.find((f) => f.id === folderId);
     if (!folder) throw new Error('共享目录不存在(可能刚被移除)');
     return listRecentCommits(folder.path, limit, skip);
@@ -4408,13 +4431,13 @@ export class SyncSessionManager {
    * 某笔提交动了哪些文件(提交展开的文件清单)。返回 null = 目录不是 git 仓库
    * (与 listGitLog 同款);哈希非法/不存在抛错,路由转 400。
    */
-  listGitCommitFiles(folderId: string, hash: string): GitCommitFileEntry[] | null {
+  async listGitCommitFiles(folderId: string, hash: string): Promise<GitCommitFileEntry[] | null> {
     const folder = this.folderStates.find((f) => f.id === folderId);
     if (!folder) throw new Error('共享目录不存在(可能刚被移除)');
     if (!isCommitHash(hash)) throw new Error('非法的提交哈希');
     if (!isGitRepo(folder.path)) return null;
     try {
-      return listCommitFiles(folder.path, hash);
+      return await listCommitFiles(folder.path, hash);
     } catch (e) {
       throw this.commitLookupError(e);
     }
@@ -4426,12 +4449,12 @@ export class SyncSessionManager {
    * 新增文件:父里没有 → 左侧 exists:false;删除:提交里已不在 → 右侧 exists:false。
    * 改名文件传 origPath:父提交里是旧路径,直读新路径会谎报「上一版没有」。
    */
-  readGitCommitDiff(
+  async readGitCommitDiff(
     folderId: string,
     hash: string,
     relPath: string,
     origPath?: string,
-  ): { path: string; parent: FileSideState; commit: FileSideState } {
+  ): Promise<{ path: string; parent: FileSideState; commit: FileSideState }> {
     const folder = this.folderStates.find((f) => f.id === folderId);
     if (!folder) throw new Error('共享目录不存在(可能刚被移除)');
     if (!isCommitHash(hash)) throw new Error('非法的提交哈希');
@@ -4441,15 +4464,15 @@ export class SyncSessionManager {
 
     let parents: string[];
     try {
-      parents = getCommitParents(folder.path, hash);
+      parents = await getCommitParents(folder.path, hash);
     } catch (e) {
       throw this.commitLookupError(e);
     }
     const parentRev = parents[0] ?? null;
     const leftPath = origPath ?? relPath;
     const parentRead =
-      parentRev === null ? ({ kind: 'absent' } as const) : readFileAt(folder.path, parentRev, leftPath);
-    const commitRead = readFileAt(folder.path, hash, relPath);
+      parentRev === null ? ({ kind: 'absent' } as const) : await readFileAt(folder.path, parentRev, leftPath);
+    const commitRead = await readFileAt(folder.path, hash, relPath);
     return {
       path: relPath,
       parent: this.sideFromRevRead(parentRead, leftPath),
@@ -4467,7 +4490,7 @@ export class SyncSessionManager {
    * 现查的同时把扫描缓存的计数对齐到现查值(含归零):弹窗所列与徽标当场一致,不必等
    * 下一轮扫描(有差异才 notifyStatus —— 它是高频通道)。
    */
-  listUnpushedByFolder(folderId?: string): UnpushedFolderEntry[] {
+  async listUnpushedByFolder(folderId?: string): Promise<UnpushedFolderEntry[]> {
     let folders = this.folderStates;
     if (folderId !== undefined) {
       const folder = this.folderStates.find((f) => f.id === folderId);
@@ -4477,7 +4500,7 @@ export class SyncSessionManager {
     const out: UnpushedFolderEntry[] = [];
     let cacheChanged = false;
     for (const folder of folders) {
-      const total = countUnpushedCommits(folder.path);
+      const total = await countUnpushedCommits(folder.path);
       const next = total ?? 0;
       if (folder.gitUnpushedCount !== next) {
         folder.gitUnpushedCount = next;
@@ -4485,7 +4508,7 @@ export class SyncSessionManager {
       }
       if (total === null || total === 0) continue;
       // 列表读取失败(理论上与 count 同生共死,留个兜底)时仍列目录:total 准确、列表空
-      const commits = listUnpushedCommits(folder.path) ?? [];
+      const commits = (await listUnpushedCommits(folder.path)) ?? [];
       out.push({ folderId: folder.id, path: folder.path, total, commits, truncated: total > GIT_UNPUSHED_LIMIT });
     }
     if (cacheChanged) this.notifyStatus();
@@ -4503,7 +4526,7 @@ export class SyncSessionManager {
    */
   async pushGitFolder(folderId: string): Promise<GitPushResult> {
     if (this.gitPushRunning) throw new Error('已有推送正在进行,请稍候');
-    if (this.gitRewriteRunning) throw new Error('已有提交信息剔除正在进行,请稍候');
+    if (this.gitRewriteRunning || this.gitRewriteStarting) throw new Error('已有提交信息剔除正在进行,请稍候');
     const folder = this.folderStates.find((f) => f.id === folderId);
     if (!folder) throw new Error('共享目录不存在(可能刚被移除)');
     if (!isGitRepo(folder.path)) throw new Error('该目录不是 git 仓库');
@@ -4515,7 +4538,7 @@ export class SyncSessionManager {
       } else {
         this.logger.warn(`git push failed: ${folder.id} (${folder.path}): ${r.error}`);
       }
-      folder.gitUnpushedCount = countUnpushedCommits(folder.path) ?? 0;
+      folder.gitUnpushedCount = (await countUnpushedCommits(folder.path)) ?? 0;
       this.notifyStatus();
       return r;
     } finally {
@@ -4548,36 +4571,43 @@ export class SyncSessionManager {
    */
   async stripGitCoAuthoredUnpushed(folderId: string): Promise<GitStripCoAuthoredUnpushedResult> {
     if (this.gitPushRunning) throw new Error('已有推送正在进行,请稍候');
-    if (this.gitRewriteRunning) throw new Error('已有提交信息剔除正在进行,请稍候');
+    if (this.gitRewriteRunning || this.gitRewriteStarting) throw new Error('已有提交信息剔除正在进行,请稍候');
     const folder = this.folderStates.find((f) => f.id === folderId);
     if (!folder) throw new Error('共享目录不存在(可能刚被移除)');
     if (!isGitRepo(folder.path)) throw new Error('该目录不是 git 仓库');
-    // 先单独确认上游存在:区分「未设置上游」(结构性不可用,400 带原因)与区间为空(正常态)
-    if (getUpstreamCommitHash(folder.path) === null) {
-      throw new Error('未设置上游分支(远程未配置或从未推送),没有可剔除的未推送区间');
-    }
-    // 预统计:区间内哪些提交的消息会被剔除规则改写(stripped 的口径,与重写过滤器同一条规则)
-    const messages = listRawCommitMessages(folder.path, '@{upstream}..HEAD');
-    if (messages === null) throw new Error('读取未推送提交失败');
-    if (messages.length === 0) return { ok: true, stripped: 0, rewritten: 0 };
-    const stripped = messages.filter((m) => stripCoAuthoredBy(m) !== m).length;
-    // 工作区必须干净(syncx 在途中间态照旧豁免,见 hasUncommittedChanges)才动历史
-    if (hasUncommittedChanges(folder.path)) {
-      throw new Error('工作区有未提交的变更,请先提交或暂存后再剔除');
-    }
-    this.gitRewriteRunning = true;
+    // 入场闸先于一切 await 置位(见 gitRewriteStarting):预检虽是异步的,
+    // 重入判定必须仍发生在调用返回之前的同步段里 —— 否则并发第二发会跟着跑重写。
+    this.gitRewriteStarting = true;
     try {
-      const r = await rewriteCommitMessages(folder.path, '@{upstream}..HEAD');
-      if (!r.ok) throw new Error(r.error || 'git 历史重写失败');
-      this.logger.info(`git strip co-authored ok: ${folder.id} (${folder.path}): ${stripped}/${messages.length} 提交被剔除尾注`);
-      // 重写只改消息,提交个数不变;计数照常重算(与 pushGitFolder 收尾同一套)
-      folder.gitUnpushedCount = countUnpushedCommits(folder.path) ?? 0;
-      // 基线推进到重写后的 HEAD 并落盘:旧哈希已不在分支上,滞留会让下一轮扫描误判广播
-      this.setGitBaseline(folder, getLastCommitHash(folder.path) ?? folder.lastCommitHash);
-      this.notifyStatus();
-      return { ok: true, stripped, rewritten: messages.length };
+      // 先单独确认上游存在:区分「未设置上游」(结构性不可用,400 带原因)与区间为空(正常态)
+      if ((await getUpstreamCommitHash(folder.path)) === null) {
+        throw new Error('未设置上游分支(远程未配置或从未推送),没有可剔除的未推送区间');
+      }
+      // 预统计:区间内哪些提交的消息会被剔除规则改写(stripped 的口径,与重写过滤器同一条规则)
+      const messages = await listRawCommitMessages(folder.path, '@{upstream}..HEAD');
+      if (messages === null) throw new Error('读取未推送提交失败');
+      if (messages.length === 0) return { ok: true, stripped: 0, rewritten: 0 };
+      const stripped = messages.filter((m) => stripCoAuthoredBy(m) !== m).length;
+      // 工作区必须干净(syncx 在途中间态照旧豁免,见 hasUncommittedChanges)才动历史
+      if (await hasUncommittedChanges(folder.path)) {
+        throw new Error('工作区有未提交的变更,请先提交或暂存后再剔除');
+      }
+      this.gitRewriteRunning = true;
+      try {
+        const r = await rewriteCommitMessages(folder.path, '@{upstream}..HEAD');
+        if (!r.ok) throw new Error(r.error || 'git 历史重写失败');
+        this.logger.info(`git strip co-authored ok: ${folder.id} (${folder.path}): ${stripped}/${messages.length} 提交被剔除尾注`);
+        // 重写只改消息,提交个数不变;计数照常重算(与 pushGitFolder 收尾同一套)
+        folder.gitUnpushedCount = (await countUnpushedCommits(folder.path)) ?? 0;
+        // 基线推进到重写后的 HEAD 并落盘:旧哈希已不在分支上,滞留会让下一轮扫描误判广播
+        this.setGitBaseline(folder, (await getLastCommitHash(folder.path)) ?? folder.lastCommitHash);
+        this.notifyStatus();
+        return { ok: true, stripped, rewritten: messages.length };
+      } finally {
+        this.gitRewriteRunning = false;
+      }
     } finally {
-      this.gitRewriteRunning = false;
+      this.gitRewriteStarting = false;
     }
   }
 

@@ -9,10 +9,14 @@
  *  - 执行自动提交(git add -A && git commit;syncx 的在途中间态两头都排除);调用方应先用
  *    hasUncommittedChanges 判定有无待提交内容,无变更不必提交
  *
- * 所有 git 命令通过 execFileSync 同步执行(本地仓库操作通常 <100ms),
- * 避免异步引入的竞态条件。失败时抛错,由调用方处理。
+ * 所有 git 命令通过 execFile **异步**执行:子进程跑多久事件循环就冻多久是同步版的
+ * 结构缺陷,慢设备实测 `git commit` 一笔 10 秒、`git rev-parse` 3.6 秒 —— 期间全部
+ * HTTP 接口、WebSocket 心跳、扫描调度全部停摆(2026-11-04 远端 Linux 盒子日志:接口
+ * pending 30s+、`[perf] 事件循环卡顿 54723ms`,根因即此)。异步化后这些调用不再冻结
+ * 主线程;同一仓库的调用按**每仓库 FIFO 队列**串行(见 gitRun),保住原先同步执行
+ * 「同仓库绝不交错」的竞态约定 —— 异步化只改「跑在哪」,不改「按什么顺序跑」。
  *
- * 每一处 execFileSync 都必须带 `windowsHide: true`,这不是装饰:
+ * 每一处 execFile 都必须带 `windowsHide: true`,这不是装饰:
  * daemon 被自更新流程 detached 拉起后**自己没有控制台**,而 git.exe 是控制台子系统
  * 程序 —— 不给这个标志,Windows 会为每次调用现开一个控制台窗口。于是每轮扫描的两笔
  * git 调用(读 HEAD + 查工作区状态)就是**两下黑框闪烁**,默认 5s 一轮,现象是
@@ -21,34 +25,91 @@
  */
 import { existsSync, statSync, unlinkSync } from 'node:fs';
 import { basename, join, resolve } from 'node:path';
-import { execFile, execFileSync, type ExecFileSyncOptions } from 'node:child_process';
+import { execFile, type ExecFileOptions } from 'node:child_process';
 import { performance } from 'node:perf_hooks';
 import { SCRATCH_SUFFIXES } from './ignore.js';
 import { blocksMatchOnDisk } from './blockstore.js';
 import type { IndexEntry } from './index.js';
 import { processPerfSink, slowRequestMs } from './api/perf.js';
 
-/**
- * 所有同步 git 调用统一走这里:子进程执行期间霸占主线程,慢设备(Termux/Android)
- * 上一条 git 就能把全部接口拖住(实测 ETIMEDOUT、数十秒级卡顿均源于此)。超过
- * 慢请求阈值(SYNCX_SLOW_REQ_MS 同源,缺省 300ms)记一笔 `[perf] git ...`,
- * 定位「卡在哪个仓库的哪条命令」;未注入探针且未开 SYNCX_PERF_LOG 时零开销。
- */
-export function gitSync<T extends ExecFileSyncOptions>(args: string[], opts: T): T extends { encoding: 'utf8' } ? string : Buffer {
+/** git 调用的选项面:与原 execFileSync 用法一一对应(cwd/encoding/stdio/timeout/maxBuffer)。 */
+type GitExecOptions = ExecFileOptions & {
+  cwd: string;
+  encoding?: 'utf8' | 'buffer';
+  windowsHide?: boolean;
+};
+
+/** perf 记账:超过慢请求阈值(SYNCX_SLOW_REQ_MS 同源,缺省 300ms)记一笔 `[perf] git ...`,定位「卡在哪个仓库的哪条命令」;未注入探针且未开 SYNCX_PERF_LOG 时零开销。 */
+function logSlowGit(args: string[], opts: GitExecOptions, start: number): void {
   const sink = processPerfSink();
-  const start = performance.now();
-  try {
-    return execFileSync('git', args, opts) as never;
-  } finally {
-    if (sink) {
-      const ms = performance.now() - start;
-      if (ms >= slowRequestMs()) {
-        const cmd = args.slice(0, 2).join(' ');
-        const repo = basename(String(opts.cwd ?? '.'));
-        sink(`[perf] git ${cmd}(${repo}) ${Math.round(ms)}ms`);
-      }
-    }
+  if (!sink) return;
+  const ms = performance.now() - start;
+  if (ms >= slowRequestMs()) {
+    const cmd = args.slice(0, 2).join(' ');
+    const repo = basename(String(opts.cwd ?? '.'));
+    sink(`[perf] git ${cmd}(${repo}) ${Math.round(ms)}ms`);
   }
+}
+
+/**
+ * 异步执行一笔 git 命令(不入队)。错误对象带 stdout/stderr 属性,与 execFileSync
+ * 抛出的错误同形,调用方的 stderr 解析逻辑原样可用。
+ */
+function gitExecRaw<T extends GitExecOptions>(args: string[], opts: T): Promise<unknown> {
+  const start = performance.now();
+  return new Promise((resolveP, rejectP) => {
+    execFile('git', args, opts, (err, stdout, stderr) => {
+      if (err) {
+        // execFile 的错误对象本身带 stdout/stderr 字段,但经由 Node 回调参数显式
+        // 挂上更稳(旧版 Node 对 stdio: ['ignore','pipe','ignore'] 的 stderr 不挂载)
+        Object.assign(err as Error, { stdout, stderr });
+        rejectP(err);
+      } else {
+        resolveP(stdout);
+      }
+    });
+  }).finally(() => logSlowGit(args, opts, start));
+}
+
+/**
+ * 每仓库 FIFO 队列:同一 cwd 的 git 调用按提交顺序串行执行,不同仓库互不阻塞。
+ * 键为 resolve 后的目录绝对路径;值为「当前队尾」的 Promise(成败无关 —— 上一环
+ * 失败不拦截后续任务,队列只管顺序不管成败)。
+ */
+const gitQueues = new Map<string, Promise<void>>();
+
+/** 拿到该仓库队列的当前队尾(没有则是立即可跑)。 */
+function gitQueueTail(cwd: string): Promise<void> {
+  return gitQueues.get(cwd) ?? Promise.resolve();
+}
+
+/**
+ * 在该仓库的队列尾追加一段**独占区间**:区间内对该仓库的所有 git 调用(必须走
+ * gitExecRaw,绝不能再入队)整体原子执行 —— 这是 autoCommit 的多笔命令
+ * (rev-parse → add → commit → rev-parse)不被同仓库其他结算/自愈调用穿插的保证。
+ */
+async function gitExclusive<T>(cwd: string, task: () => Promise<T>): Promise<T> {
+  const tail = gitQueueTail(cwd);
+  let release!: () => void;
+  const gate = new Promise<void>((r) => {
+    release = r;
+  });
+  gitQueues.set(cwd, tail.then(() => gate, () => gate));
+  await tail.catch(() => {}); // 上一环成败与本环无关:拒绝也继续排队
+  try {
+    return await task();
+  } finally {
+    release();
+  }
+}
+
+/**
+ * 所有 git 调用统一走这里(单笔命令版):自动排进该仓库的 FIFO 队列,同仓库串行、
+ * 异仓库并行。需要多笔命令整体原子的(目前只有 autoCommit)用 gitExclusive 包住
+ * 整段、内部直接调 gitExecRaw。
+ */
+async function gitRun<T extends GitExecOptions>(args: string[], opts: T): Promise<T extends { encoding: 'buffer' } ? Buffer : string> {
+  return gitExclusive(resolve(opts.cwd), () => gitExecRaw(args, opts)) as never;
 }
 
 export interface CommitInfo {
@@ -77,16 +138,35 @@ export function isGitRepo(folderPath: string): boolean {
   return existsSync(join(folderPath, '.git'));
 }
 
-/** 获取 HEAD 当前的提交哈希;无提交(空仓库)返回 null */
-export function getLastCommitHash(folderPath: string): string | null {
+/**
+ * 读 HEAD 哈希的**不入队**版本:只供 autoCommit 的独占区间内部使用(公共版会再入队,
+ * 在独占区间内调用会死等自己前面的 gate)。其余调用方一律走公共版 getLastCommitHash。
+ */
+async function revParseHeadRaw(folderPath: string): Promise<string | null> {
   try {
-    const hash = gitSync(['rev-parse', 'HEAD'], {
+    const hash = (await gitExecRaw(['rev-parse', 'HEAD'], {
       cwd: folderPath,
       encoding: 'utf8',
       stdio: ['ignore', 'pipe', 'ignore'],
       windowsHide: true,
       timeout: 5000,
-    });
+    })) as string;
+    return hash.trim() || null;
+  } catch {
+    return null;
+  }
+}
+
+/** 获取 HEAD 当前的提交哈希;无提交(空仓库)返回 null */
+export async function getLastCommitHash(folderPath: string): Promise<string | null> {
+  try {
+    const hash = (await gitRun(['rev-parse', 'HEAD'], {
+      cwd: folderPath,
+      encoding: 'utf8',
+      stdio: ['ignore', 'pipe', 'ignore'],
+      windowsHide: true,
+      timeout: 5000,
+    })) as string;
     return hash.trim() || null;
   } catch {
     return null;
@@ -98,10 +178,10 @@ export function getLastCommitHash(folderPath: string): string | null {
  * @param fromHash 起始提交(不含)
  * @param toHash 结束提交(含)
  */
-export function getCommitInfo(folderPath: string, fromHash: string, toHash: string): CommitInfo | null {
+export async function getCommitInfo(folderPath: string, fromHash: string, toHash: string): Promise<CommitInfo | null> {
   try {
     // 获取提交消息:首行 subject + body
-    const logOutput = gitSync(
+    const logOutput = await gitRun(
       ['log', '--format=%H%n%P%n%s%n%b%n---SYNCX-END---', `${fromHash}..${toHash}`],
       {
         cwd: folderPath,
@@ -139,7 +219,7 @@ export function getCommitInfo(folderPath: string, fromHash: string, toHash: stri
     const fullMessage = lines.slice(2).join('\n').trim();
 
     // 获取变更文件列表
-    const diffNameOnly = gitSync(
+    const diffNameOnly = await gitRun(
       ['diff', '--name-only', `${fromHash}..${toHash}`],
       {
         cwd: folderPath,
@@ -155,16 +235,18 @@ export function getCommitInfo(folderPath: string, fromHash: string, toHash: stri
     // 获取 diff stat(可选,信息展示用)
     let diffStat: string | undefined;
     try {
-      diffStat = gitSync(
-        ['diff', '--stat', `${fromHash}..${toHash}`],
-        {
-          cwd: folderPath,
-          encoding: 'utf8',
-          stdio: ['ignore', 'pipe', 'ignore'],
-          windowsHide: true,
-          timeout: 5000,
-          maxBuffer: 64 * 1024,
-        },
+      diffStat = (
+        await gitRun(
+          ['diff', '--stat', `${fromHash}..${toHash}`],
+          {
+            cwd: folderPath,
+            encoding: 'utf8',
+            stdio: ['ignore', 'pipe', 'ignore'],
+            windowsHide: true,
+            timeout: 5000,
+            maxBuffer: 64 * 1024,
+          },
+        )
       ).trim();
     } catch {
       // stat 获取失败不影响主流程
@@ -250,11 +332,11 @@ function parseCommitRecords(out: string): GitCommitEntry[] {
  *    不破坏解析;`--no-color` 与 `--no-show-signature` 抵御 color.ui=always / log.showSignature
  *    两个会往输出里插入 ANSI 转义或验签信息(混进字段里就是脏数据)的配置。
  */
-export function listRecentCommits(
+export async function listRecentCommits(
   folderPath: string,
   limit = GIT_LOG_LIMIT,
   skip = 0,
-): GitCommitEntry[] | null {
+): Promise<GitCommitEntry[] | null> {
   if (!isGitRepo(folderPath)) return null;
 
   // --skip 与 -n 都是 git log 自己的分页参数,不在这里切数组:让 git 只读需要的
@@ -262,7 +344,7 @@ export function listRecentCommits(
   const skipArgs = skip > 0 ? ['--skip', String(skip)] : [];
   let out: string;
   try {
-    out = gitSync(['log', '-n', String(limit), ...skipArgs, '-z', '--no-color', '--no-show-signature', `--format=${GIT_LOG_FORMAT}`], {
+    out = await gitRun(['log', '-n', String(limit), ...skipArgs, '-z', '--no-color', '--no-show-signature', `--format=${GIT_LOG_FORMAT}`], {
       cwd: folderPath,
       encoding: 'utf8',
       stdio: ['ignore', 'pipe', 'pipe'],
@@ -274,7 +356,7 @@ export function listRecentCommits(
     // 空仓库(还没有任何提交)时 git log 退出码 128:是「没有提交」而非「读取失败」,
     // 回空列表让弹窗显示空态。用 rev-parse 复核而不是解析 stderr 文案:
     // stderr 文案随 git 版本/语言(locale)变化,不可靠。
-    if (getLastCommitHash(folderPath) === null) return [];
+    if ((await getLastCommitHash(folderPath)) === null) return [];
     const stderr =
       e instanceof Error && (e as { stderr?: Buffer | string }).stderr
         ? (e as { stderr?: Buffer | string }).stderr!.toString()
@@ -318,10 +400,10 @@ export function isCommitHash(hash: string): boolean {
  *    回 [] 不是失败。
  *  - 根提交的全部文件都是 A(没有更早的版本可比)。
  */
-export function listCommitFiles(folderPath: string, hash: string): GitCommitFileEntry[] {
+export async function listCommitFiles(folderPath: string, hash: string): Promise<GitCommitFileEntry[]> {
   if (!isCommitHash(hash)) throw new Error('非法的提交哈希');
 
-  const out = gitSync(
+  const out = await gitRun(
     ['show', '--format=', '--name-status', '-z', '-M', '--no-color', hash],
     {
       cwd: folderPath,
@@ -362,10 +444,10 @@ export function listCommitFiles(folderPath: string, hash: string): GitCommitFile
  * git 失败(哈希不存在/非仓库等)抛 Error;空数组 = 根提交(没有父)。
  * 合并提交会有两个以上父 —— 「上一版」的语义取**首父**(主干侧),调用方自行决定。
  */
-export function getCommitParents(folderPath: string, hash: string): string[] {
+export async function getCommitParents(folderPath: string, hash: string): Promise<string[]> {
   if (!isCommitHash(hash)) throw new Error('非法的提交哈希');
 
-  const out = gitSync(['rev-list', '--parents', '-n', '1', hash], {
+  const out = await gitRun(['rev-list', '--parents', '-n', '1', hash], {
     cwd: folderPath,
     encoding: 'utf8',
     stdio: ['ignore', 'pipe', 'pipe'],
@@ -397,9 +479,9 @@ const SCRATCH_PATHSPECS = SCRATCH_SUFFIXES.flatMap((suffix) => [`:(exclude)*${su
  * 检查工作区是否有未提交的变更(含未跟踪文件)。
  * 返回 true 表示有变更可以提交。
  */
-export function hasUncommittedChanges(folderPath: string): boolean {
+export async function hasUncommittedChanges(folderPath: string): Promise<boolean> {
   try {
-    const status = gitSync(['status', '--porcelain', '--', ...SCRATCH_PATHSPECS], {
+    const status = await gitRun(['status', '--porcelain', '--', ...SCRATCH_PATHSPECS], {
       cwd: folderPath,
       encoding: 'utf8',
       stdio: ['ignore', 'pipe', 'ignore'],
@@ -490,10 +572,12 @@ export const GIT_CHANGES_MAX = 2000;
  * rename 条目跟两个记录(新路径 + 原路径),porcelain 的既有约定。
  * git 把「整棵未跟踪目录」折叠成一条尾部带 '/' 的记录,这里统一去斜杠并打 dir 标记。
  */
-export function getUncommittedChanges(folderPath: string): { entries: GitChangeEntry[]; truncated: boolean } | null {
+export async function getUncommittedChanges(
+  folderPath: string,
+): Promise<{ entries: GitChangeEntry[]; truncated: boolean } | null> {
   if (!isGitRepo(folderPath)) return null;
   try {
-    const out = gitSync(['status', '--porcelain', '-z', '--', ...SCRATCH_PATHSPECS], {
+    const out = await gitRun(['status', '--porcelain', '-z', '--', ...SCRATCH_PATHSPECS], {
       cwd: folderPath,
       encoding: 'utf8',
       stdio: ['ignore', 'pipe', 'ignore'],
@@ -556,11 +640,11 @@ export type HeadReadResult =
   | { kind: 'absent' }
   | { kind: 'error'; error: string };
 
-export function readFileAt(folderPath: string, rev: string, relPath: string): HeadReadResult {
+export async function readFileAt(folderPath: string, rev: string, relPath: string): Promise<HeadReadResult> {
   try {
     return {
       kind: 'bytes',
-      bytes: gitSync(['show', `${rev}:${relPath}`], {
+      bytes: await gitRun(['show', `${rev}:${relPath}`], {
         cwd: folderPath,
         encoding: 'buffer',
         stdio: ['ignore', 'pipe', 'pipe'],
@@ -582,7 +666,7 @@ export function readFileAt(folderPath: string, rev: string, relPath: string): He
 }
 
 /** 读取某文件在 HEAD 提交里的字节(工作区改动的「改前」一侧)。 */
-export function readFileAtHead(folderPath: string, relPath: string): HeadReadResult {
+export async function readFileAtHead(folderPath: string, relPath: string): Promise<HeadReadResult> {
   return readFileAt(folderPath, 'HEAD', relPath);
 }
 
@@ -607,52 +691,59 @@ export interface AutoCommitResult {
  * 对齐是既有契约(git-sync 链路测试锚定),范围收敛后空提交不再吞任何内容,
  * 链上多一笔镜像记录无害。
  *
- * 超时后探测:spawnSync 超时只保证「进程没在期限内退出」,不保证「提交没发生」
+ * 超时后探测:超时只保证「进程没在期限内退出」,不保证「提交没发生」
  * —— 慢盘 fsync、post-commit hook 卡顿都会让提交对象早已落盘而进程被杀。此时若
  * 按失败重试,重试前的 hasUncommittedChanges 判定会被「同步仍在继续」的新变更
  * 糊弄过去,同一镜像消息再吞一笔(把第一次提交之后到达的修改也提交进去)。
  * 因此失败路径先比对 HEAD:前进了且消息与本次一致 = 实际成功,按成功结算。
+ *
+ * 异步化后的原子性:整个「探测 → add → commit → 读回哈希」序列跑在该仓库的
+ * gitExclusive 独占区间里,内部一律用不入队的 gitExecRaw(公共版会在区间内死等
+ * 自己的 gate),同仓库的结算/自愈/心跳调用不可能穿插到序列中间 —— 与旧同步版
+ * 「天然原子」的语义一致。
  */
-export function autoCommit(folderPath: string, message: string, changedFiles?: string[]): AutoCommitResult {
-  const beforeHead = getLastCommitHash(folderPath);
-  try {
-    // stage:有清单按清单精确 stage(含删除 —— `add -A -- path` 同样登记删除),
-    // 无清单退回全量;两种路径都把 syncx 的在途中间态挡在外面(见 SCRATCH_PATHSPECS)
-    const paths = (changedFiles ?? []).filter((s) => s.trim());
-    gitSync(['add', '-A', '--', ...(paths.length > 0 ? paths : SCRATCH_PATHSPECS)], {
-      cwd: folderPath,
-      stdio: ['ignore', 'ignore', 'pipe'],
-      windowsHide: true,
-      timeout: 10000,
-    });
+export async function autoCommit(folderPath: string, message: string, changedFiles?: string[]): Promise<AutoCommitResult> {
+  return gitExclusive(resolve(folderPath), async () => {
+    const beforeHead = await revParseHeadRaw(folderPath);
+    try {
+      // stage:有清单按清单精确 stage(含删除 —— `add -A -- path` 同样登记删除),
+      // 无清单退回全量;两种路径都把 syncx 的在途中间态挡在外面(见 SCRATCH_PATHSPECS)
+      const paths = (changedFiles ?? []).filter((s) => s.trim());
+      await gitExecRaw(['add', '-A', '--', ...(paths.length > 0 ? paths : SCRATCH_PATHSPECS)], {
+        cwd: folderPath,
+        stdio: ['ignore', 'ignore', 'pipe'],
+        windowsHide: true,
+        timeout: 10000,
+      });
 
-    // 提交:使用参数数组形式避免 shell 注入
-    gitSync(['commit', '-m', message, '--allow-empty'], {
-      cwd: folderPath,
-      stdio: ['ignore', 'ignore', 'pipe'],
-      windowsHide: true,
-      timeout: 10000,
-    });
+      // 提交:使用参数数组形式避免 shell 注入
+      await gitExecRaw(['commit', '-m', message, '--allow-empty'], {
+        cwd: folderPath,
+        stdio: ['ignore', 'ignore', 'pipe'],
+        windowsHide: true,
+        timeout: 10000,
+      });
 
-    // 获取新提交哈希
-    const hash = getLastCommitHash(folderPath);
-    return { success: true, hash: hash ?? undefined };
-  } catch (err) {
-    // HEAD 前进且消息与本次一致 = 提交实际成功。消息不一致(并发了他程序提交)
-    // 保守按失败走原路 —— 那是罕见场景,且账目归调用方的基线/通知逻辑管。
-    const afterHead = getLastCommitHash(folderPath);
-    if (afterHead !== null && afterHead !== beforeHead && headMessageMatches(folderPath, message)) {
-      return { success: true, hash: afterHead };
+      // 获取新提交哈希
+      const hash = await revParseHeadRaw(folderPath);
+      return { success: true, hash: hash ?? undefined };
+    } catch (err) {
+      // HEAD 前进且消息与本次一致 = 提交实际成功。消息不一致(并发了他程序提交)
+      // 保守按失败走原路 —— 那是罕见场景,且账目归调用方的基线/通知逻辑管。
+      const afterHead = await revParseHeadRaw(folderPath);
+      if (afterHead !== null && afterHead !== beforeHead && (await headMessageMatchesRaw(folderPath, message))) {
+        return { success: true, hash: afterHead };
+      }
+      const msg = err instanceof Error ? err.message : String(err);
+      return { success: false, error: msg };
     }
-    const msg = err instanceof Error ? err.message : String(err);
-    return { success: false, error: msg };
-  }
+  });
 }
 
-/** HEAD 的完整提交正文(%B)与本次消息是否一致(两侧 trim 掉尾随空白后比对)。 */
-function headMessageMatches(folderPath: string, message: string): boolean {
+/** HEAD 的完整提交正文(%B)与本次消息是否一致(独占区间内部专用,不入队)。 */
+async function headMessageMatchesRaw(folderPath: string, message: string): Promise<boolean> {
   try {
-    const out = gitSync(['log', '-1', '--format=%B'], {
+    const out = await gitExecRaw(['log', '-1', '--format=%B'], {
       cwd: folderPath,
       encoding: 'utf8',
       stdio: ['ignore', 'pipe', 'ignore'],
@@ -687,23 +778,23 @@ export interface GitIndexLockRemoveResult {
 }
 
 /** 向 git 要 index.lock 的绝对路径(worktree 的 .git 是文件,不能拼 join(folder, '.git')）。 */
-function gitIndexLockPath(folderPath: string): string {
-  const out = gitSync(['rev-parse', '--git-path', 'index.lock'], {
+async function gitIndexLockPath(folderPath: string): Promise<string> {
+  const out = await gitRun(['rev-parse', '--git-path', 'index.lock'], {
     cwd: folderPath,
     encoding: 'utf8',
     stdio: ['ignore', 'pipe', 'ignore'],
     windowsHide: true,
     timeout: 5000,
-  }).trim();
-  return resolve(folderPath, out);
+  });
+  return resolve(folderPath, String(out).trim());
 }
 
 /** 读 index.lock 的现况;不存在 / 不是仓库 / git 答不上来时返回 null。只读。 */
-export function findGitIndexLock(folderPath: string): GitIndexLockInfo | null {
+export async function findGitIndexLock(folderPath: string): Promise<GitIndexLockInfo | null> {
   if (!isGitRepo(folderPath)) return null;
   let lockPath: string;
   try {
-    lockPath = gitIndexLockPath(folderPath);
+    lockPath = await gitIndexLockPath(folderPath);
   } catch {
     return null;
   }
@@ -722,11 +813,11 @@ export function findGitIndexLock(folderPath: string): GitIndexLockInfo | null {
  * 删除残留的 index.lock(不接收调用方给的路径,只删 git 指认的那一个)。
  * 调用方负责确认没有其它 git 进程正在操作 —— 本函数无法跨平台判断锁的持有者。
  */
-export function removeGitIndexLock(folderPath: string): GitIndexLockRemoveResult {
+export async function removeGitIndexLock(folderPath: string): Promise<GitIndexLockRemoveResult> {
   if (!isGitRepo(folderPath)) return { ok: false, error: '该目录不是 git 仓库' };
   let lockPath: string;
   try {
-    lockPath = gitIndexLockPath(folderPath);
+    lockPath = await gitIndexLockPath(folderPath);
   } catch (e) {
     return { ok: false, error: e instanceof Error ? e.message : '无法定位 git 锁文件' };
   }
@@ -753,12 +844,12 @@ export function removeGitIndexLock(folderPath: string): GitIndexLockRemoveResult
  * 只与本地远程跟踪引用比较,**绝不 fetch**:不产生网络请求、不改动任何引用。
  * 上游是否落后于远端由用户自己的 fetch/push 更新,这是 git 的常规口径。
  */
-export function countUnpushedCommits(folderPath: string): number | null {
+export async function countUnpushedCommits(folderPath: string): Promise<number | null> {
   // 非仓库直查 .git(与 listRecentCommits 同款):不闸的话,嵌在别的仓库内的 plain 目录
   // 会让 git 向上回溯、数到外层仓库的提交 —— 那与本函数「非仓库回 null」的契约不符。
   if (!isGitRepo(folderPath)) return null;
   try {
-    const out = gitSync(['rev-list', '--count', '@{upstream}..HEAD'], {
+    const out = await gitRun(['rev-list', '--count', '@{upstream}..HEAD'], {
       cwd: folderPath,
       encoding: 'utf8',
       stdio: ['ignore', 'pipe', 'ignore'],
@@ -785,11 +876,11 @@ export const GIT_UNPUSHED_LIMIT = 50;
  * 别的仓库内时 git 会向上回溯,不闸会把外层仓库的提交列进来(scratch 实测踩到过)。
  * 记录解析与 listRecentCommits 完全同构(共用 GIT_LOG_FORMAT/parseCommitRecords)。
  */
-export function listUnpushedCommits(folderPath: string, limit = GIT_UNPUSHED_LIMIT): GitCommitEntry[] | null {
+export async function listUnpushedCommits(folderPath: string, limit = GIT_UNPUSHED_LIMIT): Promise<GitCommitEntry[] | null> {
   if (!isGitRepo(folderPath)) return null;
   let out: string;
   try {
-    out = gitSync(
+    out = await gitRun(
       ['log', '-n', String(limit), '-z', '--no-color', '--no-show-signature', `--format=${GIT_LOG_FORMAT}`, '@{upstream}..HEAD'],
       {
         cwd: folderPath,
@@ -817,9 +908,7 @@ export const GIT_PUSH_TIMEOUT_MS = 120_000;
 /**
  * 对目录执行 `git push`:推当前分支到它配置的上游,不带 -u、不 fetch、不改变其余语义。
  *
- * 与本地仓库操作的 execFileSync 不同,**必须异步**:push 要走网络,同步执行会把 daemon
- * 的事件循环整个卡住(同步与接收全停),那不该是一个 UI 按钮的代价。回调式 execFile 包
- * Promise,与 powerguard 的探针同一写法。
+ * push 要走网络,回调式 execFile 包 Promise,与 powerguard 的探针同一写法。
  *
  * GIT_TERMINAL_PROMPT=0:daemon 没有控制台,缺凭据时让 git 立刻报错,而不是等一个
  * 永远不会出现的终端输入(干等到超时才失败)。
@@ -859,9 +948,9 @@ export function gitPush(folderPath: string, timeoutMs = GIT_PUSH_TIMEOUT_MS): Pr
  * 返回 null = 未设置上游(远程未配置 / 从未 push / 分支游离)—— 调用方据此把
  * 「剔除未推送提交」挡在 400,与 countUnpushedCommits 的 null 同为「没有上游范围」口径。
  */
-export function getUpstreamCommitHash(folderPath: string): string | null {
+export async function getUpstreamCommitHash(folderPath: string): Promise<string | null> {
   try {
-    const out = gitSync(['rev-parse', '--verify', '@{upstream}'], {
+    const out = await gitRun(['rev-parse', '--verify', '@{upstream}'], {
       cwd: folderPath,
       encoding: 'utf8',
       stdio: ['ignore', 'pipe', 'ignore'],
@@ -882,10 +971,10 @@ export function getUpstreamCommitHash(folderPath: string): string | null {
  * 这里只取 `%B` —— 剔除 Co-Authored-By 的命中统计必须跑在**逐字节原文**上
  * (%B 自带尾部换行),subject+body 的拼装口径做不到这一点。
  */
-export function listRawCommitMessages(folderPath: string, range: string): string[] | null {
+export async function listRawCommitMessages(folderPath: string, range: string): Promise<string[] | null> {
   let out: string;
   try {
-    out = gitSync(
+    out = await gitRun(
       ['log', '-z', '--no-color', '--no-show-signature', '--format=%B', range],
       {
         cwd: folderPath,
@@ -930,8 +1019,7 @@ export type GitRewriteResult = { ok: true } | { ok: false; error: string };
  * 区间只应传未推送范围(如 `@{upstream}..HEAD`)—— 未推送提交可安全重写(哈希会变),
  * 已推送区间的重写会造成与远端的分叉,调用方负责保证这一点。
  *
- * 与本地仓库操作的 execFileSync 不同,**必须异步**:重写是可能秒级~分钟级的长操作,
- * 同步执行会把 daemon 的事件循环整个卡住(同步与接收全停),与 gitPush 同一取舍。
+ * 重写是可能秒级~分钟级的长操作,与 gitPush 同一写法(回调式 execFile 包 Promise)。
  *
  * 实测口径(git 2.x,校准脚本验证):
  *  - 只重写当前分支:refs/heads/<当前分支> 指向重写后的新链,上游引用原样不动,

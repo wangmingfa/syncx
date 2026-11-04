@@ -96,8 +96,8 @@ function bootWithRepo(repoPath: string): { manager: SyncSessionManager; base: st
   return { manager, base, configPath };
 }
 
-describe('git-monitor:区间原始消息与上游解析', () => {
-  it.skipIf(!HAS_GIT)('listRawCommitMessages 逐字节取回 %B 原文(新→旧)', () => {
+describe('git-monitor:区间原始消息与上游解析', async () => {
+  it.skipIf(!HAS_GIT)('listRawCommitMessages 逐字节取回 %B 原文(新→旧)', async () => {
     const h = upstreamRepo();
     try {
       writeFileSync(join(h.repo, 'a.txt'), 'A');
@@ -105,7 +105,7 @@ describe('git-monitor:区间原始消息与上游解析', () => {
       writeFileSync(join(h.repo, 'b.txt'), 'B');
       commit(h.repo, 'fix: b', 'plain body');
 
-      const msgs = listRawCommitMessages(h.repo, '@{upstream}..HEAD');
+      const msgs = await listRawCommitMessages(h.repo, '@{upstream}..HEAD');
       expect(msgs).not.toBeNull();
       // git log 新→旧;记录以 NUL 分隔,消息原文含尾部换行
       expect(msgs).toEqual(['fix: b\n\nplain body\n', 'fix: a\n\nbody line\n\nCo-Authored-By: MOSS <m@x>\n']);
@@ -114,7 +114,7 @@ describe('git-monitor:区间原始消息与上游解析', () => {
     }
   });
 
-  it.skipIf(!HAS_GIT)('空区间回 []、非仓库回 null;上游解析同理', () => {
+  it.skipIf(!HAS_GIT)('空区间回 []、非仓库回 null;上游解析同理', async () => {
     const h = upstreamRepo();
     const plain = mkdtempSync(join(tmpdir(), 'syncx-strip-plain-'));
     const noUpstream = mkdtempSync(join(tmpdir(), 'syncx-strip-norel-'));
@@ -126,11 +126,11 @@ describe('git-monitor:区间原始消息与上游解析', () => {
       git(noUpstream, ['add', '-A']);
       git(noUpstream, ['commit', '-qm', 'only']);
 
-      expect(listRawCommitMessages(h.repo, '@{upstream}..HEAD')).toEqual([]);
-      expect(listRawCommitMessages(plain, '@{upstream}..HEAD')).toBeNull();
-      expect(getUpstreamCommitHash(h.repo)).toBe(git(h.repo, ['rev-parse', '@{upstream}']).trim());
-      expect(getUpstreamCommitHash(noUpstream)).toBeNull();
-      expect(getUpstreamCommitHash(plain)).toBeNull();
+      expect(await listRawCommitMessages(h.repo, '@{upstream}..HEAD')).toEqual([]);
+      expect(await listRawCommitMessages(plain, '@{upstream}..HEAD')).toBeNull();
+      expect(await getUpstreamCommitHash(h.repo)).toBe(git(h.repo, ['rev-parse', '@{upstream}']).trim());
+      expect(await getUpstreamCommitHash(noUpstream)).toBeNull();
+      expect(await getUpstreamCommitHash(plain)).toBeNull();
     } finally {
       rmDir(h.base);
       rmDir(plain);
@@ -139,7 +139,7 @@ describe('git-monitor:区间原始消息与上游解析', () => {
   });
 });
 
-describe('git-monitor:filter-branch 重写', () => {
+describe('git-monitor:filter-branch 重写', async () => {
   it.skipIf(!HAS_GIT)('剔除尾注、其余逐字节保留、作者时间保留、上游不动、留 refs/original 备份', async () => {
     const h = upstreamRepo();
     try {
@@ -210,7 +210,7 @@ describe('git-monitor:filter-branch 重写', () => {
   });
 });
 
-describe('stripGitCoAuthoredUnpushed(端点语义,真 manager + 真仓库)', () => {
+describe('stripGitCoAuthoredUnpushed(端点语义,真 manager + 真仓库)', async () => {
   it.skipIf(!HAS_GIT)('计数正确、重写后尾注消失、基线推进并落盘', async () => {
     const h = upstreamRepo();
     try {
