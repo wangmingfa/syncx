@@ -9,7 +9,7 @@
  *
  * 时长选择收在展开面板里(低频操作不占常驻空间)。
  */
-import { computed, ref } from 'vue';
+import { computed, onUnmounted, ref } from 'vue';
 import { NButton, NInputNumber } from 'naive-ui';
 import { useStatusContext } from '../composables/statusContext';
 
@@ -19,9 +19,20 @@ const minutes = ref(60);
 
 const QUICK = [15, 30, 60, 240];
 
+/**
+ * 每秒心跳:倒计时是纯时间推导(Date.now()),computed 不会因为「时间过去了」
+ * 而重算 —— 没有这颗心跳,剩余时间只能在状态快照更新时跳一下(WS 推送或
+ * 4s 兜底轮询),看起来像卡住。挂载期间每秒拨一次,卸载即停。
+ */
+const nowTick = ref(Date.now());
+const tickTimer = setInterval(() => {
+  nowTick.value = Date.now();
+}, 1000);
+onUnmounted(() => clearInterval(tickTimer));
+
 const banner = computed(() => status.value.scheduleBanner);
 /** 放行中:横幅必须留着让用户看见倒计时,并能一键取消。 */
-const overriding = computed(() => (banner.value?.overrideUntil ?? 0) > Date.now());
+const overriding = computed(() => (banner.value?.overrideUntil ?? 0) > nowTick.value);
 const shown = computed(() => {
   const b = banner.value;
   return !!b && (b.visible || overriding.value);
@@ -38,10 +49,10 @@ const resumeText = computed(() => {
   return sameDay ? `${time} 自动恢复` : `${d.getMonth() + 1}月${d.getDate()}日 ${time} 自动恢复`;
 });
 
-/** 放行剩余时间(mm:ss / h:mm:ss)。 */
+/** 放行剩余时间(mm:ss / h:mm:ss),随每秒心跳逐秒倒数。 */
 const remainText = computed(() => {
   const until = banner.value?.overrideUntil ?? 0;
-  const left = Math.max(0, Math.floor((until - Date.now()) / 1000));
+  const left = Math.max(0, Math.floor((until - nowTick.value) / 1000));
   const h = Math.floor(left / 3600);
   const m = Math.floor((left % 3600) / 60);
   const s = left % 60;
