@@ -51,6 +51,21 @@ fn[T] run_store(body : () -> T raise IndexStoreError) -> T raise ExecutorError {
 }
 
 ///|
+/// ExecutorError 的日志/响应文案。路径闸门两类与 Node resolveSharePath 的
+/// 抛错文案逐字一致(前端直接展示),其余变体供日志与内部兜底。
+pub fn ExecutorError::to_text(self : ExecutorError) -> String {
+  match self {
+    Io(message) => message
+    Store(err) => err.to_text()
+    UnsafePath(path) => "unsafe path: \{path}"
+    HardIgnored(path) => "hard-ignored path: \{path}"
+    Incomplete(message) => message
+    ContentMismatch(message) => message
+    FileNotFound(path) => "file not found: \{path}"
+  }
+}
+
+///|
 /// 一个共享目录的本地执行器(字段对齐 Rust `LocalExecutor::ExecutorInner`)。
 pub(all) struct LocalExecutor {
   /// 共享根(绝对路径)。
@@ -513,7 +528,7 @@ pub async fn resolve_share_path(
   root : String,
   rel_path : String,
   allow_hard_ignored : Bool,
-) -> String {
+) -> String raise ExecutorError {
   if !allow_hard_ignored && @core.is_hard_ignored(rel_path) {
     raise HardIgnored(rel_path)
   }

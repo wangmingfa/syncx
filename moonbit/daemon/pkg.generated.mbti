@@ -89,6 +89,10 @@ pub fn normalize_path(String) -> String
 
 pub fn now_ms() -> Int64
 
+pub fn parse_trash_name(String) -> (String, Int64)?
+
+pub fn parse_version_name(String) -> (String, Int64)?
+
 pub fn partial_paths(String) -> PartialPaths
 
 pub async fn prune_scratch_file(String, String, now? : Int64) -> Bool
@@ -97,7 +101,7 @@ pub async fn read_manifest(String, fingerprint~ : String, cdc~ : Bool, slots~ : 
 
 pub async fn remove_partial(String) -> Unit
 
-pub async fn resolve_share_path(String, String, Bool) -> String
+pub async fn resolve_share_path(String, String, Bool) -> String raise ExecutorError
 
 pub async fn run_git(String, String, Array[String]) -> (Int32, String, String) raise GitError
 
@@ -115,6 +119,8 @@ pub fn strip_co_authored_lines(String) -> String
 
 pub fn tombstone_of(Entry, String) -> Entry
 
+pub fn version_original_path(String) -> String
+
 pub async fn write_manifest(String, PartialManifest) -> Unit raise PartialError
 
 // Errors
@@ -127,6 +133,7 @@ pub(all) suberror ExecutorError {
   ContentMismatch(String)
   FileNotFound(String)
 }
+pub fn ExecutorError::to_text(Self) -> String
 
 pub(all) suberror GitError {
   SpawnFailed(String)

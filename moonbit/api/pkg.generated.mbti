@@ -36,15 +36,25 @@ pub fn derive_password_hash(String, Bytes) -> Bytes
 
 pub fn device_infos_json(@core.Config) -> Array[@json.Json]
 
+pub fn folder_index_hash(String) -> String
+
 pub async fn handle_add_device(ApiOptions, @mocket.MocketEvent) -> &@mocket.Responder
 
 pub async fn handle_add_folder(ApiOptions, @mocket.MocketEvent) -> &@mocket.Responder
 
 pub async fn handle_auth_info(ApiOptions, @mocket.MocketEvent) -> &@mocket.Responder
 
+pub async fn handle_delete_folder_version(ApiOptions, @mocket.MocketEvent) -> &@mocket.Responder
+
 pub async fn handle_folder_git_strip_co_authored(ApiOptions, @mocket.MocketEvent) -> &@mocket.Responder
 
+pub async fn handle_folder_version_content(ApiOptions, @mocket.MocketEvent) -> &@mocket.Responder
+
 pub async fn handle_list_devices(ApiOptions, @mocket.MocketEvent) -> &@mocket.Responder
+
+pub async fn handle_list_folder_trash(ApiOptions, @mocket.MocketEvent) -> &@mocket.Responder
+
+pub async fn handle_list_folder_versions(ApiOptions, @mocket.MocketEvent) -> &@mocket.Responder
 
 pub async fn handle_list_folders(ApiOptions, @mocket.MocketEvent) -> &@mocket.Responder
 
@@ -54,7 +64,13 @@ pub fn handle_logout(ApiOptions, @mocket.MocketEvent) -> &@mocket.Responder
 
 pub async fn handle_pause(ApiOptions, @mocket.MocketEvent) -> &@mocket.Responder
 
+pub async fn handle_purge_folder_trash(ApiOptions, @mocket.MocketEvent) -> &@mocket.Responder
+
 pub async fn handle_remove_device(ApiOptions, @mocket.MocketEvent) -> &@mocket.Responder
+
+pub async fn handle_restore_folder_trash(ApiOptions, @mocket.MocketEvent) -> &@mocket.Responder
+
+pub async fn handle_restore_folder_version(ApiOptions, @mocket.MocketEvent) -> &@mocket.Responder
 
 pub async fn handle_shutdown(ApiOptions, @mocket.MocketEvent) -> &@mocket.Responder
 

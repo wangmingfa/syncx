@@ -500,7 +500,7 @@ pub async fn PartialStore::begin(
   cdc : Bool,
 ) -> PartialStore raise PartialError {
   let target = resolve_share_path(root, entry.path, false) catch {
-    e => raise UnsafeTarget("\{entry.path}: \{@debug.to_string(e)}")
+    e => raise UnsafeTarget("\{entry.path}: \{e.to_text()}")
   }
   let paths = partial_paths(target)
   let hashes = slot_hashes(entry, cdc)
