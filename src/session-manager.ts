@@ -792,6 +792,10 @@ export class SyncSessionManager {
    * 重入直接跳过(下一轮心跳自然会补上),与旧同步版「天然原子」行为对齐。
    */
   private gitCheckRunning = false;
+  /** 全扫兜底轮次计数(见 scanOnce 的 fullScan);时段外徽标低频刷新按它取模。 */
+  private scanBeat = 0;
+  /** 时段外目录的 git 徽标刷新周期(拍数):6 拍 × 5s ≈ 30s,与 Rust 侧 git 计数循环同节奏。 */
+  private static readonly GIT_BADGE_REFRESH_BEATS = 6;
   /** 最近的中转活动环形缓冲(ADR-0014 遥测);上限 100,溢出丢弃最旧。仅供拓扑视图展示。 */
   private readonly relayActivity: RelayActivity[] = [];
   private static readonly RELAY_ACTIVITY_CAP = 100;
@@ -1619,6 +1623,9 @@ export class SyncSessionManager {
   private async scanOnce(onlyFolders?: ReadonlySet<string>): Promise<void> {
     // 整轮计时:见函数尾部的 [perf] 扫描整轮 日志(Termux 排查「扫描吃掉主线程」用)
     const roundStart = performance.now();
+    // 全扫兜底轮次计数(脏目录驱动的收窄轮不计):时段外徽标低频刷新按这个节拍
+    const fullScan = onlyFolders === undefined;
+    if (fullScan) this.scanBeat += 1;
     // 本轮真正走到扫描的目录数(被暂停/身份门禁挡住的不计,它们几乎不耗时)
     let roundScannedFolders = 0;
     // watcher 集合对账兜在每轮开头:目录恢复挂载/身份重采后自动补建监听,
@@ -1633,7 +1640,22 @@ export class SyncSessionManager {
       if (onlyFolders && !onlyFolders.has(folder.id)) continue;
       // 暂停的目录(目录级或全局):数据面整体停摆 —— 不扫描、不广播、不应用变更。
       // 控制面照常(连接保持在线),恢复后由下一轮扫描 / reconcile 继续同步。
-      if (this.folderPausedNow(folder)) continue;
+      if (this.folderPausedNow(folder)) {
+        // 但「改动 / 未推送」徽标是目录卡的事实陈述,不该跟着同步时段一起冻结 ——
+        // 用户在窗口外自己改文件 / 手动 git 提交后,徽标会一直挂着旧数(实测:
+        // 卡片显示「改动 1」,点开弹窗现查是「工作区干净」)。只被时段挡住的目录
+        // 每 6 拍(~30s,与 Rust 侧独立 git 计数循环同节奏)低频现查一次;
+        // 手动暂停 / 电源守卫挡住的不刷(那几类连着数据面意图,保持旧值即可)。
+        if (fullScan && this.scheduleBlockedOnly(folder) && this.scanBeat % SyncSessionManager.GIT_BADGE_REFRESH_BEATS === 0) {
+          folder.gitChangeCount = isGitRepo(folder.path)
+            ? ((await getUncommittedChanges(folder.path))?.entries.length ?? 0)
+            : 0;
+          folder.gitUnpushedCount = isGitRepo(folder.path)
+            ? ((await countUnpushedCommits(folder.path)) ?? 0)
+            : 0;
+        }
+        continue;
+      }
       // 一轮扫描走到这里且后续无错误即视为「干净」:清除该目录上一次的错误提示,
       // 让问题自愈后目录卡上的错误横幅自动消失。磁盘守卫错误除外 —— 它的解除
       // 只认磁盘实际可用空间(下面复检),扫描干净不代表盘有空间。
@@ -4659,6 +4681,19 @@ export class SyncSessionManager {
       this.globalPaused ||
       this.powerGuardReason !== null ||
       folder.config.paused === true ||
+      !this.scheduleVerdictFor(folder).inside
+    );
+  }
+
+  /**
+   * 该目录是否**只**被同步时段挡住(非手动暂停 / 非全局暂停 / 非电源守卫):
+   * 这类目录的数据面停摆是调度层的、暂态的,目录卡徽标仍按低频节拍现查真值。
+   */
+  private scheduleBlockedOnly(folder: FolderState): boolean {
+    return (
+      !this.globalPaused &&
+      this.powerGuardReason === null &&
+      folder.config.paused !== true &&
       !this.scheduleVerdictFor(folder).inside
     );
   }
