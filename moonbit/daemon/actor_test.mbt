@@ -528,7 +528,7 @@ fn actor_outbound_to_wire(
 struct ActorLoop {
   handle_a : @daemon.ActorHandle
   handle_b : @daemon.ActorHandle
-  /// B 侧收到的块请求路径(重试计数用)。
+  /// B 侧收到的块请求记录:`path#index#cdc`(重试计数 / 口径断言用)。
   requests : Array[String]
   /// A 的出站队列(测试收尾要关掉它,叫停出站泵)。
   sink_a : @async.Queue[@daemon.Outbound]
@@ -563,7 +563,10 @@ async fn actor_loop_start(
     },
     on_message: (device, message) => {
       match message {
-        BlockRequest(payload~, ..) => requests.push(payload.path)
+        BlockRequest(payload~, ..) =>
+          requests.push(
+            "\{payload.path}#\{payload.block_index}#\{payload.cdc == Some(true)}",
+          )
         _ => ()
       }
       let _ = handle_b.send(
@@ -812,11 +815,9 @@ async test "配置热重载:Reconfigure 对账重建目录集" {
     let spec_a = actor_make_spec(root_a)
     let handle = @daemon.start_session_actor(group, "reload-device", [spec_a])
     // 初始:仅 f1;重载后 f1 暂停 + 新增 f2
-    let spec_b = { ..actor_make_spec(root_b), id: "f2" }
+    let spec_b = { ..actor_make_spec(root_b), id: "f2", }
     let _ = handle.send(
-      @daemon.Cmd::Reconfigure(
-        specs=[{ ..spec_a, paused: true }, spec_b],
-      ),
+      @daemon.Cmd::Reconfigure(specs=[{ ..spec_a, paused: true, }, spec_b]),
     )
     assert_true(
       actor_wait_until(() => {

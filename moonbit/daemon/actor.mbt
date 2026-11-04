@@ -24,7 +24,8 @@
 ///  - 初始交换的 2s 兜底全量(`INITIAL_INDEX_FALLBACK_MS`)未接线:没有定时器
 ///    驱动,指纹无应答时靠对端主动发全量;
 ///  - 中转(ADR-0014)与磁盘空间守卫未移植;
-///  - CDC 块的请求与供应未移植(只走定长块)。
+///  - CDC 块的请求与供应已移植:接收侧按 plan_cdc 规划口径并做本地预填差集
+///    (对齐 Node requestMissingChunks),供应侧按本机 clens 前缀和供块。
 
 ///|
 /// git 提交检测心跳的周期(周期泵节拍数):POLL_TICK_MS = 500ms × 10 = 5s,
@@ -344,7 +345,7 @@ fn make_folder(spec : FolderSpec) -> Folder raise IndexStoreError {
     peers: Map([]),
     limiter: make_rate_limiter(spec.max_bandwidth_kbps),
     git_sync: spec.git_sync,
-    git_watcher: { root: spec.root, mode: spec.git_sync, last_hash: None },
+    git_watcher: { root: spec.root, mode: spec.git_sync, last_hash: None, },
   }
 }
 
@@ -422,7 +423,9 @@ pub async fn SessionActor::run(self : SessionActor) -> Unit {
     // 单条命令失败只记日志,不掀翻整个 actor(与 Rust 侧 warn + 继续同口径)
     running = self.dispatch(cmd) catch {
       e => {
-        @log.error("会话命令处理失败 {Detail}", [Json::string(@debug.to_string(e))])
+        @log.error("会话命令处理失败 {Detail}", [
+          Json::string(@debug.to_string(e)),
+        ])
         true
       }
     }
@@ -497,7 +500,11 @@ fn SessionActor::folder_by_id(self : SessionActor, id : String) -> Folder? {
 /// 日志:开始 Debug / 完成 Information(带改动条数与耗时);异常走 dispatch
 /// 层统一记 Error。`quiet~` 供 git 心跳的静默扫描抑制「扫描完成」INF
 /// (每 5s 一条会刷屏),完成日志降为 Debug;其余行为完全一致。
-async fn SessionActor::do_scan(self : SessionActor, id : String, quiet~ : Bool = false) -> Unit {
+async fn SessionActor::do_scan(
+  self : SessionActor,
+  id : String,
+  quiet~ : Bool = false,
+) -> Unit {
   let folder = match self.folder_by_id(id) {
     Some(f) => f
     None => return
@@ -551,7 +558,8 @@ async fn SessionActor::do_scan(self : SessionActor, id : String, quiet~ : Bool =
     folder.executor.apply_delete(folder.index, tomb.path, tomb) catch {
       e =>
         @log.error("墓碑落地失败 {Path}: {Detail}", [
-          Json::string(tomb.path), Json::string(@debug.to_string(e)),
+          Json::string(tomb.path),
+          Json::string(@debug.to_string(e)),
         ])
     }
     folder.local_index.set(tomb.path, tomb)
@@ -602,7 +610,10 @@ async fn SessionActor::do_scan(self : SessionActor, id : String, quiet~ : Bool =
 /// 检测节拍有两路:扫描轮尾(文件变更驱动)+ 周期泵心跳(见
 /// GIT_CHECK_TICKS,对齐 Node checkGitCommits 的 5s 扫描节拍)—— 纯 git
 /// 命令产生的提交只动 .git(被监听排除),靠心跳兜住检测时效。
-async fn SessionActor::check_folder_git_commits(self : SessionActor, folder : Folder) -> Unit {
+async fn SessionActor::check_folder_git_commits(
+  self : SessionActor,
+  folder : Folder,
+) -> Unit {
   if !git_sync_plan(folder.git_sync).watch_local {
     return
   }
@@ -648,7 +659,11 @@ async fn SessionActor::check_folder_git_commits(self : SessionActor, folder : Fo
 ///|
 /// 回填 git 提交检测基线(镜像提交成功 / 干净树跳过后由装配层调用;
 /// 死循环防护的一半 —— 另一半是装配层 processedRemoteCommits 去重)。
-fn SessionActor::do_git_baseline(self : SessionActor, folder_id : String, hash : String) -> Unit {
+fn SessionActor::do_git_baseline(
+  self : SessionActor,
+  folder_id : String,
+  hash : String,
+) -> Unit {
   match self.folder_by_id(folder_id) {
     Some(folder) => folder.git_watcher.last_hash = Some(hash)
     None => ()
@@ -668,7 +683,10 @@ fn SessionActor::do_git_baseline(self : SessionActor, folder_id : String, hash :
 ///     会话拆除、观察器重建(基线重新起算,不重放历史);
 ///   - 会话拆除只关出站队列,传输层连接不动:装配层的会话面对账负责断开
 ///     不再共享任何目录的既有连接(见 cli reload 回调)。
-async fn SessionActor::do_reconfigure(self : SessionActor, specs : Array[FolderSpec]) -> Unit {
+async fn SessionActor::do_reconfigure(
+  self : SessionActor,
+  specs : Array[FolderSpec],
+) -> Unit {
   let existing : Map[String, Folder] = Map([])
   for folder in self.folders {
     existing.set(folder.id, folder)
@@ -677,7 +695,7 @@ async fn SessionActor::do_reconfigure(self : SessionActor, specs : Array[FolderS
   let fresh : Array[String] = []
   for spec in specs {
     match existing.get(spec.id) {
-      Some(folder) => {
+      Some(folder) =>
         if normalize_path(folder.root) == normalize_path(spec.root) {
           // 保留目录:就地更新运行期字段
           folder.receive_only = spec.receive_only
@@ -712,17 +730,13 @@ async fn SessionActor::do_reconfigure(self : SessionActor, specs : Array[FolderS
             None => ()
           }
         }
-      }
       None => {
         // 新增目录
         let opened : Folder? = Some(make_folder(spec)) catch {
           e => {
             @log.error(
               "配置重载:新目录 {Folder} 索引库打开失败,跳过 ({Detail})",
-              [
-                Json::string(spec.id),
-                Json::string(IndexStoreError::to_text(e)),
-              ],
+              [Json::string(spec.id), Json::string(IndexStoreError::to_text(e))],
             )
             None
           }
@@ -747,9 +761,10 @@ async fn SessionActor::do_reconfigure(self : SessionActor, specs : Array[FolderS
       for _, session in folder.peers {
         session.sink.close(clear=true)
       }
-      @log.info("配置重载:目录 {Folder} 已移除,运行态随之拆除", [
-        Json::string(folder.id),
-      ])
+      @log.info(
+        "配置重载:目录 {Folder} 已移除,运行态随之拆除",
+        [Json::string(folder.id)],
+      )
     }
   }
   self.folders = rebuilt
@@ -1256,8 +1271,39 @@ fn blocks_equal(a : Array[String], b : Array[String]) -> Bool {
 }
 
 ///|
+/// daemon 条目是否带可用 CDC 视图:cdh 与 clens 等长且非空(与 Node
+/// `cdcUsable` 及 wire 侧 `has_cdc_view` 同一判据;不满足时绝不半套上线)。
+fn entry_has_cdc_view(entry : Entry) -> Bool {
+  match (entry.cdh, entry.clens) {
+    (Some(h), Some(l)) => h.length() > 0 && h.length() == l.length()
+    _ => false
+  }
+}
+
+///|
+/// 本轮接收是否按 CDC 口径规划(对齐 Node `planCdc`)。判据全在「本端能不能
+/// 差集」:对端条目带 cdh/clens,本机对应条目也存在、不是墓碑 / 占位、且同样
+/// 带 CDC 视图(实体文件在盘上)才启用 —— 本机没有 CDC 视图就无差集可算,
+/// 按定长口径。
+/// 「对端供不出 CDC 块」不构成风险:对端能把 cdh 宣告出来,就必然能按自己
+/// 算的 clens 供块(同一份内容的纯函数);真对不上(旧数据 / 竞态)接收端
+/// 哈希闸门会拦下,走既有的有界重试 + 放弃 + 下轮收敛 —— 退化的是效率,
+/// 不是正确性。
+fn plan_cdc(remote_entry : Entry, local_entry : Entry?) -> Bool {
+  if !entry_has_cdc_view(remote_entry) {
+    return false
+  }
+  match local_entry {
+    Some(l) => !l.deleted && !l.placeholder && entry_has_cdc_view(l)
+    None => false
+  }
+}
+
+///|
 /// 开(或续)一条在途接收:块落进磁盘中间态,只对缺的块发请求
 /// (空文件无块可请求,直接落地)。
+/// 块口径在规划时刻定下(plan_cdc):CDC 与定长的槽位数、期望哈希、指纹
+/// 全都不同,store 与后续校验统一按这次定下的口径走。
 /// 认领台账未移植:每目录每设备至多一条会话,不存在同设备去重(TODO)。
 async fn SessionActor::open_receive(
   self : SessionActor,
@@ -1274,9 +1320,17 @@ async fn SessionActor::open_receive(
     Some(old) => old.store.abort(keep_partial=true)
     None => ()
   }
+  // CDC 差集要用「本机此刻的条目」(对齐 Node localIndex.get(path)):
+  // 调用方传入的 local_entry 只在冲突分支携带,普通 Receive 传 None,
+  // 按内存索引现查 —— 否则普通接收永远无差集可算。
+  let local_now : Entry? = match local_entry {
+    Some(l) => Some(l)
+    None => folder.local_index.get(path)
+  }
+  let cdc = plan_cdc(remote_entry, local_now)
   // 开(或续)磁盘中间态:开不了(路径越界 / 盘满)按本次收不了处理,
   // 下一轮规划会重试。重连续传:manifest 指纹匹配时只请求缺的块。
-  let store = PartialStore::begin(folder.executor.root, remote_entry, false) catch {
+  let store = PartialStore::begin(folder.executor.root, remote_entry, cdc) catch {
     e => {
       println("开启接收中间态失败(\{path}): \{@debug.to_string(e)}")
       return
@@ -1295,24 +1349,122 @@ async fn SessionActor::open_receive(
   }
   session.pending.set(path, pending)
   let now = now_ms()
-  for i in store.missing_slots() {
-    let request : @net.WireBlockRequest = {
-      device_id: self.device_id,
-      path,
-      block_index: i.to_int64(),
-      hash: remote_entry.blocks[i],
-      priority: None,
-      cdc: None, // CDC 分块请求未移植(TODO)
+  if cdc {
+    // CDC 口径:先本地预填差集,只对真缺的槽位发块请求(这是 CDC 的核心收益)
+    self.request_missing_chunks(folder, session, path, pending, local_now, now)
+  } else {
+    for i in store.missing_slots() {
+      let request : @net.WireBlockRequest = {
+        device_id: self.device_id,
+        path,
+        block_index: i.to_int64(),
+        hash: remote_entry.blocks[i],
+        priority: None,
+        cdc: None,
+      }
+      push_outbound(session, BlockRequest(request))
+      // 登记重试台账:超时未响应由 PollTimeouts 驱动重发(见 reliability.mbt)
+      track_block_request(session, request, now)
     }
-    push_outbound(session, BlockRequest(request))
-    // 登记重试台账:超时未响应由 PollTimeouts 驱动重发(见 reliability.mbt)
-    track_block_request(session, request, now)
   }
 }
 
 ///|
-/// 收到块响应:以 pending 为准校验(哈希对不上整块丢弃 —— 防对端回填
-/// 自洽但错误的块),收齐即落地。
+/// CDC 口径的缺失块请求(对齐 Node `requestMissingChunks`)。本地块按
+/// 「哈希 → (偏移,长度)」的**集合成员**匹配:块边界由内容决定,插入 / 删除
+/// 让整体错位后,块自身的哈希依然与本地文件里同一段字节吻合 —— 这正是定长
+/// 下标匹配做不到的差集。偏移取本地 clens 前缀和;同哈希多块取最先出现的
+/// 一处。读出的块仍逐块验哈希:本地文件可能在扫描与规划之间被改写,验不过
+/// 就不信,自然回退网络请求。
+async fn SessionActor::request_missing_chunks(
+  self : SessionActor,
+  folder : Folder,
+  session : PeerSession,
+  path : String,
+  pending : PendingReceive,
+  local_entry : Entry?,
+  now : Int64,
+) -> Unit {
+  let cdh = match pending.entry.cdh {
+    Some(h) => h
+    None => return // store.begin 已按口径把关,这里防御兜底
+  }
+  // 本地 hash → (offset, length)(偏移是本地 clens 前缀和)
+  let local_hits : Map[String, (Int64, Int64)] = Map([])
+  match local_entry {
+    Some(l) =>
+      if !l.deleted && !l.placeholder && entry_has_cdc_view(l) {
+        match (l.cdh, l.clens) {
+          (Some(lh), Some(ll)) => {
+            let mut lo = 0L
+            for i in 0..<lh.length() {
+              if !local_hits.contains(lh[i]) {
+                local_hits.set(lh[i], (lo, ll[i]))
+              }
+              lo += ll[i]
+            }
+          }
+          _ => ()
+        }
+      }
+    None => ()
+  }
+  // 本地文件的绝对路径:解析不了(路径越界 / 不安全)就整体走网络
+  let local_abs : String? = Some(folder.executor.resolve_path(path)) catch {
+    _ => None
+  }
+  for i in pending.store.missing_slots() {
+    if i >= cdh.length() {
+      continue // 防御:store 布局与 cdh 不自洽时不发请求,交给下轮收敛
+    }
+    let hash = cdh[i]
+    let mut filled = false
+    if local_hits.contains(hash) {
+      match local_abs {
+        Some(abs) =>
+          match local_hits.get(hash) {
+            Some((offset, length)) => {
+              let data = read_chunk_at(abs, offset, length.to_int())
+              match data {
+                Some(d) =>
+                  // 本地命中也要验:盘上内容与本地索引可能已经不一致
+                  if @core.hash_block(d) == hash {
+                    let ok : Bool = try {
+                      pending.store.append(i, d)
+                      true
+                    } catch {
+                      _ => false // 落盘失败(盘满等):回退网络请求
+                    }
+                    filled = ok
+                  }
+                None => ()
+              }
+            }
+            None => ()
+          }
+        None => ()
+      }
+    }
+    if !filled {
+      let request : @net.WireBlockRequest = {
+        device_id: self.device_id,
+        path,
+        block_index: i.to_int64(),
+        hash,
+        priority: None,
+        cdc: Some(true),
+      }
+      push_outbound(session, BlockRequest(request))
+      track_block_request(session, request, now)
+    }
+  }
+}
+
+///|
+/// 收到块响应:以 pending.store 为准校验(哈希对不上整块丢弃 —— 防对端
+/// 回填自洽但错误的块),收齐即落地。槽位与期望哈希按 open_receive 规划
+/// 定下的口径取(store.hashes:CDC 口径是 cdh,定长是 blocks),不看
+/// entry.blocks —— 否则 CDC 响应会被定长布局整批拒掉。
 async fn on_block_response(
   folder : Folder,
   session : PeerSession,
@@ -1323,11 +1475,11 @@ async fn on_block_response(
     None => return
   }
   let index = response.block_index
-  if index < 0L || index >= pending.entry.blocks.length().to_int64() {
+  if index < 0L || index >= pending.store.hashes.length().to_int64() {
     return // 越界索引会污染拼装布局
   }
   let slot = index.to_int()
-  let expected = pending.entry.blocks[slot]
+  let expected = pending.store.hashes[slot]
   if response.hash != expected {
     return
   }
@@ -1335,6 +1487,16 @@ async fn on_block_response(
   let data = match decoded {
     Some(d) => d
     None => return
+  }
+  // 长度上限闸(对齐 Node:超大响应直接丢弃,避免哈希前先撑爆内存):
+  // CDC 块 ≤ CDC_MAX_CHUNK,定长块 ≤ BLOCK_SIZE;精确长度由 append 复核
+  let cap = if pending.store.cdc {
+    @core.CDC_MAX_CHUNK
+  } else {
+    @core.BLOCK_SIZE
+  }
+  if data.length() > cap {
+    return
   }
   if @core.hash_block(data) != expected {
     return
@@ -1348,8 +1510,8 @@ async fn on_block_response(
       return
     }
   }
-  // 该块有了着落:重试台账出队
-  untrack_block_response(session, response.path, index)
+  // 该块有了着落:重试台账出队(口径与请求发出时一致,即 store 的规划口径)
+  untrack_block_response(session, response.path, index, pending.store.cdc)
   if pending.store.is_full() {
     complete_receive(folder, session, response.path, pending)
   }
@@ -1424,7 +1586,101 @@ async fn complete_receive(
 // ==================== 供块 ====================
 
 ///|
-/// 对端要块:按本机索引定位条目,从盘上读出对应定长块回给对端。
+/// 待供应块的定位结果:两种口径(定长 / CDC)统一成一份,serve_block 的
+/// 闸门(发送窗口 / 路径越界 / 限速 / 发送记账)因此只有一份代码。
+priv struct ServeSlot {
+  /// 块下标(响应回填 block_index)。
+  slot : Int32
+  /// 本机索引里这块的哈希(响应回填它)。
+  expected : String
+  /// 块字节长度(发送窗口与限速按它算;CDC 口径 ≤ CDC_MAX_CHUNK)。
+  length : Int32
+  /// CDC 口径的块内偏移(本机 clens 前缀和;定长口径不用)。
+  offset : Int64
+  cdc : Bool
+}
+
+///|
+/// 按请求定位本机待供应的块。定位不了一律返回 None(静默忽略),由对端的
+/// 重试与放弃机制兜底:
+///  - CDC 口径:按本机条目 clens 前缀和定位偏移,只供那一块。本机没有该路径
+///    的 CDC 视图(旧数据 / 版本错位)时静默忽略 —— 错位是有界的(本机扫描
+///    重算后下一轮宣告就带 cdh),且对端若真是旧版口径混发,接收端哈希闸门
+///    自会拦下,不会落错内容。**不核对** request.hash:响应回填真实哈希,
+///    对端认知错位时由接收端校验自然拦。
+///  - 定长口径:槽位在 blocks 内,且请求哈希与本机索引一致(版本已漂移
+///    不发旧块)。
+fn locate_serve_slot(
+  entry : Entry,
+  request : @net.WireBlockRequest,
+) -> ServeSlot? {
+  let slot_i64 = request.block_index
+  match request.cdc {
+    Some(true) => {
+      let cdh = match entry.cdh {
+        Some(h) => h
+        None => return None
+      }
+      let clens = match entry.clens {
+        Some(l) => l
+        None => return None
+      }
+      if cdh.length() == 0 || cdh.length() != clens.length() {
+        return None
+      }
+      if slot_i64 < 0L || slot_i64 >= cdh.length().to_int64() {
+        return None
+      }
+      let slot = slot_i64.to_int()
+      let mut offset = 0L
+      for i in 0..<slot {
+        offset += clens[i]
+      }
+      let length = clens[slot]
+      // 防御闸:本机扫描产出的 clens 恒在 [1, CDC_MAX_CHUNK] 内,越界说明
+      // 数据被外部改过 —— 不供,接收端重试后走下轮收敛
+      if length <= 0L || length > @core.CDC_MAX_CHUNK.to_int64() {
+        return None
+      }
+      Some({
+        slot,
+        expected: cdh[slot],
+        length: length.to_int(),
+        offset,
+        cdc: true,
+      })
+    }
+    _ => {
+      if slot_i64 < 0L || slot_i64 >= entry.blocks.length().to_int64() {
+        return None
+      }
+      let slot = slot_i64.to_int()
+      let expected = entry.blocks[slot]
+      if request.hash != expected {
+        return None // 请求的哈希与本机索引对不上:版本已漂移,不发旧块
+      }
+      let remain = entry.size - slot_i64 * @core.BLOCK_SIZE.to_int64()
+      let length : Int32 = if remain > @core.BLOCK_SIZE.to_int64() {
+        @core.BLOCK_SIZE
+      } else if remain > 0L {
+        remain.to_int()
+      } else {
+        0
+      }
+      Some({
+        slot,
+        expected,
+        length,
+        offset: slot_i64 * @core.BLOCK_SIZE.to_int64(),
+        cdc: false,
+      })
+    }
+  }
+}
+
+///|
+/// 对端要块:按本机索引定位条目,从盘上读出对应块回给对端(定长按块下标,
+/// CDC 按本机 clens 前缀和定位,见 locate_serve_slot)。
 /// 出口有两道闸门(见 reliability.mbt):发送窗口(读盘之前判 —— 读出来
 /// 再挂起等于什么都没省)与限速令牌桶(读盘之后、上线之前按实际字节扣)。
 /// 两道闸门拦下的请求都进延迟队列,由 `PollTimeouts` / `BlockSent` 重放。
@@ -1436,9 +1692,6 @@ async fn SessionActor::serve_block(
   session : PeerSession,
   request : @net.WireBlockRequest,
 ) -> Unit {
-  if request.cdc == Some(true) {
-    return // CDC 块供应未移植(TODO)
-  }
   if @core.is_hard_ignored(request.path) ||
     folder.rules.is_ignored(request.path, false) {
     return
@@ -1450,24 +1703,12 @@ async fn SessionActor::serve_block(
   if entry.deleted || entry.placeholder {
     return
   }
-  let slot = request.block_index
-  if slot < 0L || slot >= entry.blocks.length().to_int64() {
-    return
+  let serve = match locate_serve_slot(entry, request) {
+    Some(s) => s
+    None => return
   }
-  let expected = entry.blocks[slot.to_int()]
-  if request.hash != expected {
-    return // 请求的哈希与本机索引对不上:版本已漂移,不发旧块
-  }
-  // 闸门一:发送窗口(按条目 size 估 wire 体积,不必读盘就能判)
-  let remain = entry.size - slot * @core.BLOCK_SIZE.to_int64()
-  let plain : Int32 = if remain > @core.BLOCK_SIZE.to_int64() {
-    @core.BLOCK_SIZE
-  } else if remain > 0L {
-    remain.to_int()
-  } else {
-    0
-  }
-  if !has_send_room(session, wire_bytes_estimate(plain)) {
+  // 闸门一:发送窗口(按块长估 wire 体积,不必读盘就能判;CDC 传 clens[slot])
+  if !has_send_room(session, wire_bytes_estimate(serve.length)) {
     defer_request(session, request)
     return
   }
@@ -1478,9 +1719,14 @@ async fn SessionActor::serve_block(
     Some(a) => a
     None => return
   }
-  match read_block_at(abs, slot) {
+  let data : Bytes? = if serve.cdc {
+    read_chunk_at(abs, serve.offset, serve.length)
+  } else {
+    read_block_at(abs, serve.slot.to_int64())
+  }
+  match data {
     Some(bytes) => {
-      if @core.hash_block(bytes) != expected {
+      if @core.hash_block(bytes) != serve.expected {
         return // 盘上内容与索引不符(本地改动未重扫):不发旧块
       }
       // 闸门二:目录级限速(扣的是实际字节;不够则延迟重放)
@@ -1499,10 +1745,14 @@ async fn SessionActor::serve_block(
         BlockResponse({
           device_id: self.device_id,
           path: request.path,
-          block_index: slot,
-          hash: expected,
+          block_index: serve.slot.to_int64(),
+          hash: serve.expected,
           data: @base64.encode(bytes),
-          cdc: None,
+          cdc: if serve.cdc {
+            Some(true)
+          } else {
+            None
+          },
         }),
       )
       // 「发完释放」:帧已交给出站队列即视为发送完成,经 BlockSent 回账
@@ -1560,6 +1810,35 @@ async fn read_block_at(abs : String, block_index : Int64) -> Bytes? {
     current += 1
   }
   result
+}
+
+///|
+/// 定位读出 [offset, offset+length) 一段字节(CDC 供块与本地预填共用)。
+/// 必须循环读满:单次定位读的短读是 POSIX 允许的正常返回;读不满 / 中途
+/// EOF 返回 None —— 半截块的哈希必然对不上,不如直接回退网络请求。
+async fn read_chunk_at(abs : String, offset : Int64, length : Int32) -> Bytes? {
+  if length <= 0 {
+    return None
+  }
+  let file = @fs.open(abs, mode=ReadOnly) catch { _ => return None }
+  defer file.close()
+  let buf : FixedArray[Byte] = FixedArray::make(length, b'\x00')
+  let mut filled = 0
+  while filled < length {
+    let n = file.read_at(
+      buf,
+      position=offset + filled.to_int64(),
+      offset=filled,
+      len=length - filled,
+    ) catch {
+      _ => -1
+    }
+    if n <= 0 {
+      return None
+    }
+    filled += n
+  }
+  Some(Bytes::from_array(buf.exact_view(end=filled)))
 }
 
 // ==================== 快照 ====================

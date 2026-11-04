@@ -84,9 +84,14 @@ priv struct PendingBlock {
 }
 
 ///|
-/// 块台账键:路径 + 槽位(同一文件的每个块独立计数)。
-fn block_key(path : String, block_index : Int64) -> String {
-  "\{path}\u{1f}\{block_index}"
+/// 块台账键:口径前缀 + 路径 + 槽位(同一文件的每个块独立计数)。cdc 参与
+/// 键构造:同一路径下「定长第 i 块」与「CDC 第 i 块」是两个不同的东西,
+/// 重规划切换口径时两套在途请求与重试不能互相顶掉(对齐 Node blockKey)。
+/// 键只做身份不做结构:清路径在途项按记录本体的 request.path 字段匹配,
+/// 不解析键字符串(路径可含任意字符,包括分隔符本身)。
+fn block_key(path : String, block_index : Int64, cdc : Bool) -> String {
+  let tag = if cdc { "c" } else { "b" }
+  "\{tag}:\{path}\u{1f}\{block_index}"
 }
 
 ///|
@@ -96,21 +101,21 @@ fn track_block_request(
   request : @net.WireBlockRequest,
   now : Int64,
 ) -> Unit {
-  session.block_retries.set(block_key(request.path, request.block_index), {
-    deadline: now + BLOCK_REQUEST_TIMEOUT_MS,
-    retries: 0,
-    request,
-  })
+  session.block_retries.set(
+    block_key(request.path, request.block_index, request.cdc == Some(true)),
+    { deadline: now + BLOCK_REQUEST_TIMEOUT_MS, retries: 0, request, },
+  )
 }
 
 ///|
-/// 块响应到达:该块有了着落,摘掉重试台账。
+/// 块响应到达:该块有了着落,摘掉重试台账(口径须与请求发出时一致)。
 fn untrack_block_response(
   session : PeerSession,
   path : String,
   block_index : Int64,
+  cdc : Bool,
 ) -> Unit {
-  let _ = session.block_retries.remove(block_key(path, block_index))
+  let _ = session.block_retries.remove(block_key(path, block_index, cdc))
 }
 
 ///|
@@ -240,7 +245,11 @@ fn defer_request(
   if session.deferred.length() >= DEFERRED_MAX {
     return
   }
-  let key = block_key(request.path, request.block_index)
+  let key = block_key(
+    request.path,
+    request.block_index,
+    request.cdc == Some(true),
+  )
   if session.deferred_keys.contains(key) {
     return
   }

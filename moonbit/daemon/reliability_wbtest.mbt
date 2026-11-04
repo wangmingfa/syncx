@@ -200,9 +200,37 @@ async test "reliability: 块响应到达即出台账,路径级整批摘除" {
   track_block_request(session, two, 1000)
   assert_eq(session.block_retries.length(), 2)
   // 一块到账:只摘一块
-  untrack_block_response(session, "f.txt", 0L)
+  untrack_block_response(session, "f.txt", 0L, false)
   assert_eq(session.block_retries.length(), 1)
   // 路径级摘除(接收落地 / 对端墓碑中止):整批出清
   purge_block_retries(session, "f.txt")
+  assert_eq(session.block_retries.length(), 0)
+}
+
+///|
+/// 同路径同槽位的定长与 CDC 请求是两个不同的块:登记互不顶掉,摘除按口径
+/// 精确出队(重规划切换口径时两套在途不能互相冲账)。
+test "reliability: 跨口径重试键互不顶掉" {
+  let session = wb_session()
+  let fixed = wb_request("f.txt")
+  let cdc : @net.WireBlockRequest = {
+    device_id: "me",
+    path: "f.txt",
+    block_index: 0L,
+    hash: "h",
+    priority: None,
+    cdc: Some(true),
+  }
+  track_block_request(session, fixed, 1000)
+  track_block_request(session, cdc, 1000)
+  // 同路径同槽位,口径不同 → 两条台账共存
+  assert_eq(session.block_retries.length(), 2)
+  // CDC 块到账:只摘 CDC 台账,定长的还在途
+  untrack_block_response(session, "f.txt", 0L, true)
+  assert_eq(session.block_retries.length(), 1)
+  let remaining = session.block_retries.get(block_key("f.txt", 0L, false))
+  assert_true(remaining is Some(_))
+  // 定长块到账:台账出清
+  untrack_block_response(session, "f.txt", 0L, false)
   assert_eq(session.block_retries.length(), 0)
 }
