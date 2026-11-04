@@ -24,6 +24,8 @@ import { basename, join, resolve } from 'node:path';
 import { execFile, execFileSync, type ExecFileSyncOptions } from 'node:child_process';
 import { performance } from 'node:perf_hooks';
 import { SCRATCH_SUFFIXES } from './ignore.js';
+import { blocksMatchOnDisk } from './blockstore.js';
+import type { IndexEntry } from './index.js';
 import { processPerfSink, slowRequestMs } from './api/perf.js';
 
 /**
@@ -405,6 +407,55 @@ export function hasUncommittedChanges(folderPath: string): boolean {
       timeout: 5000,
     });
     return status.trim().length > 0;
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * 工作树内容是否与本机索引条目「对齐」—— 镜像提交结算的逐文件准入判据。
+ *
+ * 事故还原(2026-11-04,契约动机):本地提交被广播后遭改写(reset + 重做),对端
+ * 13 秒内就镜像了旧通知(范围收敛:只 stage changedFiles),此刻部分文件的内容
+ * 尚未经数据面落齐 → 对端把半途内容定格成一笔提交(消息对、内容错);随后本地
+ * revert 的内容又同步过去 → 对端工作树 ≠ HEAD,而这些文件再也不在任何通知的
+ * changedFiles 里(范围收敛拒绝扫荡)→ 残留 17 个脏文件永久挂起,无人再提交。
+ *
+ * 解法是「宁缺勿错」:结算前逐文件问一遍「盘上字节是否就是索引宣告的那份内容」,
+ * 对齐的才准进本次镜像提交;未对齐(半途/在途/被改写)的不提交,交漂移台账
+ * (见 session-manager 的 gitDeferredMirror)等内容到齐后自愈补提交。判定必须
+ * 用内容本身,不看 mtime —— 定格半途内容的代价是永久性历史污染,比对一次块哈希
+ * 的代价只是几毫秒 IO。
+ *
+ * 对齐口径(与扫描器 contentChanged / drift 哨兵共用 blocksMatchOnDisk 同一条
+ * 「块哈希还代表不代表盘上字节」的判定):
+ *  - 索引无条目(从未收到过该路径的内容)→ 未对齐;
+ *  - 索引是墓碑:盘上文件也缺失才算对齐(墓碑/删除语义);盘上还在 = 删除尚未
+ *    落地,此刻提交会把「该删未删」定格;
+ *  - 索引是活条目:盘上须有实体文件(按需同步占位条目盘上无文件 → 未对齐),
+ *    且大小一致、按 BLOCK_SIZE 切块哈希逐一相等(首块不符立刻短路,不整读)。
+ */
+export function workTreeContentAligned(
+  folderPath: string,
+  relPath: string,
+  entry: IndexEntry | undefined,
+): boolean {
+  if (!entry) return false;
+  const absPath = join(folderPath, relPath);
+  if (entry.deleted) {
+    return !existsSync(absPath);
+  }
+  let size: number;
+  try {
+    const st = statSync(absPath);
+    if (!st.isFile()) return false;
+    size = st.size;
+  } catch {
+    return false; // 盘上没有实体文件(含占位条目)→ 未对齐
+  }
+  if (size !== entry.size) return false; // 大小先短路:省掉整文件切块哈希
+  try {
+    return blocksMatchOnDisk(absPath, entry.blocks);
   } catch {
     return false;
   }

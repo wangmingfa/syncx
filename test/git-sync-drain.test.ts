@@ -8,6 +8,9 @@ import { loadOrCreateIdentity } from '../src/identity.js';
 import { readFolderIdentity } from '../src/folder-identity.js';
 import type { SharedFolderConfig } from '../src/config.js';
 import { createLogger } from '../src/logger.js';
+import { hashBlock, splitIntoBlocks } from '../src/blockstore.js';
+import type { IndexEntry } from '../src/index.js';
+import { createVersionVector } from '../src/version.js';
 import type { ControlMessage } from '../src/net/wire.js';
 import type { SyncPeer } from '../src/peer.js';
 import { SyncSessionManager } from '../src/session-manager.js';
@@ -143,6 +146,36 @@ function notify(hash: string, message = 'feat: 远端提交'): NotifyMsg {
   };
 }
 
+/** 按内容构造活条目(块哈希与 content 逐块一致),供「索引声明的内容」与盘上字节比对。 */
+function entryFor(rel: string, content: string): IndexEntry {
+  const data = Buffer.from(content, 'utf8');
+  return {
+    path: rel,
+    version: createVersionVector(),
+    size: data.length,
+    deleted: false,
+    blocks: splitIntoBlocks(data).map(hashBlock),
+  };
+}
+
+/** 墓碑条目:索引已标记删除、块列表为空(与接收侧落墓碑同形)。 */
+function tombstoneEntry(rel: string): IndexEntry {
+  return { path: rel, version: createVersionVector(), size: 0, deleted: true, blocks: [] };
+}
+
+type FolderStateOfTest = NonNullable<SyncSessionManager['folderStates'][number]>;
+
+/**
+ * 模拟「内容已经数据面落地」:写盘 + 写本机索引条目。真实链路里接收侧落地即
+ * localIndex.set(见 peer.ts),两者必然同时在;只写盘不写索引对应的是「用户本机
+ * 的新文件」,结算的内容对齐判据(workTreeContentAligned)会把它当未对齐挡在
+ * 镜像提交之外 —— 测试里想表达「对端内容已到」,必须用这个助手。
+ */
+function land(folder: FolderStateOfTest, share: string, rel: string, content: string): void {
+  writeFileSync(join(share, rel), content);
+  folder.localIndex.set(rel, entryFor(rel, content));
+}
+
 /** 从磁盘配置里读某目录的待投递台账(验证「内存与配置同值」这条不变量)。 */
 function pendingOnDisk(dir: string, field: 'gitRelayPending' | 'gitBroadcastPending'): Record<string, unknown> | undefined {
   const config = JSON.parse(readFileSync(join(dir, 'config.json'), 'utf8')) as {
@@ -223,7 +256,7 @@ describe('git auto-commit deferred until receive ledger drains', () => {
     const internals = manager as unknown as Internals;
     const remoteHash = 'b'.repeat(40);
 
-    writeFileSync(join(share, 'a.txt'), 'from peer');
+    land(folder, share, 'a.txt', 'from peer');
     folder.receiveLedger.set('a.txt', { claimId: 999, key: 'fake', ts: Date.now() });
     internals.onGitCommitNotify(notify(remoteHash));
 
@@ -254,7 +287,7 @@ describe('git auto-commit deferred until receive ledger drains', () => {
     const { share, manager, folder } = boot('full');
     const internals = manager as unknown as Internals;
 
-    writeFileSync(join(share, 'a.txt'), 'from peer');
+    land(folder, share, 'a.txt', 'from peer');
     folder.receiveLedger.set('a.txt', { claimId: 999, key: 'fake', ts: Date.now() });
     internals.onGitCommitNotify(notify('c'.repeat(40)));
 
@@ -294,7 +327,7 @@ describe('git auto-commit deferred until receive ledger drains', () => {
     const internals = manager as unknown as Internals;
 
     // 离线积压多笔的通知:镜像提交正文用最后一笔,body 附上其余提交的 subject(旧→新)
-    writeFileSync(join(share, 'a.txt'), 'from peer');
+    land(folder, share, 'a.txt', 'from peer');
     const batch = notify('9'.repeat(40), 'feat: 最后一笔\n\n最后一笔的正文');
     batch.commitSubjects = ['feat: 第一笔', 'feat: 第二笔', 'feat: 最后一笔'];
     internals.onGitCommitNotify(batch);
@@ -304,7 +337,7 @@ describe('git auto-commit deferred until receive ledger drains', () => {
       .toBe('feat: 最后一笔\n\n最后一笔的正文\n\nfeat: 第一笔\nfeat: 第二笔');
 
     // 缺 commitSubjects(旧版本对端):消息原样落库,不多一段
-    writeFileSync(join(share, 'b.txt'), 'again');
+    land(folder, share, 'b.txt', 'again');
     internals.onGitCommitNotify(notify('8'.repeat(40), 'feat: 单独一笔'));
     internals.flushPendingGitNotify();
     expect(commitCount(share)).toBe(3);
@@ -341,7 +374,7 @@ describe('git auto-commit retries local failures instead of dropping the notify'
     const internals = manager as unknown as Internals;
     const lock = join(share, '.git', 'index.lock');
 
-    writeFileSync(join(share, 'a.txt'), 'from peer');
+    land(folder, share, 'a.txt', 'from peer');
     writeFileSync(lock, '');
     internals.onGitCommitNotify(notify('e'.repeat(40)));
     internals.flushPendingGitNotify();
@@ -377,7 +410,7 @@ describe('git auto-commit retries local failures instead of dropping the notify'
     const internals = manager as unknown as Internals;
     const lock = join(share, '.git', 'index.lock');
 
-    writeFileSync(join(share, 'a.txt'), 'from peer');
+    land(folder, share, 'a.txt', 'from peer');
     writeFileSync(lock, '');
     internals.onGitCommitNotify(notify('f'.repeat(40)));
     for (let i = 0; i < 5; i++) {
@@ -420,7 +453,7 @@ describe('git auto-commit retries local failures instead of dropping the notify'
     const internals = manager as unknown as Internals;
     const lock = join(share, '.git', 'index.lock');
 
-    writeFileSync(join(share, 'a.txt'), 'from peer');
+    land(folder, share, 'a.txt', 'from peer');
     writeFileSync(lock, '');
     internals.onGitCommitNotify(notify('b'.repeat(40), 'feat: 远端的第二笔\n\n正文'));
     internals.flushPendingGitNotify();
@@ -477,7 +510,7 @@ describe('git auto-commit waits for the initial index exchange to settle', () =>
     const { share, manager, folder } = boot('full');
     const internals = manager as unknown as Internals;
 
-    writeFileSync(join(share, 'a.txt'), 'from peer');
+    land(folder, share, 'a.txt', 'from peer');
     folder.peers.set('PEER000001', stubPeer(Date.now()));
     internals.onGitCommitNotify(notify('7'.repeat(40)), 'PEER000001');
     internals.flushPendingGitNotify();
@@ -500,7 +533,7 @@ describe('git auto-commit waits for the initial index exchange to settle', () =>
     const { share, manager, folder } = boot('full');
     const internals = manager as unknown as Internals;
 
-    writeFileSync(join(share, 'a.txt'), 'from peer');
+    land(folder, share, 'a.txt', 'from peer');
     internals.onGitCommitNotify(notify('4'.repeat(40)), 'PEER000001');
     internals.flushPendingGitNotify();
     // 送达通知的会话已不在:内容可能停在半途(拆除时认领已被释放)→ 等重连
@@ -519,7 +552,7 @@ describe('git auto-commit waits for the initial index exchange to settle', () =>
     const { share, manager, folder } = boot('full');
     const internals = manager as unknown as Internals;
 
-    writeFileSync(join(share, 'a.txt'), 'from peer');
+    land(folder, share, 'a.txt', 'from peer');
     folder.peers.set('PEER000001', stubPeer(Date.now()));
     internals.onGitCommitNotify(notify('3'.repeat(40)), 'PEER000001');
     internals.flushPendingGitNotify();
@@ -538,7 +571,7 @@ describe('git auto-commit waits for the initial index exchange to settle', () =>
     const { share, manager, folder } = boot('full');
     const internals = manager as unknown as Internals;
 
-    writeFileSync(join(share, 'a.txt'), 'from peer');
+    land(folder, share, 'a.txt', 'from peer');
     folder.receiveLedger.set('a.txt', { claimId: 999, key: 'fake', ts: Date.now() });
     folder.gitDrainSince = Date.now() - 61_000;
     internals.onGitCommitNotify(notify('2'.repeat(40)));
@@ -557,7 +590,7 @@ describe('git commit notify relayed to the folder\'s other devices', () => {
     const internals = manager as unknown as Internals;
     const sent = spyControls(manager);
 
-    writeFileSync(join(share, 'a.txt'), 'from peer');
+    land(folder, share, 'a.txt', 'from peer');
     internals.onGitCommitNotify(notify('1'.repeat(40)));
     internals.flushPendingGitNotify();
 
@@ -575,7 +608,7 @@ describe('git commit notify relayed to the folder\'s other devices', () => {
     const remoteHash = 'e'.repeat(40);
     const sent = spyControls(manager);
 
-    writeFileSync(join(share, 'a.txt'), 'from peer');
+    land(folder, share, 'a.txt', 'from peer');
     internals.onGitCommitNotify(notify(remoteHash));
     internals.flushPendingGitNotify();
 
@@ -622,7 +655,7 @@ describe('git commit notify relayed to the folder\'s other devices', () => {
     const internals = manager as unknown as Internals;
     const sent = spyControls(manager);
 
-    writeFileSync(join(share, 'a.txt'), 'from peer');
+    land(folder, share, 'a.txt', 'from peer');
     internals.onGitCommitNotify(notify('f'.repeat(40)));
     internals.flushPendingGitNotify();
 
@@ -639,7 +672,7 @@ describe('git commit notify relayed to the folder\'s other devices', () => {
     let online = false;
     const sent = spyControls(manager, () => online);
 
-    writeFileSync(join(share, 'a.txt'), 'from peer');
+    land(folder, share, 'a.txt', 'from peer');
     internals.onGitCommitNotify(notify('a'.repeat(40)));
     internals.flushPendingGitNotify();
     expect(commitCount(share)).toBe(2);
@@ -677,7 +710,7 @@ describe('git commit relay ledger persisted to config', () => {
     let online = false;
     spyControls(manager, () => online);
 
-    writeFileSync(join(share, 'a.txt'), 'from peer');
+    land(folder, share, 'a.txt', 'from peer');
     internals.onGitCommitNotify(notify('b'.repeat(40)));
     internals.flushPendingGitNotify();
 
@@ -715,7 +748,7 @@ describe('git commit relay ledger persisted to config', () => {
     const internals = manager as unknown as Internals;
     spyControls(manager, () => false);
 
-    writeFileSync(join(share, 'a.txt'), 'from peer');
+    land(folder, share, 'a.txt', 'from peer');
     internals.onGitCommitNotify(notify('c'.repeat(40)));
     internals.flushPendingGitNotify();
     expect(folder.gitRelay).not.toBeNull();
@@ -737,7 +770,7 @@ describe('git commit relay ledger persisted to config', () => {
     const internals = manager as unknown as Internals;
     spyControls(manager, () => false);
 
-    writeFileSync(join(share, 'a.txt'), 'from peer');
+    land(folder, share, 'a.txt', 'from peer');
     internals.onGitCommitNotify(notify('d'.repeat(40)));
     internals.flushPendingGitNotify();
     expect(folder.gitRelay).not.toBeNull();
@@ -760,7 +793,7 @@ describe('git commit relay ledger persisted to config', () => {
     const internals = manager as unknown as Internals;
     spyControls(manager, () => false);
 
-    writeFileSync(join(share, 'a.txt'), 'from peer');
+    land(folder, share, 'a.txt', 'from peer');
     internals.onGitCommitNotify(notify('e'.repeat(40)));
     internals.flushPendingGitNotify();
     expect(folder.gitRelay?.targets).toEqual(['PEER000002']);
@@ -1031,7 +1064,7 @@ describe('incoming git commit notify is receipted to the hop it arrived on', () 
     const { share, manager } = boot('receive', ['PEER000001', 'PEER000002']);
     const internals = manager as unknown as Internals;
     const sent = spyControls(manager, () => true);
-    writeFileSync(join(share, 'a.txt'), 'from peer');
+    writeFileSync(join(share, 'a.txt'), 'from peer'); // 本测试只验回执与入队,不走结算,无需索引条目
 
     // 通知由 PEER000002 转发过来,署名仍是最初提交者 PEER000001
     internals.onControl(notify('7'.repeat(40)), 'PEER000002');
@@ -1088,7 +1121,7 @@ describe('git sync honors the folder identity gate', () => {
     expect(folder.lastCommitHash).not.toBe(head);
 
     // ② 挂起的对端提交通知不结算(不自动提交,通知继续挂着)
-    writeFileSync(join(share, 'b.txt'), 'from peer');
+    land(folder, share, 'b.txt', 'from peer');
     internals.onGitCommitNotify(notify('6'.repeat(40)));
     folder.receiveLedger.clear();
     internals.flushPendingGitNotify();
@@ -1108,8 +1141,10 @@ describe('git sync honors the folder identity gate', () => {
     expect(broadcast?.msg).toMatchObject({ kind: 'git-commit-notify', commitHash: head });
 
     // 再看「结算接续」:新的对端提交通知照常自动提交
-    writeFileSync(join(share, 'c.txt'), 'from peer 2');
-    internals.onGitCommitNotify(notify('5'.repeat(40), 'feat: 恢复后的提交'));
+    land(folder, share, 'c.txt', 'from peer 2');
+    const resumed = notify('5'.repeat(40), 'feat: 恢复后的提交');
+    resumed.changedFiles = ['c.txt'];
+    internals.onGitCommitNotify(resumed);
     folder.receiveLedger.clear();
     internals.flushPendingGitNotify();
     expect(commitCount(share)).toBe(3); // 初始 + 本机那笔 + 恢复后的镜像提交
@@ -1334,5 +1369,209 @@ describe('git push (manager API)', () => {
     expect(await first).toEqual({ ok: true });
 
     await shutdown(manager);
+  });
+});
+
+/* ==================== 结算内容对齐 + 结算后漂移自愈 ==================== */
+
+/**
+ * 2026-11-04 实测事故的契约。事故还原:本地提交被广播后遭改写(reset + 重做),
+ * 对端 13 秒内镜像了旧通知(范围收敛:只 stage changedFiles),此刻部分文件内容
+ * 尚未经数据面落齐 → 镜像提交把半途内容定格(消息对、内容错);随后本地 revert
+ * 的内容又同步过去 → 对端工作树 ≠ HEAD,而这些文件再也不在任何通知的 changedFiles
+ * 里(范围收敛拒绝扫荡)→ 残留 17 个脏文件永久挂起。
+ *
+ * 两条机制:
+ *  ① 结算时把 changedFiles 按「工作树内容 vs 本机索引」拆成对齐/未对齐两份,
+ *     只提交对齐的;全不对齐则不提交但通知照常结算(基线推进),未对齐的进漂移
+ *     台账(gitDeferredMirror,内存与 config.json 同值)。
+ *  ② 每轮 checkGitCommits 开头复查台账:内容到齐即补一笔只含已对齐文件的收敛
+ *     提交,台账摘除;收敛提交是一笔本地新提交,会被同轮的新提交检测正常广播。
+ */
+
+/** 从磁盘配置里读某目录的漂移台账(验证「内存与配置同值」这条不变量)。 */
+function deferredOnDisk(dir: string): Record<string, unknown> | undefined {
+  const config = JSON.parse(readFileSync(join(dir, 'config.json'), 'utf8')) as {
+    sharedFolders?: Array<{ id?: string; gitDeferredMirror?: Record<string, unknown> }>;
+  };
+  return config.sharedFolders?.find((f) => f.id === 'main')?.gitDeferredMirror;
+}
+
+describe('git mirror commit aligns content before committing and heals drift afterwards', () => {
+  it.skipIf(!HAS_GIT)('commits only content-aligned files and defers the rest to the drift ledger', () => {
+    const { dir, share, manager, folder } = boot('full');
+    const internals = manager as unknown as Internals;
+
+    // a.txt 已落齐(索引 + 工作树一致);b.txt 半途(索引宣告 'final-b',盘上还是 'half-way')
+    writeFileSync(join(share, 'a.txt'), 'landed-a');
+    folder.localIndex.set('a.txt', entryFor('a.txt', 'landed-a'));
+    writeFileSync(join(share, 'b.txt'), 'half-way');
+    folder.localIndex.set('b.txt', entryFor('b.txt', 'final-b'));
+
+    const msg = notify('a'.repeat(40), 'feat: 半途事故');
+    msg.changedFiles = ['a.txt', 'b.txt'];
+    internals.onGitCommitNotify(msg);
+    internals.flushPendingGitNotify();
+
+    // 镜像提交只含 a.txt;b.txt 没有被定格进去
+    expect(commitCount(share)).toBe(2);
+    expect(git(share, ['show', '--name-only', '--format=', 'HEAD']).trim()).toBe('a.txt');
+    // 通知照常结算、基线推进
+    expect(folder.pendingGitNotify).toBeNull();
+    expect(folder.lastCommitHash).toBe(git(share, ['rev-parse', 'HEAD']));
+    // b.txt 进漂移台账(内存与磁盘同值),信息来自来源通知
+    expect(folder.gitDeferredMirror).toMatchObject({
+      hash: 'a'.repeat(40),
+      message: 'feat: 半途事故',
+      files: ['b.txt'],
+    });
+    expect(deferredOnDisk(dir)).toMatchObject({ files: ['b.txt'] });
+
+    (manager as unknown as { close(): void }).close();
+  });
+
+  it.skipIf(!HAS_GIT)('settles without a commit when nothing aligns, but still advances the baseline', () => {
+    const { dir, share, manager, folder } = boot('full');
+    const internals = manager as unknown as Internals;
+    const base = git(share, ['rev-parse', 'HEAD']);
+
+    // 两份内容都半途:盘上字节与索引宣告不符
+    writeFileSync(join(share, 'a.txt'), 'half-a');
+    folder.localIndex.set('a.txt', entryFor('a.txt', 'final-a'));
+    writeFileSync(join(share, 'b.txt'), 'half-b');
+    folder.localIndex.set('b.txt', entryFor('b.txt', 'final-b'));
+
+    const msg = notify('b'.repeat(40), 'feat: 全半途');
+    msg.changedFiles = ['a.txt', 'b.txt'];
+    internals.onGitCommitNotify(msg);
+    internals.flushPendingGitNotify();
+
+    // 宁缺勿错:一笔也不提交;但通知照常结算、基线推进 —— 通知本身不能卡住
+    expect(commitCount(share)).toBe(1);
+    expect(folder.pendingGitNotify).toBeNull();
+    expect(folder.lastCommitHash).toBe(base);
+    // 台账收全
+    expect(folder.gitDeferredMirror?.files).toEqual(['a.txt', 'b.txt']);
+    expect(folder.gitDeferredMirror?.hash).toBe('b'.repeat(40));
+    expect(deferredOnDisk(dir)?.files).toEqual(['a.txt', 'b.txt']);
+
+    (manager as unknown as { close(): void }).close();
+  });
+
+  it.skipIf(!HAS_GIT)('heals drifted files once their content lands and broadcasts the convergence commit', async () => {
+    const { share, manager, folder } = boot('full');
+    const internals = manager as unknown as Internals;
+
+    writeFileSync(join(share, 'b.txt'), 'half-way');
+    folder.localIndex.set('b.txt', entryFor('b.txt', 'final-b'));
+    const msg = notify('c'.repeat(40), 'feat: 台账里的欠账\n\n正文第二行');
+    msg.changedFiles = ['b.txt'];
+    internals.onGitCommitNotify(msg);
+    internals.flushPendingGitNotify();
+    expect(commitCount(share)).toBe(1);
+    expect(folder.gitDeferredMirror?.files).toEqual(['b.txt']);
+
+    // 内容落齐(盘上字节与索引一致):下一拍产生只含 b.txt 的收敛提交,台账清空
+    writeFileSync(join(share, 'b.txt'), 'final-b');
+    const sent = spyControls(manager);
+    await internals.checkGitCommits();
+
+    expect(commitCount(share)).toBe(2);
+    const head = git(share, ['rev-parse', 'HEAD']);
+    expect(git(share, ['log', '-1', '--format=%s'])).toBe(
+      `chore: 收敛镜像提交后到达的内容 (${'c'.repeat(8)} feat: 台账里的欠账)`,
+    );
+    expect(git(share, ['show', '--name-only', '--format=', 'HEAD']).trim()).toBe('b.txt');
+    expect(folder.gitDeferredMirror).toBeNull();
+    // 收敛提交是一笔本地新提交:基线推进,并被正常广播给对端
+    expect(folder.lastCommitHash).toBe(head);
+    expect(sent.map((s) => s.deviceId)).toEqual(['PEER000001']);
+    expect(sent[0]?.msg.kind).toBe('git-commit-notify');
+    const broadcast = sent[0]?.msg;
+    if (broadcast?.kind !== 'git-commit-notify') throw new Error('broadcast is not a git commit notify');
+    expect(broadcast.commitHash).toBe(head);
+
+    (manager as unknown as { close(): void }).close();
+  });
+
+  it.skipIf(!HAS_GIT)('treats a deleted file with an index tombstone as aligned and records the deletion', () => {
+    const { share, manager, folder } = boot('full');
+    const internals = manager as unknown as Internals;
+
+    // tracked.txt 先进 HEAD,再本地删除 + 索引墓碑:删除已落地 = 对齐(墓碑/删除语义)
+    writeFileSync(join(share, 'tracked.txt'), 'tracked\n');
+    git(share, ['add', '-A']);
+    git(share, ['commit', '-qm', 'chore: 将被删除的文件']);
+    rmSync(join(share, 'tracked.txt'));
+    folder.localIndex.set('tracked.txt', tombstoneEntry('tracked.txt'));
+
+    const msg = notify('d'.repeat(40));
+    msg.changedFiles = ['tracked.txt'];
+    internals.onGitCommitNotify(msg);
+    internals.flushPendingGitNotify();
+
+    expect(commitCount(share)).toBe(3);
+    expect(git(share, ['log', '-1', '--format=%s'])).toBe('feat: 远端提交');
+    // 删除被镜像提交记录:工作树干净,show 显示 D
+    expect(git(share, ['status', '--porcelain'])).toBe('');
+    expect(git(share, ['show', '--name-status', '--format=', 'HEAD']).trim()).toBe('D\ttracked.txt');
+    expect(folder.pendingGitNotify).toBeNull();
+    expect(folder.gitDeferredMirror).toBeNull();
+
+    (manager as unknown as { close(): void }).close();
+  });
+
+  it.skipIf(!HAS_GIT)('defers files that have no local index entry at all', () => {
+    const { share, manager, folder } = boot('full');
+    const internals = manager as unknown as Internals;
+
+    // ghost.txt 盘上有内容、本地索引没有条目(从未收到过内容):视为未对齐
+    writeFileSync(join(share, 'ghost.txt'), 'appeared');
+
+    const msg = notify('e'.repeat(40));
+    msg.changedFiles = ['ghost.txt'];
+    internals.onGitCommitNotify(msg);
+    internals.flushPendingGitNotify();
+
+    expect(commitCount(share)).toBe(1);
+    expect(folder.pendingGitNotify).toBeNull();
+    expect(folder.gitDeferredMirror?.files).toEqual(['ghost.txt']);
+
+    (manager as unknown as { close(): void }).close();
+  });
+
+  it.skipIf(!HAS_GIT)('keeps the drift ledger across a daemon restart and still heals afterwards', async () => {
+    const { dir, share, manager, folder } = boot('full');
+    const internals = manager as unknown as Internals;
+
+    // 索引条目同时落库:重启后的 localIndex 从 sqlite 重建,得能对上
+    writeFileSync(join(share, 'b.txt'), 'half-way');
+    const entry = entryFor('b.txt', 'final-b');
+    folder.localIndex.set('b.txt', entry);
+    folder.index.saveEntry(entry);
+
+    const msg = notify('f'.repeat(40), 'feat: 重启前的欠账');
+    msg.changedFiles = ['b.txt'];
+    internals.onGitCommitNotify(msg);
+    internals.flushPendingGitNotify();
+    expect(folder.gitDeferredMirror).toMatchObject({ files: ['b.txt'] });
+
+    // 重启:内存全清,台账只能来自 config.json —— 漂移文件不因重启而永远没人提交
+    (manager as unknown as { close(): void }).close();
+    const restarted = reboot(dir);
+    expect(restarted.folder.gitDeferredMirror).toMatchObject({
+      hash: 'f'.repeat(40),
+      message: 'feat: 重启前的欠账',
+      files: ['b.txt'],
+    });
+    expect(deferredOnDisk(dir)).toMatchObject({ files: ['b.txt'] });
+
+    // 重启后台账仍会自愈:内容落齐 → 收敛提交,台账清空
+    writeFileSync(join(share, 'b.txt'), 'final-b');
+    await (restarted.manager as unknown as Internals).checkGitCommits();
+    expect(commitCount(share)).toBe(2);
+    expect(restarted.folder.gitDeferredMirror).toBeNull();
+
+    (restarted.manager as unknown as { close(): void }).close();
   });
 });

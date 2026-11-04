@@ -19,7 +19,7 @@ import { randomBytes } from 'node:crypto';
 import type { Logger } from 'pino';
 import { WebSocket } from 'ws';
 
-import { loadConfig, mutateConfig, folderIdFor, folderIndexKey, folderIndexPath, folderTrashPath, folderVersionsPath, purgeFolderIndex, isUnderDirPrefix, DEFAULT_FS_WATCH_FALLBACK_SCAN_SECS, type FolderIdentity, type GitCommitPendingRecord, type SharedFolderConfig, type GitSyncMode, type ConflictPolicy } from './config.js';
+import { loadConfig, mutateConfig, folderIdFor, folderIndexKey, folderIndexPath, folderTrashPath, folderVersionsPath, purgeFolderIndex, isUnderDirPrefix, DEFAULT_FS_WATCH_FALLBACK_SCAN_SECS, type FolderIdentity, type GitCommitPendingRecord, type GitDeferredMirrorRecord, type SharedFolderConfig, type GitSyncMode, type ConflictPolicy } from './config.js';
 import { FolderWatchHub, DEFAULT_FS_WATCH_DEBOUNCE_MS, type WatchableFolder } from './fs-watcher.js';
 import { nextScheduleChangeAt, withinSchedule, formatScheduleSummary, type Schedule } from './schedule.js';
 import type { HolidayStore } from './holidays.js';
@@ -63,7 +63,7 @@ import { learnPeerUrl, learnPeerIp, getLanAddresses } from './net/addresses.js';
 import { e2eKeyForPeer, wrapTransportBlind } from './e2e.js';
 import { hostname as osHostname } from 'node:os';
 import { RateLimiter } from './ratelimit.js';
-import { isPeerAllowed, addPeer, removePeer, setFolderPaused, setGlobalPaused, setFolderSchedule as persistFolderSchedule, setFolderGitSync as persistFolderGitSync, setFolderConflictPolicy as persistFolderConflictPolicy, setFolderGitStripCoAuthored as persistFolderGitStripCoAuthored, setFolderOnDemand as persistFolderOnDemand, setFolderOnDemandDir as persistFolderOnDemandDir, setFolderPausedFile as persistFolderPausedFile, setFolderE2E as persistFolderE2E, setFolderGitLastCommitHash, setFolderGitRelayPending, setFolderGitBroadcastPending, setGlobalSettings as persistGlobalSettings, setScheduleOverride as persistScheduleOverride, setCalendarOverride as persistCalendarOverride, type GlobalSettingsPatch, type FolderE2EPatch } from './devices.js';
+import { isPeerAllowed, addPeer, removePeer, setFolderPaused, setGlobalPaused, setFolderSchedule as persistFolderSchedule, setFolderGitSync as persistFolderGitSync, setFolderConflictPolicy as persistFolderConflictPolicy, setFolderGitStripCoAuthored as persistFolderGitStripCoAuthored, setFolderOnDemand as persistFolderOnDemand, setFolderOnDemandDir as persistFolderOnDemandDir, setFolderPausedFile as persistFolderPausedFile, setFolderE2E as persistFolderE2E, setFolderGitLastCommitHash, setFolderGitRelayPending, setFolderGitBroadcastPending, setFolderGitDeferredMirror as persistFolderGitDeferredMirror, setGlobalSettings as persistGlobalSettings, setScheduleOverride as persistScheduleOverride, setCalendarOverride as persistCalendarOverride, type GlobalSettingsPatch, type FolderE2EPatch } from './devices.js';
 import { receiveOffer, makeOfferId, pruneRevokedOffers } from './offers.js';
 import { OfferRetryLedger, type TrackedOffer } from './net/offer-retry.js';
 import type { DeviceIdentity } from './identity.js';
@@ -74,7 +74,7 @@ import { NETWORK_OFFLINE_BACKOFF_MS, offlineAwareReconnectDelay, reconnectDelayM
 import { hasRoutableInterface } from './net/offline-probe.js';
 import { isSelfPeerUrl, localInterfaceAddresses } from './net/peer-address.js';
 import { CAP_BINARY1, CAP_INDEX_CHUNK1 } from './handshake.js';
-import { isGitRepo, getLastCommitHash, getCommitInfo, hasUncommittedChanges, autoCommit, getUncommittedChanges, readFileAtHead, readFileAt, listCommitFiles, getCommitParents, isCommitHash, listRecentCommits, countUnpushedCommits, listUnpushedCommits, GIT_UNPUSHED_LIMIT, gitPush, findGitIndexLock, removeGitIndexLock, getUpstreamCommitHash, listRawCommitMessages, rewriteCommitMessages, type CommitInfo, type GitChangeEntry, type GitCommitEntry, type GitCommitFileEntry, type GitPushResult, type HeadReadResult, type GitIndexLockInfo, type GitIndexLockRemoveResult } from './git-monitor.js';
+import { isGitRepo, getLastCommitHash, getCommitInfo, hasUncommittedChanges, autoCommit, workTreeContentAligned, getUncommittedChanges, readFileAtHead, readFileAt, listCommitFiles, getCommitParents, isCommitHash, listRecentCommits, countUnpushedCommits, listUnpushedCommits, GIT_UNPUSHED_LIMIT, gitPush, findGitIndexLock, removeGitIndexLock, getUpstreamCommitHash, listRawCommitMessages, rewriteCommitMessages, type CommitInfo, type GitChangeEntry, type GitCommitEntry, type GitCommitFileEntry, type GitPushResult, type HeadReadResult, type GitIndexLockInfo, type GitIndexLockRemoveResult } from './git-monitor.js';
 import { scanEmptyDirs, removeEmptyDirs, type EmptyDirScanResult, type EmptyDirDeleteResult } from './empty-dirs.js';
 
 /** scheduleVerdictFor 的结论:此刻该不该同步、被哪一层挡住、下一个边界何时。 */
@@ -207,6 +207,19 @@ function readGitPending(folderId: string, r: GitCommitPendingRecord | undefined)
 }
 
 /**
+ * 从配置里的漂移台账还原(daemon 重启后自愈继续)。防御性读:字段不全或文件清单
+ * 已空都视为无 —— 台账本来就是「等内容到齐」的暂记,残缺记录宁可不认,不能凭它
+ * 对工作树乱下判断(配置可被手改)。
+ */
+function readGitDeferredMirror(r: GitDeferredMirrorRecord | undefined): GitDeferredMirrorRecord | null {
+  if (!r || typeof r.hash !== 'string' || !r.hash) return null;
+  if (typeof r.message !== 'string') return null;
+  const files = Array.isArray(r.files) ? r.files.filter((s) => typeof s === 'string' && s) : [];
+  if (files.length === 0) return null;
+  return { hash: r.hash, message: r.message, files };
+}
+
+/**
  * 组装镜像提交的提交信息:正文用本批最后一笔的 fullMessage,多于一笔时把其余
  * 提交的 subject(旧→新)附在 body —— 一笔镜像提交里保留整批提交脉络(哈希两侧
  * 本就不同,消息是唯一可对上的线索)。单笔、或通知缺 commitSubjects(旧版对端)
@@ -268,6 +281,16 @@ function describeAutoCommitFailure(error: string): string | undefined {
     return `仓库里有 git 锁文件冲突:${lockPath}(已不可读),下一轮扫描会自动重试`;
   }
   return `仓库里有残留的 git 锁文件 ${lockPath}(${info})。确认没有其它 git 进程在操作后删除它,syncx 会自动重试提交`;
+}
+
+/**
+ * 收敛提交信息里引用的原消息首行截断:超长的提交主题截到 64 个码点(整个 subject
+ * 连前缀仍在一行内可读)。按码点切,避免 slice 劈开代理对。
+ */
+function truncateGitSubject(line: string, max = 64): string {
+  const t = line.trim();
+  const chars = [...t];
+  return chars.length <= max ? t : `${chars.slice(0, max).join('')}…`;
 }
 
 /**
@@ -408,6 +431,18 @@ export interface FolderState {
    * 与配置里的 `gitRelayPending` 同值落盘(daemon 重启后这一跳仍能补投,不因重启丢失)。
    */
   gitRelay: GitCommitLedger | null;
+  /**
+   * Git 提交同步:镜像提交结算后「内容尚未落齐」的**漂移台账**(形状见
+   * GitDeferredMirrorRecord;仅本机状态,不进 wire)。
+   *
+   * 结算(见 flushPendingGitNotify)把通知的 changedFiles 按「工作树内容 vs 本机
+   * 索引」拆成两份:对齐的进镜像提交;未对齐的(半途/在途/被改写)不提交,记入
+   * 本台账 —— 否则这些文件再也不在任何通知的 changedFiles 里(范围收敛拒绝扫荡),
+   * 永远没人提交(2026-11-04 实测残留 17 个脏文件)。每轮扫描的
+   * healDeferredGitMirror 逐文件复查,内容到齐即补一笔收敛提交并从台账摘除。
+   * 与配置里的 `gitDeferredMirror` 同值落盘(重启不丢,与 gitRelay 同一套不变式)。
+   */
+  gitDeferredMirror: GitDeferredMirrorRecord | null;
   /**
    * 磁盘守卫当前是否拦着入向接收(checkFolderDiskSpace 判不足时置位)。
    * 解除由守卫复检/扫描心跳完成:空间恢复 → 清目录错误 → 重放各 peer 的积压索引。
@@ -1250,7 +1285,7 @@ export class SyncSessionManager {
     // 索引为空 → 首扫是建基线(存量文件不算新增);索引有存量 → 首扫 diff 是
     // daemon 离线期间的真实改动,要写同步记录
     const baselinePending = usable.length === 0;
-    return { id, indexKey, path: f.path, index, executor, localIndex, ignoreLines, transports: [], peers: new Map(), transportDevice: new Map(), receiveLedger: new Map(), driftState: { lastAt: 0, round: 0 }, localAuditState: { lastAt: 0, round: 0 }, config: f, baselinePending, conflictCount: 0, gitChangeCount: 0, gitUnpushedCount: 0, lastCommitHash: f.gitLastCommitHash ?? null, processedRemoteCommits: new Set(), gitBroadcast: readGitPending(id, f.gitBroadcastPending), pendingGitNotify: null, gitDrainWarned: false, gitAutoCommitAttempts: 0, gitRelay: readGitPending(id, f.gitRelayPending), diskBlocked: false };
+    return { id, indexKey, path: f.path, index, executor, localIndex, ignoreLines, transports: [], peers: new Map(), transportDevice: new Map(), receiveLedger: new Map(), driftState: { lastAt: 0, round: 0 }, localAuditState: { lastAt: 0, round: 0 }, config: f, baselinePending, conflictCount: 0, gitChangeCount: 0, gitUnpushedCount: 0, lastCommitHash: f.gitLastCommitHash ?? null, processedRemoteCommits: new Set(), gitBroadcast: readGitPending(id, f.gitBroadcastPending), pendingGitNotify: null, gitDrainWarned: false, gitAutoCommitAttempts: 0, gitRelay: readGitPending(id, f.gitRelayPending), gitDeferredMirror: readGitDeferredMirror(f.gitDeferredMirror), diskBlocked: false };
   }
 
   /**
@@ -1892,6 +1927,10 @@ export class SyncSessionManager {
     // 结算里的自动提交会把基线同步推到新 HEAD,下面的比对因此不会把
     // 镜像提交误判成本地新提交而回弹给对端(死循环防护不变)。
     this.flushPendingGitNotify();
+    // 漂移台账自愈(机制二):结算时未落齐的文件内容到位后,在这里补一笔收敛提交。
+    // 刻意放在下方新提交检测**之前**:收敛提交是一笔本地新提交,下面的循环会把它
+    // 当作新 HEAD 正常广播给对端并对齐基线 —— 自愈自己不推基线,广播这一跳免了。
+    this.healDeferredGitMirror();
     for (const folder of this.folderStates) {
       if (this.folderPausedNow(folder)) continue;
       if (this.gitBlockedByIdentity(folder)) continue;
@@ -2056,8 +2095,44 @@ export class SyncSessionManager {
         this.setGitBaseline(folder, getLastCommitHash(folder.path));
         continue;
       }
-      const filesDesc = msg.changedFiles.length
-        ? `${msg.changedFiles.length} 个文件: ${msg.changedFiles.slice(0, 10).join(', ')}${msg.changedFiles.length > 10 ? ' …' : ''}`
+      /* ── 机制一:结算前逐文件内容对齐(宁缺勿错)──
+       * 台账排空只证明「没有在途接收」,不证明「内容已经落齐」:对端镜像提交把
+       * 半途内容定格(消息对、内容错)的事故里,认领早已释放、结算闸门一路放行,
+       * 差的就是这一道内容比对。把 changedFiles 拆成两份:工作树内容与本机索引
+       * 逐块一致的(或索引墓碑 + 盘上已删的)才进本次镜像提交;未对齐的不提交,
+       * 记入漂移台账(gitDeferredMirror),由 healDeferredGitMirror 在内容到齐后
+       * 补提交 —— 这些文件从此不在任何通知的 changedFiles 里,不记台账就永久挂起。
+       * 旧版对端的通知没有文件清单(changedFiles 为空),无从逐文件判定,保持
+       * 既有全量兜底不变。 */
+      let stageFiles = msg.changedFiles;
+      let deferredFiles: string[] = [];
+      if (msg.changedFiles.length > 0) {
+        const aligned: string[] = [];
+        for (const rel of msg.changedFiles) {
+          if (workTreeContentAligned(folder.path, rel, folder.localIndex.get(rel))) aligned.push(rel);
+          else deferredFiles.push(rel);
+        }
+        stageFiles = aligned;
+        if (aligned.length === 0) {
+          // 全都不对齐:一笔也不提交 —— 半途内容绝不能被定格;但通知照常结算 +
+          // 基线推进(沿用「干净工作树跳过提交但推进基线」的口径,通知本身不能
+          // 卡住),剩余文件交给漂移台账的自愈。
+          this.logger.warn(
+            `git auto-commit settled without commit (no changed file content aligned with the local index): ${folder.id} (from ${msg.fromDeviceId}) "${msg.commitMessage.split('\n')[0]}" — ${deferredFiles.length} 个文件进漂移台账: ${deferredFiles.slice(0, 10).join(', ')}${deferredFiles.length > 10 ? ' …' : ''}`,
+          );
+          this.recordGitDeferredMirror(folder, msg, deferredFiles);
+          this.settlePendingGitNotify(folder);
+          this.setGitBaseline(folder, getLastCommitHash(folder.path));
+          continue;
+        }
+        if (deferredFiles.length > 0) {
+          this.logger.info(
+            `git mirror commit narrowed to content-aligned files: ${folder.id} — committing ${aligned.length}, deferring ${deferredFiles.length} to the drift ledger (${deferredFiles.slice(0, 10).join(', ')}${deferredFiles.length > 10 ? ' …' : ''})`,
+          );
+        }
+      }
+      const filesDesc = stageFiles.length
+        ? `${stageFiles.length} 个文件: ${stageFiles.slice(0, 10).join(', ')}${stageFiles.length > 10 ? ' …' : ''}`
         : '无文件变更';
       this.logger.info(
         `auto-committing: ${folder.id} (from ${msg.fromDeviceId}) "${msg.commitMessage.split('\n')[0]}" — ${filesDesc}`,
@@ -2072,8 +2147,9 @@ export class SyncSessionManager {
         folder.config.gitStripCoAuthored === true ? stripCoAuthoredBy(mirrorMessage) : mirrorMessage,
         // 范围收敛:只 stage 通知宣称的文件 —— 工作树里用户并发的未提交改动
         // 不属于这笔镜像提交,绝不能被 add -A 顺手打包(根治 2026-11-04 的
-        // 「脚本改名被回声镜像消息吞掉」事故)
-        msg.changedFiles,
+        // 「脚本改名被回声镜像消息吞掉」事故);机制一再此之上再按内容对齐收窄
+        // (见上),内容未落齐的文件绝不定格进提交
+        stageFiles,
       );
       if (result.success) {
         this.logger.info(`auto-commit success: ${folder.id} -> ${result.hash?.slice(0, 8)}`);
@@ -2085,6 +2161,19 @@ export class SyncSessionManager {
           folder.processedRemoteCommits.add(folder.lastCommitHash);
         }
         this.relayGitCommitNotify(folder, msg);
+        // 未对齐的文件进漂移台账(提交失败则不动台账:通知还挂着,下轮结算会重新判定)
+        if (deferredFiles.length > 0) {
+          this.recordGitDeferredMirror(folder, msg, deferredFiles);
+        }
+        // 本笔镜像提交已把「此前欠着、这次对齐了」的文件一并提交:从台账摘除,
+        // 否则自愈会对着 HEAD 里已有的内容再补一笔空收敛提交
+        const ledger = folder.gitDeferredMirror;
+        if (ledger && stageFiles.length > 0) {
+          const remaining = ledger.files.filter((rel) => !stageFiles.includes(rel));
+          if (remaining.length !== ledger.files.length) {
+            this.setGitDeferredMirror(folder, remaining.length > 0 ? { hash: ledger.hash, message: ledger.message, files: remaining } : null);
+          }
+        }
       } else {
         const error = result.error ?? 'git auto-commit failed';
         this.logger.warn(
@@ -2123,6 +2212,76 @@ export class SyncSessionManager {
     folder.gitAutoCommitAttempts = 0;
     folder.gitAutoCommitRetryAt = undefined;
     this.clearFolderError(folder.id, { onlyKind: 'git-auto-commit' });
+  }
+
+  /** 更新漂移台账并落盘(与 setGitRelay 同一套「内存与配置同值」不变式;null = 台账已收敛清空)。 */
+  private setGitDeferredMirror(folder: FolderState, next: GitDeferredMirrorRecord | null): void {
+    folder.gitDeferredMirror = next;
+    persistFolderGitDeferredMirror(this.configPath, folder.id, next ?? undefined);
+  }
+
+  /**
+   * 把结算时未对齐的文件并入该目录的漂移台账。多笔通知的欠账合并去重(files 取并集),
+   * hash/message 取最新一笔 —— 台账只描述「这些内容还没提交」,收敛提交的信息引用
+   * 最新的来源即可。
+   */
+  private recordGitDeferredMirror(folder: FolderState, msg: GitCommitNotifyMsg, files: string[]): void {
+    const prev = folder.gitDeferredMirror;
+    const merged = prev ? [...new Set([...prev.files, ...files])] : files;
+    this.setGitDeferredMirror(folder, { hash: msg.commitHash, message: msg.commitMessage, files: merged });
+  }
+
+  /**
+   * 漂移台账自愈:结算后经数据面落齐/回落的内容,补一笔收敛提交(机制二)。
+   *
+   * 镜像提交按内容对齐收窄后,未对齐的文件进了台账 —— 而它们从此不在任何通知的
+   * changedFiles 里(范围收敛拒绝扫荡),没人再提交就永久脏着。这里在每轮
+   * checkGitCommits 开头逐文件复查「工作树内容 vs 本机索引」:已对齐的收集起来,
+   * 非空则 autoCommit 一笔**本地新提交**(消息 `chore: 收敛镜像提交后到达的内容
+   * (<hash8> <原消息首行>)`),成功后从台账摘除;失败沿用 describeAutoCommitFailure
+   * 提示与错误通道,台账保留下轮再试 —— 不设上限次数,内容不到齐就一直脏着,
+   * 反正对齐判据保证了提交内容不会错。
+   *
+   * 收敛提交会被同轮的新提交检测当作新 HEAD 正常广播给对端(对端工作树内容一致 →
+   * 对端结算走「nothing to commit」跳过并推进基线,可接受 —— 内容早已一致,只欠
+   * 一笔提交记录)。中途叠加的暂停/身份闸/重写闸与结算闸门同口径:中场休息,不自愈。
+   */
+  private healDeferredGitMirror(): void {
+    for (const folder of this.folderStates) {
+      const ledger = folder.gitDeferredMirror;
+      if (!ledger) continue; // 台账为空:零开销(不读盘不比文件)
+      if (this.folderPausedNow(folder) || this.gitBlockedByIdentity(folder)) continue;
+      if (this.gitRewriteRunning) continue; // filter-branch 进行中:叠加自动提交会被孤儿化(见结算闸门)
+      // 关了 git 同步不再动它的仓库(改模式会清台账,这里兜手改配置的底)
+      const mode = folder.config.gitSync;
+      if (!mode || mode === 'off') continue;
+      if (!isGitRepo(folder.path)) continue;
+      const aligned = ledger.files.filter((rel) => workTreeContentAligned(folder.path, rel, folder.localIndex.get(rel)));
+      if (aligned.length === 0) continue; // 内容还没到齐:下轮再试(不设上限)
+      const subject = ledger.message.split('\n')[0] ?? '';
+      const message = `chore: 收敛镜像提交后到达的内容 (${ledger.hash.slice(0, 8)} ${truncateGitSubject(subject)})`;
+      const result = autoCommit(folder.path, message, aligned);
+      if (result.success) {
+        const remaining = ledger.files.filter((rel) => !aligned.includes(rel));
+        this.setGitDeferredMirror(
+          folder,
+          remaining.length > 0 ? { hash: ledger.hash, message: ledger.message, files: remaining } : null,
+        );
+        this.logger.info(
+          `git drift healed: ${folder.id} -> ${result.hash?.slice(0, 8)} (${aligned.length} 个文件: ${aligned.slice(0, 10).join(', ')}${aligned.length > 10 ? ' …' : ''})`,
+        );
+      } else {
+        const error = result.error ?? 'git auto-commit failed';
+        this.logger.warn(`git drift heal commit failed: ${folder.id}: ${error}`);
+        const hint = describeAutoCommitFailure(error);
+        this.recordFolderError(
+          folder.id,
+          new Error(hint ? `${error}\n${hint}` : error),
+          'Git 漂移收敛提交失败',
+          'git-auto-commit',
+        );
+      }
+    }
   }
 
   /**
@@ -5077,10 +5236,12 @@ export class SyncSessionManager {
           const prevReceiveOnly = existing.config.receiveOnly ?? false;
           const nextReceiveOnly = f.receiveOnly ?? false;
           existing.config = f;
-          // 两份待投递台账以磁盘为准:内存里那两份只由 setGitRelay/setGitBroadcast 写入、
-          // 两处必然同值,此刻有出入只可能是手改配置或改模式清空所致,故只跟随、不回写。
+          // 两份待投递台账与漂移台账以磁盘为准:内存里这几份只由 setGitRelay/
+          // setGitBroadcast/setGitDeferredMirror 写入、两处必然同值,此刻有出入只可能
+          // 是手改配置或改模式清空所致,故只跟随、不回写。
           existing.gitRelay = readGitPending(id, f.gitRelayPending);
           existing.gitBroadcast = readGitPending(id, f.gitBroadcastPending);
+          existing.gitDeferredMirror = readGitDeferredMirror(f.gitDeferredMirror);
           if (prevReceiveOnly !== nextReceiveOnly) {
             for (const session of this.activeSessions) {
               if (session.peers.has(id)) this.detachFolderFromSession(session, existing);

@@ -206,6 +206,15 @@ export interface SharedFolderConfig {
    */
   gitBroadcastPending?: GitCommitPendingRecord;
   /**
+   * 镜像提交结算后「内容尚未落齐」的漂移台账(见 GitDeferredMirrorRecord;同样**仅本机使用**)。
+   *
+   * 对端镜像提交时部分文件内容可能尚未经数据面落齐,这部分不进镜像提交、记入台账;
+   * 内容到齐后由每轮扫描补一笔收敛提交。落盘是为了 daemon 重启后自愈继续 —— 不落盘,
+   * 这些文件再也不在任何通知的 changedFiles 里,会永久脏着(2026-11-04 实测残留
+   * 17 个脏文件的事故形态)。gitSync 改档时随其余台账一并清除。
+   */
+  gitDeferredMirror?: GitDeferredMirrorRecord;
+  /**
    * 端到端加密密钥记录(passphrase 经 scrypt 派生;salt/key 皆 base64,**口令本体永不落盘**)。
    * 设置后,列在 e2eUntrusted 里的对端只收密文视图:路径与内容逐块加密,盲区节点「只存块、
    * 看不懂内容」,且永不回源(可信端忽略其索引宣告)。语义与已知边界见 src/e2e.ts 头注释。
@@ -243,6 +252,25 @@ export interface GitCommitPendingRecord {
   parentHash: string;
   /** 仍未送达的设备 id。 */
   targets: string[];
+}
+
+/**
+ * 镜像提交结算时「内容尚未落齐」文件的漂移台账(**仅本机使用,不进 wire、不跨设备对齐**)。
+ *
+ * 镜像提交按范围收敛只 stage 通知宣称的文件,而其中内容尚未与本机索引对齐的部分
+ * 不能一并定格(宁缺勿错,见 git-monitor.workTreeContentAligned);它们记入本台账,
+ * 由每轮扫描的自愈(workTreeContentAligned 复查)在内容到齐后补一笔收敛提交。
+ * hash/message 来自产生台账的那条通知,供收敛提交的信息与日志;files 是还没对齐的
+ * 相对路径('/' 分隔,与索引同形)。落盘同 gitRelayPending/gitBroadcastPending 的
+ * 「内存与配置同值」口径:daemon 重启后台账还在,漂移文件不会因为重启而永远没人提交。
+ */
+export interface GitDeferredMirrorRecord {
+  /** 来源通知的提交哈希(供收敛提交信息与日志)。 */
+  hash: string;
+  /** 来源通知的原始提交消息(供收敛提交信息与日志)。 */
+  message: string;
+  /** 尚未对齐、等待内容到齐后补提交的相对路径。 */
+  files: string[];
 }
 
 /** 冲突自动处理策略;定义与语义见 SharedFolderConfig.conflictPolicy 的注释。 */

@@ -2,7 +2,7 @@ import { existsSync, mkdirSync, statSync } from 'node:fs';
 import { resolve, isAbsolute, sep, dirname, join } from 'node:path';
 import { homedir } from 'node:os';
 import { randomBytes } from 'node:crypto';
-import { loadConfig, saveConfig, mutateConfig, normalizePeerUrl, DEFAULT_CONFIG, folderIdFor, folderIndexKey, generateFolderInstanceId, purgeFolderIndex, isGitSyncMode, isConflictPolicy, type Config, type FolderIdentity, type GitCommitPendingRecord, type SharedFolderConfig, type DeviceConfig, type GitSyncMode, type ConflictPolicy } from './config.js';
+import { loadConfig, saveConfig, mutateConfig, normalizePeerUrl, DEFAULT_CONFIG, folderIdFor, folderIndexKey, generateFolderInstanceId, purgeFolderIndex, isGitSyncMode, isConflictPolicy, type Config, type FolderIdentity, type GitCommitPendingRecord, type GitDeferredMirrorRecord, type SharedFolderConfig, type DeviceConfig, type GitSyncMode, type ConflictPolicy } from './config.js';
 import { normalizeSchedule, SCHEDULE_MAX_RULES, SCHEDULE_MAX_WINDOWS, type Schedule } from './schedule.js';
 import { DEFAULT_HOLIDAY_SOURCE, isRealDateKey, type CalendarOverrides, type DayType } from './holidays.js';
 import { readFolderIdentity } from './folder-identity.js';
@@ -360,6 +360,7 @@ export function setFolderGitSync(configPath: string, folderId: string, mode: Git
     existing.gitLastCommitHash = undefined;
     existing.gitRelayPending = undefined;
     existing.gitBroadcastPending = undefined;
+    existing.gitDeferredMirror = undefined;
   });
 }
 
@@ -537,6 +538,24 @@ export function setFolderGitBroadcastPending(
     if (!existing) return false; // 目录已被移除:不用为它写状态
     if (record === undefined && existing.gitBroadcastPending === undefined) return false; // 已回执齐:库里本就没有,不用重写
     existing.gitBroadcastPending = record;
+  });
+}
+
+/**
+ * 记录/清除某目录镜像提交后的**漂移台账**(内容尚未落齐、等待自愈补提交的文件,
+ * 见 gitDeferredMirror)。与 setFolderGitRelayPending 同一套口径:台账落盘,daemon
+ * 重启后自愈继续 —— 这些文件不在任何通知的 changedFiles 里,丢了台账就永久没人提交。
+ */
+export function setFolderGitDeferredMirror(
+  configPath: string,
+  folderId: string,
+  record: GitDeferredMirrorRecord | undefined,
+): void {
+  mutateConfig(configPath, (config) => {
+    const existing = config.sharedFolders.find((f) => folderIdFor(f) === folderId);
+    if (!existing) return false; // 目录已被移除:不用为它写状态
+    if (record === undefined && existing.gitDeferredMirror === undefined) return false; // 已收敛:库里本就没有,不用重写
+    existing.gitDeferredMirror = record;
   });
 }
 
