@@ -464,7 +464,11 @@ async test "镜像提交信息组装:strip 开关作用在最终消息上" {
 /// 跑 git)原样透传 —— 无进程级全局状态,并发安全。用于模拟 MoonBit 形态
 /// 造不出的「命令报错但提交已落盘」中间态(run_git 无超时;post-commit hook
 /// 失败不影响 git commit 退出码、pre-commit 里嵌套 commit 会死锁,均实测)。
-async fn install_git_shim(repo : String, tag : String, commit_script : String) -> Unit {
+async fn install_git_shim(
+  repo : String,
+  tag : String,
+  commit_script : String,
+) -> Unit {
   // 真实 git 绝对路径与仓库的物理路径(getcwd 语义,macOS 下 /tmp 会被
   // 解析成 /private/tmp,必须两边同口径)
   let (_, real_git, _) = @daemon.run_git("sh", repo, ["-c", "command -v git"])
@@ -497,23 +501,25 @@ async test "auto_commit:提交阶段失败的探测(成功落盘 / 真失败 / �
   commit_file(repo_fail, "base.txt", "v1", "init: base")
   @fs.write_file("\{repo_fail}/work.txt", "v2")
   // 形态 2:commit 直接退出 1(不真跑)—— HEAD 不动,探测必须回落失败
-  install_git_shim(repo_fail, "fail", "  echo \"fake commit failure\" >&2\n  exit 1")
+  install_git_shim(
+    repo_fail, "fail", "  echo \"fake commit failure\" >&2\n  exit 1",
+  )
   let repo_mix = fresh_repo("probe-mix")
   commit_file(repo_mix, "base.txt", "v1", "init: base")
   @fs.write_file("\{repo_mix}/work.txt", "v2")
   // 形态 3:commit 换消息真跑后伪装退出 1 —— HEAD 前进但落的是他消息
   // (并发了他程序提交的等价物),账目对不上必须保守按失败
   install_git_shim(
-    repo_mix,
-    "mix",
-    "  {REAL} commit -m \"other: concurrent\" --allow-empty >/dev/null 2>&1\n  exit 1",
+    repo_mix, "mix", "  {REAL} commit -m \"other: concurrent\" --allow-empty >/dev/null 2>&1\n  exit 1",
   )
   // 形态 1:HEAD 前进且消息一致 → 探测按成功结算,避免按失败重试吞双笔
   let ok = @daemon.auto_commit(repo_ok, "mirror: probe")
   assert_true(ok.success)
   assert_true(!is_none(ok.hash))
   // 提交内容确已落盘:HEAD 消息与本次一致,脏文件也已提交
-  let (_, head_msg, _) = @daemon.run_git("git", repo_ok, ["log", "-1", "--format=%B"]) catch {
+  let (_, head_msg, _) = @daemon.run_git("git", repo_ok, [
+    "log", "-1", "--format=%B",
+  ]) catch {
     _ => panic()
   }
   assert_eq(head_msg.trim().to_owned(), "mirror: probe")
@@ -533,7 +539,10 @@ async test "auto_commit:提交阶段失败的探测(成功落盘 / 真失败 / �
 async test "auto_commit:index.lock 残留 → 失败路径不变" {
   let repo = fresh_repo("lock")
   commit_file(repo, "base.txt", "v1", "init: base")
-  let before = unwrap_or_panic(@daemon.get_last_commit_hash(repo), "基线应存在")
+  let before = unwrap_or_panic(
+    @daemon.get_last_commit_hash(repo),
+    "基线应存在",
+  )
   // 残留锁文件:git add 直接失败,HEAD 不动
   @fs.write_file("\{repo}/.git/index.lock", "stale")
   @fs.write_file("\{repo}/work.txt", "v2")

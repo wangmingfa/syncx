@@ -567,11 +567,7 @@ pub fn git_files_desc(changed : Array[String]) -> String {
     }
     head.push(changed[i])
   }
-  let tail = if changed.length() > 10 {
-    " …"
-  } else {
-    ""
-  }
+  let tail = if changed.length() > 10 { " …" } else { "" }
   "\{changed.length()} 个文件: \{head.join(", ")}\{tail}"
 }
 
@@ -651,9 +647,13 @@ pub async fn auto_commit(
   ]) catch {
     SpawnFailed(m) =>
       // 拉起失败 = 进程根本没跑,提交不可能落盘;探测兜一道仍按保守口径
-      return commit_failed_probe(folder, before_head, message, "git 拉起失败:\{m}")
-    GitFailed(m) =>
-      return commit_failed_probe(folder, before_head, message, m)
+      return commit_failed_probe(
+        folder,
+        before_head,
+        message,
+        "git 拉起失败:\{m}",
+      )
+    GitFailed(m) => return commit_failed_probe(folder, before_head, message, m)
   }
   if commit_code != 0 {
     let err_text = if first_line(commit_err) != "" {
@@ -687,12 +687,17 @@ async fn commit_failed_probe(
         None => true
       }
       if advanced && head_message_matches(folder, message) {
-        return { success: true, skipped: false, hash: Some(after), error: None }
+        return {
+          success: true,
+          skipped: false,
+          hash: Some(after),
+          error: None,
+        }
       }
     }
     None => ()
   }
-  { success: false, skipped: false, hash: None, error: Some(err) }
+  { success: false, skipped: false, hash: None, error: Some(err), }
 }
 
 ///|

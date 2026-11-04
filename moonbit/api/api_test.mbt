@@ -316,14 +316,19 @@ test "status_json:本机信息三字段(注入 peerPort 必上线,主机名/局�
 ///|
 test "status_json:未注入 peerPort 则字段不上线" {
   let obj = require_object(
-    @api.status_json(@api.ApiOptions::new(device_id="D", control_token="test-token")),
+    @api.status_json(
+      @api.ApiOptions::new(device_id="D", control_token="test-token"),
+    ),
   )
   assert_true(obj.get("peerPort") is None)
 }
 
 ///|
 test "parse_lan_addresses:合法数组逐条收,非字符串与畸形输入丢弃" {
-  assert_eq(@api.parse_lan_addresses("[\"192.168.1.5\",\"10.0.0.2\"]").length(), 2)
+  assert_eq(
+    @api.parse_lan_addresses("[\"192.168.1.5\",\"10.0.0.2\"]").length(),
+    2,
+  )
   assert_true(@api.parse_lan_addresses("[]").length() == 0)
   // 畸形 JSON:解析失败视作取不到
   assert_true(@api.parse_lan_addresses("not json").length() == 0)
@@ -387,7 +392,9 @@ test "status_json:device_infos 快照透传(装配层/增删路由维护)" {
   }
   // 缺省注入 = 空数组(最小装配/旧形态),前端「还没有设备」兜底
   let bare = require_object(
-    @api.status_json(@api.ApiOptions::new(device_id="D", control_token="test-token")),
+    @api.status_json(
+      @api.ApiOptions::new(device_id="D", control_token="test-token"),
+    ),
   )
   match bare.get("devices") {
     Some(Array(items)) => assert_eq(items.length(), 0)

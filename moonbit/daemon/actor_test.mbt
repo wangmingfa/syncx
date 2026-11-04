@@ -534,6 +534,8 @@ struct ActorLoop {
   sink_a : @async.Queue[@daemon.Outbound]
   /// B 的出站队列(同上)。
   sink_b : @async.Queue[@daemon.Outbound]
+  /// A 发出的全量索引帧计数(初始交换兜底测试用)。
+  fulls_from_a : Array[Bool]
   /// A 侧客户端连接(收尾必须关掉,否则 A 的读循环永不退出,
   /// TaskGroup 陪着它一起挂住)。
   client : @net.PeerClient
@@ -547,10 +549,12 @@ async fn actor_loop_start(
   spec_a : @daemon.FolderSpec,
   spec_b : @daemon.FolderSpec,
   drop_responses~ : Bool = false,
+  drop_fingerprints~ : Bool = false,
 ) -> ActorLoop {
   let handle_a = @daemon.start_session_actor(group, "DEV-A", [spec_a])
   let handle_b = @daemon.start_session_actor(group, "DEV-B", [spec_b])
   let requests : Array[String] = []
+  let fulls_from_a : Array[Bool] = []
   let sink_a : @async.Queue[@daemon.Outbound] = @async.Queue(kind=Unbounded)
   let sink_b : @async.Queue[@daemon.Outbound] = @async.Queue(kind=Unbounded)
   // B 侧服务端:注册即挂会话;入站转命令,索引到达补 ApplyPlan
@@ -568,6 +572,11 @@ async fn actor_loop_start(
             "\{payload.path}#\{payload.block_index}#\{payload.cdc == Some(true)}",
           )
         _ => ()
+      }
+      // drop_fingerprints:模拟旧版对端 —— 收到指纹不转交也不应答,
+      // A 侧的初始交换兜底因此成为唯一出路
+      if drop_fingerprints && message is IndexFingerprint(_) {
+        return
       }
       let _ = handle_b.send(
         @daemon.Cmd::PeerMessage(folder="f1", remote_device_id=device, message~),
@@ -609,6 +618,11 @@ async fn actor_loop_start(
     while running {
       let frame : @daemon.Outbound? = Some(sink_a.get()) catch { _ => None }
       match frame {
+        Some(Entries(full~, ..)) => fulls_from_a.push(full)
+        Some(_) => ()
+        None => running = false
+      }
+      match frame {
         Some(f) =>
           client.send_message(actor_outbound_to_wire("f1", f)) catch {
             _ => running = false
@@ -645,7 +659,7 @@ async fn actor_loop_start(
       }
     }
   }
-  // B 出站泵:可按需丢块响应(模拟失联)
+  // B 出站泵:可按需丢块响应(模拟失联)/ 丢指纹(模拟旧版对端)
   group.spawn_bg(allow_failure=true, no_wait=true) <| () => {
     let mut running = true
     while running {
@@ -663,6 +677,17 @@ async fn actor_loop_start(
               _ => running = false
             }
           }
+        Some(IndexFingerprint(_)) =>
+          if drop_fingerprints {
+            () // 丢弃:B 的主动指纹也不许结算 A 的会话
+          } else {
+            server.send_message(
+              "DEV-A",
+              actor_outbound_to_wire("f1", frame.unwrap()),
+            ) catch {
+              _ => running = false
+            }
+          }
         Some(f) =>
           server.send_message("DEV-A", actor_outbound_to_wire("f1", f)) catch {
             _ => running = false
@@ -671,7 +696,7 @@ async fn actor_loop_start(
       }
     }
   }
-  { handle_a, handle_b, requests, sink_a, sink_b, client, }
+  { handle_a, handle_b, requests, sink_a, sink_b, fulls_from_a, client, }
 }
 
 ///|
@@ -756,6 +781,35 @@ async test "actor 回环: 块请求超时重发,达上限放弃并记录事件" 
     }
     assert_eq(retries, 3)
     assert_eq(giveups, 1)
+    actor_loop_stop(env)
+  }
+}
+
+///|
+async test "actor 回环: 初始交换 2s 无应答,兜底补发全量恰好一次" {
+  // 两侧空树:指纹天然一致;对端(B)不认指纹 → A 的指纹永远无人应答,
+  // 兜底是初始交换的唯一出路(对齐 Rust INITIAL_INDEX_FALLBACK_MS 场景)
+  let root_a = actor_fresh_root("fallback-a")
+  actor_mkdir(root_a)
+  let root_b = actor_fresh_root("fallback-b")
+  actor_mkdir(root_b)
+  let spec_a = actor_make_spec(root_a)
+  let spec_b = actor_make_spec(root_b)
+  @async.with_task_group() <| group => {
+    let env = actor_loop_start(group, spec_a, spec_b, drop_fingerprints=true)
+    assert_true(
+      actor_wait_until(() => env.handle_a.snapshot().folders[0].peers == 1),
+    )
+    // 兜底恰发一次:真实 500ms 周期泵与注入的快进拍都可能触发,断言只看
+    // 「发过一次」与「之后不再发」,不与时序竞争 —— 结算位(deadline 摘除
+    // + settled 置位)保证唯一性。
+    assert_true(actor_wait_until(() => env.fulls_from_a.length() >= 1))
+    let _ = env.handle_a.send(
+      @daemon.Cmd::PollTimeouts(now=@daemon.now_ms() + 5000L),
+    )
+    let _ = env.handle_a.sync_snapshot()
+    @async.sleep(100)
+    assert_eq(env.fulls_from_a.length(), 1)
     actor_loop_stop(env)
   }
 }

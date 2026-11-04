@@ -20,10 +20,12 @@ test "会话注册表:登记/查询/撤销,hello 覆盖元数据但保留已知 
   let registry = @cli.PeerSessionRegistry::new()
   assert_eq(registry.size(), 0)
   // 出站拨号登记(url = 拨号地址)
-  registry.register(
-    "DEV-A",
-    { version: None, platform: None, hostname: None, url: Some("ws://10.0.0.2:22000") },
-  )
+  registry.register("DEV-A", {
+    version: None,
+    platform: None,
+    hostname: None,
+    url: Some("ws://10.0.0.2:22000"),
+  })
   assert_eq(registry.size(), 1)
   match registry.lookup("DEV-A") {
     Some(meta) => assert_eq(meta.url, Some("ws://10.0.0.2:22000"))
@@ -71,15 +73,12 @@ test "devices 合并:会话有/无两态,静态快照不被就地改写" {
     _ => panic()
   }
   // 会话活着:online=true + version/platform/hostname/url 逐字段上线
-  registry.register(
-    "DEV-A",
-    {
-      version: Some("0.4.1"),
-      platform: Some("darwin"),
-      hostname: Some("host-a"),
-      url: Some("ws://10.0.0.2:22000"),
-    },
-  )
+  registry.register("DEV-A", {
+    version: Some("0.4.1"),
+    platform: Some("darwin"),
+    hostname: Some("host-a"),
+    url: Some("ws://10.0.0.2:22000"),
+  })
   let merged2 = @cli.merge_device_status(static_infos, registry)
   match merged2[0] {
     Object(obj) => {
@@ -97,10 +96,12 @@ test "devices 合并:会话有/无两态,静态快照不被就地改写" {
     _ => panic()
   }
   // 元数据缺字段的会话:缺的键不上线(url None 不写键)
-  registry.register(
-    "DEV-A",
-    { version: Some("0.4.1"), platform: None, hostname: None, url: None },
-  )
+  registry.register("DEV-A", {
+    version: Some("0.4.1"),
+    platform: None,
+    hostname: None,
+    url: None,
+  })
   let merged3 = @cli.merge_device_status(static_infos, registry)
   match merged3[0] {
     Object(obj) => {

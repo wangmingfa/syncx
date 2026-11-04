@@ -20,13 +20,13 @@
 ///|
 /// 自动重试上限(Node GIT_AUTO_COMMIT_MAX_ATTEMPTS 同值):次数用尽后停止
 /// 自动重试,通知槽保留 —— 手动重试与下一条通知都还要用它。
-pub const GIT_AUTO_COMMIT_MAX_ATTEMPTS : Int = 5
+pub const GIT_AUTO_COMMIT_MAX_ATTEMPTS : Int32 = 5
 
 ///|
 /// git 通知补投上限(Node GIT_NOTIFY_MAX_RESENDS 同值):同一目标发送满
 /// 这个次数仍无回执就放弃并清账 —— 「本地写成功不等于送达」,但不回 ack 的
 /// 对端(旧版本/离线僵尸会话)不能无限占用台账。
-pub const GIT_NOTIFY_MAX_RESENDS : Int = 5
+pub const GIT_NOTIFY_MAX_RESENDS : Int32 = 5
 
 ///|
 /// 失败退避间隔 ms(Node GIT_AUTO_COMMIT_RETRY_MS 同值):扫描/结算节拍
@@ -42,15 +42,15 @@ pub const GIT_DRAIN_CAP_MS : Int64 = 60000L
 
 ///|
 /// flush 轻量循环的节拍 ms:比扫描快,通知到齐后尽快结算。
-pub const MIRROR_FLUSH_PERIOD_MS : Int = 2000
+pub const MIRROR_FLUSH_PERIOD_MS : Int32 = 2000
 
 ///|
 /// 去重集合容量与淘汰数(Node processedRemoteCommits 同口径:>1000 时淘
 /// 最旧的 500,保留最新的一半)。
-pub const PROCESSED_REMOTE_CAP : Int = 1000
+pub const PROCESSED_REMOTE_CAP : Int32 = 1000
 
 ///|
-pub const PROCESSED_REMOTE_EVICT : Int = 500
+pub const PROCESSED_REMOTE_EVICT : Int32 = 500
 
 ///|
 /// 对端发送闭包登记表:deviceId → 投递闭包(server 侧按入站连接、client 侧
@@ -61,7 +61,7 @@ pub struct PeerSenders {
 
 ///|
 pub fn PeerSenders::new() -> PeerSenders {
-  { senders: Map([]) }
+  { senders: Map([]), }
 }
 
 ///|
@@ -125,7 +125,7 @@ pub(all) struct DrainGate {
 ///   - source_away:通知来源那一跳的会话已不在 —— 内容可能停在半途且没人
 ///     观察,等它重连续上。
 pub fn drain_gate(
-  in_flight : Int,
+  in_flight : Int32,
   source_away : Bool,
   blocked_since : Int64?,
   now : Int64,
@@ -138,7 +138,7 @@ pub fn drain_gate(
     reasons.push("notify source is offline")
   }
   if reasons.is_empty() {
-    return { flush_now: true, reasons: "", blocked_since: None }
+    return { flush_now: true, reasons: "", blocked_since: None, }
   }
   let since = match blocked_since {
     Some(s) => s
@@ -158,7 +158,7 @@ pub fn drain_gate(
 pub(all) struct PendingGitNotify {
   notify : @net.ControlMessage
   via : String?
-  mut attempts : Int
+  mut attempts : Int32
   mut retry_at : Int64?
   mut blocked_since : Int64?
   mut warned : Bool
@@ -174,7 +174,7 @@ pub(all) struct GitCommitLedger {
   /// 仍未销账的目标设备(拿到 ack 即摘;全部摘除即清账)。
   mut targets : Array[String]
   /// deviceId → 已发送次数(含首次投递;达到 GIT_NOTIFY_MAX_RESENDS 放弃)。
-  mut attempts : Map[String, Int]
+  mut attempts : Map[String, Int32]
   broadcast : Bool
 }
 
@@ -243,7 +243,7 @@ pub fn GitMirror::has_slot(self : GitMirror, folder_id : String) -> Bool {
 
 ///|
 /// 观测:挂起通知槽的已尝试次数(无槽 = -1;测试用)。
-pub fn GitMirror::slot_attempts(self : GitMirror, folder_id : String) -> Int {
+pub fn GitMirror::slot_attempts(self : GitMirror, folder_id : String) -> Int32 {
   match self.slots.get(folder_id) {
     Some(s) => s.attempts
     None => -1
@@ -272,7 +272,7 @@ pub fn GitMirror::ledger_attempt_of(
   folder_id : String,
   device : String,
   broadcast~ : Bool = true,
-) -> Int? {
+) -> Int32? {
   match self.ledger_of(folder_id, broadcast~) {
     Some(l) => l.attempts.get(device)
     None => None
@@ -308,7 +308,7 @@ fn GitMirror::ledger_map_of(
 
 ///|
 /// 观测:去重集合大小(测试用)。
-pub fn GitMirror::processed_size(self : GitMirror) -> Int {
+pub fn GitMirror::processed_size(self : GitMirror) -> Int32 {
   self.processed.length()
 }
 
@@ -443,7 +443,10 @@ pub async fn GitMirror::flush(self : GitMirror) -> Unit {
         changed_files~,
         commit_subjects~,
         ..
-      ) => (from_device_id, commit_hash, commit_message, changed_files, commit_subjects)
+      ) =>
+        (
+          from_device_id, commit_hash, commit_message, changed_files, commit_subjects,
+        )
       // 槽里只可能存 GitCommitNotify(on_notify 已闸),到达即弃
       _ => {
         let _ = self.slots.remove(folder_id)
@@ -481,7 +484,12 @@ pub async fn GitMirror::flush(self : GitMirror) -> Unit {
     // folderIdentity 判定面。
     // 在途接收与来源会话闸:内容没拉齐不提交;60s 封顶强推(死传输自愈兜底)
     let now = @daemon.now_ms()
-    let gate = drain_gate(self.in_flight_of(folder_id), self.source_away(slot.via), slot.blocked_since, now)
+    let gate = drain_gate(
+      self.in_flight_of(folder_id),
+      self.source_away(slot.via),
+      slot.blocked_since,
+      now,
+    )
     if !gate.flush_now {
       slot.blocked_since = gate.blocked_since
       if !slot.warned {
@@ -503,9 +511,7 @@ pub async fn GitMirror::flush(self : GitMirror) -> Unit {
     // 上一轮尝试失败后的退避期:通知留在队列里,到点再试(循环节拍不退避就会
     // 对持久性失败每拍跑一遍 git、刷一屏 WARN)
     match slot.retry_at {
-      Some(retry_at) => if now < retry_at {
-        continue
-      }
+      Some(retry_at) => if now < retry_at { continue }
       None => ()
     }
     slot.warned = false
@@ -571,10 +577,12 @@ pub async fn GitMirror::flush(self : GitMirror) -> Unit {
     if result.success {
       @log.info("auto-commit success: {Folder} -> {Hash8}", [
         Json::string(folder_id),
-        Json::string(match result.hash {
-          Some(h) => hash8(h)
-          None => "?"
-        }),
+        Json::string(
+          match result.hash {
+            Some(h) => hash8(h)
+            None => "?"
+          },
+        ),
       ])
       let _ = self.slots.remove(folder_id)
       // 基线推进 + 去重登记:防止扫描循环把这笔镜像提交误判为「本地新提交」
@@ -596,22 +604,22 @@ pub async fn GitMirror::flush(self : GitMirror) -> Unit {
         Some(e) => e
         None => "git auto-commit failed"
       }
-      @log.warn(
-        "auto-commit failed (attempt {N}/{Max}): {Folder}: {Error}",
-        [
-          Json::number(slot.attempts.to_double()),
-          Json::number(GIT_AUTO_COMMIT_MAX_ATTEMPTS.to_double()),
-          Json::string(folder_id),
-          Json::string(error),
-        ],
-      )
+      @log.warn("auto-commit failed (attempt {N}/{Max}): {Folder}: {Error}", [
+        Json::number(slot.attempts.to_double()),
+        Json::number(GIT_AUTO_COMMIT_MAX_ATTEMPTS.to_double()),
+        Json::string(folder_id),
+        Json::string(error),
+      ])
       if slot.attempts >= GIT_AUTO_COMMIT_MAX_ATTEMPTS {
         // 停止自动重试但**保留通知**:工作树依旧是脏的、这一笔仍未提交;
         // 下一条通知照旧覆盖并重置计数
         slot.retry_at = None
         @log.warn(
           "auto-commit giving up after {Max} attempts: {Folder}; notify kept for manual retry or the next commit notification",
-          [Json::number(GIT_AUTO_COMMIT_MAX_ATTEMPTS.to_double()), Json::string(folder_id)],
+          [
+            Json::number(GIT_AUTO_COMMIT_MAX_ATTEMPTS.to_double()),
+            Json::string(folder_id),
+          ],
         )
       } else {
         slot.retry_at = Some(now + GIT_AUTO_COMMIT_RETRY_MS)
@@ -622,7 +630,7 @@ pub async fn GitMirror::flush(self : GitMirror) -> Unit {
 
 ///|
 /// 该目录的在途接收总数(actor 快照里各会话 pending 之和;无该目录 = 0)。
-fn GitMirror::in_flight_of(self : GitMirror, folder_id : String) -> Int {
+fn GitMirror::in_flight_of(self : GitMirror, folder_id : String) -> Int32 {
   let snapshot = self.handle.snapshot()
   for status in snapshot.folders {
     if status.id == folder_id {
@@ -796,7 +804,7 @@ async fn GitMirror::push_targets(
   ledger : GitCommitLedger,
 ) -> PushOutcome {
   let wire : @net.WireMessage = @net.WireMessage::Control(payload=ledger.notify)
-  let outcome : PushOutcome = { sent: [], offline: [], dropped: [] }
+  let outcome : PushOutcome = { sent: [], offline: [], dropped: [], }
   let pending : Array[String] = []
   for device in ledger.targets {
     if self.senders.send_to(device, wire) {
@@ -813,10 +821,14 @@ async fn GitMirror::push_targets(
           [
             Json::number(GIT_NOTIFY_MAX_RESENDS.to_double()),
             Json::string(folder_id),
-            Json::string(hash8(match ledger.notify {
-              GitCommitNotify(commit_hash~, ..) => commit_hash
-              _ => ""
-            })),
+            Json::string(
+              hash8(
+                match ledger.notify {
+                  GitCommitNotify(commit_hash~, ..) => commit_hash
+                  _ => ""
+                },
+              ),
+            ),
             Json::string(device),
           ],
         )
@@ -910,10 +922,7 @@ async fn GitMirror::retry_ledgers(self : GitMirror) -> Unit {
 ///|
 /// 台账里是否存在已达上限的目标(决定是否需要把「少了目标」的现状落盘)。
 /// 判据与 push_targets 一致:attempts 记满即已放弃(目标已不在 targets)。
-fn GitMirror::any_dropped(
-  self : GitMirror,
-  ledger : GitCommitLedger,
-) -> Bool {
+fn GitMirror::any_dropped(self : GitMirror, ledger : GitCommitLedger) -> Bool {
   let _ = self
   for _, tries in ledger.attempts {
     if tries >= GIT_NOTIFY_MAX_RESENDS {
@@ -948,7 +957,12 @@ async fn GitMirror::drain_acks(self : GitMirror) -> Unit {
   let batch = self.acks
   self.acks = []
   for (sender, folder_id, commit_hash) in batch {
-    if self.clear_ack_target(self.broadcast_ledger, sender, folder_id, commit_hash) {
+    if self.clear_ack_target(
+        self.broadcast_ledger,
+        sender,
+        folder_id,
+        commit_hash,
+      ) {
       continue
     }
     if self.clear_ack_target(self.relay_ledger, sender, folder_id, commit_hash) {
@@ -1019,7 +1033,10 @@ async fn GitMirror::clear_ack_target(
 /// 位清空;attempts 不落盘(仅内存,重启重新计数)。已知取舍:与 API 写
 /// 路由的整文件保存之间存在丢更新小竞态 —— 单线程 async 的交错只发生在
 /// await 点之间,窗口极小,且台账记录本身幂等可重建(Node 整文件回写同源)。
-async fn GitMirror::persist_ledgers(self : GitMirror, folder_id : String) -> Unit {
+async fn GitMirror::persist_ledgers(
+  self : GitMirror,
+  folder_id : String,
+) -> Unit {
   // 读路径不失败(坏文件按全新配置处理,api 包内部兜底),只有写可能失败
   let config = load_config_file(self.config_file)
   let broadcast_json = match self.broadcast_ledger.get(folder_id) {
@@ -1046,11 +1063,10 @@ async fn GitMirror::persist_ledgers(self : GitMirror, folder_id : String) -> Uni
     return
   }
   save_config_atomic(self.config_file, config) catch {
-    e => {
+    e =>
       @log.warn("git ledger persist failed: {Detail}", [
         Json::string(CliError::to_text(e)),
       ])
-    }
   }
 }
 
@@ -1072,17 +1088,14 @@ pub async fn GitMirror::adopt_pending(self : GitMirror) -> Unit {
               self.broadcast_ledger.set(id, ledger)
               @log.info(
                 "git broadcast ledger restored: {Folder} -> {Targets}",
-                [
-                  Json::string(id),
-                  Json::string(ledger.targets.join(", ")),
-                ],
+                [Json::string(id), Json::string(ledger.targets.join(", "))],
               )
             }
-            None => {
-              @log.warn("git broadcast ledger record malformed, ignored: {Folder}", [
-                Json::string(id),
-              ])
-            }
+            None =>
+              @log.warn(
+                "git broadcast ledger record malformed, ignored: {Folder}",
+                [Json::string(id)],
+              )
           }
         }
       None => ()
@@ -1093,16 +1106,16 @@ pub async fn GitMirror::adopt_pending(self : GitMirror) -> Unit {
           match ledger_record_from_json(json, id, false) {
             Some(ledger) => {
               self.relay_ledger.set(id, ledger)
-              @log.info(
-                "git relay ledger restored: {Folder} -> {Targets}",
-                [Json::string(id), Json::string(ledger.targets.join(", "))],
-              )
-            }
-            None => {
-              @log.warn("git relay ledger record malformed, ignored: {Folder}", [
+              @log.info("git relay ledger restored: {Folder} -> {Targets}", [
                 Json::string(id),
+                Json::string(ledger.targets.join(", ")),
               ])
             }
+            None =>
+              @log.warn(
+                "git relay ledger record malformed, ignored: {Folder}",
+                [Json::string(id)],
+              )
           }
         }
       None => ()
@@ -1118,31 +1131,25 @@ fn ledger_record_to_json(ledger : GitCommitLedger) -> Json? {
   if ledger.targets.is_empty() {
     return None
   }
-  let (from_id, folder_id, hash, message, changed, diff_stat, subjects, parent) =
-    match ledger.notify {
-      GitCommitNotify(
-        from_device_id~,
-        folder_id~,
-        commit_hash~,
-        commit_message~,
-        changed_files~,
-        diff_stat~,
-        commit_subjects~,
-        parent_hash~,
-        ..
-      ) =>
-        (
-          from_device_id,
-          folder_id,
-          commit_hash,
-          commit_message,
-          changed_files,
-          diff_stat,
-          commit_subjects,
-          parent_hash,
-        )
-      _ => return None
-    }
+  let (from_id, folder_id, hash, message, changed, diff_stat, subjects, parent) = match
+    ledger.notify {
+    GitCommitNotify(
+      from_device_id~,
+      folder_id~,
+      commit_hash~,
+      commit_message~,
+      changed_files~,
+      diff_stat~,
+      commit_subjects~,
+      parent_hash~,
+      ..
+    ) =>
+      (
+        from_device_id, folder_id, commit_hash, commit_message, changed_files, diff_stat,
+        commit_subjects, parent_hash,
+      )
+    _ => return None
+  }
   let map : Map[String, Json] = Map([])
   map.set("fromDeviceId", Json::string(from_id))
   map.set("folderId", Json::string(folder_id))
@@ -1193,7 +1200,7 @@ fn ledger_record_from_json(
     platform=None,
     runtime=None,
   )
-  Some({ notify, targets, attempts: Map([]), broadcast })
+  Some({ notify, targets, attempts: Map([]), broadcast, })
 }
 
 ///|

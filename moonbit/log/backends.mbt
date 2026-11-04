@@ -22,7 +22,7 @@ pub fn PrintLogger::new() -> PrintLogger {
 }
 
 ///|
-pub impl @logging.Logger for PrintLogger with log(_self, event) {
+pub impl @logging.Logger for PrintLogger with fn log(_self, event) {
   let line = @utf8.encode(event.to_line() + "\n")
   let _ = c_log_stdout(line, line.length())
 }
@@ -64,7 +64,7 @@ extern "C" fn c_log_append(
 ) -> Int32 = "syncx_log_append"
 
 ///|
-pub impl @logging.Logger for FileLogger with log(self, event) {
+pub impl @logging.Logger for FileLogger with fn log(self, event) {
   let path = @utf8.encode(self.path)
   let line = @utf8.encode(event.to_line() + "\n")
   let _ = c_log_append(path, path.length(), line, line.length())

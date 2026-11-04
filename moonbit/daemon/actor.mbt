@@ -21,8 +21,8 @@
 ///  - 块重试 / 发送租约 / 限速窗口 / 延迟队列已移植(见 reliability.mbt);
 ///    放弃接收时保留断点续传中间态;尚未移植的是块重试的 30s 慢退避
 ///    (Rust 总计 23 次发送上限);
-///  - 初始交换的 2s 兜底全量(`INITIAL_INDEX_FALLBACK_MS`)未接线:没有定时器
-///    驱动,指纹无应答时靠对端主动发全量;
+///  - 初始交换的 2s 兜底全量已接线:指纹发出时挂死线,2s 无应答由周期泵
+///    补发全量(见 INITIAL_INDEX_FALLBACK_MS / poll_initial_fallback);
 ///  - 中转(ADR-0014)与磁盘空间守卫未移植;
 ///  - CDC 块的请求与供应已移植:接收侧按 plan_cdc 规划口径并做本地预填差集
 ///    (对齐 Node requestMissingChunks),供应侧按本机 clens 前缀和供块。
@@ -32,7 +32,12 @@
 /// 对齐 Node checkGitCommits 所在的 5s 扫描节拍。纯 git 命令产生的提交只动
 /// .git(文件监听按硬忽略排除),检测时效靠这条心跳兜住;扫描轮尾的检测
 /// (文件变更驱动)照旧并行存在,两路共用同一个观察器基线。
-const GIT_CHECK_TICKS : Int = 10
+const GIT_CHECK_TICKS : Int32 = 10
+
+///|
+/// 初始交换兜底全量的时限:指纹发出去 2s 内没有任何应答(指纹/ack/请求)
+/// 就不再干等,主动补发本机全量(对齐 Rust `INITIAL_INDEX_FALLBACK_MS`)。
+const INITIAL_INDEX_FALLBACK_MS : Int64 = 2000L
 
 ///|
 /// 索引消息的语义:全量(并集规划)或增量(只判消息里提到的路径)。
@@ -239,6 +244,11 @@ priv struct PeerSession {
   mut deferred : Array[@net.WireBlockRequest]
   /// 延迟队列去重键(与 deferred 同进同出)。
   deferred_keys : Map[String, Unit]
+  /// 初始交换兜底死线:PeerOpen 发指纹时挂上,收到任一应答(指纹/ack/请求)
+  /// 即摘除;到期未结算则补发本机全量(见 INITIAL_INDEX_FALLBACK_MS)。
+  mut initial_deadline : Int64?
+  /// 初始交换已结算(应答到达或兜底已发),结算后兜底不再触发。
+  mut initial_settled : Bool
   /// 运行期事件(上层经 DrainEvents 取走)。
   events : Array[SyncEventRecord]
 }
@@ -279,7 +289,7 @@ pub struct SessionActor {
   priv mut folders : Array[Folder]
   priv cell : SnapshotCell
   /// git 提交检测心跳的节拍计数(见 GIT_CHECK_TICKS;周期泵每 500ms 一拍)。
-  priv mut git_tick : Int
+  priv mut git_tick : Int32
   /// 本地提交通知的出口(装配层注入):检测到新提交后由它投递。送达保证
   /// (按目标设备记台账、离线补投、ack 销账)在装配层镜像循环实现;daemon
   /// 单测不注入时为空操作。
@@ -800,11 +810,16 @@ fn SessionActor::do_peer_open(
     last_serve_ms: 0L,
     deferred: [],
     deferred_keys: Map([]),
+    initial_deadline: None,
+    initial_settled: false,
     events: [],
   }
   folder.peers.set(device, session)
   let fingerprint = index_fingerprint(local_entries(folder))
   push_outbound(session, IndexFingerprint(fingerprint))
+  // 兜底死线与指纹同时挂:对端旧版不认指纹、或应答在路上丢失时,这条
+  // 死线是初始交换从「永远干等」里出来的唯一出路(到期补发全量)。
+  session.initial_deadline = Some(now_ms() + INITIAL_INDEX_FALLBACK_MS)
 }
 
 ///|
@@ -857,6 +872,7 @@ async fn SessionActor::do_poll_timeouts(
     for _, session in folder.peers {
       poll_block_retries(session, now)
       decay_serve_lease(session, now)
+      poll_initial_fallback(folder, session, now)
       self.pump_deferred(folder, session)
     }
   }
@@ -914,6 +930,35 @@ async fn SessionActor::pump_deferred(
 // ==================== 入站消息 ====================
 
 ///|
+/// 初始交换已结算:死线摘除,兜底不再触发(对齐 Rust `settle_initial`)。
+fn settle_initial_exchange(session : PeerSession) -> Unit {
+  session.initial_deadline = None
+  session.initial_settled = true
+}
+
+///|
+/// 初始交换兜底:指纹发出去 2s 仍未结算 → 主动补发本机全量(对齐 Rust
+/// `poll_timeouts` 的兜底分支)。对端是旧版(不认指纹)或应答丢失时,这是
+/// 从「永远干等」里出来的唯一出路;对端重复收到全量按并集规划,幂等。
+fn poll_initial_fallback(
+  folder : Folder,
+  session : PeerSession,
+  now : Int64,
+) -> Unit {
+  match session.initial_deadline {
+    Some(deadline) =>
+      if now >= deadline {
+        session.initial_deadline = None
+        if !session.initial_settled {
+          session.initial_settled = true
+          send_full_snapshot(folder, session)
+        }
+      }
+    None => ()
+  }
+}
+
+///|
 /// 处理一条对端 wire 消息。索引先暂存(等 `ApplyPlan` 规划执行);
 /// 指纹 / 回执 / 块请求 / 块响应即时处理(协议控制流不等批量)。
 async fn SessionActor::do_peer_message(
@@ -948,8 +993,10 @@ async fn SessionActor::do_peer_message(
         None => ()
       }
     IndexFingerprint(fingerprint~, ..) => {
+      // 任一初始交换应答都先结算兜底死线(对齐 Rust settle_initial):
       // 指纹一致 → 互免全量;不一致 → 请求对端全量(两侧对称,各自都会
-      // 发起,于是两侧都拿到对方的全量)。TODO:2s 无应答的兜底全量。
+      // 发起,于是两侧都拿到对方的全量)。
+      settle_initial_exchange(session)
       let mine = index_fingerprint(local_entries(folder))
       if fingerprint == mine {
         push_outbound(session, IndexAck)
@@ -957,8 +1004,11 @@ async fn SessionActor::do_peer_message(
         push_outbound(session, IndexRequest)
       }
     }
-    IndexAck(..) => ()
-    IndexRequest(..) => send_full_snapshot(folder, session)
+    IndexAck(..) => settle_initial_exchange(session)
+    IndexRequest(..) => {
+      settle_initial_exchange(session)
+      send_full_snapshot(folder, session)
+    }
     BlockRequest(payload~, ..) => self.serve_block(folder, session, payload)
     BlockResponse(payload~, ..) => on_block_response(folder, session, payload)
     Control(..) => () // 控制面不进会话层(由上层全局路由)

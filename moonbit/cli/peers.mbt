@@ -13,17 +13,17 @@
 
 ///|
 /// 断线重连退避基数(ms):指数退避 1s、2s、4s…(Node RECONNECT_BASE_MS 同值)。
-pub const RECONNECT_BASE_MS : Int = 1000
+pub const RECONNECT_BASE_MS : Int32 = 1000
 
 ///|
 /// 断线重连退避上限(ms)(Node RECONNECT_MAX_MS 同值)。
-pub const RECONNECT_MAX_MS : Int = 30000
+pub const RECONNECT_MAX_MS : Int32 = 30000
 
 ///|
 /// 出站拨号监督循环的 diff 节拍(ms):每拍现读配置的 peers 清单,新 URL 补起
 /// 拨号循环。配置热重载的「设备登记后立即建连」由这个节拍承担(3s 内跟上;
 /// Node 是回调即拨,MoonBit 以轻量轮询等价,避免回调里碰网络)。
-pub const DIAL_SUPERVISOR_TICK_MS : Int = 3000
+pub const DIAL_SUPERVISOR_TICK_MS : Int32 = 3000
 
 ///|
 /// 断线重连退避延迟(ms),与 Node `reconnectDelayMs` 同曲线:`attempts` 为
@@ -31,7 +31,7 @@ pub const DIAL_SUPERVISOR_TICK_MS : Int = 3000
 /// 启动时互相拒连把连接建立推到 30s 边缘 —— 之后 1s 起指数退避,30s 封顶。
 /// 注:Node 还有「无网抬到 5 分钟下限」的 offlineAware 口径,依赖网络在线
 /// 感知,MoonBit 尚未实现该探针,故不在此曲线内(后续包)。
-pub fn reconnect_delay_ms(attempts : Int) -> Int {
+pub fn reconnect_delay_ms(attempts : Int32) -> Int32 {
   if attempts <= 0 {
     return 0
   }
@@ -68,7 +68,7 @@ pub struct PeerSessionRegistry {
 
 ///|
 pub fn PeerSessionRegistry::new() -> PeerSessionRegistry {
-  { sessions: Map([]) }
+  { sessions: Map([]), }
 }
 
 ///|
@@ -92,19 +92,24 @@ pub fn PeerSessionRegistry::register(
 
 ///|
 /// 会话撤销(断开钩子;幂等)。
-pub fn PeerSessionRegistry::unregister(self : PeerSessionRegistry, device_id : String) -> Unit {
+pub fn PeerSessionRegistry::unregister(
+  self : PeerSessionRegistry,
+  device_id : String,
+) -> Unit {
   self.sessions.remove(device_id)
 }
 
 ///|
 /// 活跃会话数(观测/测试用)。
-pub fn PeerSessionRegistry::size(self : PeerSessionRegistry) -> Int {
+pub fn PeerSessionRegistry::size(self : PeerSessionRegistry) -> Int32 {
   self.sessions.length()
 }
 
 ///|
 /// 当前活跃设备清单(观测/会话面对账用,配置热重载按它对账 sinks 与连接)。
-pub fn PeerSessionRegistry::devices(self : PeerSessionRegistry) -> Array[String] {
+pub fn PeerSessionRegistry::devices(
+  self : PeerSessionRegistry,
+) -> Array[String] {
   let out : Array[String] = []
   for device, _ in self.sessions {
     out.push(device)
@@ -128,10 +133,12 @@ pub fn PeerSessionRegistry::register_hello(
     Some(existing) => existing.url
     None => None
   }
-  self.register(
-    device_id,
-    { version: Some(version), platform, hostname, url: kept },
-  )
+  self.register(device_id, {
+    version: Some(version),
+    platform,
+    hostname,
+    url: kept,
+  })
 }
 
 ///|
@@ -277,8 +284,8 @@ fn handle_peer_message(
           send_control(
             @net.ControlMessage::GitCommitAck(
               from_device_id=self_device_id,
-              folder_id=folder_id,
-              commit_hash=commit_hash,
+              folder_id~,
+              commit_hash~,
               version=None,
               hostname=None,
               platform=None,
@@ -304,7 +311,11 @@ fn handle_peer_message(
       match message_folder(message) {
         Some(folder) => {
           let _ = handle.send(
-            @daemon.Cmd::PeerMessage(folder~, remote_device_id=device_id, message~),
+            @daemon.Cmd::PeerMessage(
+              folder~,
+              remote_device_id=device_id,
+              message~,
+            ),
           )
           // 索引到达后补一条 ApplyPlan(驱动层职责,同 actor_test)
           if message is Index(..) {
@@ -360,20 +371,17 @@ async fn outbound_peer_loop(
     ) catch {
       e => {
         // 拨号失败是对端离线的常态(Node 同口径记 WARN 不记 ERROR)
-        @log.warn(
-          "dial to {Url} failed: {Err} (attempt {N})",
-          [
-            Json::string(url),
-            Json::string(e.to_text()),
-            Json::number((attempts + 1).to_double()),
-          ],
-        )
+        @log.warn("dial to {Url} failed: {Err} (attempt {N})", [
+          Json::string(url),
+          Json::string(e.to_text()),
+          Json::number((attempts + 1).to_double()),
+        ])
         let delay = reconnect_delay_ms(attempts)
         attempts = attempts + 1
-        @log.debug(
-          "reconnect scheduled {Url} in {Ms}ms",
-          [Json::string(url), Json::number(delay.to_double())],
-        )
+        @log.debug("reconnect scheduled {Url} in {Ms}ms", [
+          Json::string(url),
+          Json::number(delay.to_double()),
+        ])
         @async.sleep(delay)
         None
       }
@@ -382,15 +390,17 @@ async fn outbound_peer_loop(
       Some(client) => {
         attempts = 0
         let device_id = client.remote_device_id().unwrap_or("")
-        @log.info(
-          "connected to configured peer {DeviceId} ({Url})",
-          [Json::string(device_id), Json::string(url)],
-        )
+        @log.info("connected to configured peer {DeviceId} ({Url})", [
+          Json::string(device_id),
+          Json::string(url),
+        ])
         // 会话登记 + 主动 hello 宣告(版本/平台/主机名;生命周期跟随会话)
-        registry.register(
-          device_id,
-          { version: None, platform: None, hostname: None, url: Some(url) },
-        )
+        registry.register(device_id, {
+          version: None,
+          platform: None,
+          hostname: None,
+          url: Some(url),
+        })
         client.send_message(
           @net.WireMessage::Control(
             payload=@net.make_hello(
@@ -399,20 +409,33 @@ async fn outbound_peer_loop(
               Some(@api.platform_name()),
             ),
           ),
-        ) catch { _ => () }
+        ) catch {
+          _ => ()
+        }
         // actor 出站接线(共享目录 sinks + 泵,直接走本条客户端连接;
         // 目录清单现读配置单元格)
-        spawn_session_pumps(group, handle, config_cell.val, device_id, session_sinks, msg => {
-          client.send_message(msg) catch { _ => return false }
-          true
-        })
+        spawn_session_pumps(
+          group,
+          handle,
+          config_cell.val,
+          device_id,
+          session_sinks,
+          msg => {
+            client.send_message(msg) catch {
+              _ => return false
+            }
+            true
+          },
+        )
         // 发送闭包登记(镜像中继按它寻址;断开钩子摘除)+ 连接 closer 登记
         // (配置热重载:设备不再共享任何目录时由会话面对账主动掐线)
         senders.register(device_id, msg => {
-          client.send_message(msg) catch { _ => return false }
+          client.send_message(msg) catch {
+            _ => return false
+          }
           true
         })
-        closers.set(device_id, () => { client.close() })
+        closers.set(device_id, () => client.close())
         // git 回执泵:handle_peer_message 是同步回调,而 client 发送是 async ——
         // 回执先入无界箱,由本任务异步投递(单线程 async,箱即同步转发)
         let ack_outbox : @async.Queue[@net.ControlMessage] = @async.Queue(
@@ -420,7 +443,9 @@ async fn outbound_peer_loop(
         )
         group.spawn_bg(allow_failure=true, no_wait=true) <| () => {
           for ;; {
-            let ack : @net.ControlMessage? = Some(ack_outbox.get()) catch { _ => None }
+            let ack : @net.ControlMessage? = Some(ack_outbox.get()) catch {
+              _ => None
+            }
             match ack {
               Some(m) =>
                 client.send_message(@net.WireMessage::Control(payload=m)) catch {
@@ -433,7 +458,7 @@ async fn outbound_peer_loop(
         }
         // 收发循环:返回 = 连接结束(对端断开 / 链路故障)
         client.run({
-          on_message: message =>
+          on_message: message => {
             handle_peer_message(
               registry,
               handle,
@@ -444,12 +469,15 @@ async fn outbound_peer_loop(
               msg => {
                 let _ = ack_outbox.try_put(msg) catch { _ => false }
               },
-            ),
+            )
+          },
           on_binary: _ => (),
-          on_error: reason =>
+          on_error: reason => {
             @log.warn("peer {DeviceId} message error {Reason}", [
-              Json::string(device_id), Json::string(reason),
-            ]),
+              Json::string(device_id),
+              Json::string(reason),
+            ])
+          },
           on_close: () => (),
         })
         // 会话撤销:元数据失效 + sinks 关闭 + 发送闭包/closer 摘除 + 回执箱
@@ -459,10 +487,10 @@ async fn outbound_peer_loop(
         closers.remove(device_id)
         close_session_sinks(session_sinks, device_id)
         ack_outbox.close(clear=true)
-        @log.warn(
-          "peer {DeviceId} session closed ({Url}); reconnecting",
-          [Json::string(device_id), Json::string(url)],
-        )
+        @log.warn("peer {DeviceId} session closed ({Url}); reconnecting", [
+          Json::string(device_id),
+          Json::string(url),
+        ])
         // attempts 已在成功时归零:闭链后 0ms 立即重拨,失败再指数退避
         @async.sleep(reconnect_delay_ms(attempts))
       }

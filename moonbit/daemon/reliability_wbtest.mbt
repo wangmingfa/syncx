@@ -18,6 +18,8 @@ fn wb_session() -> PeerSession {
     last_serve_ms: 0L,
     deferred: [],
     deferred_keys: Map([]),
+    initial_deadline: None,
+    initial_settled: false,
     events: [],
   }
 }
