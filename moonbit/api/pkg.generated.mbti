@@ -67,6 +67,8 @@ pub fn index_html() -> String
 
 pub fn is_shell_path(String) -> Bool
 
+pub fn lan_addresses() -> Array[String]
+
 pub async fn load_account(String) -> AccountRecord?
 
 pub async fn load_config(String) -> @core.Config

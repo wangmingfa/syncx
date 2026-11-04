@@ -314,6 +314,9 @@ pub async fn handle_add_device(
   save_config(options.config_file, config) catch {
     _ => return json_error(event, @mocket.BadRequest, "invalid json body")
   }
+  // 刷新 status.devices 快照:添加动作后设备卡立即出现(Node 的
+  // statusHub.notify 同职责)
+  options.device_infos = device_infos_json(config)
   // TODO(daemon):设备登记后通知 daemon 立即建连/补发配对请求
   // (Node 侧 manager.notifyPairingIntent 同职责),当前落盘即止
   @mocket.HttpResponse(@mocket.Created).json(ok_true())
@@ -341,6 +344,8 @@ pub async fn handle_remove_device(
   save_config(options.config_file, config) catch {
     _ => return json_error(event, @mocket.BadRequest, "invalid json body")
   }
+  // 刷新 status.devices 快照:移除动作后设备卡立即消失
+  options.device_infos = device_infos_json(config)
   // TODO(daemon):设备移除后通知 daemon 断开既有会话、清理学习到的
   // 对端地址并重算状态推送(Node 侧 forgetAndCloseSessions 同职责)
   @mocket.HttpResponse(@mocket.OK).json(ok_true())

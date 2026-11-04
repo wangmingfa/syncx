@@ -38,6 +38,12 @@ pub(all) struct ApiOptions {
   /// peer 数据面监听端口(`/api/status.peerPort`,顶栏本机信息浮层用;
   /// cli 装配时从启动参数注入,缺省 22000;None = 未注入,不上线该字段)。
   peer_port : Int32?
+  /// `/api/status.devices` 的设备清单快照(前端设备列表与「已配对设备」徽标
+  /// 的数据源)。装配层启动时从 config.knownDevices 折算注入;设备增删路由
+  /// 成功后重建快照 —— 对应 Node 的「内存态 + statusHub.notify」语义,不做
+  /// 每请求读配置(status 是高频端点)。其他进程改配置(两后端切换场景)
+  /// 重启后可见。
+  mut device_infos : Array[Json]
 }
 
 ///|
@@ -57,6 +63,7 @@ pub fn ApiOptions::new(
   upload_swap~ : UploadSwapFn? = None,
   settings~ : Json? = None,
   peer_port~ : Int32? = None,
+  device_infos~ : Array[Json] = [],
 ) -> ApiOptions {
   let web_dist = match web_dist {
     Some(dist) => Some(dist)
@@ -75,6 +82,7 @@ pub fn ApiOptions::new(
     upload_swap,
     settings,
     peer_port,
+    device_infos,
   }
 }
 
@@ -132,19 +140,6 @@ pub fn parse_lan_addresses(text : String) -> Array[String] {
 pub fn lan_addresses() -> Array[String] {
   parse_lan_addresses(c_status_lan_addresses())
 }
-  let parsed : Json? = Some(@json.parse(text)) catch { _ => None }
-  let addresses : Array[String] = []
-  match parsed {
-    Some(Array(items)) =>
-      for item in items {
-        if item is String(addr) {
-          addresses.push(addr)
-        }
-      }
-    _ => ()
-  }
-  addresses
-}
 
 ///|
 /// `/api/status.settings` 全局设置段(设置弹窗读取;键名与 config.json 顶层
@@ -162,6 +157,32 @@ pub fn settings_json(config : @core.Config) -> Json {
 }
 
 ///|
+/// 设备清单快照构建:config.knownDevices → 前端 DeviceInfo。
+/// - online 恒 false:MoonBit 尚无 peer 会话层,设备可达性未知(离线展示);
+///   会话层落地后由 actor 快照覆盖在线态。
+/// - folders = 该设备被指派到的目录 id 列表(设备卡「共享 N 个目录」),
+///   从各共享目录的 devices 清单反查。
+pub fn device_infos_json(config : @core.Config) -> Array[Json] {
+  let items : Array[Json] = []
+  for device in config.known_devices {
+    let item : Map[String, Json] = Map([])
+    item.set("deviceId", Json::string(device.id))
+    item.set("online", Json::boolean(false))
+    let assigned : Array[Json] = []
+    for folder in config.shared_folders {
+      for d in folder.devices {
+        if d == device.id {
+          assigned.push(Json::string(folder.folder_id()))
+        }
+      }
+    }
+    item.set("folders", Json::array(assigned))
+    items.push(Json::object(item))
+  }
+  items
+}
+
+///|
 pub fn status_json(options : ApiOptions) -> Json {
   let map : Map[String, Json] = Map([])
   map.set("deviceId", Json::string(options.device_id))
@@ -173,7 +194,9 @@ pub fn status_json(options : ApiOptions) -> Json {
   map.set("entries", Json::number(0))
   map.set("tombstones", Json::number(0))
   map.set("folders", Json::array([]))
-  map.set("devices", Json::array([]))
+  // 设备清单:装配层/设备增删路由维护的快照(见 ApiOptions.device_infos 注释);
+  // 缺省空数组 = 未注入(测试/最小装配),前端「还没有设备」兜底
+  map.set("devices", Json::array(options.device_infos))
   map.set("syncProgress", Json::array([]))
   map.set("offers", Json::array([]))
   // 编译目标 OS,口径对齐 Node 的 process.platform(前端 osIconKind 只认 darwin/win32/linux)

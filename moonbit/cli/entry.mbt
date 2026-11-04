@@ -267,20 +267,25 @@ pub async fn run_start(args : StartArgs) -> Unit {
       watch_folders,
       @daemon.FsWatchOptions::from_config(config),
     )
-    // 启动横幅(控制端口绑定成功与否在 mocket 内部,绑定失败由 mocket 打印)
-    @log.info("syncx {Version} (moonbit backend) started", [Json::string(@core.VERSION)])
-    @log.info("device: {DeviceId}", [Json::string(identity.device_id)])
+    // 启动横幅(控制端口绑定成功与否在 mocket 内部,绑定失败由 mocket 打印):
+    // 行内容与顺序对齐 Node src/cli.ts 启动段,LAN 地址走 api 包的 C FFI 包装。
+    // --log-file 形态下照样进文件(统一走 @log,无需特判)。
     // 绝对路径展示:--config-dir 常传相对值(dev 脚本 ../.syncx-dev),日志里
     // 看绝对路径才好核对;realpath 失败(目录异常)回退原值
-    @log.info(
-      "config dir: {Dir}",
-      [Json::string(@fs.realpath(config_dir) catch { _ => config_dir })],
+    let lan = @api.lan_addresses()
+    let banner = build_banner_lines(
+      @fs.realpath(config_dir) catch { _ => config_dir },
+      control_host,
+      control_port,
+      peer_port,
+      identity.device_id,
+      lan,
+      args.dev_vite_url,
+      token,
     )
-    @log.info(
-      "control UI: http://{Host}:{Port}",
-      [Json::string(control_host), Json::number(control_port.to_double())],
-    )
-    @log.info("peer port: {Port}", [Json::number(peer_port.to_double())])
+    for line in banner {
+      @log.info(line, [])
+    }
     // 控制 API 常驻(serve 内部 listen 常驻,不返回)
     // 上传换入回调:识别/换入逻辑在 cli/upload.mbt(依赖方向 cli → api,
     // 回调在这里注入;api 包只见类型不见实现)
@@ -313,6 +318,65 @@ pub async fn run_start(args : StartArgs) -> Unit {
     )
     @api.serve(api_options, "\{control_host}:\{control_port}")
   }
+}
+
+///|
+/// 启动横幅行(纯函数,便于单测):行内容与顺序逐字对齐 Node src/cli.ts
+/// 的启动段。LAN 地址与令牌由调用方注入(config dir 先折算成展示形态)。
+/// 地址口径(自查 Node 后照抄):
+///   - control UI:0.0.0.0 = localhost + 全部 LAN IPv4;--host 指定具体
+///     地址时只列该地址(监听 127.0.0.1 时列局域网地址无意义);
+///   - peer sync:localhost + LAN **无条件列出**(Node 侧此列表不按 bind
+///     host 收闸,照抄其不对称口径)。
+/// 令牌仅随 dev mode(--dev-vite)两行打出 —— 生产启动不打明文令牌,终端
+/// 日志常被截图/粘进 issue(Node 同口径,注释原文见 cli.ts:1293)。
+pub fn build_banner_lines(
+  config_dir : String,
+  control_host : String,
+  control_port : Int32,
+  peer_port : Int32,
+  device_id : String,
+  lan_addresses : Array[String],
+  dev_vite_url : String?,
+  token : String,
+) -> Array[String] {
+  let lines : Array[String] = []
+  // config dir 一行带过(用户特意要保留的一行)
+  lines.push("config dir: \{config_dir}")
+  // control UI 地址列表(token 文件位置一并交代,Node 同款)
+  lines.push("control UI (token in \{config_dir}/control.token):")
+  let host_disp = if control_host == "0.0.0.0" {
+    "localhost"
+  } else {
+    control_host
+  }
+  lines.push("  http://\{host_disp}:\{control_port}")
+  if control_host == "0.0.0.0" {
+    for lan in lan_addresses {
+      lines.push("  http://\{lan}:\{control_port}")
+    }
+  }
+  // dev mode 两行 + 登录令牌:仅 --dev-vite 显式传入时(键同 Node args.devViteUrl)
+  match dev_vite_url {
+    Some(url) => {
+      lines.push(
+        "dev mode: 访问 \{control_port} 端口的页面会自动重定向到 vite dev server \{url}(HMR 已启用)",
+      )
+      lines.push(
+        "  请用 \{url} 打开 Web UI;生产构建(不带 --dev-vite)才由 \{control_port} 端口直接提供页面",
+      )
+      lines.push("  登录令牌(control.token):\{token}")
+    }
+    None => ()
+  }
+  lines.push("syncx daemon started (device \{device_id}, peer port \{peer_port})")
+  // peer sync 列表(数据面):localhost + LAN 无条件,Node 不对称口径照抄
+  lines.push("peer sync (ws://ip:port):")
+  lines.push("  ws://localhost:\{peer_port}")
+  for lan in lan_addresses {
+    lines.push("  ws://\{lan}:\{peer_port}")
+  }
+  lines
 }
 
 ///|

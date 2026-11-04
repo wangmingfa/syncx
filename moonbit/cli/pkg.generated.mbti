@@ -35,6 +35,8 @@ pub const UPLOAD_KILL_PARENT_GRACE_MS : Int64 = 600
 
 pub fn asset_name(String, String) -> String
 
+pub fn build_banner_lines(String, String, Int32, Int32, String, Array[String], String?, String) -> Array[String]
+
 pub fn build_update_restart(Array[String]) -> UpdateRestart
 
 pub async fn check_for_update() -> UpdateInfo
