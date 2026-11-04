@@ -41,7 +41,9 @@ pub const FS_WATCH_DEBOUNCE_MS : Int = 2000
 /// 还在不在,失效检测因此与平台无关。探针按**路径存在性**判定:删除与重建
 /// 都落在同一片内、且目录内容原样的情形属于理论盲区(索引本就与盘一致,
 /// 无需重扫),由兜底全扫兜住;任何跨探针片的删除/重建都走失效重建。
-/// 生产 1s 足够;测试调短。
+/// 实际切片时长见 watch_slice_ms:必须长过 debounce 强冲窗口,否则取消本身
+/// 会把事件饿死(2026-11-04 根因)。生产目录被删的检测延迟由 1s 放宽到
+/// 5s(debmax 4s + 1s);测试调短。
 pub const FS_WATCH_ALIVE_PROBE_MS : Int = 1000
 
 ///|
@@ -382,17 +384,39 @@ priv enum WatchSlice {
 }
 
 ///|
-/// 等一片事件:wait() 被超时切成不超过 probe_ms 的片 —— 片内 wait 正常返回
-/// 就交出事件批;超时则探一次根目录存活(目录被删在部分后端上既不报错也
-/// 不再来事件,只靠探针兜住);wait 抛错(OSError 等)按失效处理。
-/// `@fs.Watcher::wait` 是取消安全的:超时取消不消费任何事件,切片不丢事件。
+/// 切片时长下限:必须**大于** watcher 的 max_debounce_delay(强制冲刷上限)。
+/// 这是库交互的硬不变式(2026-11-04 根因,最小复现在 /tmp/fsrepro):
+/// `Watcher::wait` 内部结构是「阶段 1 阻塞等事件(标记目录 dirty)→ 阶段 2
+/// debounce 窗口(最长 max_debounce_delay)→ 扫描 → 出事件」。若外层切片
+/// 先于阶段 2 结束就把整个 wait() 取消,已标记的 dirty 永远走不完「扫描 →
+/// 出事件」,每个切片都重复同样过程 —— 事件被**永久饿死**(表现:watcher
+/// 启动日志正常、文件变更却永远等不来扫描;单测因 debounce 参数恰好小于
+/// 切片而侥幸全绿)。因此切片时长取 max(alive_probe_ms, debmax + 1s):
+/// 目录被删的失效检测延迟放宽到 5s(删除是罕见事件,兜底扫描可兜),
+/// 换事件链的活性,划算。
+fn watch_slice_ms(options : FsWatchOptions) -> Int {
+  let floor = options.debounce_max_ms + 1000
+  if options.alive_probe_ms > floor {
+    options.alive_probe_ms
+  } else {
+    floor
+  }
+}
+
+///|
+/// 等一片事件:wait() 被超时切成不超过 slice_ms 的片(下限见 watch_slice_ms
+/// 的不变式注释)—— 片内 wait 正常返回就交出事件批;超时则探一次根目录存活
+/// (目录被删在部分后端上既不报错也不再来事件,只靠探针兜住);wait 抛错
+/// (OSError 等)按失效处理。`@fs.Watcher::wait` 是取消安全的:超时取消不
+/// 消费任何事件,切片不丢事件 —— 前提是切片必须长过 debounce 窗口,否则
+/// 取消本身会把事件饿死(见上)。
 async fn watch_wait_slice(
   watcher : @fs.Watcher,
   root : String,
-  probe_ms : Int,
+  slice_ms : Int,
 ) -> WatchSlice {
   try {
-    Events(@async.with_timeout(probe_ms, () => watcher.wait()))
+    Events(@async.with_timeout(slice_ms, () => watcher.wait()))
   } catch {
     @async.TimeoutError => {
       let kind = @fs.kind(root) catch { _ => Unknown }
@@ -421,8 +445,9 @@ async fn watch_until_broken(
   stop : Ref[Bool],
 ) -> Unit {
   defer watcher.close()
+  let slice_ms = watch_slice_ms(options)
   for ;; {
-    match watch_wait_slice(watcher, folder.root, options.alive_probe_ms) {
+    match watch_wait_slice(watcher, folder.root, slice_ms) {
       Events(events) =>
         // 空批(创建+删除在同窗口内互相抵消)什么都不用做
         if events.length() > 0 {
