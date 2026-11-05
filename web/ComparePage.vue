@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import { computed, nextTick, onUnmounted, ref, toRef, watch } from 'vue';
-import { NButton } from 'naive-ui';
+import { NButton, NTooltip } from 'naive-ui';
 import { useCompare } from './composables/useCompare';
 import { useToast } from './composables/useToast';
 import { diffReportText } from './utils/diff-report';
@@ -354,17 +354,25 @@ const reportText = computed<string>(() => {
     <template v-else>
       <div class="cmp-bar">
         <span class="cmp-bar__label">对比设备</span>
-        <n-button
+        <!-- 设备按钮的悬停 tooltip(NTooltip 替代原生 title,样式与全局一致):主机名 · IP -->
+        <n-tooltip
           v-for="d in devices"
           :key="d"
-          size="small"
-          class="mono"
-          :type="d === device ? 'primary' : 'default'"
-          :tertiary="d !== device"
-          :disabled="loading"
-          :title="deviceTip(d)"
-          @click="selectDevice(d)"
-        >{{ d }}</n-button>
+          trigger="hover"
+          :style="{ maxWidth: '280px' }"
+        >
+          <template #trigger>
+            <n-button
+              size="small"
+              class="mono"
+              :type="d === device ? 'primary' : 'default'"
+              :tertiary="d !== device"
+              :disabled="loading"
+              @click="selectDevice(d)"
+            >{{ d }}</n-button>
+          </template>
+          {{ deviceTip(d) }}
+        </n-tooltip>
         <span v-if="devices.length === 0" class="cmp-bar__empty">该目录还没有指派设备</span>
       </div>
 
