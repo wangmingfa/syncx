@@ -13,6 +13,9 @@ import {
   "moonbitlang/async/websocket",
   "moonbitlang/core/encoding/hex",
   "moonbitlang/core/encoding/utf8",
+  "moonbitlang/core/encoding/base64",
+  "moonbitlang/core/debug",
+  "moonbitlang/core/string",
   "moonbitlang/core/env",
   "moonbitlang/core/json",
 }
@@ -24,6 +27,7 @@ import {
   "wangmingfa/syncx/net",
   "moonbitlang/async/fs",
   "moonbitlang/async/http",
+  "moonbitlang/async/process",
   "moonbitlang/async/socket",
   "moonbitlang/async/websocket",
   "moonbitlang/core/encoding/base64",

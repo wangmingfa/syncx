@@ -641,3 +641,215 @@ async test "POST /api/schedule/override:落盘到期时刻,minutes<=0 取消" {
   )
   assert_eq(response.status_code.to_int(), 400)
 }
+
+///|
+/// Git 数据面夹具:真 git 仓库(根提交 a.txt)+ 未跟踪文件;返回 (仓库路径, 会话头)。
+async fn git_repo_fixture(tag : String) -> String {
+  let repo = "/tmp/syncx-mb-api-gitrepo-\{tag}-\{@api.now_ms()}"
+  @fs.mkdir(repo, recursive=true, allow_exist=true)
+  let code = @process.run(
+    "git",
+    ["init", "-q"],
+    cwd=repo,
+    no_console_window=true,
+  )
+  assert_eq(code, 0)
+  let _ = @process.run(
+    "git",
+    ["config", "user.name", "syncx-test"],
+    cwd=repo,
+    no_console_window=true,
+  )
+  let _ = @process.run(
+    "git",
+    ["config", "user.email", "t@example.com"],
+    cwd=repo,
+    no_console_window=true,
+  )
+  @fs.write_file("\{repo}/a.txt", "v1")
+  let _ = @process.run(
+    "git",
+    ["add", "a.txt"],
+    cwd=repo,
+    no_console_window=true,
+  )
+  let _ = @process.run(
+    "git",
+    ["commit", "-q", "-m", "init"],
+    cwd=repo,
+    no_console_window=true,
+  )
+  @fs.write_file("\{repo}/new.txt", "untracked")
+  repo
+}
+
+///|
+async test "Git 数据面:改动/历史/提交文件/对比/未推送/推送 全链路" {
+  let dir = test_config_dir("gitdata")
+  let app = @api.build_app(options_with("gitdata", dir))
+  let secret = @api.session_secret("test-token")
+  let ticket = @api.sign_session(
+    { via: "token", sub: "token", exp: @api.now_ms() + 60_000L, },
+    secret,
+  )
+  let headers : Map[@http.CaseInsensitiveString, StringView] = {
+    "Cookie": "syncx_session=\{ticket}",
+  }
+  let repo = git_repo_fixture("gd")
+  // 登记共享目录
+  let body = @utf8.encode("{\"path\":\"" + repo + "\"}")
+  let response = @mocket.dispatch_http(
+    app, "POST", "/api/folders", headers, body,
+  )
+  assert_eq(response.status_code.to_int(), 201)
+  let saved = @api.load_config("\{dir}/config.json")
+  let folder_id = saved.shared_folders[0].id.unwrap()
+  // 改动清单:未跟踪一条 added;非仓库目录 → gitRepo:false
+  let response = @mocket.dispatch_http(
+    app,
+    "GET",
+    "/api/folders/git-changes?folderId=\{folder_id}",
+    headers,
+    b"",
+  )
+  assert_eq(response.status_code.to_int(), 200)
+  let data : Json = response.read_body()
+  match data {
+    Object(obj) => assert_true(obj.get("gitRepo") is None)
+    _ => fail("应为对象")
+  }
+  // 提交历史:1 笔 + gitRepo:true;非法 limit 400
+  let response = @mocket.dispatch_http(
+    app,
+    "GET",
+    "/api/folders/git-log?folderId=\{folder_id}",
+    headers,
+    b"",
+  )
+  assert_eq(response.status_code.to_int(), 200)
+  let data : Json = response.read_body()
+  match data {
+    Object(obj) => {
+      assert_true(obj.get("gitRepo") is Some(True))
+      match obj.get("commits") {
+        Some(Array(items)) => assert_eq(items.length(), 1)
+        _ => fail("应有提交")
+      }
+    }
+    _ => fail("应为对象")
+  }
+  let response = @mocket.dispatch_http(
+    app,
+    "GET",
+    "/api/folders/git-log?folderId=\{folder_id}&limit=0",
+    headers,
+    b"",
+  )
+  assert_eq(response.status_code.to_int(), 400)
+  // 提交文件清单:根提交全是 A;非法哈希 400
+  let root = @daemon.get_last_commit_hash(repo).unwrap()
+  let response = @mocket.dispatch_http(
+    app,
+    "GET",
+    "/api/folders/git-commit-files?folderId=\{folder_id}&hash=\{root}",
+    headers,
+    b"",
+  )
+  assert_eq(response.status_code.to_int(), 200)
+  let data : Json = response.read_body()
+  match data {
+    Object(obj) =>
+      match obj.get("files") {
+        Some(Array(items)) => assert_eq(items.length(), 1)
+        _ => fail("应有文件")
+      }
+    _ => fail("应为对象")
+  }
+  let response = @mocket.dispatch_http(
+    app,
+    "GET",
+    "/api/folders/git-commit-files?folderId=\{folder_id}&hash=-evil",
+    headers,
+    b"",
+  )
+  assert_eq(response.status_code.to_int(), 400)
+  // 提交对比:根提交的父侧不存在,提交侧是文本 v1
+  let response = @mocket.dispatch_http(
+    app,
+    "GET",
+    "/api/folders/git-commit-diff?folderId=\{folder_id}&hash=\{root}&path=a.txt",
+    headers,
+    b"",
+  )
+  assert_eq(response.status_code.to_int(), 200)
+  let data : Json = response.read_body()
+  match data {
+    Object(obj) => {
+      match obj.get("parent") {
+        Some(Object(p)) => assert_true(p.get("exists") is Some(False))
+        _ => fail("应有 parent 侧")
+      }
+      match obj.get("commit") {
+        Some(Object(c)) => assert_eq(c.get("text"), Some(Json::string("v1")))
+        _ => fail("应有 commit 侧")
+      }
+    }
+    _ => fail("应为对象")
+  }
+  // 工作区对比:HEAD 侧 v1;盘上被改后 worktree 侧 v2
+  @fs.write_file("\{repo}/a.txt", "v2")
+  let response = @mocket.dispatch_http(
+    app,
+    "GET",
+    "/api/folders/git-diff?folderId=\{folder_id}&path=a.txt",
+    headers,
+    b"",
+  )
+  assert_eq(response.status_code.to_int(), 200)
+  let data : Json = response.read_body()
+  match data {
+    Object(obj) => {
+      match obj.get("head") {
+        Some(Object(h)) => assert_eq(h.get("text"), Some(Json::string("v1")))
+        _ => fail("应有 head 侧")
+      }
+      match obj.get("worktree") {
+        Some(Object(w)) => assert_eq(w.get("text"), Some(Json::string("v2")))
+        _ => fail("应有 worktree 侧")
+      }
+    }
+    _ => fail("应为对象")
+  }
+  // 未推送:无上游 → 空列表
+  let response = @mocket.dispatch_http(
+    app, "GET", "/api/folders/git-unpushed", headers, b"",
+  )
+  assert_eq(response.status_code.to_int(), 200)
+  let data : Json = response.read_body()
+  match data {
+    Object(obj) =>
+      match obj.get("folders") {
+        Some(Array(items)) => assert_eq(items.length(), 0)
+        _ => fail("应有 folders")
+      }
+    _ => fail("应为对象")
+  }
+  // 推送:无上游 → 200 {ok:false, error};非法目录 → 400
+  let response = @mocket.dispatch_http(
+    app,
+    "POST",
+    "/api/folders/git-push",
+    headers,
+    @utf8.encode("{\"folderId\":\"" + folder_id + "\"}"),
+  )
+  assert_eq(response.status_code.to_int(), 200)
+  let data : Json = response.read_body()
+  match data {
+    Object(obj) => assert_true(obj.get("ok") is Some(False))
+    _ => fail("应为对象")
+  }
+  let response = @mocket.dispatch_http(
+    app, "POST", "/api/folders/git-push", headers, b"{\"folderId\":\"nope\"}",
+  )
+  assert_eq(response.status_code.to_int(), 400)
+}

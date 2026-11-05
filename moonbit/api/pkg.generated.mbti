@@ -14,9 +14,13 @@ pub const DEV_UPDATE_REJECT : String = "开发模式下不支持升级功能（�
 
 pub const EVENTS_PATH : String = "/api/events"
 
+pub const IMAGE_PREVIEW_MAX_BYTES : Int64 = 8388608
+
 pub const SESSION_COOKIE : String = "syncx_session"
 
 pub const SESSION_TTL_MS : Int64 = 86400000
+
+pub const TEXT_COMPARE_MAX_BYTES : Int64 = 2097152
 
 pub fn add_folder_to_config(@core.Config, String, Array[String], String?, Bool) -> Result[Bool, String]
 
@@ -26,9 +30,13 @@ pub fn build_app(ApiOptions) -> @mocket.App
 
 pub fn clear_cookie_header(String) -> String
 
+pub fn compare_content_limit(String) -> Int64
+
 pub fn cookie_header(String, String, Int64) -> String
 
 pub async fn credential_ok(String, String, String?) -> Bool
+
+pub fn decode_text(Bytes) -> String?
 
 pub fn default_config_path() -> String
 
@@ -53,6 +61,20 @@ pub async fn handle_folder_git_strip_co_authored(ApiOptions, @mocket.MocketEvent
 pub async fn handle_folder_schedule(ApiOptions, @mocket.MocketEvent) -> &@mocket.Responder
 
 pub async fn handle_folder_version_content(ApiOptions, @mocket.MocketEvent) -> &@mocket.Responder
+
+pub async fn handle_git_changes(ApiOptions, @mocket.MocketEvent) -> &@mocket.Responder
+
+pub async fn handle_git_commit_diff(ApiOptions, @mocket.MocketEvent) -> &@mocket.Responder
+
+pub async fn handle_git_commit_files(ApiOptions, @mocket.MocketEvent) -> &@mocket.Responder
+
+pub async fn handle_git_diff(ApiOptions, @mocket.MocketEvent) -> &@mocket.Responder
+
+pub async fn handle_git_log(ApiOptions, @mocket.MocketEvent) -> &@mocket.Responder
+
+pub async fn handle_git_push(ApiOptions, @mocket.MocketEvent) -> &@mocket.Responder
+
+pub async fn handle_git_unpushed(ApiOptions, @mocket.MocketEvent) -> &@mocket.Responder
 
 pub async fn handle_list_devices(ApiOptions, @mocket.MocketEvent) -> &@mocket.Responder
 
@@ -89,6 +111,8 @@ pub async fn handle_upload_inspect(ApiOptions, @mocket.MocketEvent) -> &@mocket.
 pub async fn handle_upload_swap(ApiOptions, @mocket.MocketEvent) -> &@mocket.Responder
 
 pub fn health_json() -> @json.Json
+
+pub fn image_mime_of(String) -> String?
 
 pub fn index_html() -> String
 
@@ -129,6 +153,10 @@ pub async fn session_cookie_value(SessionPayload, String, String?) -> String
 pub fn session_secret(String) -> String
 
 pub fn settings_json(@core.Config) -> @json.Json
+
+pub fn side_from_head_read(@daemon.HeadRead, String) -> @json.Json
+
+pub async fn side_from_local_disk(String, String) -> @json.Json
 
 pub fn sign_session(SessionPayload, String) -> String
 

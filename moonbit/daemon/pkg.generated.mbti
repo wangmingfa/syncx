@@ -5,6 +5,7 @@ import {
   "moonbitlang/async",
   "moonbitlang/async/aqueue",
   "moonbitlang/core/debug",
+  "moonbitlang/x/time",
   "wangmingfa/syncx/core",
   "wangmingfa/syncx/net",
   "wangmingfa/syncx/sqlite",
@@ -27,11 +28,17 @@ pub const FS_WATCH_DEBOUNCE_MAX_MS : Int32 = 4000
 
 pub const FS_WATCH_DEBOUNCE_MS : Int32 = 2000
 
+pub const GIT_CHANGES_MAX : Int32 = 2000
+
+pub const GIT_LOG_LIMIT : Int32 = 20
+
 pub const GIT_PUSH_TIMEOUT_MS : Int32 = 120_000
 
 pub const GIT_UNPUSHED_LIMIT : Int32 = 50
 
 pub const MAX_BLOCK_RETRIES : Int32 = 3
+
+pub const MAX_GIT_LOG_LIMIT : Int32 = 100
 
 pub const MTIME_TOLERANCE_MS : Int64 = 2000
 
@@ -69,7 +76,11 @@ pub fn event_ignore_filter(@core.IgnoreRuleset) -> (String) -> Bool
 
 pub async fn get_commit_info(String, String, String) -> CommitInfo?
 
+pub async fn get_commit_parents(String, String) -> Array[String]
+
 pub async fn get_last_commit_hash(String) -> String?
+
+pub async fn get_uncommitted_changes(String) -> GitChangesResult?
 
 pub fn git_files_desc(Array[String]) -> String
 
@@ -83,9 +94,17 @@ pub async fn has_uncommitted_changes(String) -> Bool
 
 pub async fn hash_file_views(String) -> @core.FileViews
 
+pub fn head_read_absent() -> HeadRead
+
 pub fn index_fingerprint(Array[Entry]) -> String
 
+pub fn is_commit_hash(String) -> Bool
+
 pub async fn is_git_repo(String) -> Bool
+
+pub async fn list_commit_files(String, String) -> Array[GitCommitFileEntry]
+
+pub async fn list_recent_commits(String, limit? : Int32, skip? : Int32) -> Array[GitCommitEntry]?
 
 pub async fn list_unpushed_commits(String, limit? : Int32) -> Array[GitCommitEntry]?
 
@@ -107,6 +126,8 @@ pub fn partial_paths(String) -> PartialPaths
 
 pub async fn prune_scratch_file(String, String, now? : Int64) -> Bool
 
+pub async fn read_file_at(String, String, String) -> HeadRead
+
 pub async fn read_folder_ignore_lines(String, Bool) -> Array[String]
 
 pub async fn read_manifest(String, fingerprint~ : String, cdc~ : Bool, slots~ : Int32) -> PartialManifest?
@@ -122,6 +143,8 @@ pub async fn run_git(String, String, Array[String]) -> (Int32, String, String) r
 pub async fn scan_empty_dirs(String, @core.IgnoreRuleset, Array[String], limit? : Int32) -> EmptyDirScanResult
 
 pub async fn scan_folder(String, IndexStore, @core.IgnoreRuleset, String, Array[String]) -> ScanDiff
+
+pub fn schedule_verdict(Array[@core.ScheduleRule]?, Array[@core.ScheduleRule]?, Int64?, Int64, @time.Zone, (Int32, Int32, Int32) -> Bool) -> ScheduleVerdict
 
 pub fn set_send_window_bytes(Int32) -> Int32
 
@@ -206,6 +229,7 @@ pub(all) enum Cmd {
   DrainEvents(folder~ : String, reply~ : @aqueue.Queue[Array[SyncEventRecord]])
   PollTimeouts(now~ : Int64)
   ApplySchedule(sync_schedule~ : Array[@core.ScheduleRule]?, override_until~ : Int64?)
+  GitUnpushedObserved(folder~ : String, total~ : Int32)
   BlockSent(folder~ : String, remote_device_id~ : String, bytes~ : Int32)
   Shutdown
 }
@@ -301,6 +325,19 @@ pub(all) struct FsWatchOptions {
 pub fn FsWatchOptions::from_config(@core.Config) -> Self
 pub fn FsWatchOptions::new(enabled? : Bool, fallback_scan_secs? : Int32) -> Self
 
+pub(all) struct GitChangeEntry {
+  path : String
+  dir : Bool
+  status : String
+  orig_path : String?
+  staged : Bool
+}
+
+pub(all) struct GitChangesResult {
+  entries : Array[GitChangeEntry]
+  truncated : Bool
+}
+
 pub(all) struct GitCommitEntry {
   hash : String
   author : String
@@ -308,6 +345,12 @@ pub(all) struct GitCommitEntry {
   refs : String
   subject : String
   body : String
+}
+
+pub(all) struct GitCommitFileEntry {
+  status : String
+  path : String
+  orig_path : String?
 }
 
 pub(all) struct GitPushResult {
@@ -343,6 +386,12 @@ pub(all) struct GitWatcher {
 }
 pub async fn GitWatcher::check_new_commit(Self) -> CommitInfo?
 pub fn GitWatcher::new(String, GitSyncMode) -> Self
+
+pub enum HeadRead {
+  Bytes(Bytes)
+  Absent
+  Error(String)
+}
 
 pub struct IndexCounts {
   entries : Int64
@@ -443,6 +492,13 @@ pub(all) struct ScheduleStateRow {
   blocked_by : String?
   next_change_at : Int64?
   summary : String
+}
+
+pub(all) struct ScheduleVerdict {
+  inside : Bool
+  overridden : Bool
+  blocked_by : String?
+  next_change_at : Int64?
 }
 
 pub struct SessionActor {

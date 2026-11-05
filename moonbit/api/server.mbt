@@ -691,6 +691,22 @@ pub fn build_app(options : ApiOptions) -> @mocket.App {
   app.post("/api/folders/git-strip-co-authored", event => {
     handle_folder_git_strip_co_authored(options, event)
   })
+  // Git 弹窗数据面(改动/对比/历史/提交文件/未推送/推送)
+  app.get("/api/folders/git-changes", event => {
+    handle_git_changes(options, event)
+  })
+  app.get("/api/folders/git-diff", event => handle_git_diff(options, event))
+  app.get("/api/folders/git-log", event => handle_git_log(options, event))
+  app.get("/api/folders/git-commit-files", event => {
+    handle_git_commit_files(options, event)
+  })
+  app.get("/api/folders/git-commit-diff", event => {
+    handle_git_commit_diff(options, event)
+  })
+  app.get("/api/folders/git-unpushed", event => {
+    handle_git_unpushed(options, event)
+  })
+  app.post("/api/folders/git-push", event => handle_git_push(options, event))
   // 文件版本(时间机器)与回收站操作面:列表/恢复/删除/预览 + 列表/还原/
   // 清理(对齐 Node /api/folders/versions* 与 /api/trash*;详见 versions.mbt)
   app.get("/api/folders/versions", event => {

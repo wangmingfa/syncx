@@ -145,6 +145,10 @@ pub(all) enum Cmd {
   /// actor 即时重算横幅并在需要时补扫(对应 Node 的 applyPausedState +
   /// runScan 链路)。
   ApplySchedule(sync_schedule~ : @core.Schedule?, override_until~ : Int64?)
+  /// git-unpushed 弹窗现查后回写的徽标缓存(与 Node listUnpushedByFolder
+  /// 「现查同时把扫描缓存对齐到现查值」同款):弹窗所列与徽标当场一致,
+  /// 不必等下一轮 30s 徽标循环。
+  GitUnpushedObserved(folder~ : String, total~ : Int32)
   /// 驱动层回账:一帧块响应已写进 socket,释放发送窗口额度并重放延迟队列。
   /// 未接线前的额度兜底靠 `decay_serve_lease` 衰减,不会永久卡死。
   BlockSent(folder~ : String, remote_device_id~ : String, bytes~ : Int32)
@@ -618,6 +622,12 @@ async fn SessionActor::dispatch(self : SessionActor, cmd : Cmd) -> Bool {
       // 改动都在这条路上落到运行态)
       self.check_schedule_transitions()
     }
+    GitUnpushedObserved(folder~, total~) =>
+      for f in self.folders {
+        if f.id == folder {
+          f.git_unpushed = total
+        }
+      }
     BlockSent(folder~, remote_device_id~, bytes~) =>
       self.do_block_sent(folder, remote_device_id, bytes)
   }
