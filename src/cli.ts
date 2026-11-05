@@ -494,15 +494,8 @@ export async function run(args: ParsedArgs): Promise<void> {
     },
     config.sharedFolders,
   );
-  // 文件系统监听:每个未暂停且身份校验通过的共享目录建一个递归 fs.watch,事件经防抖
-  // 聚合后驱动「单目录按需重扫」(见 fs-watcher.ts)。定时全扫自此退化为兜底。
-  // 必须在首次 armScanTimer 之前启动:启动期降级(平台不支持递归 watch)要立即反映
-  // 到兜底间隔上。单元测试不调用它,行为保持与旧架构一致。
-  manager.startFolderWatchers();
-  // git 提交检测心跳:纯 git 提交只动被监听硬忽略的 .git,检测不能再依赖扫描轮
-  // (兜底全扫缺省 600s);独立 5s 心跳让「本机提交 → 本机广播」稳定在秒级,
-  // 节拍对齐 Rust 排空泵的 5s 节流与 MoonBit 的 GIT_CHECK_TICKS 心跳
-  manager.startGitCheckTimer();
+  // 文件系统监听与 git 心跳延迟到控制端口绑定成功之后启动(见下方 startFolderWatchers
+  // 调用处):目录多/大时递归 fs.watch 的建立是秒级同步树遍历,不该挡在探活端口前面。
   // 无目录提示也延迟到端口绑定成功后输出(与其它启动日志同批)
   const noFoldersAtBoot = manager.folderStates.length === 0;
 
@@ -1381,6 +1374,21 @@ export async function run(args: ParsedArgs): Promise<void> {
   for (const lan of lanAddresses) {
     logger.info(`  ws://${formatHost(lan.address, lan.family)}:${server.port}`);
   }
+
+  // 文件系统监听:每个未暂停且身份校验通过的共享目录建一个递归 fs.watch,事件经防抖
+  // 聚合后驱动「单目录按需重扫」(见 fs-watcher.ts)。定时全扫自此退化为兜底。
+  // 故意放在控制端口绑定成功**之后**:目录多/大时递归 fs.watch 的建立是秒级同步树
+  // 遍历(Linux 上要整棵走树挂 inotify),此前挡在 bind 之前,探活端口要等全部目录
+  // 建完才就绪,启动脚本的健康检查按 15s 预算会在最后一秒输掉竞速。绑定先行后,
+  // 探活/Web UI/peer 服务先就绪,watcher 暖机在后(暖机期间事件循环仍会被单目录的
+  // fs.watch 同步卡住,外部探活预算需覆盖这段,好在这是启动期一次性代价)。
+  // 仍必须在首次 armScanTimer 之前启动:启动期降级(平台不支持递归 watch)要立即
+  // 反映到兜底间隔上。单元测试直接调 manager.startFolderWatchers,不经过本装配序。
+  manager.startFolderWatchers();
+  // git 提交检测心跳:纯 git 提交只动被监听硬忽略的 .git,检测不能再依赖扫描轮
+  // (兜底全扫缺省 600s);独立 5s 心跳让「本机提交 → 本机广播」稳定在秒级,
+  // 节拍对齐 Rust 排空泵的 5s 节流与 MoonBit 的 GIT_CHECK_TICKS 心跳
+  manager.startGitCheckTimer();
 
   // 本地变更检测兜底:watch 事件驱动的按需重扫为主(见上方 startFolderWatchers),
   // 定时全扫只做兜底。间隔经 manager.fallbackScanIntervalMs() 动态决定 ——
