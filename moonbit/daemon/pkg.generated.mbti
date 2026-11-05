@@ -137,6 +137,8 @@ pub fn tombstone_of(Entry, String) -> Entry
 
 pub fn truncate_git_subject(String, max? : Int32) -> String
 
+pub async fn uncommitted_change_count(String) -> Int32?
+
 pub fn version_original_path(String) -> String
 
 pub async fn work_tree_content_aligned(String, String, Entry?) -> Bool
@@ -274,6 +276,8 @@ pub(all) struct FolderStatus {
   entries : Int64
   tombstones : Int64
   conflicts : Int32
+  git_changes : Int32
+  git_unpushed : Int32
   in_flight_receives : Int32
 }
 

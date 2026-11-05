@@ -272,7 +272,7 @@ pub fn status_json(options : ApiOptions) -> Json {
   // 单测)= 没有可报的传输量,字段仍上线,形态恒完整
   let traffic_stats : @daemon.TrafficStats = match options.traffic {
     Some(provider) => provider()
-    None => { sent: 0L, received: 0L, samples: [] }
+    None => { sent: 0L, received: 0L, samples: [], }
   }
   map.set("traffic", traffic_json(traffic_stats))
   // 编译目标 OS,口径对齐 Node 的 process.platform(前端 osIconKind 只认 darwin/win32/linux)
@@ -328,6 +328,26 @@ pub fn status_json(options : ApiOptions) -> Json {
       }
       map.set("folders", Json::array(folders))
       map.set("conflictCounts", Json::object(conflicts))
+      // 目录卡 git 徽标(键 = 目录 id,只上非零项,对齐前端 gitChangeCounts/
+      // gitUnpushedCounts;daemon 侧独立循环每 30s 现查,与扫描/暂停/时段解耦)
+      let git_changes : Map[String, Json] = Map([])
+      let git_unpushed : Map[String, Json] = Map([])
+      for folder in snapshot.folders {
+        if folder.git_changes > 0 {
+          git_changes.set(
+            folder.id,
+            Json::number(folder.git_changes.to_double()),
+          )
+        }
+        if folder.git_unpushed > 0 {
+          git_unpushed.set(
+            folder.id,
+            Json::number(folder.git_unpushed.to_double()),
+          )
+        }
+      }
+      map.set("gitChangeCounts", Json::object(git_changes))
+      map.set("gitUnpushedCounts", Json::object(git_unpushed))
     }
     None => ()
   }
@@ -401,8 +421,7 @@ pub fn traffic_json(stats : @daemon.TrafficStats) -> Json {
 /// 站点图标(SVG 源码)。真值在 src/favicon.ts(Node 侧内联常量),
 /// Rust 侧复制于 syncx-api/src/favicon.svg —— 三处逐字同源,改图标要一起动。
 /// 内联常量而非读盘:单文件/独立部署形态下没有 web/ 目录可用。
-const FAVICON_SVG : String =
-  "<svg xmlns=\"http://www.w3.org/2000/svg\" viewBox=\"0 0 32 32\">\n<rect width=\"32\" height=\"32\" rx=\"7\" fill=\"#0F6E56\"/>\n<g fill=\"none\" stroke=\"#FFFFFF\" stroke-width=\"2.4\" stroke-linecap=\"round\">\n<path d=\"M8.5 13H20\"/>\n<path d=\"M24 19H12\"/>\n</g>\n<path d=\"M20 10.5 24.5 13 20 15.5Z\" fill=\"#FFFFFF\"/>\n<path d=\"M12 16.5 7.5 19 12 21.5Z\" fill=\"#FFFFFF\"/>\n</svg>\n"
+const FAVICON_SVG : String = "<svg xmlns=\"http://www.w3.org/2000/svg\" viewBox=\"0 0 32 32\">\n<rect width=\"32\" height=\"32\" rx=\"7\" fill=\"#0F6E56\"/>\n<g fill=\"none\" stroke=\"#FFFFFF\" stroke-width=\"2.4\" stroke-linecap=\"round\">\n<path d=\"M8.5 13H20\"/>\n<path d=\"M24 19H12\"/>\n</g>\n<path d=\"M20 10.5 24.5 13 20 15.5Z\" fill=\"#FFFFFF\"/>\n<path d=\"M12 16.5 7.5 19 12 21.5Z\" fill=\"#FFFFFF\"/>\n</svg>\n"
 
 ///|
 /// 页面壳占位 HTML。dist/web 未配置/不存在时的兜底;
@@ -534,7 +553,11 @@ pub async fn handle_login(
     _ => return json_error(event, @mocket.BadRequest, "invalid json body")
   }
   if username == "" || password == "" {
-    return json_error(event, @mocket.BadRequest, "用户名和密码不能为空")
+    return json_error(
+      event,
+      @mocket.BadRequest,
+      "用户名和密码不能为空",
+    )
   }
   match load_account(file) {
     Some(record) =>
@@ -621,16 +644,30 @@ pub fn build_app(options : ApiOptions) -> @mocket.App {
   })
   // 文件版本(时间机器)与回收站操作面:列表/恢复/删除/预览 + 列表/还原/
   // 清理(对齐 Node /api/folders/versions* 与 /api/trash*;详见 versions.mbt)
-  app.get("/api/folders/versions", event => handle_list_folder_versions(options, event))
-  app.post("/api/folders/versions/restore", event => handle_restore_folder_version(options, event))
-  app.post("/api/folders/versions/delete", event => handle_delete_folder_version(options, event))
-  app.get("/api/folders/versions/content", event => handle_folder_version_content(options, event))
+  app.get("/api/folders/versions", event => {
+    handle_list_folder_versions(options, event)
+  })
+  app.post("/api/folders/versions/restore", event => {
+    handle_restore_folder_version(options, event)
+  })
+  app.post("/api/folders/versions/delete", event => {
+    handle_delete_folder_version(options, event)
+  })
+  app.get("/api/folders/versions/content", event => {
+    handle_folder_version_content(options, event)
+  })
   app.get("/api/trash", event => handle_list_folder_trash(options, event))
-  app.post("/api/trash/restore", event => handle_restore_folder_trash(options, event))
-  app.post("/api/trash/purge", event => handle_purge_folder_trash(options, event))
+  app.post("/api/trash/restore", event => {
+    handle_restore_folder_trash(options, event)
+  })
+  app.post("/api/trash/purge", event => {
+    handle_purge_folder_trash(options, event)
+  })
   // 空文件夹工具:盘点(只读)与删除(只 rmdir、绝不删文件;刻意不触发扫描、
   // 不碰索引 —— 目录不是同步实体,删空目录没有任何东西需要广播,见 emptydirs.mbt)
-  app.get("/api/folders/empty-dirs", event => handle_list_empty_dirs(options, event))
+  app.get("/api/folders/empty-dirs", event => {
+    handle_list_empty_dirs(options, event)
+  })
   app.post("/api/folders/empty-dirs/delete", event => {
     handle_delete_empty_dirs(options, event)
   })
@@ -648,7 +685,7 @@ pub fn build_app(options : ApiOptions) -> @mocket.App {
   })
   // 站点图标:免认证公开资源(浏览器 tab logo)。/favicon.ico 显式 204,
   // 避免浏览器自动请求落到 404/401 分支误导排查(对齐 Node/Rust)
-  app.get("/favicon.svg", _event =>
+  app.get("/favicon.svg", _event => {
     @mocket.HttpResponse(
       @mocket.OK,
       headers={
@@ -656,7 +693,8 @@ pub fn build_app(options : ApiOptions) -> @mocket.App {
         "Cache-Control": "public, max-age=86400",
       },
       body=@mocket.text(FAVICON_SVG),
-    ))
+    )
+  })
   app.get("/favicon.ico", _event => @mocket.HttpResponse(@mocket.NoContent))
   // 静态资源 / 占位页(最后兜底)
   match options.web_dist {

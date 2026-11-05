@@ -35,6 +35,11 @@
 const GIT_CHECK_TICKS : Int32 = 10
 
 ///|
+/// git 徽标刷新的节拍数(周期泵 500ms 一拍 × 60 = 30s):与 Node refreshGitBadges /
+/// Rust spawn_git_counts_loop(GIT_COUNT_INTERVAL=30s)同节奏。
+const GIT_BADGE_TICKS : Int32 = 60
+
+///|
 /// 初始交换兜底全量的时限:指纹发出去 2s 内没有任何应答(指纹/ack/请求)
 /// 就不再干等,主动补发本机全量(对齐 Rust `INITIAL_INDEX_FALLBACK_MS`)。
 const INITIAL_INDEX_FALLBACK_MS : Int64 = 2000L
@@ -118,7 +123,11 @@ pub(all) enum Cmd {
   /// 按路径清单取某目录的本机索引条目(cli 镜像结算的内容对齐与漂移自愈
   /// 的准入判据数据源;索引无该路径的文件不回 —— 缺位即「索引无条目 →
   /// 未对齐」,含墓碑/占位在内的真实条目原样带回)。
-  EntryLookup(folder~ : String, paths~ : Array[String], reply~ : @async.Queue[Array[Entry]])
+  EntryLookup(
+    folder~ : String,
+    paths~ : Array[String],
+    reply~ : @async.Queue[Array[Entry]]
+  )
   /// 取走某目录各会话的运行期事件(同步记录)。
   DrainEvents(folder~ : String, reply~ : @async.Queue[Array[SyncEventRecord]])
   /// 周期泵:处理到期的块重试、租约衰减与限速重放。驱动层接 WS 后由
@@ -156,6 +165,10 @@ pub(all) struct FolderStatus {
   tombstones : Int64
   /// 盘上残留的冲突副本数(目录卡徽标)。
   conflicts : Int32
+  /// 目录卡「改动 N」徽标(独立循环每 30s 现查;见 refresh_git_badges)。
+  git_changes : Int32
+  /// 目录卡「未推送 N」徽标。
+  git_unpushed : Int32
   /// 各会话在途接收的总条数(镜像提交的 drain 闸判据;Node receiveLedger
   /// 的等价物 —— 块未拉齐时通知先挂着,不把半套文件定格成提交)。
   in_flight_receives : Int32
@@ -287,6 +300,10 @@ priv struct Folder {
   mut paused : Bool
   paused_files : Array[String]
   mut conflict_count : Int32
+  /// 目录卡 git 徽标缓存(独立循环每 30s 现查;与扫描/暂停/时段解耦,见
+  /// GIT_BADGE_TICKS 与 refresh_git_badges)。
+  mut git_changes : Int32
+  mut git_unpushed : Int32
   /// remote_device_id → 会话(认领台账未移植:同设备至多一条连接,TODO)。
   peers : Map[String, PeerSession]
   /// 目录级限速令牌桶(maxBandwidthKbps;None = 不限,对齐 Node)。
@@ -306,6 +323,8 @@ pub struct SessionActor {
   priv cell : SnapshotCell
   /// git 提交检测心跳的节拍计数(见 GIT_CHECK_TICKS;周期泵每 500ms 一拍)。
   priv mut git_tick : Int32
+  /// git 徽标刷新的节拍计数(见 GIT_BADGE_TICKS;周期泵每 500ms 一拍)。
+  priv mut badge_tick : Int32
   /// 本地提交通知的出口(装配层注入):检测到新提交后由它投递。送达保证
   /// (按目标设备记台账、离线补投、ack 销账)在装配层镜像循环实现;daemon
   /// 单测不注入时为空操作。
@@ -387,6 +406,8 @@ fn make_folder(spec : FolderSpec) -> Folder raise IndexStoreError {
     paused: spec.paused,
     paused_files: spec.paused_files,
     conflict_count: 0,
+    git_changes: 0,
+    git_unpushed: 0,
     peers: Map([]),
     limiter: make_rate_limiter(spec.max_bandwidth_kbps),
     git_sync: spec.git_sync,
@@ -420,6 +441,7 @@ pub fn new_session_actor(
       },
     },
     git_tick: 0,
+    badge_tick: 0,
     on_git_notify,
     traffic: TrafficLedger::new(now),
   }
@@ -739,14 +761,13 @@ fn SessionActor::do_entry_lookup(
 ) -> Unit {
   let out : Array[Entry] = []
   match self.folder_by_id(folder_id) {
-    Some(folder) => {
+    Some(folder) =>
       for path in paths {
         match folder.local_index.get(path) {
           Some(entry) => out.push(entry)
           None => ()
         }
       }
-    }
     None => ()
   }
   let _ : Bool = reply.try_put(out) catch { _ => false }
@@ -959,6 +980,31 @@ async fn SessionActor::do_poll_timeouts(
       }
     }
   }
+  // git 徽标独立刷新(与 Node refreshGitBadges / Rust spawn_git_counts_loop
+  // 同构):与扫描、暂停、时段全部解耦 —— 收窄轮/暂停/窗口外都不再让徽标
+  // 长期停在旧值(2026-11-05 远端实测徽标整排消失的根因)。
+  self.badge_tick = self.badge_tick + 1
+  if self.badge_tick >= GIT_BADGE_TICKS {
+    self.badge_tick = 0
+    self.refresh_git_badges()
+  }
+}
+
+///|
+/// 现查全部目录的 git 徽标(改动条数 / 未推送提交数):目录卡的事实陈述,
+/// 连手动暂停/时段外的目录也照刷 —— 徽标说真话,同步归同步。git 失败
+/// (None)按 0 处理,徽标不出现。
+async fn SessionActor::refresh_git_badges(self : SessionActor) -> Unit {
+  for folder in self.folders {
+    folder.git_changes = match uncommitted_change_count(folder.root) {
+      Some(n) => n
+      None => 0
+    }
+    folder.git_unpushed = match count_unpushed_commits(folder.root) {
+      Some(n) => n
+      None => 0
+    }
+  }
 }
 
 ///|
@@ -1084,7 +1130,8 @@ async fn SessionActor::do_peer_message(
       send_full_snapshot(folder, session)
     }
     BlockRequest(payload~, ..) => self.serve_block(folder, session, payload)
-    BlockResponse(payload~, ..) => self.on_block_response(folder, session, payload)
+    BlockResponse(payload~, ..) =>
+      self.on_block_response(folder, session, payload)
     Control(..) => () // 控制面不进会话层(由上层全局路由)
   }
 }
@@ -2020,6 +2067,8 @@ fn SessionActor::publish(self : SessionActor) -> Unit {
       entries: counts.entries,
       tombstones: counts.tombstones,
       conflicts: folder.conflict_count,
+      git_changes: folder.git_changes,
+      git_unpushed: folder.git_unpushed,
       in_flight_receives: in_flight,
     })
   }

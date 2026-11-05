@@ -996,7 +996,12 @@ async test "actor: 供块/收块字节落账 syncProgress 与 traffic" {
       @daemon.Cmd::PeerMessage(
         folder="f1",
         remote_device_id="dev-b",
-        message=actor_block_response("f1", "receive.bin", @core.hash_block(@utf8.encode("recv-xyz")), "recv-xyz"),
+        message=actor_block_response(
+          "f1",
+          "receive.bin",
+          @core.hash_block(@utf8.encode("recv-xyz")),
+          "recv-xyz",
+        ),
       ),
     )
     let snap2 = handle.sync_snapshot()
@@ -1011,5 +1016,58 @@ async test "actor: 供块/收块字节落账 syncProgress 与 traffic" {
     assert_eq(snap2.progress[0].sending, 1)
     assert_true(snap2.progress[0].receive_rate is Some(_))
     let _ = handle.send(@daemon.Cmd::Shutdown)
+  }
+}
+
+///|
+async test "actor 徽标:独立循环把改动/未推送计数写进快照" {
+  // A 的夹具目录做成 git 仓库:bare 上游 + 1 笔未推送提交 + 1 个未跟踪文件
+  let root_a = actor_fresh_root("badge-a")
+  let origin = "\{root_a}-origin.git"
+  assert_eq(
+    @process.run(
+      "git",
+      ["init", "-q", "--bare", origin],
+      no_console_window=true,
+    ),
+    0,
+  )
+  assert_eq(
+    @process.run("git", ["clone", "-q", origin, root_a], no_console_window=true),
+    0,
+  )
+  let _ = actor_write_file(root_a, "committed.txt", "v1")
+  let git_a = (args : Array[String]) => {
+    assert_eq(@process.run("git", args, cwd=root_a, no_console_window=true), 0)
+  }
+  git_a(["config", "user.name", "syncx-test"])
+  git_a(["config", "user.email", "t@example.com"])
+  git_a(["add", "-A"])
+  git_a(["commit", "-q", "-m", "基线"])
+  git_a(["push", "-q", "-u", "origin", "HEAD"])
+  let _ = actor_write_file(root_a, "b.txt", "v1")
+  git_a(["add", "-A"])
+  git_a(["commit", "-q", "-m", "feat: b"])
+  let _ = actor_write_file(root_a, "dirty.txt", "untracked")
+  let root_b = actor_fresh_root("badge-b")
+  let spec_a = actor_make_spec(root_a)
+  let spec_b = actor_make_spec(root_b)
+  @async.with_task_group() <| group => {
+    let env = actor_loop_start(group, spec_a, spec_b)
+    // 徽标循环每 60 拍(30s)跑一次:连发 PollTimeouts 推满节拍,测试不等真实时间
+    let mut i = 0
+    while i < 61 {
+      let _ = env.handle_a.send(
+        @daemon.Cmd::PollTimeouts(now=@daemon.now_ms() + 3000L),
+      )
+      i = i + 1
+    }
+    assert_true(
+      actor_wait_until(() => {
+        let f = env.handle_a.snapshot().folders[0]
+        f.git_unpushed == 1 && f.git_changes >= 1
+      }),
+    )
+    actor_loop_stop(env)
   }
 }

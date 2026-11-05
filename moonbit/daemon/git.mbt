@@ -297,6 +297,55 @@ pub async fn has_uncommitted_changes(folder : String) -> Bool {
 }
 
 ///|
+/// 工作区未提交变更的条数(目录卡「改动 N」徽标的数据源)。解析口径与 Node
+/// getUncommittedChanges 一致:`-z` NUL 分隔,改名/复制占两段记录(新路径 +
+/// 原路径)按一条计,syncx 在途中间态照旧被 pathspec 排除。
+/// 返回 None = 不是 git 仓库 / git 失败 —— 徽标循环按 0 处理(徽标不出现)。
+pub async fn uncommitted_change_count(folder : String) -> Int32? {
+  let (code, out, _) = run_git(
+    "git",
+    folder,
+    ["status", "--porcelain", "-z", "--", ..scratch_pathspecs()],
+  ) catch {
+    _ => return None
+  }
+  if code != 0 {
+    return None
+  }
+  // 改名/复制记录多占一段原路径:命中 R/C 的下一段不单独计数(照 Node 的解析判定)
+  let mut count = 0
+  let mut skip_next = false
+  for rec in out.split("\u{0}") {
+    if skip_next {
+      skip_next = false
+      continue
+    }
+    if rec == "" {
+      continue
+    }
+    count = count + 1
+    skip_next = porcelain_xy_has_rename(rec)
+  }
+  Some(count)
+}
+
+///|
+/// porcelain 记录的 XY 两列里是否带 R/C(改名/复制;-z 下该记录多占一段)。
+fn porcelain_xy_has_rename(rec : StringView) -> Bool {
+  let mut i = 0
+  for ch in rec {
+    if i >= 2 {
+      break
+    }
+    if ch == 'R' || ch == 'C' {
+      return true
+    }
+    i = i + 1
+  }
+  false
+}
+
+///|
 /// 工作树内容是否与本机索引条目「对齐」—— 镜像提交结算的逐文件准入判据
 /// (对应 Node `workTreeContentAligned` / Rust `work_tree_content_aligned`)。
 ///
@@ -348,7 +397,7 @@ pub async fn work_tree_content_aligned(
 /// 收敛提交信息里引用的原消息首行截断:超长的提交主题截到 64 个码点(整个
 /// subject 连前缀仍在一行内可读)。按码点切,避免劈开代理对(与 Node
 /// `truncateGitSubject` / Rust `truncate_git_subject` 同口径)。
-pub fn truncate_git_subject(line : String, max~ : Int = 64) -> String {
+pub fn truncate_git_subject(line : String, max~ : Int32 = 64) -> String {
   let trimmed = line.trim().to_owned()
   if trimmed.char_length() <= max {
     return trimmed
@@ -637,11 +686,7 @@ pub fn git_files_desc(changed : Array[String]) -> String {
     }
     head.push(changed[i])
   }
-  let tail = if changed.length() > 10 {
-    " …"
-  } else {
-    ""
-  }
+  let tail = if changed.length() > 10 { " …" } else { "" }
   "\{changed.length()} 个文件: \{head.join(", ")}\{tail}"
 }
 
@@ -721,9 +766,13 @@ pub async fn auto_commit(
   ]) catch {
     SpawnFailed(m) =>
       // 拉起失败 = 进程根本没跑,提交不可能落盘;探测兜一道仍按保守口径
-      return commit_failed_probe(folder, before_head, message, "git 拉起失败:\{m}")
-    GitFailed(m) =>
-      return commit_failed_probe(folder, before_head, message, m)
+      return commit_failed_probe(
+        folder,
+        before_head,
+        message,
+        "git 拉起失败:\{m}",
+      )
+    GitFailed(m) => return commit_failed_probe(folder, before_head, message, m)
   }
   if commit_code != 0 {
     let err_text = if first_line(commit_err) != "" {
@@ -757,12 +806,17 @@ async fn commit_failed_probe(
         None => true
       }
       if advanced && head_message_matches(folder, message) {
-        return { success: true, skipped: false, hash: Some(after), error: None }
+        return {
+          success: true,
+          skipped: false,
+          hash: Some(after),
+          error: None,
+        }
       }
     }
     None => ()
   }
-  { success: false, skipped: false, hash: None, error: Some(err) }
+  { success: false, skipped: false, hash: None, error: Some(err), }
 }
 
 ///|

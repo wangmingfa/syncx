@@ -123,6 +123,28 @@ async test "变更探测:两次提交之间能被观察器发现" {
 }
 
 ///|
+async test "改动计数:未跟踪计入、改名两段一条、中间态排除、非仓库 None" {
+  let repo = fresh_repo("changes-count")
+  // 空仓库(还没有提交):计数 0 而不是 None —— 「干净」是正常态
+  assert_true(@daemon.uncommitted_change_count(repo) == Some(0))
+  commit_file(repo, "a.txt", "v1", "init")
+  assert_true(@daemon.uncommitted_change_count(repo) == Some(0))
+  // 未跟踪文件 → 1
+  @fs.write_file("\{repo}/new.txt", "x")
+  assert_true(@daemon.uncommitted_change_count(repo) == Some(1))
+  // staged 改名:XY 带 R 占两段记录(新路径 + 原路径),按一条计 → 改名 + new.txt = 2
+  git_in(repo, ["mv", "a.txt", "a2.txt"])
+  assert_true(@daemon.uncommitted_change_count(repo) == Some(2))
+  // syncx 在途中间态两头排除:tmp/partial 不进计数
+  @fs.write_file("\{repo}/big.bin.syncx-tmp", "half")
+  @fs.write_file("\{repo}/big.bin.syncx-partial", "bitmap")
+  assert_true(@daemon.uncommitted_change_count(repo) == Some(2))
+  // 非仓库目录 → None(徽标循环按 0 处理)
+  let plain = git_tmp_dir("plain-count")
+  assert_true(is_none(@daemon.uncommitted_change_count(plain)))
+}
+
+///|
 async test "未提交变更:脏工作树与在途中间态排除" {
   let repo = fresh_repo("dirty")
   assert_false(@daemon.has_uncommitted_changes(repo))
@@ -464,7 +486,11 @@ async test "镜像提交信息组装:strip 开关作用在最终消息上" {
 /// 跑 git)原样透传 —— 无进程级全局状态,并发安全。用于模拟 MoonBit 形态
 /// 造不出的「命令报错但提交已落盘」中间态(run_git 无超时;post-commit hook
 /// 失败不影响 git commit 退出码、pre-commit 里嵌套 commit 会死锁,均实测)。
-async fn install_git_shim(repo : String, tag : String, commit_script : String) -> Unit {
+async fn install_git_shim(
+  repo : String,
+  tag : String,
+  commit_script : String,
+) -> Unit {
   // 真实 git 绝对路径与仓库的物理路径(getcwd 语义,macOS 下 /tmp 会被
   // 解析成 /private/tmp,必须两边同口径)
   let (_, real_git, _) = @daemon.run_git("sh", repo, ["-c", "command -v git"])
@@ -497,23 +523,25 @@ async test "auto_commit:提交阶段失败的探测(成功落盘 / 真失败 / �
   commit_file(repo_fail, "base.txt", "v1", "init: base")
   @fs.write_file("\{repo_fail}/work.txt", "v2")
   // 形态 2:commit 直接退出 1(不真跑)—— HEAD 不动,探测必须回落失败
-  install_git_shim(repo_fail, "fail", "  echo \"fake commit failure\" >&2\n  exit 1")
+  install_git_shim(
+    repo_fail, "fail", "  echo \"fake commit failure\" >&2\n  exit 1",
+  )
   let repo_mix = fresh_repo("probe-mix")
   commit_file(repo_mix, "base.txt", "v1", "init: base")
   @fs.write_file("\{repo_mix}/work.txt", "v2")
   // 形态 3:commit 换消息真跑后伪装退出 1 —— HEAD 前进但落的是他消息
   // (并发了他程序提交的等价物),账目对不上必须保守按失败
   install_git_shim(
-    repo_mix,
-    "mix",
-    "  {REAL} commit -m \"other: concurrent\" --allow-empty >/dev/null 2>&1\n  exit 1",
+    repo_mix, "mix", "  {REAL} commit -m \"other: concurrent\" --allow-empty >/dev/null 2>&1\n  exit 1",
   )
   // 形态 1:HEAD 前进且消息一致 → 探测按成功结算,避免按失败重试吞双笔
   let ok = @daemon.auto_commit(repo_ok, "mirror: probe")
   assert_true(ok.success)
   assert_true(!is_none(ok.hash))
   // 提交内容确已落盘:HEAD 消息与本次一致,脏文件也已提交
-  let (_, head_msg, _) = @daemon.run_git("git", repo_ok, ["log", "-1", "--format=%B"]) catch {
+  let (_, head_msg, _) = @daemon.run_git("git", repo_ok, [
+    "log", "-1", "--format=%B",
+  ]) catch {
     _ => panic()
   }
   assert_eq(head_msg.trim().to_owned(), "mirror: probe")
@@ -533,7 +561,10 @@ async test "auto_commit:提交阶段失败的探测(成功落盘 / 真失败 / �
 async test "auto_commit:index.lock 残留 → 失败路径不变" {
   let repo = fresh_repo("lock")
   commit_file(repo, "base.txt", "v1", "init: base")
-  let before = unwrap_or_panic(@daemon.get_last_commit_hash(repo), "基线应存在")
+  let before = unwrap_or_panic(
+    @daemon.get_last_commit_hash(repo),
+    "基线应存在",
+  )
   // 残留锁文件:git add 直接失败,HEAD 不动
   @fs.write_file("\{repo}/.git/index.lock", "stale")
   @fs.write_file("\{repo}/work.txt", "v2")
@@ -586,18 +617,30 @@ async test "结算对齐判据:按内容判定,不看 mtime" {
   // 落齐:盘上字节与索引逐块一致 → 对齐
   @fs.write_file("\{dir}/a.txt", "landed-a")
   assert_true(
-    @daemon.work_tree_content_aligned(dir, "a.txt", Some(align_entry("a.txt", "landed-a"))),
+    @daemon.work_tree_content_aligned(
+      dir,
+      "a.txt",
+      Some(align_entry("a.txt", "landed-a")),
+    ),
   )
   // 半途:索引宣告 'final-b',盘上还是 'half-way' → 未对齐(消息对内容错的
   // 事故形态)
   @fs.write_file("\{dir}/b.txt", "half-way")
   assert_false(
-    @daemon.work_tree_content_aligned(dir, "b.txt", Some(align_entry("b.txt", "final-b"))),
+    @daemon.work_tree_content_aligned(
+      dir,
+      "b.txt",
+      Some(align_entry("b.txt", "final-b")),
+    ),
   )
   // 同长度不同内容:必须真的逐块哈希,大小短路兜不住
   @fs.write_file("\{dir}/b2.txt", "aaaa")
   assert_false(
-    @daemon.work_tree_content_aligned(dir, "b2.txt", Some(align_entry("b2.txt", "aaab"))),
+    @daemon.work_tree_content_aligned(
+      dir,
+      "b2.txt",
+      Some(align_entry("b2.txt", "aaab")),
+    ),
   )
   // 大小不同:短路,不切块
   @fs.write_file("\{dir}/b3.txt", "short")
@@ -610,7 +653,11 @@ async test "结算对齐判据:按内容判定,不看 mtime" {
   )
   // 墓碑 + 盘上缺失 = 对齐(删除语义);墓碑 + 盘上还在 = 删除尚未落地,未对齐
   assert_true(
-    @daemon.work_tree_content_aligned(dir, "missing.txt", Some(align_tombstone("missing.txt"))),
+    @daemon.work_tree_content_aligned(
+      dir,
+      "missing.txt",
+      Some(align_tombstone("missing.txt")),
+    ),
   )
   @fs.write_file("\{dir}/still-there.txt", "x")
   assert_false(
@@ -625,14 +672,21 @@ async test "结算对齐判据:按内容判定,不看 mtime" {
   assert_false(@daemon.work_tree_content_aligned(dir, "c.txt", None))
   // 盘上根本没有文件(按需同步占位条目的形态)→ 未对齐
   assert_false(
-    @daemon.work_tree_content_aligned(dir, "ghost.txt", Some(align_entry("ghost.txt", "never landed"))),
+    @daemon.work_tree_content_aligned(
+      dir,
+      "ghost.txt",
+      Some(align_entry("ghost.txt", "never landed")),
+    ),
   )
 }
 
 ///|
 test "收敛提交消息的 subject 截断:64 码点一刀" {
   // 两侧 trim:收敛消息里引用的是干净的首行
-  assert_eq(@daemon.truncate_git_subject("  feat: 短主题  "), "feat: 短主题")
+  assert_eq(
+    @daemon.truncate_git_subject("  feat: 短主题  "),
+    "feat: 短主题",
+  )
   let mut fits = "feat: "
   for _ in 0..<58 {
     fits = fits + "长"
