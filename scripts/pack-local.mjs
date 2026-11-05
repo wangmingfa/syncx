@@ -7,27 +7,36 @@
  * 因此能直接喂给服务端同一条自更新管线:解压 → 四道校验 → 整包换入 → 失败自动回滚。
  *
  * 版本号(重要):
- *   默认**就是本机 package.json 的 version** —— 不查 npm registry、不递增、也不写回仓库。
+ *   基数**就是本机 package.json 的 version** —— 不查 npm registry、不递增、也不写回仓库。
  *   也就是说:如果你本地是 0.2.14、npm 上最新是 0.2.20,打出来的包版本仍是 0.2.14。
- *   想让多次本地构建可区分(装到多台设备后能从界面看出装的是哪一次),用 --append 打后缀:
+ *   默认自动附加**打包时刻的时间戳**后缀(0.2.14-20261105.0930),让多次本地构建
+ *   可区分(装到多台设备后能从界面看出装的是哪一次);--no-timestamp 可关掉。
+ *   也可以用 --append 显式指定后缀(此时不再叠加时间戳):
  *     npm run pack:local -- --append local.1   → 0.2.14-local.1
  *   后缀属 semver 预发布标识,只改压缩包里那份 package.json,仓库文件一字不动。
+ *   注意口径:semver 预发布排在同基数的正式版**之前**,所以带时间戳的本地包对
+ *   「从对端升级」(版本必须严格比对端新)而言不算比 0.2.14 正式版新 —— 本地验证
+ *   请让相关设备都装时间戳包,同后缀体系内按日期时间正常比大小。
  *
  * 用法:
- *   npm run pack:local                      先构建再打包(默认,版本取 package.json)
+ *   npm run pack:local                      先构建再打包(默认,版本取 package.json + 时间戳)
  *   npm run pack:local -- --no-build        直接用现有 dist/syncx.js 打包
- *   npm run pack:local -- --append local.1  附预发布后缀,便于区分本地测试构建
+ *   npm run pack:local -- --no-timestamp    不加时间戳,版本就是 package.json 原样
+ *   npm run pack:local -- --append local.1  显式附预发布后缀(替代时间戳)
  *   npm run pack:local -- --out <目录>       指定输出目录(默认项目根)
  *   npm run pack:local -- --backend rust    打 Rust 后端安装包(syncx-rs)
  *   npm run pack:local -- --backend moonbit 打 MoonBit 后端安装包(syncx-mb)
+ *
+ * 打包完成时自动清理输出目录里**旧的时间戳产物**(匹配本脚本的时间戳命名方案,
+ * 连带 rust/moonbit 资产;不带时间戳的文件一律不碰),防止反复打包无限堆积。
  *
  * --backend(node 缺省):
  *   node     现有行为 —— npm 载体的 tgz,喂给 Web UI「上传升级」。
  *   rust / moonbit  按发布 workflow 的资产命名(syncx-v{version}-{target-triple}.tar.gz
  *   / Windows .zip)打「本机目标」的包:解压结构与 GitHub Release 资产一致,
  *   便于在多台设备上验证自更新的下载/换入链路(真实 Release 的本地替身)。
- *   --append 对 rust/moonbit 同样生效(仅改包内二进制的版本注入走不到,
- *   版本号只体现在资产文件名里)。
+ *   时间戳/--append 对 rust/moonbit 同样生效(仅改资产文件名;包内二进制的
+ *   版本注入走不到,版本号只体现在资产文件名里)。
  *
  * 注意:升级是「整包替换安装目录」。请勿对源码仓库目录做升级 —— 直接
  * `node dist/syncx.js` 从仓库里跑时,安装目录就是仓库根,服务端会拒绝(防止删掉 src/)。
@@ -45,13 +54,14 @@ import {
   existsSync,
   mkdirSync,
   mkdtempSync,
+  readdirSync,
   readFileSync,
   rmSync,
   statSync,
   writeFileSync,
 } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { dirname, join, resolve } from 'node:path';
+import { basename, dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 const ROOT = dirname(fileURLToPath(import.meta.url));
@@ -87,15 +97,49 @@ function run(cmd, args, { cwd = PROJECT } = {}) {
   if (r.status !== 0) fail(`${cmd} ${args.join(' ')} 失败 (exit ${r.status})`);
 }
 
+/** 本脚本时间戳命名方案的产物名(输出目录清扫的匹配范围,匹配不到的一律不动):
+ *  node tgz:syncx-<version>-YYYYMMDD.HHMM.tgz;后端资产:syncx-(rs|mbt)-v<version>
+ *  -YYYYMMDD.HHMM-<triple>.tar.gz / .zip。 */
+const TS_PACK_PATTERNS = [
+  /^syncx-.+-\d{8}\.\d{4}\.tgz$/,
+  /^syncx-(rs|mbt)-.+-\d{8}\.\d{4}-[A-Za-z0-9_.-]+\.(tar\.gz|zip)$/,
+];
+
+/**
+ * 清理输出目录里旧的时间戳打包产物:每次打包生成一颗新包,不清会无限堆积。
+ * 只删名字命中时间戳方案的文件(本轮产物 keepName 除外),其它文件——包括
+ * 不带时间戳的手工命名包——绝不碰,防误删。清扫失败不挡打包,只记日志。
+ */
+function cleanOldTimestampedPacks(outDir, keepName) {
+  let stale;
+  try {
+    stale = readdirSync(outDir).filter(
+      (f) => f !== keepName && TS_PACK_PATTERNS.some((p) => p.test(f)),
+    );
+  } catch {
+    return; // 目录不可读(权限/挂载异常):放弃清扫,打包照常
+  }
+  for (const f of stale) {
+    try {
+      rmSync(join(outDir, f));
+      log(`清理旧时间戳包:${f}`);
+    } catch (e) {
+      log(`清理旧时间戳包失败(${f}):${e instanceof Error ? e.message : String(e)}`);
+    }
+  }
+}
+
 const argv = process.argv.slice(2);
 let doBuild = true;
 let outDir = PROJECT;
 let append = '';
+let noTimestamp = false;
 let backend = 'node';
 for (let i = 0; i < argv.length; i++) {
   const a = argv[i];
   if (a === '--no-build') doBuild = false;
   else if (a === '--build') doBuild = true;
+  else if (a === '--no-timestamp') noTimestamp = true;
   else if (a === '--backend') {
     const v = argv[++i];
     if (v !== 'node' && v !== 'rust' && v !== 'moonbit') {
@@ -120,12 +164,22 @@ for (let i = 0; i < argv.length; i++) {
     if (!v) fail('--out 需要跟一个目录');
     outDir = resolve(v);
   } else if (a.startsWith('--out=')) outDir = resolve(a.slice('--out='.length));
-  else fail(`无法识别的参数: ${a}(支持 --no-build / --append <后缀> / --out <目录>)`);
+  else fail(`无法识别的参数: ${a}(支持 --no-build / --no-timestamp / --append <后缀> / --out <目录>)`);
 }
 
 const pkg = JSON.parse(readFileSync(PKG_PATH, 'utf8'));
 
-// 版本 = 本机 package.json 的 version(不查 registry、不递增);--append 只在包内加预发布后缀。
+/** 打包时刻的本地时间戳后缀:YYYYMMDD.HHMM。作 semver 预发布标识时,
+ *  upgrade.ts 的 compareVersions 恰好按「tag 字符串比日期、迭代号数值比时刻」解析,
+ *  同体系内跨天/同天都能正确比出新旧(见文件头「注意口径」)。 */
+function timestampSuffix() {
+  const d = new Date();
+  const pad = (n) => String(n).padStart(2, '0');
+  return `${d.getFullYear()}${pad(d.getMonth() + 1)}${pad(d.getDate())}.${pad(d.getHours())}${pad(d.getMinutes())}`;
+}
+
+// 版本 = 本机 package.json 的 version(不查 registry、不递增);预发布后缀只进包内。
+// 默认附时间戳;显式 --append 以后缀为准(两者不叠加);--no-timestamp 打原样版本。
 let version = pkg.version;
 if (append) {
   if (!/^[0-9A-Za-z.-]+$/.test(append)) {
@@ -133,6 +187,9 @@ if (append) {
   }
   // 已是预发布(0.2.14-beta.3)时续在其后(beta.3.local.1),仍是合法 semver
   version = pkg.version.includes('-') ? `${pkg.version}.${append}` : `${pkg.version}-${append}`;
+} else if (!noTimestamp) {
+  const stamp = timestampSuffix();
+  version = pkg.version.includes('-') ? `${pkg.version}.${stamp}` : `${pkg.version}-${stamp}`;
 }
 if (!/^\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?(?:\+[0-9A-Za-z.-]+)?$/.test(version)) {
   fail(`版本号 ${version} 不是合法 semver,无法打包`);
@@ -183,6 +240,7 @@ try {
   run('tar', ['-czf', 'local.tgz', 'package'], { cwd: staging });
 
   const target = join(outDir, `syncx-${version}.tgz`);
+  cleanOldTimestampedPacks(outDir, basename(target));
   // 不能用 renameSync:staging 在系统临时目录(Windows 上通常是 C:),而目标在项目盘
   // (如 F:)——跨卷 rename 直接 EXDEV 失败。staging 反正会在 finally 里整体清掉,
   // 这里复制一份等价且跨平台稳。
@@ -193,8 +251,8 @@ try {
 
   log(`✅ 打包完成:${target}`);
   log(`   版本 ${version} · ${(size / 1024).toFixed(0)} KB · sha256 ${sha256.slice(0, 16)}…`);
-  if (!append) {
-    log(`   版本取自 package.json(${pkg.version})。多次本地构建想区分开,加 --append local.N`);
+  if (!append && !noTimestamp) {
+    log(`   版本 = package.json(${pkg.version}) + 打包时间戳;打原样版本用 --no-timestamp,自定义后缀用 --append local.N`);
   }
   log('');
   log('下一步:在目标设备的 Web UI 点顶栏「上传升级」,选该 tgz 即可(升级前会先显示版本对比)。');
@@ -255,6 +313,7 @@ function packBackend() {
     }
 
     const target = join(outDir, archive);
+    cleanOldTimestampedPacks(outDir, basename(target));
     copyFileSync(join(staging, archive), target);
 
     const size = statSync(target).size;
