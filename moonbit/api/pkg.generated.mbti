@@ -68,7 +68,13 @@ pub async fn handle_git_commit_diff(ApiOptions, @mocket.MocketEvent) -> &@mocket
 
 pub async fn handle_git_commit_files(ApiOptions, @mocket.MocketEvent) -> &@mocket.Responder
 
+pub async fn handle_git_commit_retry(ApiOptions, @mocket.MocketEvent) -> &@mocket.Responder
+
+pub async fn handle_git_commit_status(ApiOptions, @mocket.MocketEvent) -> &@mocket.Responder
+
 pub async fn handle_git_diff(ApiOptions, @mocket.MocketEvent) -> &@mocket.Responder
+
+pub async fn handle_git_index_lock_delete(ApiOptions, @mocket.MocketEvent) -> &@mocket.Responder
 
 pub async fn handle_git_log(ApiOptions, @mocket.MocketEvent) -> &@mocket.Responder
 
@@ -203,6 +209,8 @@ pub(all) struct ApiOptions {
   mut device_status : (() -> Array[@json.Json])?
   mut sync_progress : (() -> Array[@daemon.SyncProgress])?
   mut traffic : (() -> @daemon.TrafficStats)?
+  mut git_commit_status : ((String) -> @json.Json?)?
+  mut git_commit_retry : (async (String) -> @json.Json)?
   mut on_config_changed : (async () -> Unit)?
 }
 pub fn ApiOptions::new(device_id~ : String, control_token? : String, auth_file? : String?, config_file? : String?, actor? : @daemon.ActorHandle?, web_dist? : String?, on_shutdown? : (() -> Unit)?, dev_mode? : Bool, upload_inspect? : (async (Bytes) -> Result[InspectedPackage, String])?, upload_swap? : (async (Bytes) -> Result[String, String])?, settings? : @json.Json?, peer_port? : Int32?, device_infos? : Array[@json.Json], on_config_changed? : (async () -> Unit)?) -> Self

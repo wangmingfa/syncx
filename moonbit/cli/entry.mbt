@@ -434,6 +434,14 @@ pub async fn run_start(args : StartArgs) -> Unit {
       }
     }
     api_options.sync_progress = Some(() => progress_cell.val)
+    // 「自动提交失败」弹窗:镜像台账的 status/retry 入口(status 的 lock 与
+    // maxAttempts 缺省由 api 层补齐)
+    api_options.git_commit_status = Some(folder_id => {
+      mirror.commit_status(folder_id)
+    })
+    api_options.git_commit_retry = Some(folder_id => {
+      mirror.retry_folder(folder_id)
+    })
     api_options.traffic = Some(() => traffic_cell.val)
     // 配置热重载回调:任何写路由成功落盘后触发(Node 的 configWatcher +
     // reload 语义收拢成一个同步入口)。职责面:

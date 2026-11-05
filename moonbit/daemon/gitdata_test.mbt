@@ -231,3 +231,33 @@ async test "历史重写:上游哈希/裸消息原文/剔除计数/filter-branch
     _ => abort("工作区文件应逐字节保持")
   }
 }
+
+///|
+async test "index.lock:现查/删除/幂等/非仓库拒绝" {
+  let repo = fresh_repo("lock")
+  commit_file(repo, "a.txt", "v1", "init")
+  // 无锁 → None
+  assert_true(@daemon.find_index_lock(repo) is None)
+  // 造一个残留锁 → 现查到路径/大小/时刻
+  @fs.write_file("\{repo}/.git/index.lock", "lock-by-another-process")
+  match @daemon.find_index_lock(repo) {
+    Some(lock) => {
+      assert_true(lock.path.has_suffix("index.lock"))
+      assert_true(lock.size > 0L)
+      assert_true(lock.mtime_ms > 0L)
+    }
+    None => abort("应现查到锁")
+  }
+  // 删除:ok + removed:true;再删:ok + removed:false(幂等,目的已达成)
+  let r = @daemon.remove_index_lock(repo)
+  assert_true(r.ok)
+  assert_eq(r.removed, Some(true))
+  let r = @daemon.remove_index_lock(repo)
+  assert_true(r.ok)
+  assert_eq(r.removed, Some(false))
+  // 非仓库:ok:false 带原因(路径不乱给)
+  let plain = git_tmp_dir("lock-plain")
+  let r = @daemon.remove_index_lock(plain)
+  assert_false(r.ok)
+  assert_eq(r.error, Some("该目录不是 git 仓库"))
+}

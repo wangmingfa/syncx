@@ -58,6 +58,13 @@ pub(all) struct ApiOptions {
   /// `/api/status.traffic` 动态提供器(None = 零值缺省):传输字节账本在
   /// actor 任务上,同经 cli 侧镜像读出(形态见 traffic_json)。
   mut traffic : (() -> @daemon.TrafficStats)?
+  /// 「自动提交失败」弹窗的镜像侧数据源(cli 装配注入;None = 未接镜像,
+  /// status 回缺省形状、retry 回 503)。形态对齐 Node getGitAutoCommitStatus
+  /// 的台账部分(lock 由 api 层现查合并;maxAttempts 由提供器带上)。
+  mut git_commit_status : ((String) -> Json?)?
+  /// 手动重试自动提交的镜像入口(None = 未接镜像,回 503;形状照
+  /// Node retryGitAutoCommit:{ ok, hash?, error?, attempts })。
+  mut git_commit_retry : (async (String) -> Json)?
   /// 配置变更回调(None = 未接 daemon,落盘即止):任何写路由成功落盘后
   /// 触发一次,装配层借此重读配置并热重载 daemon 派生状态(目录集重建 /
   /// 设备清单快照 / fs-watch 对账 / 出站拨号对账)。回调在单线程事件循环里
@@ -121,6 +128,8 @@ pub fn ApiOptions::new(
     device_status: None,
     sync_progress: None,
     traffic: None,
+    git_commit_status: None,
+    git_commit_retry: None,
     on_config_changed,
   }
 }
@@ -709,6 +718,15 @@ pub fn build_app(options : ApiOptions) -> @mocket.App {
   app.post("/api/folders/git-push", event => handle_git_push(options, event))
   app.post("/api/folders/git-strip-coauthored-unpushed", event => {
     handle_git_strip_coauthored_unpushed(options, event)
+  })
+  app.get("/api/folders/git-commit-status", event => {
+    handle_git_commit_status(options, event)
+  })
+  app.post("/api/folders/git-index-lock/delete", event => {
+    handle_git_index_lock_delete(options, event)
+  })
+  app.post("/api/folders/git-commit-retry", event => {
+    handle_git_commit_retry(options, event)
   })
   // 文件版本(时间机器)与回收站操作面:列表/恢复/删除/预览 + 列表/还原/
   // 清理(对齐 Node /api/folders/versions* 与 /api/trash*;详见 versions.mbt)

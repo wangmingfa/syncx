@@ -490,3 +490,136 @@ pub async fn rewrite_commit_messages(
     error: Some(if line == "" { "git 历史重写失败" } else { line }),
   }
 }
+
+// ==================== index.lock 残留(自动提交失败弹窗) ====================
+
+///|
+/// 残留 index.lock 的现况(size/mtimeMs 供弹窗说明「这个锁躺了多久」)。
+pub(all) struct IndexLockInfo {
+  path : String
+  size : Int64
+  mtime_ms : Int64
+}
+
+///|
+/// 删除结果。removed:false = 调用时锁已不存在(幂等:目的已达成)。
+pub(all) struct IndexLockRemoveResult {
+  ok : Bool
+  path : String?
+  removed : Bool?
+  error : String?
+}
+
+///|
+/// 向 git 要 index.lock 的绝对路径(worktree 的 .git 可能是文件,不能拼
+/// join(folder, '.git');照 Node gitIndexLockPath)。
+async fn git_index_lock_path(folder : String) -> String? {
+  let (code, out, _) = run_git("git", folder, [
+    "rev-parse", "--git-path", "index.lock",
+  ]) catch {
+    _ => return None
+  }
+  if code != 0 {
+    return None
+  }
+  let t = out.trim().to_owned()
+  if t == "" {
+    return None
+  }
+  // rev-parse --git-path 在 worktree 内给出相对路径,按仓库根拼绝对
+  if t.has_prefix("/") {
+    Some(t)
+  } else {
+    Some("\{folder}/\{t}")
+  }
+}
+
+///|
+/// 现查残留的 index.lock。路径虽由 git 给出,仍校验文件名 —— 本函数只该碰
+/// index.lock。None = 没有锁(或仓库不可用)。
+pub async fn find_index_lock(folder : String) -> IndexLockInfo? {
+  if !is_git_repo(folder) {
+    return None
+  }
+  let lock_path = match git_index_lock_path(folder) {
+    Some(p) => p
+    None => return None
+  }
+  // 只认文件名 index.lock:绝对路径的最后一段
+  let segments : Array[String] = []
+  for seg in lock_path.split("/") {
+    segments.push(seg.to_owned())
+  }
+  match segments.last() {
+    Some(name) => if name != "index.lock" { return None }
+    None => return None
+  }
+  let size = @fs.file_size(lock_path) catch { _ => return None }
+  // mtime → ms(@fs.mtime 返回 (秒, 纳秒))
+  let (secs, nanos) = @fs.mtime(lock_path) catch { _ => (0L, 0) }
+  let mtime_ms = secs * 1000L + nanos.to_int64() / 1_000_000L
+  Some({ path: lock_path, size, mtime_ms, })
+}
+
+///|
+/// 删除残留的 index.lock(不接收调用方给的路径,只删 git 指认的那一个)。
+/// 调用方负责确认没有其它 git 进程正在操作 —— 本函数无法跨平台判断锁的持有者。
+pub async fn remove_index_lock(folder : String) -> IndexLockRemoveResult {
+  if !is_git_repo(folder) {
+    return {
+      ok: false,
+      path: None,
+      removed: None,
+      error: Some("该目录不是 git 仓库"),
+    }
+  }
+  let lock_path = match git_index_lock_path(folder) {
+    Some(p) => p
+    None =>
+      return {
+        ok: false,
+        path: None,
+        removed: None,
+        error: Some("无法定位 git 锁文件"),
+      }
+  }
+  let segments : Array[String] = []
+  for seg in lock_path.split("/") {
+    segments.push(seg.to_owned())
+  }
+  let name_ok = match segments.last() {
+    Some(name) => name == "index.lock"
+    None => false
+  }
+  if !name_ok {
+    return {
+      ok: false,
+      path: Some(lock_path),
+      removed: None,
+      error: Some("git 返回的锁路径异常,已中止删除"),
+    }
+  }
+  @fs.remove(lock_path) catch {
+    e => {
+      // ENOENT = 锁已不存在:幂等成功,removed:false
+      let text = "\{e}"
+      if text.contains("ENOENT") ||
+        text.contains("no such file") ||
+        text.contains("No such file") {
+        return {
+          ok: true,
+          path: Some(lock_path),
+          removed: Some(false),
+          error: None,
+        }
+      }
+      return {
+        ok: false,
+        path: Some(lock_path),
+        removed: None,
+        error: Some(text),
+      }
+    }
+  }
+  { ok: true, path: Some(lock_path), removed: Some(true), error: None, }
+}

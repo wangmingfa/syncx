@@ -1024,3 +1024,108 @@ async test "Git 剔除路由:剔除成功落新链,脏工作区与缺上游 400"
   )
   assert_eq(response.status_code.to_int(), 400)
 }
+
+///|
+async test "自动提交失败弹窗路由:status 缺省形状 + lock 现查 + 锁删除 + retry 未接线 503" {
+  let dir = test_config_dir("gitlock")
+  let app = @api.build_app(options_with("gitlock", dir))
+  let secret = @api.session_secret("test-token")
+  let ticket = @api.sign_session(
+    { via: "token", sub: "token", exp: @api.now_ms() + 60_000L, },
+    secret,
+  )
+  let headers : Map[@http.CaseInsensitiveString, StringView] = {
+    "Cookie": "syncx_session=\{ticket}",
+  }
+  let repo = git_repo_fixture("lock")
+  let body = @utf8.encode("{\"path\":\"" + repo + "\"}")
+  let response = @mocket.dispatch_http(
+    app, "POST", "/api/folders", headers, body,
+  )
+  assert_eq(response.status_code.to_int(), 201)
+  let saved = @api.load_config("\{dir}/config.json")
+  let folder_id = saved.shared_folders[0].id.unwrap()
+  // status:未接镜像 → pending:false 缺省形状;无锁 → lock:null
+  let response = @mocket.dispatch_http(
+    app,
+    "GET",
+    "/api/folders/git-commit-status?folderId=\{folder_id}",
+    headers,
+    b"",
+  )
+  assert_eq(response.status_code.to_int(), 200)
+  let data : Json = response.read_body()
+  match data {
+    Object(obj) => {
+      assert_eq(obj.get("pending"), Some(Json::boolean(false)))
+      assert_eq(obj.get("maxAttempts"), Some(Json::number(5)))
+      assert_eq(obj.get("lock"), Some(Json::null()))
+    }
+    _ => fail("应为对象")
+  }
+  // 造残留锁:status 现查到;锁删除路由清掉后再查为 null
+  @fs.write_file("\{repo}/.git/index.lock", "stale")
+  let response = @mocket.dispatch_http(
+    app,
+    "GET",
+    "/api/folders/git-commit-status?folderId=\{folder_id}",
+    headers,
+    b"",
+  )
+  let data : Json = response.read_body()
+  match data {
+    Object(obj) =>
+      match obj.get("lock") {
+        Some(Object(lock)) => {
+          assert_true(
+            match lock.get("path") {
+              Some(String(p)) => p.contains("index.lock")
+              _ => false
+            },
+          )
+          assert_true(lock.get("size") is Some(Number(_)))
+        }
+        _ => fail("应现查到锁")
+      }
+    _ => fail("应为对象")
+  }
+  let response = @mocket.dispatch_http(
+    app,
+    "POST",
+    "/api/folders/git-index-lock/delete",
+    headers,
+    @utf8.encode("{\"folderId\":\"" + folder_id + "\"}"),
+  )
+  assert_eq(response.status_code.to_int(), 200)
+  let data : Json = response.read_body()
+  match data {
+    Object(obj) => {
+      assert_true(obj.get("ok") is Some(True))
+      assert_true(obj.get("removed") is Some(True))
+    }
+    _ => fail("应为对象")
+  }
+  // 再删一次:幂等(removed:false)
+  let response = @mocket.dispatch_http(
+    app,
+    "POST",
+    "/api/folders/git-index-lock/delete",
+    headers,
+    @utf8.encode("{\"folderId\":\"" + folder_id + "\"}"),
+  )
+  let data : Json = response.read_body()
+  match data {
+    Object(obj) => assert_true(obj.get("removed") is Some(False))
+    _ => fail("应为对象")
+  }
+  // retry:镜像未接线 → 503(shutdown 同款口径;503 短路前必须 drain_body,
+  // 否则 mocket 的 MemoryReader 写协程收不了尾 —— 见 routes.mbt drain_body 注释)
+  let response = @mocket.dispatch_http(
+    app,
+    "POST",
+    "/api/folders/git-commit-retry",
+    headers,
+    @utf8.encode("{\"folderId\":\"" + folder_id + "\"}"),
+  )
+  assert_eq(response.status_code.to_int(), 503)
+}

@@ -1007,3 +1007,82 @@ async test "漂移台账:重启后从盘上恢复,自愈继续" {
     let _ = handle.send(@daemon.Cmd::Shutdown)
   }
 }
+
+///|
+async test "自动提交失败弹窗:status 折算失败口径,retry 重置计数再结算" {
+  @async.with_task_group() <| group => {
+    let repo = gm_fresh_repo("status")
+    gm_commit(repo, "a.txt", "v1", "init")
+    // 残留 index.lock:提交必失败的夹具(与退避测试同款)
+    @fs.write_file("\{repo}/.git/index.lock", "stale")
+    @fs.write_file("\{repo}/a.txt", "v2")
+    let config = @core.parse_config(
+      "{\"sharedFolders\":[{\"path\":\"\{repo}\",\"id\":\"f1\",\"gitSync\":\"full\"}]}",
+    )
+    let registry = @cli.PeerSessionRegistry::new()
+    registry.register("DEV-A", {
+      version: None,
+      platform: None,
+      hostname: None,
+      url: None,
+    })
+    let (mirror, handle, _) = gm_mirror_repo(
+      group,
+      config,
+      registry,
+      @cli.PeerSenders::new(),
+      repo,
+      "f1",
+    )
+    gm_land(handle, "f1", repo, "a.txt", "v2")
+    mirror.on_notify(gm_notify("DEV-A", "f1", "aaaa2222"), Some("DEV-A"))
+    mirror.flush()
+    assert_eq(mirror.slot_attempts("f1"), 1)
+    // status:挂起通知折算 —— pending/attempts/错误口径/消息首行
+    let status = mirror.commit_status("f1").unwrap()
+    match status {
+      Object(o) => {
+        assert_eq(o.get("pending"), Some(Json::boolean(true)))
+        assert_eq(o.get("attempts"), Some(Json::number(1)))
+        assert_eq(
+          o.get("commitMessage"),
+          Some(Json::string("syncx: 测试提交")),
+        )
+        assert_true(o.get("givenUp") is Some(False))
+        match o.get("error") {
+          Some(Object(e)) => assert_true(e.get("message") is Some(String(_)))
+          _ => fail("应带最近一次失败原因")
+        }
+      }
+      _ => fail("应为对象")
+    }
+    // 无通知目录:status None / retry 如实回「没有待提交的通知」
+    assert_true(mirror.commit_status("nope") is None)
+    let r = mirror.retry_folder("nope")
+    match r {
+      Object(o) =>
+        assert_eq(
+          o.get("error"),
+          Some(Json::string("没有待提交的通知")),
+        )
+      _ => fail("应为对象")
+    }
+    // retry:清零计数与退避立即结算 —— 锁还在,再次失败,ok:false 带原因
+    let r = mirror.retry_folder("f1")
+    match r {
+      Object(o) => {
+        assert_true(o.get("ok") is Some(False))
+        assert_eq(o.get("attempts"), Some(Json::number(1)))
+        match o.get("error") {
+          Some(String(msg)) =>
+            assert_true(msg.contains("index.lock") || msg.contains("fatal"))
+          _ => fail("应带失败原因")
+        }
+      }
+      _ => fail("应为对象")
+    }
+    assert_true(mirror.has_slot("f1"))
+    // 收尾:叫停 actor 常驻循环
+    let _ = handle.send(@daemon.Cmd::Shutdown)
+  }
+}

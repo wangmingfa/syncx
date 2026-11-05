@@ -78,6 +78,8 @@ pub fn entry_fingerprint(Entry) -> String
 
 pub fn event_ignore_filter(@core.IgnoreRuleset) -> (String) -> Bool
 
+pub async fn find_index_lock(String) -> IndexLockInfo?
+
 pub async fn get_commit_info(String, String, String) -> CommitInfo?
 
 pub async fn get_commit_parents(String, String) -> Array[String]
@@ -141,6 +143,8 @@ pub async fn read_folder_ignore_lines(String, Bool) -> Array[String]
 pub async fn read_manifest(String, fingerprint~ : String, cdc~ : Bool, slots~ : Int32) -> PartialManifest?
 
 pub async fn remove_empty_dirs(String, Array[String], @core.IgnoreRuleset, Array[String]) -> Array[EmptyDirDeleteResult]
+
+pub async fn remove_index_lock(String) -> IndexLockRemoveResult
 
 pub async fn remove_partial(String) -> Unit
 
@@ -411,6 +415,19 @@ pub enum HeadRead {
 pub struct IndexCounts {
   entries : Int64
   tombstones : Int64
+}
+
+pub(all) struct IndexLockInfo {
+  path : String
+  size : Int64
+  mtime_ms : Int64
+}
+
+pub(all) struct IndexLockRemoveResult {
+  ok : Bool
+  path : String?
+  removed : Bool?
+  error : String?
 }
 
 pub(all) enum IndexMode {

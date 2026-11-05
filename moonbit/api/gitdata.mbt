@@ -508,14 +508,18 @@ async fn strip_coauthored_inner(
   options : ApiOptions,
   folder_id : String,
 ) -> Result[Json, String] {
+  println("STRIP:enter")
   let folder = match git_folder_of(options, folder_id) {
     Some(f) => f
     None => return Err("共享目录不存在(可能刚被移除)")
   }
+  println("STRIP:repo-ok")
   if !@daemon.is_git_repo(folder.path) {
     return Err("该目录不是 git 仓库")
   }
+  println("STRIP:is-repo")
   // 先单独确认上游存在:区分「未设置上游」(结构性不可用)与区间为空(正常态)
+  println("STRIP:upstream-check")
   if @daemon.get_upstream_commit_hash(folder.path) is None {
     return Err(
       "未设置上游分支(远程未配置或从未推送),没有可剔除的未推送区间",
@@ -542,11 +546,13 @@ async fn strip_coauthored_inner(
   }
   // 工作区必须干净(syncx 在途中间态照旧豁免)才动历史:重写期间叠加未提交
   // 改动,会把中间态一起写进重写后的历史
+  println("STRIP:dirty-check")
   if @daemon.has_uncommitted_changes(folder.path) {
     return Err(
       "工作区有未提交的变更,请先提交或暂存后再剔除",
     )
   }
+  println("STRIP:rewriting")
   let result = @daemon.rewrite_commit_messages(folder.path, "@{upstream}..HEAD")
   if !result.ok {
     return Err(result.error.unwrap_or("git 历史重写失败"))
@@ -621,9 +627,159 @@ pub async fn handle_git_strip_coauthored_unpushed(
   }
   git_rewrite_guard.val = true
   let outcome = strip_coauthored_inner(options, folder_id)
+  println("STRIP:guard-release")
   git_rewrite_guard.val = false
   match outcome {
     Ok(json) => @mocket.HttpResponse(@mocket.OK).json(json)
     Err(reason) => return json_error(event, @mocket.BadRequest, reason)
+  }
+}
+
+// ==================== 「自动提交失败」弹窗(status / 锁 / retry) ====================
+
+///|
+/// GET /api/folders/git-commit-status?folderId:「自动提交失败」弹窗的数据源。
+/// 台账部分来自镜像提供器(cli 注入;None = 未接镜像,回 pending:false 的
+/// 缺省形状),lock 现查 —— 打开弹窗 / 每次操作后都要反映盘上事实,不使用
+/// 错误文案里那一刻的路径快照(对齐 Node getGitAutoCommitStatus)。
+pub async fn handle_git_commit_status(
+  options : ApiOptions,
+  event : @mocket.MocketEvent,
+) -> &Responder {
+  let folder_id = query_param(event, "folderId")
+  if folder_id == "" {
+    return json_error(event, @mocket.BadRequest, "folderId is required")
+  }
+  let folder = match git_folder_of(options, folder_id) {
+    Some(f) => f
+    None =>
+      return json_error(
+        event,
+        @mocket.BadRequest,
+        "共享目录不存在(可能刚被移除)",
+      )
+  }
+  let map : Map[String, Json] = Map([])
+  match options.git_commit_status {
+    Some(provider) =>
+      match provider(folder_id) {
+        // 镜像台账部分原样并入(pending/commitMessage/changedFiles/attempts/
+        // maxAttempts/retryAt/givenUp/error)
+        Some(part) =>
+          match part {
+            Object(fields) =>
+              for key, value in fields {
+                map.set(key, value)
+              }
+            _ => ()
+          }
+        None => ()
+      }
+    None => {
+      // 未接镜像:pending:false 的缺省形状(maxAttempts 与 cli 侧
+      // GIT_AUTO_COMMIT_MAX_ATTEMPTS 同值;跨包常量不走反向依赖)
+      map.set("pending", Json::boolean(false))
+      map.set("changedFiles", Json::array([]))
+      map.set("attempts", Json::number(0))
+      map.set("maxAttempts", Json::number(5))
+      map.set("givenUp", Json::boolean(false))
+    }
+  }
+  match @daemon.find_index_lock(folder.path) {
+    Some(lock) => {
+      let lm : Map[String, Json] = Map([])
+      lm.set("path", Json::string(lock.path))
+      lm.set("size", Json::number(lock.size.to_double()))
+      lm.set("mtimeMs", Json::number(lock.mtime_ms.to_double()))
+      map.set("lock", Json::object(lm))
+    }
+    None => map.set("lock", Json::null())
+  }
+  @mocket.HttpResponse(@mocket.OK).json(Json::object(map))
+}
+
+///|
+/// POST /api/folders/git-index-lock/delete { folderId }:删除残留的 index.lock。
+/// 只删 git 指认的那一个文件,不接收调用方路径;用户须先确认没有其它 git 进程
+/// 在操作(弹窗里有二次确认)。删完不清错误横幅 —— 这一笔仍未提交。
+pub async fn handle_git_index_lock_delete(
+  options : ApiOptions,
+  event : @mocket.MocketEvent,
+) -> &Responder {
+  let body = match parse_json_body(event) {
+    Some(body) => body
+    None => return json_error(event, @mocket.BadRequest, "invalid json body")
+  }
+  let obj = match body {
+    Object(obj) => obj
+    _ => return json_error(event, @mocket.BadRequest, "invalid json body")
+  }
+  let folder_id = match non_empty_string(obj, "folderId") {
+    Some(id) => id
+    None => return json_error(event, @mocket.BadRequest, "folderId is required")
+  }
+  let folder = match git_folder_of(options, folder_id) {
+    Some(f) => f
+    None =>
+      return json_error(
+        event,
+        @mocket.BadRequest,
+        "共享目录不存在(可能刚被移除)",
+      )
+  }
+  let result = @daemon.remove_index_lock(folder.path)
+  let map : Map[String, Json] = Map([])
+  map.set("ok", Json::boolean(result.ok))
+  match result.path {
+    Some(p) => map.set("path", Json::string(p))
+    None => ()
+  }
+  match result.removed {
+    Some(removed) => map.set("removed", Json::boolean(removed))
+    None => ()
+  }
+  match result.error {
+    Some(err) => map.set("error", Json::string(err))
+    None => ()
+  }
+  @mocket.HttpResponse(@mocket.OK).json(Json::object(map))
+}
+
+///|
+/// POST /api/folders/git-commit-retry { folderId }:手动重试自动提交。
+/// 仍走完整结算闸门(在途接收/索引交换/暂停),被挡时如实回报「仍被延后」。
+pub async fn handle_git_commit_retry(
+  options : ApiOptions,
+  event : @mocket.MocketEvent,
+) -> &Responder {
+  match options.git_commit_retry {
+    None => {
+      // 503 短路前必须排空请求体:mocket 的 MemoryReader 写协程要等 body
+      // 被消费才收尾,丢着不管会卡住事件循环(见 routes.mbt drain_body 注释)
+      drain_body(event)
+      return json_error(
+        event,
+        @mocket.ServiceUnavailable,
+        "镜像台账未接线",
+      )
+    }
+    Some(retry) => {
+      let body = match parse_json_body(event) {
+        Some(body) => body
+        None =>
+          return json_error(event, @mocket.BadRequest, "invalid json body")
+      }
+      let obj = match body {
+        Object(obj) => obj
+        _ => return json_error(event, @mocket.BadRequest, "invalid json body")
+      }
+      let folder_id = match non_empty_string(obj, "folderId") {
+        Some(id) => id
+        None =>
+          return json_error(event, @mocket.BadRequest, "folderId is required")
+      }
+      let result = retry(folder_id)
+      @mocket.HttpResponse(@mocket.OK).json(result)
+    }
   }
 }
