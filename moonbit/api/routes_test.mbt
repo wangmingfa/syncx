@@ -853,3 +853,174 @@ async test "Git 数据面:改动/历史/提交文件/对比/未推送/推送 全
   )
   assert_eq(response.status_code.to_int(), 400)
 }
+
+///|
+async test "Git 剔除路由:剔除成功落新链,脏工作区与缺上游 400" {
+  let dir = test_config_dir("gitstrip")
+  let app = @api.build_app(options_with("gitstrip", dir))
+  let secret = @api.session_secret("test-token")
+  let ticket = @api.sign_session(
+    { via: "token", sub: "token", exp: @api.now_ms() + 60_000L, },
+    secret,
+  )
+  let headers : Map[@http.CaseInsensitiveString, StringView] = {
+    "Cookie": "syncx_session=\{ticket}",
+  }
+  // 带上游的仓库:推送一笔干净提交,再攒一笔带尾注的未推送提交
+  let base = "/tmp/syncx-mb-api-gitstrip-\{@api.now_ms()}"
+  @fs.mkdir(base, recursive=true, allow_exist=true)
+  let origin = "\{base}/origin.git"
+  assert_eq(
+    @process.run(
+      "git",
+      ["init", "-q", "--bare", origin],
+      no_console_window=true,
+    ),
+    0,
+  )
+  let repo = "\{base}/work"
+  assert_eq(
+    @process.run("git", ["clone", "-q", origin, repo], no_console_window=true),
+    0,
+  )
+  let _ = @process.run(
+    "git",
+    ["config", "user.name", "syncx-test"],
+    cwd=repo,
+    no_console_window=true,
+  )
+  let _ = @process.run(
+    "git",
+    ["config", "user.email", "t@example.com"],
+    cwd=repo,
+    no_console_window=true,
+  )
+  @fs.write_file("\{repo}/a.txt", "v1")
+  let _ = @process.run(
+    "git",
+    ["add", "a.txt"],
+    cwd=repo,
+    no_console_window=true,
+  )
+  let _ = @process.run(
+    "git",
+    ["commit", "-q", "-m", "feat: a"],
+    cwd=repo,
+    no_console_window=true,
+  )
+  let _ = @process.run(
+    "git",
+    ["push", "-q", "-u", "origin", "HEAD"],
+    cwd=repo,
+    no_console_window=true,
+  )
+  @fs.write_file("\{repo}/b.txt", "v1")
+  let _ = @process.run(
+    "git",
+    ["add", "b.txt"],
+    cwd=repo,
+    no_console_window=true,
+  )
+  let _ = @process.run(
+    "git",
+    ["commit", "-q", "-m", "feat: b\n\nCo-Authored-By: MOSS <moss@example.com>"],
+    cwd=repo,
+    no_console_window=true,
+  )
+  // 登记共享目录
+  let body = @utf8.encode("{\"path\":\"" + repo + "\"}")
+  let response = @mocket.dispatch_http(
+    app, "POST", "/api/folders", headers, body,
+  )
+  assert_eq(response.status_code.to_int(), 201)
+  let saved = @api.load_config("\{dir}/config.json")
+  let folder_id = saved.shared_folders[0].id.unwrap()
+  // 缺上游的目录:400 结构性不可用
+  let plain_repo = git_repo_fixture("strip-plain")
+  let body = @utf8.encode("{\"path\":\"" + plain_repo + "\"}")
+  let response = @mocket.dispatch_http(
+    app, "POST", "/api/folders", headers, body,
+  )
+  assert_eq(response.status_code.to_int(), 201)
+  let saved = @api.load_config("\{dir}/config.json")
+  let plain_id = saved.shared_folders[1].id.unwrap()
+  let response = @mocket.dispatch_http(
+    app,
+    "POST",
+    "/api/folders/git-strip-coauthored-unpushed",
+    headers,
+    @utf8.encode("{\"folderId\":\"" + plain_id + "\"}"),
+  )
+  assert_eq(response.status_code.to_int(), 400)
+  // 剔除成功:1/1,落新链后消息不带尾注
+  let response = @mocket.dispatch_http(
+    app,
+    "POST",
+    "/api/folders/git-strip-coauthored-unpushed",
+    headers,
+    @utf8.encode("{\"folderId\":\"" + folder_id + "\"}"),
+  )
+  assert_eq(response.status_code.to_int(), 200)
+  let data : Json = response.read_body()
+  match data {
+    Object(obj) => {
+      assert_true(obj.get("ok") is Some(True))
+      assert_eq(obj.get("stripped"), Some(Json::number(1)))
+      assert_eq(obj.get("rewritten"), Some(Json::number(1)))
+    }
+    _ => fail("应为对象")
+  }
+  // 未推送列表还在(个数不变),subject 相同且不再带尾注
+  let response = @mocket.dispatch_http(
+    app,
+    "GET",
+    "/api/folders/git-unpushed?folderId=\{folder_id}",
+    headers,
+    b"",
+  )
+  assert_eq(response.status_code.to_int(), 200)
+  let data : Json = response.read_body()
+  match data {
+    Object(obj) =>
+      match obj.get("folders") {
+        Some(Array(items)) => {
+          assert_eq(items.length(), 1)
+          match items[0] {
+            Object(row) =>
+              match row.get("commits") {
+                Some(Array(commits)) => {
+                  assert_eq(commits.length(), 1)
+                  match commits[0] {
+                    Object(c) => {
+                      assert_eq(c.get("subject"), Some(Json::string("feat: b")))
+                      assert_false(
+                        c
+                        .get("body")
+                        .unwrap_or(Json::string(""))
+                        .stringify()
+                        .contains("Co-Authored-By"),
+                      )
+                    }
+                    _ => fail("应有提交")
+                  }
+                }
+                _ => fail("应有提交列表")
+              }
+            _ => fail("应有目录行")
+          }
+        }
+        _ => fail("应有 folders")
+      }
+    _ => fail("应为对象")
+  }
+  // 脏工作区:400 带原因
+  @fs.write_file("\{repo}/dirty.txt", "x")
+  let response = @mocket.dispatch_http(
+    app,
+    "POST",
+    "/api/folders/git-strip-coauthored-unpushed",
+    headers,
+    @utf8.encode("{\"folderId\":\"" + folder_id + "\"}"),
+  )
+  assert_eq(response.status_code.to_int(), 400)
+}

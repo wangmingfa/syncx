@@ -34,6 +34,8 @@ pub const GIT_LOG_LIMIT : Int32 = 20
 
 pub const GIT_PUSH_TIMEOUT_MS : Int32 = 120_000
 
+pub const GIT_REWRITE_TIMEOUT_MS : Int32 = 120_000
+
 pub const GIT_UNPUSHED_LIMIT : Int32 = 50
 
 pub const MAX_BLOCK_RETRIES : Int32 = 3
@@ -53,6 +55,8 @@ pub const POLL_TICK_MS : Int32 = 500
 pub const SEND_WINDOW_BYTES : Int32 = 67108864
 
 pub const SERVE_LEASE_MS : Int64 = 15_000
+
+pub const STRIP_CO_AUTHORED_MSG_FILTER : String = "grep -Evi 'co-?authored-by' | git stripspace || true"
 
 pub const TRAFFIC_RING_LEN : Int32 = 288
 
@@ -82,6 +86,8 @@ pub async fn get_last_commit_hash(String) -> String?
 
 pub async fn get_uncommitted_changes(String) -> GitChangesResult?
 
+pub async fn get_upstream_commit_hash(String) -> String?
+
 pub fn git_files_desc(Array[String]) -> String
 
 pub async fn git_push(String, timeout_ms? : Int32) -> GitPushResult
@@ -103,6 +109,8 @@ pub fn is_commit_hash(String) -> Bool
 pub async fn is_git_repo(String) -> Bool
 
 pub async fn list_commit_files(String, String) -> Array[GitCommitFileEntry]
+
+pub async fn list_raw_commit_messages(String, String) -> Array[String]?
 
 pub async fn list_recent_commits(String, limit? : Int32, skip? : Int32) -> Array[GitCommitEntry]?
 
@@ -137,6 +145,8 @@ pub async fn remove_empty_dirs(String, Array[String], @core.IgnoreRuleset, Array
 pub async fn remove_partial(String) -> Unit
 
 pub async fn resolve_share_path(String, String, Bool) -> String raise ExecutorError
+
+pub async fn rewrite_commit_messages(String, String) -> GitRewriteResult
 
 pub async fn run_git(String, String, Array[String]) -> (Int32, String, String) raise GitError
 
@@ -354,6 +364,11 @@ pub(all) struct GitCommitFileEntry {
 }
 
 pub(all) struct GitPushResult {
+  ok : Bool
+  error : String?
+}
+
+pub(all) struct GitRewriteResult {
   ok : Bool
   error : String?
 }

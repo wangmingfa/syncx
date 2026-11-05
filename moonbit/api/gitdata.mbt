@@ -11,6 +11,11 @@
 let git_push_guard : Ref[Bool] = Ref(false)
 
 ///|
+/// 历史重写重入闸(与 push 互斥:重写期间推送被拒、推送期间重写被拒;
+/// 对齐 Node 的 gitRewriteRunning ⇄ gitPushRunning 双向检查)。
+let git_rewrite_guard : Ref[Bool] = Ref(false)
+
+///|
 /// 仓库相对路径的安全闸:拒绝绝对路径、目录穿越与盘符样式的输入。
 /// `git show` 不经 resolveSharePath,这里必须自己把好这道门。
 fn git_rel_path_error(rel_path : String) -> String? {
@@ -494,4 +499,131 @@ pub async fn handle_git_push(
     None => ()
   }
   @mocket.HttpResponse(@mocket.OK).json(Json::object(map))
+}
+
+///|
+/// 剔除的主体流程(重入闸已在外层同步段置位;所有失败走 Err,由调用方在
+/// 单一出口把闸清掉 —— MoonBit 无 try/finally,收拢出口替代 finally)。
+async fn strip_coauthored_inner(
+  options : ApiOptions,
+  folder_id : String,
+) -> Result[Json, String] {
+  let folder = match git_folder_of(options, folder_id) {
+    Some(f) => f
+    None => return Err("共享目录不存在(可能刚被移除)")
+  }
+  if !@daemon.is_git_repo(folder.path) {
+    return Err("该目录不是 git 仓库")
+  }
+  // 先单独确认上游存在:区分「未设置上游」(结构性不可用)与区间为空(正常态)
+  if @daemon.get_upstream_commit_hash(folder.path) is None {
+    return Err(
+      "未设置上游分支(远程未配置或从未推送),没有可剔除的未推送区间",
+    )
+  }
+  // 预统计:区间内哪些提交的消息会被剔除规则改写(与重写过滤器同一条规则)
+  let messages = match
+    @daemon.list_raw_commit_messages(folder.path, "@{upstream}..HEAD") {
+    Some(m) => m
+    None => return Err("读取未推送提交失败")
+  }
+  if messages.length() == 0 {
+    let map : Map[String, Json] = Map([])
+    map.set("ok", Json::boolean(true))
+    map.set("stripped", Json::number(0))
+    map.set("rewritten", Json::number(0))
+    return Ok(Json::object(map))
+  }
+  let mut stripped = 0
+  for message in messages {
+    if @daemon.strip_co_authored_lines(message) != message {
+      stripped = stripped + 1
+    }
+  }
+  // 工作区必须干净(syncx 在途中间态照旧豁免)才动历史:重写期间叠加未提交
+  // 改动,会把中间态一起写进重写后的历史
+  if @daemon.has_uncommitted_changes(folder.path) {
+    return Err(
+      "工作区有未提交的变更,请先提交或暂存后再剔除",
+    )
+  }
+  let result = @daemon.rewrite_commit_messages(folder.path, "@{upstream}..HEAD")
+  if !result.ok {
+    return Err(result.error.unwrap_or("git 历史重写失败"))
+  }
+  @log.info(
+    "git strip co-authored ok: \{folder_id} (\{folder.path}): \{stripped}/\{messages.length()} 提交被剔除尾注",
+    [],
+  )
+  // 重写只改消息,提交个数不变;计数照常重算(与 push 收尾同一套)
+  let observed = @daemon.count_unpushed_commits(folder.path).unwrap_or(0)
+  match options.actor {
+    Some(handle) => {
+      let _ = handle.send(
+        @daemon.Cmd::GitUnpushedObserved(folder=folder_id, total=observed),
+      )
+      // 基线推进到重写后的 HEAD:旧基线哈希已不在分支上,滞留会让下一轮扫描
+      // 把整个重写区间误判成「新提交」再广播一遍给对端
+      match @daemon.get_last_commit_hash(folder.path) {
+        Some(head) => {
+          let _ = handle.send(
+            @daemon.Cmd::GitBaseline(folder=folder_id, hash=head),
+          )
+        }
+        None => ()
+      }
+    }
+    None => ()
+  }
+  let map : Map[String, Json] = Map([])
+  map.set("ok", Json::boolean(true))
+  map.set("stripped", Json::number(stripped.to_double()))
+  map.set("rewritten", Json::number(messages.length().to_double()))
+  Ok(Json::object(map))
+}
+
+///|
+/// POST /api/folders/git-strip-coauthored-unpushed { folderId }:一键剔除未推送
+/// 提交里的 Co-Authored-By 行(filter-branch 重写未推送区间的提交消息,哈希会
+/// 变)。响应 { ok, stripped, rewritten };400 带原因;区间为空 → ok 且 0/0。
+/// 入场闸先于一切 await 置位(Node gitRewriteStarting 同款):重入判定必须
+/// 发生在调用返回之前的同步段里,否则并发第二发会跟着跑重写。
+pub async fn handle_git_strip_coauthored_unpushed(
+  options : ApiOptions,
+  event : @mocket.MocketEvent,
+) -> &Responder {
+  let body = match parse_json_body(event) {
+    Some(body) => body
+    None => return json_error(event, @mocket.BadRequest, "invalid json body")
+  }
+  let obj = match body {
+    Object(obj) => obj
+    _ => return json_error(event, @mocket.BadRequest, "invalid json body")
+  }
+  let folder_id = match non_empty_string(obj, "folderId") {
+    Some(id) => id
+    None => return json_error(event, @mocket.BadRequest, "folderId is required")
+  }
+  // 同步段:检查双向互斥闸并置位重写闸(其后第一个 await 之前不会被切走)
+  if git_push_guard.val {
+    return json_error(
+      event,
+      @mocket.BadRequest,
+      "已有推送正在进行,请稍候",
+    )
+  }
+  if git_rewrite_guard.val {
+    return json_error(
+      event,
+      @mocket.BadRequest,
+      "已有提交信息剔除正在进行,请稍候",
+    )
+  }
+  git_rewrite_guard.val = true
+  let outcome = strip_coauthored_inner(options, folder_id)
+  git_rewrite_guard.val = false
+  match outcome {
+    Ok(json) => @mocket.HttpResponse(@mocket.OK).json(json)
+    Err(reason) => return json_error(event, @mocket.BadRequest, reason)
+  }
 }

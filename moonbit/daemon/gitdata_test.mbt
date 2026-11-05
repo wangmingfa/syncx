@@ -159,3 +159,75 @@ async test "提交父链与文件读取:根提交无父、bytes/absent/error 三
   assert_false(@daemon.is_commit_hash("abc"))
   assert_false(@daemon.is_commit_hash("zzzzzzz"))
 }
+
+///|
+/// 带上游的真仓库夹具:bare origin + clone + push -u 建立上游。
+async fn fresh_repo_with_upstream(tag : String) -> String {
+  let base = git_tmp_dir(tag)
+  let origin = "\{base}/origin.git"
+  assert_eq(
+    @process.run(
+      "git",
+      ["init", "-q", "--bare", origin],
+      no_console_window=true,
+    ),
+    0,
+  )
+  let work = "\{base}/work"
+  assert_eq(
+    @process.run("git", ["clone", "-q", origin, work], no_console_window=true),
+    0,
+  )
+  git_in(work, ["config", "user.name", "syncx-test"])
+  git_in(work, ["config", "user.email", "t@example.com"])
+  work
+}
+
+///|
+async test "历史重写:上游哈希/裸消息原文/剔除计数/filter-branch 重写" {
+  // 未设上游 → None(与 count 的「没有上游范围」同口径)
+  let plain = fresh_repo("rewrite-plain")
+  commit_file(plain, "a.txt", "v1", "init")
+  assert_true(@daemon.get_upstream_commit_hash(plain) is None)
+  assert_true(
+    @daemon.list_raw_commit_messages(plain, "@{upstream}..HEAD") is None,
+  )
+  let work = fresh_repo_with_upstream("rewrite")
+  commit_file(work, "a.txt", "v1", "feat: a")
+  // 第一次 push -u 建立上游
+  git_in(work, ["push", "-q", "-u", "origin", "HEAD"])
+  let upstream = @daemon.get_upstream_commit_hash(work).unwrap()
+  assert_true(@daemon.is_commit_hash(upstream))
+  // 新攒两笔未推送,一笔带尾注
+  commit_file(
+    work, "b.txt", "v1", "feat: b\n\nCo-Authored-By: MOSS <moss@example.com>",
+  )
+  commit_file(work, "c.txt", "v1", "feat: c")
+  assert_true(@daemon.count_unpushed_commits(work) == Some(2))
+  // 裸消息原文:新→旧,%B 自带尾部换行;命中统计跑在原文上
+  let messages = @daemon.list_raw_commit_messages(work, "@{upstream}..HEAD").unwrap()
+  assert_eq(messages.length(), 2)
+  assert_true(messages[0].has_prefix("feat: c"))
+  assert_true(messages[1].contains("Co-Authored-By"))
+  let mut stripped = 0
+  for message in messages {
+    if @daemon.strip_co_authored_lines(message) != message {
+      stripped = stripped + 1
+    }
+  }
+  assert_eq(stripped, 1)
+  // 重写:消息被剔除、个数不变、上游引用原样、工作区逐字节保持
+  let result = @daemon.rewrite_commit_messages(work, "@{upstream}..HEAD")
+  assert_true(result.ok)
+  assert_true(result.error is None)
+  let after = @daemon.list_raw_commit_messages(work, "@{upstream}..HEAD").unwrap()
+  assert_eq(after.length(), 2)
+  assert_true(after[1].contains("feat: b"))
+  assert_false(after[1].contains("Co-Authored-By"))
+  assert_true(@daemon.count_unpushed_commits(work) == Some(2))
+  assert_eq(@daemon.get_upstream_commit_hash(work), Some(upstream))
+  match @daemon.read_file_at(work, "HEAD", "a.txt") {
+    Bytes(bytes) => assert_eq(@utf8.decode_lossy(bytes), "v1")
+    _ => abort("工作区文件应逐字节保持")
+  }
+}

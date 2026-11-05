@@ -74,6 +74,8 @@ pub async fn handle_git_log(ApiOptions, @mocket.MocketEvent) -> &@mocket.Respond
 
 pub async fn handle_git_push(ApiOptions, @mocket.MocketEvent) -> &@mocket.Responder
 
+pub async fn handle_git_strip_coauthored_unpushed(ApiOptions, @mocket.MocketEvent) -> &@mocket.Responder
+
 pub async fn handle_git_unpushed(ApiOptions, @mocket.MocketEvent) -> &@mocket.Responder
 
 pub async fn handle_list_devices(ApiOptions, @mocket.MocketEvent) -> &@mocket.Responder

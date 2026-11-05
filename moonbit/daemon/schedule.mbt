@@ -232,7 +232,7 @@ fn SessionActor::refresh_schedule(self : SessionActor) -> Unit {
 /// 时段状态巡检(60s 一拍,对齐 Node checkScheduleTransitions):签名变了
 /// = 有目录进出窗口 —— 立即重算状态并补扫,不等下一轮常规节拍。首轮只
 /// 登记基线(ApplySchedule 落地时会即时跑一遍)。
-async fn SessionActor::check_schedule_transitions(self : SessionActor) -> Unit {
+fn SessionActor::check_schedule_transitions(self : SessionActor) -> Unit {
   self.refresh_schedule()
   let mut signature = match self.schedule_override_until {
     Some(until) => if until > now_ms() { "override" } else { "" }

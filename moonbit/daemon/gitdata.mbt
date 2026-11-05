@@ -371,3 +371,122 @@ pub async fn read_file_at(
 pub fn head_read_absent() -> HeadRead {
   Absent
 }
+
+// ==================== 历史重写链(剔除未推送提交的 Co-Authored-By) ====================
+
+///|
+/// 解析当前分支的上游提交哈希(`git rev-parse --verify @{upstream}`)。
+/// None = 未设置上游(远程未配置 / 从未 push / 分支游离)—— 与
+/// count_unpushed_commits 的 None 同为「没有上游范围」口径。
+pub async fn get_upstream_commit_hash(folder : String) -> String? {
+  let (code, out, _) = run_git("git", folder, [
+    "rev-parse", "--verify", "@{upstream}",
+  ]) catch {
+    _ => return None
+  }
+  if code != 0 {
+    return None
+  }
+  let t = out.trim().to_owned()
+  if t == "" {
+    None
+  } else {
+    Some(t)
+  }
+}
+
+///|
+/// 读取一段提交区间里每笔提交的**原始完整消息**(`%B`,新→旧)。
+/// None = git 读取失败(不是仓库 / 区间表达式解析失败);空区间是正常状态,回 []。
+/// 剔除命中统计必须跑在逐字节原文上(%B 自带尾部换行;subject+body 的拼装口径
+/// 做不到这一点,照 Node listRawCommitMessages 的注释)。
+pub async fn list_raw_commit_messages(
+  folder : String,
+  range : String,
+) -> Array[String]? {
+  let (code, out, _) = run_git("git", folder, [
+    "log", "-z", "--no-color", "--no-show-signature", "--format=%B", range,
+  ]) catch {
+    _ => return None
+  }
+  if code != 0 {
+    return None
+  }
+  let records : Array[String] = []
+  for rec in out.split("\u{0}") {
+    records.push(rec.to_owned())
+  }
+  // 只有最后一个 NUL 之后的空尾串该丢;中间的空串是「消息为空的提交」
+  //(罕见但合法),丢掉会让区间计数对不上。
+  if records.length() > 0 && records[records.length() - 1] == "" {
+    let _ = records.pop()
+  }
+  Some(records)
+}
+
+///|
+/// 重写的结果;失败时 error 为 stderr 首行(如 Cannot rewrite branches: ...)。
+pub(all) struct GitRewriteResult {
+  ok : Bool
+  error : String?
+}
+
+///|
+/// git 历史重写的超时封顶(与 push 同档 120s;filter-branch 逐提交跑一次
+/// shell 过滤器,耗时随区间长度线性增长,本地重写通常秒级,卡死的仓库不能
+/// 让请求挂死)。
+pub const GIT_REWRITE_TIMEOUT_MS : Int32 = 120_000
+
+///|
+/// --msg-filter 的 shell 过滤器:与 daemon 侧 strip_co_authored_lines 同一条
+/// 剔除规则的 shell 形态 —— grep 整行剔除(/co-?authored-by/i)+ `git stripspace`
+/// 收尾(与纯函数「剔除后收掉尾部空行」等价);末尾 `|| true` 防 grep 把整条
+/// 消息剔空时退出码 1 中断 filter-branch。只以字面量出现、不含用户输入,经
+/// 参数数组直达 git,无注入面。
+pub const STRIP_CO_AUTHORED_MSG_FILTER : String = "grep -Evi 'co-?authored-by' | git stripspace || true"
+
+///|
+/// 用 `git filter-branch --msg-filter` 重写一段提交区间的提交消息。区间只应传
+/// 未推送范围(如 `@{upstream}..HEAD`)—— 未推送提交尚未出现在上游,可安全重写
+/// (哈希全变);已推送区间的重写会造成与远端的分叉,调用方负责保证这一点。
+///
+/// 实测口径:只重写当前分支(上游引用原样不动,原链备份在 refs/original/,
+/// 失败时仓库自恢复);重写期间**不动工作区**(msg-filter 只重建对象与引用);
+/// 作者时间/作者信息逐笔保留(只有消息走过滤器)。
+pub async fn rewrite_commit_messages(
+  folder : String,
+  range : String,
+) -> GitRewriteResult {
+  let (code, _, err) = @async.with_timeout(GIT_REWRITE_TIMEOUT_MS, () => {
+    @process.collect_output(
+      "git",
+      [
+        "filter-branch",
+        "-f",
+        "--msg-filter",
+        STRIP_CO_AUTHORED_MSG_FILTER,
+        "--",
+        range,
+      ],
+      // 压掉 filter-branch 的弃用大段警告,让 stderr 里剩下的只有进度与真正的错误首行
+      extra_env=Map([("FILTER_BRANCH_SQUELCH_WARNING", "1")]),
+      cwd=folder,
+      no_console_window=true,
+    )
+  }) catch {
+    // 超时被杀:给一句能定位的文案
+    _ =>
+      return {
+        ok: false,
+        error: Some("超时(>\{GIT_REWRITE_TIMEOUT_MS / 1000}s)"),
+      }
+  }
+  if code == 0 {
+    return { ok: true, error: None, }
+  }
+  let line = first_line(err.text() catch { _ => "" })
+  {
+    ok: false,
+    error: Some(if line == "" { "git 历史重写失败" } else { line }),
+  }
+}

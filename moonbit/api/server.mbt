@@ -707,6 +707,9 @@ pub fn build_app(options : ApiOptions) -> @mocket.App {
     handle_git_unpushed(options, event)
   })
   app.post("/api/folders/git-push", event => handle_git_push(options, event))
+  app.post("/api/folders/git-strip-coauthored-unpushed", event => {
+    handle_git_strip_coauthored_unpushed(options, event)
+  })
   // 文件版本(时间机器)与回收站操作面:列表/恢复/删除/预览 + 列表/还原/
   // 清理(对齐 Node /api/folders/versions* 与 /api/trash*;详见 versions.mbt)
   app.get("/api/folders/versions", event => {
