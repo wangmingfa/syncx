@@ -56,6 +56,24 @@ describe('createUpdateChecker', () => {
     expect(checker.available()).toBeUndefined();
   });
 
+  it('时间戳构建不被 npm 同基数正式版判成落后(剥预发布口径)', async () => {
+    const checker = createUpdateChecker('0.4.1-20261105.1133', {
+      fetchImpl: mockFetch({ version: '0.4.1', dist: { tarball: 'https://r/x.tgz' } }),
+    });
+
+    await checker.check();
+    expect(checker.available()).toBeUndefined();
+  });
+
+  it('时间戳构建在基数演进后照常提示(0.4.1-ts → 0.4.2)', async () => {
+    const checker = createUpdateChecker('0.4.1-20261105.1133', {
+      fetchImpl: mockFetch({ version: '0.4.2', dist: { tarball: 'https://r/x.tgz' } }),
+    });
+
+    await checker.check();
+    expect(checker.available()).toMatchObject({ latest: '0.4.2' });
+  });
+
   it('keeps silent on fetch failure and stays available-free', async () => {
     const failing = vi.fn(async () => {
       throw new Error('offline');

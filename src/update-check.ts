@@ -1,9 +1,12 @@
-import { compareVersions } from './upgrade.js';
+import { compareVersions, stripPrerelease } from './upgrade.js';
 
 /**
  * npm 更新检查:daemon 运行期间定时查询 registry 的 latest dist-tag,
  * 发现更高版本时经 status.updateAvailable 下发,Web UI 弹升级提示。
  * 仅查询元数据与下载 tgz,不调用 npm CLI(避免 Windows npm.cmd 的 shell 依赖)。
+ * 新旧判定剥预发布后缀(见 upgrade.ts stripPrerelease):pack:local 的时间戳
+ * 构建(0.4.1-20261105.1133)不因 semver「预发布 < 正式版」被 npm 上的同基数
+ * 正式版判成落后 —— 那会让顶栏常挂「发现新版本 0.4.1」横幅。基数演进才提示。
  */
 
 const REGISTRY_LATEST_URL = 'https://registry.npmjs.org/@wangmingfa%2Fsyncx/latest';
@@ -90,7 +93,7 @@ export function createUpdateChecker(currentVersion: string, opts: { fetchImpl?: 
     },
     available(): UpdateInfo | undefined {
       if (!last) return undefined;
-      return compareVersions(currentVersion, last.latest) < 0 ? last : undefined;
+      return compareVersions(stripPrerelease(currentVersion), stripPrerelease(last.latest)) < 0 ? last : undefined;
     },
   };
 }
