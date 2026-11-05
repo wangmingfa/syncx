@@ -291,8 +291,7 @@ async test "POST /api/devices:400 校验、201 登记、幂等、地址登记口
   assert_eq(idempotent.known_devices.length(), 1)
   // 非法 address(缺 ws:// 前缀):响应仍 201,peers 不变
   let response = @mocket.dispatch_http(
-    app, "POST", "/api/devices", headers,
-    b"{\"deviceId\":\"DEV3\",\"address\":\"10.0.0.9:22000\"}",
+    app, "POST", "/api/devices", headers, b"{\"deviceId\":\"DEV3\",\"address\":\"10.0.0.9:22000\"}",
   )
   assert_eq(response.status_code.to_int(), 201)
   let no_peer = @api.load_config("\{dir}/config.json")
@@ -300,16 +299,14 @@ async test "POST /api/devices:400 校验、201 登记、幂等、地址登记口
   assert_eq(no_peer.peers.length(), 0)
   // 合法 ws:// address:落进 peers,且 ::ffff: 前缀被规范化剥离
   let response = @mocket.dispatch_http(
-    app, "POST", "/api/devices", headers,
-    b"{\"deviceId\":\"DEV3\",\"address\":\"ws://[::ffff:10.0.0.9]:22000\"}",
+    app, "POST", "/api/devices", headers, b"{\"deviceId\":\"DEV3\",\"address\":\"ws://[::ffff:10.0.0.9]:22000\"}",
   )
   assert_eq(response.status_code.to_int(), 201)
   let with_peer = @api.load_config("\{dir}/config.json")
   assert_eq(with_peer.peers, ["ws://10.0.0.9:22000"])
   // 再登记同地址(大小写不敏感前缀 + host 小写):幂等,peers 不重复
   let response = @mocket.dispatch_http(
-    app, "POST", "/api/devices", headers,
-    b"{\"deviceId\":\"DEV4\",\"address\":\"WS://10.0.0.9:22000\"}",
+    app, "POST", "/api/devices", headers, b"{\"deviceId\":\"DEV4\",\"address\":\"WS://10.0.0.9:22000\"}",
   )
   assert_eq(response.status_code.to_int(), 201)
   let deduped = @api.load_config("\{dir}/config.json")
@@ -335,7 +332,9 @@ async test "DELETE /api/devices:knownDevices 与目录 devices 联动摘除,幂�
     "Cookie": "syncx_session=\{ticket}",
   }
   // 缺参 → 400 + Node 同款文案
-  let response = @mocket.dispatch_http(app, "DELETE", "/api/devices", headers, b"")
+  let response = @mocket.dispatch_http(
+    app, "DELETE", "/api/devices", headers, b"",
+  )
   assert_eq(response.status_code.to_int(), 400)
   let body : Json = response.read_body()
   match body {
@@ -512,4 +511,133 @@ async test "POST /api/folders/git-strip-co-authored:开/关落盘与 400 校验"
       assert_true(obj.get("error") is Some(String("on must be a boolean")))
     _ => fail("响应应为对象")
   }
+}
+
+///|
+async test "POST /api/folders/schedule:旧字符串归一化落盘,null 清除,400 校验" {
+  let dir = test_config_dir("folderschedule")
+  let app = @api.build_app(options_with("folderschedule", dir))
+  let secret = @api.session_secret("test-token")
+  let ticket = @api.sign_session(
+    { via: "token", sub: "token", exp: @api.now_ms() + 60_000L, },
+    secret,
+  )
+  let headers : Map[@http.CaseInsensitiveString, StringView] = {
+    "Cookie": "syncx_session=\{ticket}",
+  }
+  // 先建一个目录
+  let response = @mocket.dispatch_http(
+    app, "POST", "/api/folders", headers, b"{\"path\":\"/tmp/syncx-mb-api-sched\"}",
+  )
+  assert_eq(response.status_code.to_int(), 201)
+  // 旧 HH:MM-HH:MM 字符串 → 归一化数组形态落盘(与 Node 同款);
+  // folderId 用自动生成的 id(与 Node folderIdFor:f.id ?? f.path 同口径)
+  let saved0 = @api.load_config("\{dir}/config.json")
+  let folder_id = saved0.shared_folders[0].id.unwrap()
+  let response = @mocket.dispatch_http(
+    app,
+    "POST",
+    "/api/folders/schedule",
+    headers,
+    @utf8.encode(
+      "{\"folderId\":\"" + folder_id + "\",\"schedule\":\"22:00-08:00\"}",
+    ),
+  )
+  assert_eq(response.status_code.to_int(), 200)
+  let saved = @api.load_config("\{dir}/config.json")
+  let folder = saved.shared_folders[0]
+  match folder.schedule {
+    Some(Array(rules)) => assert_eq(rules.length(), 1)
+    _ => fail("schedule 应为归一化数组")
+  }
+  // null = 清除
+  let response = @mocket.dispatch_http(
+    app,
+    "POST",
+    "/api/folders/schedule",
+    headers,
+    @utf8.encode("{\"folderId\":\"" + folder_id + "\",\"schedule\":null}"),
+  )
+  assert_eq(response.status_code.to_int(), 200)
+  let saved = @api.load_config("\{dir}/config.json")
+  assert_true(saved.shared_folders[0].schedule is None)
+  // 类型不合法:400
+  let response = @mocket.dispatch_http(
+    app,
+    "POST",
+    "/api/folders/schedule",
+    headers,
+    @utf8.encode("{\"folderId\":\"" + folder_id + "\",\"schedule\":true}"),
+  )
+  assert_eq(response.status_code.to_int(), 400)
+  // 目录不存在:400(与 Node「未找到共享目录」同文案口径)
+  let response = @mocket.dispatch_http(
+    app, "POST", "/api/folders/schedule", headers, b"{\"folderId\":\"nope\",\"schedule\":\"09:00-18:00\"}",
+  )
+  assert_eq(response.status_code.to_int(), 400)
+}
+
+///|
+async test "POST /api/schedule/override:落盘到期时刻,minutes<=0 取消" {
+  let dir = test_config_dir("schedoverride")
+  let app = @api.build_app(options_with("schedoverride", dir))
+  let secret = @api.session_secret("test-token")
+  let ticket = @api.sign_session(
+    { via: "token", sub: "token", exp: @api.now_ms() + 60_000L, },
+    secret,
+  )
+  let headers : Map[@http.CaseInsensitiveString, StringView] = {
+    "Cookie": "syncx_session=\{ticket}",
+  }
+  // 放行 30 分钟:回包带 until,落盘同一时刻
+  let before = @api.now_ms()
+  let response = @mocket.dispatch_http(
+    app, "POST", "/api/schedule/override", headers, b"{\"minutes\":30}",
+  )
+  assert_eq(response.status_code.to_int(), 200)
+  let body : Json = response.read_body()
+  let until : Int64 = match body {
+    Object(obj) =>
+      match obj.get("until") {
+        Some(Number(n, ..)) => n.to_int64()
+        _ => fail("应带 until")
+      }
+    _ => fail("响应应为对象")
+  }
+  assert_true(until > before)
+  assert_true(until - before <= 31 * 60_000L)
+  let saved = @api.load_config("\{dir}/config.json")
+  assert_eq(saved.schedule_override_until, Some(until))
+  // 上限 24 小时:minutes 超限截断
+  let response = @mocket.dispatch_http(
+    app, "POST", "/api/schedule/override", headers, b"{\"minutes\":99999}",
+  )
+  assert_eq(response.status_code.to_int(), 200)
+  let body : Json = response.read_body()
+  let capped : Int64 = match body {
+    Object(obj) =>
+      match obj.get("until") {
+        Some(Number(n, ..)) => n.to_int64()
+        _ => fail("应带 until")
+      }
+    _ => fail("响应应为对象")
+  }
+  assert_true(capped - @api.now_ms() <= 24 * 60 * 60_000L)
+  // minutes <= 0:取消(回包不带 until,落盘清零)
+  let response = @mocket.dispatch_http(
+    app, "POST", "/api/schedule/override", headers, b"{\"minutes\":0}",
+  )
+  assert_eq(response.status_code.to_int(), 200)
+  let body : Json = response.read_body()
+  match body {
+    Object(obj) => assert_true(obj.get("until") is None)
+    _ => fail("响应应为对象")
+  }
+  let saved = @api.load_config("\{dir}/config.json")
+  assert_true(saved.schedule_override_until is None)
+  // 非数字:400
+  let response = @mocket.dispatch_http(
+    app, "POST", "/api/schedule/override", headers, b"{\"minutes\":\"soon\"}",
+  )
+  assert_eq(response.status_code.to_int(), 400)
 }

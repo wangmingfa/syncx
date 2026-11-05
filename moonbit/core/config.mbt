@@ -26,9 +26,9 @@ pub(all) struct SharedFolder {
   /// instanceId;索引寿命 = 目录实例寿命,目录重加必须开全新空库
   instance_id : String?
   mut paused : Bool?
-  /// 时段规则;core 层只透传不解释,判定在 daemon(与 Node/Rust 的 normalize
-  /// 行为对齐的时机在 daemon 里程碑)
-  schedule : Json?
+  /// 时段规则;core 层只透传不解释,判定在 daemon(API 设置时段时落归一化
+  /// 后的形态,mut 供写路由就地更新,与 paused 同款)
+  mut schedule : Json?
   /// gitSync
   git_sync : String?
   /// conflictPolicy
@@ -173,8 +173,9 @@ pub(all) struct Config {
   mut battery_pause_threshold : Int32?
   /// syncSchedule(透传,同 SharedFolder.schedule)
   mut sync_schedule : Json?
-  /// scheduleOverrideUntil
-  mut schedule_override_until : Int32?
+  /// scheduleOverrideUntil(epoch 毫秒;Int32 装不下 2^31 ms ≈ 24.8 天之外的
+  /// 时间戳,毫秒时间戳必须 Int64)
+  mut schedule_override_until : Int64?
   /// holidayAutoFetch
   mut holiday_auto_fetch : Bool?
   /// holidaySourceUrl
@@ -389,6 +390,15 @@ fn int_of(v : Json?) -> Int32? {
   }
 }
 
+///|
+/// 毫秒时间戳清洗(epoch ms 超出 Int32;只认正数,0/负数 = 缺省)。
+fn int64_of(v : Json?) -> Int64? {
+  match v {
+    Some(Number(n, ..)) => if n < 0.0 { None } else { Some(n.to_int64()) }
+    _ => None
+  }
+}
+
 // ---- 解析 --------------------------------------------------------------
 
 ///|
@@ -474,11 +484,7 @@ fn parse_config_object(obj : Map[String, Json]) -> Config {
     take(obj, "batteryPauseThreshold"),
   )
   config.sync_schedule = take(obj, "syncSchedule")
-  config.schedule_override_until = match
-    int_of(take(obj, "scheduleOverrideUntil")) {
-    Some(n) => if n > 0 { Some(n) } else { None }
-    None => None
-  }
+  config.schedule_override_until = int64_of(take(obj, "scheduleOverrideUntil"))
   config.holiday_source_url = match take(obj, "holidaySourceUrl") {
     Some(String(s)) =>
       if s.contains("{year}") && s.char_length() <= 300 {
@@ -782,6 +788,14 @@ fn set_int(map : Map[String, Json], key : String, v : Int32?) -> Unit {
 }
 
 ///|
+fn set_int64(map : Map[String, Json], key : String, v : Int64?) -> Unit {
+  match v {
+    Some(n) => map.set(key, Json::number(n.to_double()))
+    None => ()
+  }
+}
+
+///|
 fn set_string_array(
   map : Map[String, Json],
   key : String,
@@ -924,7 +938,7 @@ pub fn Config::to_json(self : Config) -> Json {
   set_bool(map, "pauseOnLowBattery", self.pause_on_low_battery)
   set_int(map, "batteryPauseThreshold", self.battery_pause_threshold)
   set_json(map, "syncSchedule", self.sync_schedule)
-  set_int(map, "scheduleOverrideUntil", self.schedule_override_until)
+  set_int64(map, "scheduleOverrideUntil", self.schedule_override_until)
   set_bool(map, "holidayAutoFetch", self.holiday_auto_fetch)
   set_string(map, "holidaySourceUrl", self.holiday_source_url)
   set_bool(map, "fsWatchEnabled", self.fs_watch_enabled)
@@ -1025,7 +1039,7 @@ pub fn Config::add_known_device(self : Config, device_id : String) -> Bool {
       return false
     }
   }
-  self.known_devices.push({ id: device_id, name: None, extra: Map([]) })
+  self.known_devices.push({ id: device_id, name: None, extra: Map([]), })
   true
 }
 
@@ -1059,7 +1073,7 @@ pub fn Config::remove_known_device(self : Config, device_id : String) -> Bool {
     }
     if hit {
       changed = true
-      self.shared_folders[i] = { ..folder, devices }
+      self.shared_folders[i] = { ..folder, devices, }
     }
   }
   changed

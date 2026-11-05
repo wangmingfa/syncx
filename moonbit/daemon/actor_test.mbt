@@ -71,6 +71,7 @@ async fn actor_make_spec(
     // actor 单测不覆盖 git 镜像路径,一律按 off 装配(检测/镜像全关)。
     git_sync: @daemon.GitSyncMode::Off,
     git_strip_co_authored: false,
+    schedule: None,
   }
 }
 

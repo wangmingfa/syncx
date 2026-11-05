@@ -40,6 +40,13 @@ const GIT_CHECK_TICKS : Int32 = 10
 const GIT_BADGE_TICKS : Int32 = 60
 
 ///|
+/// 时段状态巡检的节拍数(周期泵 500ms 一拍 × 120 = 60s):对齐 Node
+/// checkScheduleTransitions 的 60s 巡检 —— 边界到点后最多 60s 内翻转生效;
+/// 精确唤醒不再单独挂(远端 Linux 实测 spawn 定时器不可靠,60s 兜底已足,
+/// 见 Node armScheduleWake 的注释)。
+const SCHEDULE_TICKS : Int32 = 120
+
+///|
 /// 初始交换兜底全量的时限:指纹发出去 2s 内没有任何应答(指纹/ack/请求)
 /// 就不再干等,主动补发本机全量(对齐 Rust `INITIAL_INDEX_FALLBACK_MS`)。
 const INITIAL_INDEX_FALLBACK_MS : Int64 = 2000L
@@ -133,6 +140,11 @@ pub(all) enum Cmd {
   /// 周期泵:处理到期的块重试、租约衰减与限速重放。驱动层接 WS 后由
   /// 定时任务自动投递;测试可注入时钟快进(语义对齐 Rust `poll_timeouts`)。
   PollTimeouts(now~ : Int64)
+  /// 同步时段上下文:全局规则 + 临时放行到期时刻(epoch ms,None = 无)。
+  /// 装配层在启动与每次配置热重载后投递;override 路由设置/取消放行时也投,
+  /// actor 即时重算横幅并在需要时补扫(对应 Node 的 applyPausedState +
+  /// runScan 链路)。
+  ApplySchedule(sync_schedule~ : @core.Schedule?, override_until~ : Int64?)
   /// 驱动层回账:一帧块响应已写进 socket,释放发送窗口额度并重放延迟队列。
   /// 未接线前的额度兜底靠 `decay_serve_lease` 衰减,不会永久卡死。
   BlockSent(folder~ : String, remote_device_id~ : String, bytes~ : Int32)
@@ -175,6 +187,34 @@ pub(all) struct FolderStatus {
 }
 
 ///|
+/// 单目录此刻的时段结论(对应 Node `ScheduleState`;JSON 折算在 api 包)。
+pub(all) struct ScheduleStateRow {
+  id : String
+  inside : Bool
+  /// 放行中:此刻无视全部时段约束。
+  overridden : Bool
+  /// "global" / "folder";None = 没被挡。
+  blocked_by : String?
+  /// 下一次可能翻转的时刻(epoch ms);None = 无约束。
+  next_change_at : Int64?
+  /// 规则的界面摘要(「工作日 09:00–23:00」),后端算好下发。
+  summary : String
+}
+
+///|
+/// 顶部横幅状态(对应 Node `ScheduleBanner`):是否该提示「当前不在同步
+/// 时段内」+ 什么时候自动恢复。
+pub(all) struct ScheduleBannerRow {
+  visible : Bool
+  /// 因时段而被挡住的目录数。
+  blocked_by_schedule : Int32
+  /// 目录总数。
+  total : Int32
+  next_change_at : Int64?
+  override_until : Int64?
+}
+
+///|
 /// 全局只读状态快照(对应 Rust `StatusSnapshot`)。progress / traffic 是
 /// status 数据面字段(syncProgress / traffic 的结构化形态,JSON 折算在 api
 /// 包),随 publish 每条命令后刷新 —— 聚合只遍历会话内存表,空闲时近乎零开销。
@@ -186,6 +226,10 @@ pub(all) struct StatusSnapshot {
   progress : Array[SyncProgress]
   /// 传输字节账本快照(累计 + 已完成窗口采样;见 traffic.mbt)。
   traffic : TrafficStats
+  /// 各目录此刻的时段结论(时段子系统;见 refresh_schedule)。
+  schedule_states : Array[ScheduleStateRow]
+  /// 顶部横幅状态。
+  schedule_banner : ScheduleBannerRow?
 }
 
 ///|
@@ -215,6 +259,8 @@ pub(all) struct FolderSpec {
   git_sync : GitSyncMode
   /// gitStripCoAuthored:镜像提交时剔除 Co-Authored-By 尾注行。
   git_strip_co_authored : Bool
+  /// 同步时段规则(装配层经 core.normalize_schedule 折算;None = 不设限)。
+  schedule : @core.Schedule?
 }
 
 ///|
@@ -312,6 +358,8 @@ priv struct Folder {
   mut git_sync : GitSyncMode
   /// 本地提交检测观察器(基线结算在 watcher 内部;首轮只记基线)。
   git_watcher : GitWatcher
+  /// 同步时段规则(None = 不设限;热重载就地更新,见 do_reconfigure)。
+  mut schedule : @core.Schedule?
 }
 
 ///|
@@ -332,6 +380,21 @@ pub struct SessionActor {
   /// 全局传输字节账本(累计 + 采样环;重启清零):发送在 serve_block 落账、
   /// 接收在 on_block_response 落账,快照随 publish 刷新(见 traffic.mbt)。
   priv traffic : TrafficLedger
+  /// ===== 同步时段子系统(对齐 Node scheduleVerdictFor 一族)=====
+  /// 全局同步时段(config.syncSchedule 的折算结果;ApplySchedule 注入)。
+  priv mut sync_schedule : @core.Schedule?
+  /// 临时放行到期时刻(epoch ms;None = 无放行)。
+  priv mut schedule_override_until : Int64?
+  /// 时段状态签名(见 check_schedule_transitions;"" = 尚未登记基线)。
+  priv mut schedule_signature : String
+  /// 时段巡检节拍计数(见 SCHEDULE_TICKS;周期泵每 500ms 一拍)。
+  priv mut schedule_tick : Int32
+  /// 本机时区(懒加载一次;解析失败退 UTC,判定永不锁死)。
+  priv mut local_zone : @time.Zone?
+  /// 最近一次刷新的时段状态行与横幅(随 Snapshot/poll 刷新,publish 直读;
+  /// 与 Node「判定只在后端做一份,前端只渲染」同口径)。
+  priv mut schedule_rows : Array[ScheduleStateRow]
+  priv mut schedule_banner : ScheduleBannerRow?
 }
 
 ///|
@@ -412,6 +475,7 @@ fn make_folder(spec : FolderSpec) -> Folder raise IndexStoreError {
     limiter: make_rate_limiter(spec.max_bandwidth_kbps),
     git_sync: spec.git_sync,
     git_watcher: { root: spec.root, mode: spec.git_sync, last_hash: None, },
+    schedule: spec.schedule,
   }
 }
 
@@ -438,12 +502,21 @@ pub fn new_session_actor(
         total_tombstones: 0L,
         progress: [],
         traffic: TrafficLedger::new(now).snapshot(now),
+        schedule_states: [],
+        schedule_banner: None,
       },
     },
     git_tick: 0,
     badge_tick: 0,
     on_git_notify,
     traffic: TrafficLedger::new(now),
+    sync_schedule: None,
+    schedule_override_until: None,
+    schedule_signature: "",
+    schedule_tick: 0,
+    local_zone: None,
+    schedule_rows: [],
+    schedule_banner: None,
   }
   actor.publish()
   actor
@@ -528,12 +601,23 @@ async fn SessionActor::dispatch(self : SessionActor, cmd : Cmd) -> Bool {
     PeerClose(folder~, remote_device_id~) =>
       self.do_peer_close(folder, remote_device_id)
     Snapshot(reply~) => {
+      // 状态读取时现算时段结论:横幅/徽标的判定要贴近响应时刻(与 Node
+      // scheduleStates(now) 同口径;纯内存计算,单次开销可忽略)
+      self.refresh_schedule()
+      self.publish()
       let _ : Bool = reply.try_put(self.cell.snapshot()) catch { _ => false }
     }
     EntryLookup(folder~, paths~, reply~) =>
       self.do_entry_lookup(folder, paths, reply)
     DrainEvents(folder~, reply~) => self.do_drain_events(folder, reply)
     PollTimeouts(now~) => self.do_poll_timeouts(now)
+    ApplySchedule(sync_schedule~, override_until~) => {
+      self.sync_schedule = sync_schedule
+      self.schedule_override_until = override_until
+      // 即时生效:重算状态 + 签名对比触发补扫(放行设置/取消、全局时段
+      // 改动都在这条路上落到运行态)
+      self.check_schedule_transitions()
+    }
     BlockSent(folder~, remote_device_id~, bytes~) =>
       self.do_block_sent(folder, remote_device_id, bytes)
   }
@@ -590,6 +674,12 @@ async fn SessionActor::do_scan(
   }
   if folder.paused {
     return // 暂停(目录级):数据面整体停摆
+  }
+  // 时段闸(全局 ∩ 目录的交集判定,临时放行期间一律窗口内):窗口外与暂停
+  // 同款停摆 —— 扫描不跑,本机改动不被发现也就不会被广播;边界翻转由
+  // check_schedule_transitions 补扫(对齐 Node folderPausedNow 的时段分支)
+  if !self.schedule_verdict_now(folder).inside {
+    return
   }
   // 嵌套共享根 = 其余目录的归一化绝对根(交由那些共享自己管理)
   let nested : Array[String] = []
@@ -807,6 +897,7 @@ async fn SessionActor::do_reconfigure(
           folder.limiter = make_rate_limiter(spec.max_bandwidth_kbps)
           folder.git_sync = spec.git_sync
           folder.git_watcher.mode = spec.git_sync
+          folder.schedule = spec.schedule
           rebuilt.push(folder)
         } else {
           // 换根:删 + 建
@@ -987,6 +1078,13 @@ async fn SessionActor::do_poll_timeouts(
   if self.badge_tick >= GIT_BADGE_TICKS {
     self.badge_tick = 0
     self.refresh_git_badges()
+  }
+  // 时段巡检独立 60s 一拍(见 SCHEDULE_TICKS):边界到点后最多 60s 内翻转
+  // 生效并补扫;判定纯内存,Snapshot 每次也会现算最新状态。
+  self.schedule_tick = self.schedule_tick + 1
+  if self.schedule_tick >= SCHEDULE_TICKS {
+    self.schedule_tick = 0
+    self.check_schedule_transitions()
   }
 }
 
@@ -2094,6 +2192,8 @@ fn SessionActor::publish(self : SessionActor) -> Unit {
     total_tombstones,
     progress,
     traffic: self.traffic.snapshot(now),
+    schedule_states: self.schedule_rows,
+    schedule_banner: self.schedule_banner,
   }
 }
 

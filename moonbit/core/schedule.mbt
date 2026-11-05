@@ -676,3 +676,67 @@ fn join_strings(parts : Array[String], sep : String) -> String {
   }
   buf.to_string()
 }
+
+///|
+/// 归一化后的规则数组 → 配置 JSON 形态(与 Node `normalizeSchedule` 落盘的
+/// 对象逐字同形:`{days:{kind,days?},windows:[{from,to}]}`)。None = 不设限。
+/// 时段配置的持久化只走这里:API 写入什么形态,读回来就是同一份判定结果。
+pub fn schedule_to_json(schedule : Array[ScheduleRule]?) -> Json? {
+  match schedule {
+    None => None
+    Some(rules) => {
+      let out : Array[Json] = []
+      for rule in rules {
+        let days : Map[String, Json] = Map([])
+        match rule.days {
+          Any => days.set("kind", Json::string("any"))
+          Workday => days.set("kind", Json::string("workday"))
+          Offday => days.set("kind", Json::string("offday"))
+          Dow(list) => {
+            days.set("kind", Json::string("dow"))
+            let arr : Array[Json] = []
+            for d in list {
+              arr.push(Json::number(d.to_double()))
+            }
+            days.set("days", Json::array(arr))
+          }
+        }
+        let windows : Array[Json] = []
+        for w in rule.windows {
+          let wm : Map[String, Json] = Map([])
+          wm.set("from", Json::number(w.from.to_double()))
+          wm.set("to", Json::number(w.to.to_double()))
+          windows.push(Json::object(wm))
+        }
+        let rm : Map[String, Json] = Map([])
+        rm.set("days", Json::object(days))
+        rm.set("windows", Json::array(windows))
+        out.push(Json::object(rm))
+      }
+      Some(Json::array(out))
+    }
+  }
+}
+
+///|
+/// 「工作日」的退化口径:周一~周五(与 Node `isWeekdayByClock` 同语义)。
+/// MoonBit 后端尚未接节假日日历(清单项),判注入这份退化实现 —— 语义与
+/// 「无日历数据」完全一致:绝不为拉不到日历把目录锁死。
+pub fn weekday_workday_fallback(
+  year : Int32,
+  month : Int32,
+  day : Int32,
+) -> Bool {
+  let dow = CivilMoment::new(year, month, day, 0).day_of_week()
+  dow >= 1 && dow <= 5
+}
+
+///|
+/// `Json?` 版归一化(字段缺省/清除 → 不设限):config 模型里的时段字段是
+/// 透传 Json?,判定与落盘前都要过这一步。
+pub fn normalize_schedule_opt(raw : Json?) -> Schedule? {
+  match raw {
+    Some(j) => normalize_schedule(j)
+    None => None
+  }
+}

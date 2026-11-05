@@ -13,6 +13,7 @@ import {
   "moonbitlang/core/buffer",
   "moonbitlang/core/debug",
   "moonbitlang/core/encoding/base64",
+  "moonbitlang/x/time",
 }
 
 import {

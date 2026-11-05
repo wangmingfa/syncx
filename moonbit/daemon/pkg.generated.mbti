@@ -205,6 +205,7 @@ pub(all) enum Cmd {
   EntryLookup(folder~ : String, paths~ : Array[String], reply~ : @aqueue.Queue[Array[Entry]])
   DrainEvents(folder~ : String, reply~ : @aqueue.Queue[Array[SyncEventRecord]])
   PollTimeouts(now~ : Int64)
+  ApplySchedule(sync_schedule~ : Array[@core.ScheduleRule]?, override_until~ : Int64?)
   BlockSent(folder~ : String, remote_device_id~ : String, bytes~ : Int32)
   Shutdown
 }
@@ -265,6 +266,7 @@ pub(all) struct FolderSpec {
   max_bandwidth_kbps : Int32?
   git_sync : GitSyncMode
   git_strip_co_authored : Bool
+  schedule : Array[@core.ScheduleRule]?
 }
 
 pub(all) struct FolderStatus {
@@ -426,6 +428,23 @@ pub(all) struct ScanDiff {
   conflict_count : Int32
 }
 
+pub(all) struct ScheduleBannerRow {
+  visible : Bool
+  blocked_by_schedule : Int32
+  total : Int32
+  next_change_at : Int64?
+  override_until : Int64?
+}
+
+pub(all) struct ScheduleStateRow {
+  id : String
+  inside : Bool
+  overridden : Bool
+  blocked_by : String?
+  next_change_at : Int64?
+  summary : String
+}
+
 pub struct SessionActor {
   // private fields
 }
@@ -455,6 +474,8 @@ pub(all) struct StatusSnapshot {
   total_tombstones : Int64
   progress : Array[SyncProgress]
   traffic : TrafficStats
+  schedule_states : Array[ScheduleStateRow]
+  schedule_banner : ScheduleBannerRow?
 }
 
 pub(all) struct SyncEventRecord {

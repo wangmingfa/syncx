@@ -348,6 +348,49 @@ pub fn status_json(options : ApiOptions) -> Json {
       }
       map.set("gitChangeCounts", Json::object(git_changes))
       map.set("gitUnpushedCounts", Json::object(git_unpushed))
+      // 同步时段:目录结论(键 = 目录 id)+ 顶部横幅。判定在 actor 现算
+      // (Snapshot 时刷新),前端只渲染 —— 不再各留一份判定实现。
+      let schedule_states : Map[String, Json] = Map([])
+      for row in snapshot.schedule_states {
+        let item : Map[String, Json] = Map([])
+        item.set("inside", Json::boolean(row.inside))
+        if row.overridden {
+          item.set("overridden", Json::boolean(true))
+        }
+        match row.blocked_by {
+          Some(b) => item.set("blockedBy", Json::string(b))
+          None => ()
+        }
+        match row.next_change_at {
+          Some(at) => item.set("nextChangeAt", Json::number(at.to_double()))
+          None => ()
+        }
+        item.set("summary", Json::string(row.summary))
+        schedule_states.set(row.id, Json::object(item))
+      }
+      map.set("scheduleStates", Json::object(schedule_states))
+      match snapshot.schedule_banner {
+        Some(banner) => {
+          let item : Map[String, Json] = Map([])
+          item.set("visible", Json::boolean(banner.visible))
+          item.set(
+            "blockedBySchedule",
+            Json::number(banner.blocked_by_schedule.to_double()),
+          )
+          item.set("total", Json::number(banner.total.to_double()))
+          match banner.next_change_at {
+            Some(at) => item.set("nextChangeAt", Json::number(at.to_double()))
+            None => ()
+          }
+          match banner.override_until {
+            Some(until) =>
+              item.set("overrideUntil", Json::number(until.to_double()))
+            None => ()
+          }
+          map.set("scheduleBanner", Json::object(item))
+        }
+        None => ()
+      }
     }
     None => ()
   }
@@ -639,6 +682,12 @@ pub fn build_app(options : ApiOptions) -> @mocket.App {
   app.get("/api/folders", event => handle_list_folders(options, event))
   app.post("/api/folders", event => handle_add_folder(options, event))
   app.post("/api/pause", event => handle_pause(options, event))
+  app.post("/api/folders/schedule", event => {
+    handle_folder_schedule(options, event)
+  })
+  app.post("/api/schedule/override", event => {
+    handle_schedule_override(options, event)
+  })
   app.post("/api/folders/git-strip-co-authored", event => {
     handle_folder_git_strip_co_authored(options, event)
   })

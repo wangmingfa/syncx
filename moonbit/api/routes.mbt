@@ -25,14 +25,11 @@ fn json_error(
   status : @mocket.StatusCode,
   message : String,
 ) -> &Responder {
-  @log.warn(
-    "API 失败 {Path} {Status}: {Message}",
-    [
-      Json::string(event.req.url),
-      Json::number(status.to_int().to_double()),
-      Json::string(message),
-    ],
-  )
+  @log.warn("API 失败 {Path} {Status}: {Message}", [
+    Json::string(event.req.url),
+    Json::number(status.to_int().to_double()),
+    Json::string(message),
+  ])
   let map : Map[String, Json] = Map([])
   map.set("error", Json::string(message))
   @mocket.HttpResponse(status).json(Json::object(map))
@@ -161,7 +158,8 @@ pub async fn handle_add_folder(
     if !@fs.exists(path) {
       @fs.mkdir(path, recursive=true, allow_exist=true) catch {
         _ =>
-          return json_error(event,
+          return json_error(
+            event,
             @mocket.BadRequest,
             "创建目录失败(目录为空?路径正确?)",
           )
@@ -241,7 +239,8 @@ pub async fn handle_folder_git_strip_co_authored(
     }
   }
   if target < 0 {
-    return json_error(event,
+    return json_error(
+      event,
       @mocket.BadRequest,
       "未找到共享目录:「\{folder_id}」",
     )
@@ -370,7 +369,8 @@ pub async fn handle_shutdown(
   event : @mocket.MocketEvent,
 ) -> &Responder {
   match options.on_shutdown {
-    None => json_error(event, @mocket.ServiceUnavailable, "shutdown not available")
+    None =>
+      json_error(event, @mocket.ServiceUnavailable, "shutdown not available")
     Some(shutdown) => {
       // body 不参与本路由,显式丢弃(见 drain_body 注释)
       drain_body(event)
@@ -383,4 +383,118 @@ pub async fn handle_shutdown(
       @mocket.HttpResponse(@mocket.OK).json(Json::object(map))
     }
   }
+}
+
+///|
+/// POST /api/folders/schedule { folderId, schedule }:设置某目录的同步时段。
+/// schedule 是规则数组(见 core/schedule.mbt),兼容旧的 `HH:MM-HH:MM` 字符串;
+/// null/缺省 = 清除(全天同步)。落盘归一化后的形态(与 Node setFolderSchedule
+/// 同款):结构不合法的片段被丢弃并整体回退「不设限」—— 时段是节流手段,
+/// 坏数据绝不把目录锁死。
+pub async fn handle_folder_schedule(
+  options : ApiOptions,
+  event : @mocket.MocketEvent,
+) -> &Responder {
+  let body = match parse_json_body(event) {
+    Some(body) => body
+    None => return json_error(event, @mocket.BadRequest, "invalid json body")
+  }
+  let obj = match body {
+    Object(obj) => obj
+    _ => return json_error(event, @mocket.BadRequest, "invalid json body")
+  }
+  let folder_id = match non_empty_string(obj, "folderId") {
+    Some(id) => id
+    None => return json_error(event, @mocket.BadRequest, "folderId is required")
+  }
+  // 类型只认 规则数组 / 旧字符串 / null(缺省同 null = 清除),其余 400
+  let raw : Json? = obj.get("schedule")
+  match raw {
+    None => ()
+    Some(Null) => ()
+    Some(String(_)) | Some(Array(_)) => ()
+    Some(_) =>
+      return json_error(
+        event,
+        @mocket.BadRequest,
+        "schedule must be a rule array (or legacy \"HH:MM-HH:MM\" string), null to clear",
+      )
+  }
+  let config = load_config(options.config_file)
+  // 按 folderId 定位(id 缺省回退 path,与 Node folderIdFor 同口径)
+  let normalized = match raw {
+    Some(j) => @core.normalize_schedule(j)
+    None => None
+  }
+  let mut found = false
+  for folder in config.shared_folders {
+    if folder.folder_id() == folder_id {
+      folder.schedule = @core.schedule_to_json(normalized)
+      found = true
+    }
+  }
+  if !found {
+    return json_error(
+      event,
+      @mocket.BadRequest,
+      "未找到共享目录:「\{folder_id}」",
+    )
+  }
+  save_config(options.config_file, config) catch {
+    _ =>
+      return json_error(event, @mocket.BadRequest, "设置同步时段失败")
+  }
+  // 配置热重载:actor 就地更新该目录的时段(扫描闸下一拍生效)
+  notify_config_changed(options)
+  @mocket.HttpResponse(@mocket.OK).json(ok_true())
+}
+
+///|
+/// POST /api/schedule/override { minutes }:临时放行时段约束(全域生效,
+/// minutes ≤ 0 = 取消)。写「到期时刻」而非「剩余时长」,重启后按同一时刻
+/// 收住;只解时段(全局 + 目录两层一起解),不解手动暂停 —— 后者是用户
+/// 明确的「不要同步」。上限 24 小时:「临时」就是临时,长期约束请直接改
+/// 全局时段(与 Node setScheduleOverride 同款)。
+pub async fn handle_schedule_override(
+  options : ApiOptions,
+  event : @mocket.MocketEvent,
+) -> &Responder {
+  let body = match parse_json_body(event) {
+    Some(body) => body
+    None => return json_error(event, @mocket.BadRequest, "invalid json body")
+  }
+  let obj = match body {
+    Object(obj) => obj
+    _ => return json_error(event, @mocket.BadRequest, "invalid json body")
+  }
+  let minutes = match obj.get("minutes") {
+    Some(Number(n, ..)) => n
+    _ =>
+      return json_error(
+        event,
+        @mocket.BadRequest,
+        "minutes must be a number (<= 0 to cancel)",
+      )
+  }
+  let config = load_config(options.config_file)
+  let until : Int64? = if minutes <= 0.0 {
+    config.schedule_override_until = None
+    None
+  } else {
+    let capped = if minutes > 1440.0 { 1440.0 } else { minutes.floor() }
+    let until = now_ms() + (capped * 60_000.0).to_int64()
+    config.schedule_override_until = Some(until)
+    Some(until)
+  }
+  save_config(options.config_file, config) catch {
+    _ => return json_error(event, @mocket.BadRequest, "临时放行失败")
+  }
+  notify_config_changed(options)
+  let map : Map[String, Json] = Map([])
+  map.set("ok", Json::boolean(true))
+  match until {
+    Some(u) => map.set("until", Json::number(u.to_double()))
+    None => ()
+  }
+  @mocket.HttpResponse(@mocket.OK).json(Json::object(map))
 }
