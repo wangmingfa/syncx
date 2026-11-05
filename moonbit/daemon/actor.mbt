@@ -52,6 +52,14 @@ const SCHEDULE_TICKS : Int32 = 120
 const INITIAL_INDEX_FALLBACK_MS : Int64 = 2000L
 
 ///|
+/// 兜底全量重发的抑制窗口:同一 (目录, 对端) 在窗口内已发过「指纹相同」的
+/// 全量时,重连后的兜底不再重发 —— 对端手里的快照已是当前索引,重发纯属浪费。
+/// 旧版对端不认指纹消息,每次会话重建都触发兜底;链路抖动连续重建时就是
+/// 全目录 × 全量的重发风暴(2026-11-04 实测:一次抖动 6 目录 × 双 transport
+/// 9 连发)。指纹变了说明本机有新变更,照发不误(对齐 Node/Rust 同名常量)。
+const INITIAL_FALLBACK_SUPPRESS_MS : Int64 = 60_000L
+
+///|
 /// 索引消息的语义:全量(并集规划)或增量(只判消息里提到的路径)。
 /// **缺省 = 增量**:把增量当全量做并集规划,两端会各自回推对方「没提到」的
 /// 本地条目,形成回声死循环(见 `core/plan.mbt` 的 `build_delta_plan` 注释)。
@@ -334,6 +342,15 @@ priv struct PeerSession {
 
 ///|
 /// 单个共享目录的运行期状态。
+
+///|
+/// 一次「已向对端发过全量」的台账:发出时刻 + 发出时的本机指纹。
+priv struct FullIndexSent {
+  at : Int64
+  fingerprint : String
+}
+
+///|
 priv struct Folder {
   id : String
   root : String
@@ -360,6 +377,9 @@ priv struct Folder {
   mut limiter : RateLimiter?
   /// gitSync 模式(检测/镜像/中继三闸由 git_sync_plan 推导;见 git.mbt)。
   mut git_sync : GitSyncMode
+  /// remote_device_id → 全量发出台账:兜底抑制的跨 attach 记忆(会话重建不清,
+  /// 见 INITIAL_FALLBACK_SUPPRESS_MS 与 poll_initial_fallback)。
+  full_index_sent : Map[String, FullIndexSent]
   /// 本地提交检测观察器(基线结算在 watcher 内部;首轮只记基线)。
   git_watcher : GitWatcher
   /// 同步时段规则(None = 不设限;热重载就地更新,见 do_reconfigure)。
@@ -480,6 +500,7 @@ fn make_folder(spec : FolderSpec) -> Folder raise IndexStoreError {
     git_sync: spec.git_sync,
     git_watcher: { root: spec.root, mode: spec.git_sync, last_hash: None, },
     schedule: spec.schedule,
+    full_index_sent: Map([]),
   }
 }
 
@@ -1165,9 +1186,55 @@ fn settle_initial_exchange(session : PeerSession) -> Unit {
 }
 
 ///|
+/// 兜底抑制的纯判定核(参数全是裸值,供黑盒测试直达):上次发出至今仍在
+/// 窗口内、且指纹未变 → true(该抑制);指纹变化或窗口已过 → false。
+pub fn initial_fallback_suppressed(
+  now : Int64,
+  sent_at : Int64,
+  sent_fingerprint : String,
+  fingerprint : String,
+) -> Bool {
+  now - sent_at < INITIAL_FALLBACK_SUPPRESS_MS &&
+  sent_fingerprint == fingerprint
+}
+
+///|
+/// 兜底全量是否该发:窗口内已向该对端发过「指纹相同」的全量 → 抑制(不发),
+/// 台账保持锚在实际发出时刻;指纹变化或窗口外 → 放行并记台账。台账跨 attach
+/// 保留在目录上,重连风暴里第二次起的兜底不再重发同指纹全量。返回 true 时
+/// 调用方负责发出(台账已记好),false 时什么都不用做。
+fn fallback_full_needed(
+  folder : Folder,
+  device : String,
+  now : Int64,
+  fingerprint : String,
+) -> Bool {
+  match folder.full_index_sent.get(device) {
+    Some(prev) =>
+      if initial_fallback_suppressed(
+          now,
+          prev.at,
+          prev.fingerprint,
+          fingerprint,
+        ) {
+        false
+      } else {
+        folder.full_index_sent.set(device, { at: now, fingerprint, })
+        true
+      }
+    None => {
+      folder.full_index_sent.set(device, { at: now, fingerprint, })
+      true
+    }
+  }
+}
+
+///|
 /// 初始交换兜底:指纹发出去 2s 仍未结算 → 主动补发本机全量(对齐 Rust
 /// `poll_timeouts` 的兜底分支)。对端是旧版(不认指纹)或应答丢失时,这是
 /// 从「永远干等」里出来的唯一出路;对端重复收到全量按并集规划,幂等。
+/// 但同一 (目录, 对端) 窗口内已发过同指纹快照时抑制重发(见
+/// fallback_full_needed)—— 重连风暴里重发的是一模一样的字节。
 fn poll_initial_fallback(
   folder : Folder,
   session : PeerSession,
@@ -1179,7 +1246,20 @@ fn poll_initial_fallback(
         session.initial_deadline = None
         if !session.initial_settled {
           session.initial_settled = true
-          send_full_snapshot(folder, session)
+          let fingerprint = index_fingerprint(local_entries(folder))
+          if fallback_full_needed(
+              folder,
+              session.remote_device_id,
+              now,
+              fingerprint,
+            ) {
+            send_full_snapshot(folder, session)
+          } else {
+            @log.info(
+              "兜底全量重发已抑制(窗口内已发过同指纹快照):目录 {Folder} 对端 {Device}",
+              [Json::string(folder.id), Json::string(session.remote_device_id)],
+            )
+          }
         }
       }
     None => ()
@@ -1235,6 +1315,12 @@ async fn SessionActor::do_peer_message(
     IndexAck(..) => settle_initial_exchange(session)
     IndexRequest(..) => {
       settle_initial_exchange(session)
+      // 对端主动索要 = 正面证据,永远放行;但入账台账,后续窗口内的兜底
+      // 重发才有抑制依据(对端手里的快照已覆盖当前指纹)。
+      folder.full_index_sent.set(session.remote_device_id, {
+        at: now_ms(),
+        fingerprint: index_fingerprint(local_entries(folder)),
+      })
       send_full_snapshot(folder, session)
     }
     BlockRequest(payload~, ..) => self.serve_block(folder, session, payload)

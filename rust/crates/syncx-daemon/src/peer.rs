@@ -79,6 +79,11 @@ pub const RATE_SPAN_FLOOR_MS: i64 = 1_000;
 pub const RECEIVE_CLAIM_TTL_MS: i64 = 5 * 60_000;
 /// 初始索引交换的兜底等待:2 秒内没等到指纹应答就直接发全量。
 pub const INITIAL_INDEX_FALLBACK_MS: i64 = 2_000;
+/// 兜底全量重发的抑制窗口:同一 (目录, 对端) 在窗口内已发过「指纹相同」的
+/// 全量时,重连后的兜底不再重发 —— 对端手里的快照已是当前索引,重发纯属浪费。
+/// 旧版对端每次会话重建都触发兜底,链路抖动连续重建时形成风暴(2026-11-04
+/// 实测:一次抖动 6 目录 × 双 transport 9 连发)。指纹变了照发。
+pub const INITIAL_FALLBACK_SUPPRESS_MS: i64 = 60_000;
 
 /// 冲突自动处理策略。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -163,6 +168,9 @@ pub type SpaceCheck = Rc<dyn Fn(u64) -> bool>;
 pub type SharedIndex = Rc<RefCell<BTreeMap<String, StoredEntry>>>;
 /// 认领台账(多连接共享)。
 pub type SharedLedger = Rc<RefCell<HashMap<String, ReceiveClaim>>>;
+/// 兜底抑制台账:remote_device_id → (最近全量发出时刻, 发出时的本机指纹)。
+/// 挂在目录状态上跨 attach 保留,同一目录的所有连接共享一份。
+pub type SharedFullIndexSent = Rc<RefCell<HashMap<String, (i64, String)>>>;
 
 fn next_claim_id() -> u64 {
     use std::sync::atomic::{AtomicU64, Ordering};
@@ -221,6 +229,8 @@ pub struct PeerDeps {
     pub is_paused: Option<PathPredicate>,
     /// 磁盘空间守卫:入向体积不足时返回 false。
     pub check_disk_space: Option<SpaceCheck>,
+    /// 兜底抑制台账(多连接共享,见 `SharedFullIndexSent`)。测试注入空台账。
+    pub full_index_sent: SharedFullIndexSent,
 }
 
 /// 一条对端连接上的会话状态机。
@@ -1076,8 +1086,15 @@ impl Peer {
                 self.initial_fallback_deadline = None;
                 if !self.initial_settled {
                     self.initial_settled = true;
-                    self.initial_outcome = Some("fallback");
-                    self.send_full_snapshot();
+                    let fingerprint = self.fingerprint();
+                    if self.fallback_suppressed(now, &fingerprint) {
+                        // 窗口内已向同一对端发过同指纹全量:重发是一模一样的
+                        // 字节,链路抖动风暴里白白付流量(见 INITIAL_FALLBACK_SUPPRESS_MS)
+                        self.initial_outcome = Some("fallback-suppressed");
+                    } else {
+                        self.initial_outcome = Some("fallback");
+                        self.send_full_snapshot();
+                    }
                 }
             }
         }
@@ -1334,12 +1351,41 @@ impl Peer {
     pub fn on_index_request(&mut self) {
         self.settle_initial();
         self.initial_outcome = Some("request-served");
+        // 对端主动索要 = 正面证据,永远照发;但入账台账,后续窗口内的兜底
+        // 重发才有抑制依据(对端手里的快照已覆盖当前指纹)。
+        self.record_full_index_sent();
         self.send_full_snapshot();
     }
 
     fn settle_initial(&mut self) {
         self.initial_fallback_deadline = None;
         self.initial_settled = true;
+    }
+
+    /// 台账入账(不抑制):记下「已向该对端发过当前指纹的全量」。
+    fn record_full_index_sent(&mut self) {
+        let fingerprint = self.fingerprint();
+        self.deps
+            .full_index_sent
+            .borrow_mut()
+            .insert(self.deps.remote_device_id.clone(), (self.now(), fingerprint));
+    }
+
+    /// 兜底全量是否被抑制:窗口内已向该对端发过「指纹相同」的全量 → 抑制
+    /// (不发,台账保持锚在实际发出时刻);指纹变化或窗口外 → 放行并重记
+    /// 台账(对齐 MoonBit `initial_fallback_suppressed` / Node `gateFullIndexResend`)。
+    fn fallback_suppressed(&self, now: i64, fingerprint: &str) -> bool {
+        let mut sent = self.deps.full_index_sent.borrow_mut();
+        match sent.get(self.deps.remote_device_id.as_str()) {
+            Some((at, prev_fp)) if now - *at < INITIAL_FALLBACK_SUPPRESS_MS && prev_fp == fingerprint => true,
+            _ => {
+                sent.insert(
+                    self.deps.remote_device_id.clone(),
+                    (now, fingerprint.to_string()),
+                );
+                false
+            }
+        }
     }
 
     fn send_full_snapshot(&mut self) {

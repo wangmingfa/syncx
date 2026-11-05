@@ -62,6 +62,10 @@ pub struct Folder {
     /// 用 tokio 的无界通道而不是 `std::sync::mpsc`:驱动层是 async 任务,`recv()`
     /// 直接就是 future;发送端是无界的 `send`,在 actor 线程(非 async)上也不会阻塞。
     pub sinks: Vec<Option<tokio::sync::mpsc::UnboundedSender<Outbound>>>,
+    /// 兜底全量抑制台账(remote_device_id → (时刻, 指纹)):跨 attach 保留,
+    /// 会话重建不清;所有连接共享,见 `SharedFullIndexSent` 与
+    /// `INITIAL_FALLBACK_SUPPRESS_MS`。
+    pub full_index_sent: crate::peer::SharedFullIndexSent,
 }
 
 impl Folder {
@@ -90,6 +94,7 @@ impl Folder {
                 Some(Rc::new(move |path: &str| paused.iter().any(|p| p == path)))
             },
             check_disk_space: None,
+            full_index_sent: Rc::clone(&self.full_index_sent),
         });
         // 复用已拆除的槽位,避免长跑进程里槽位无限增长
         if let Some(slot) = self.peers.iter().position(|p| p.is_none()) {
@@ -429,7 +434,8 @@ pub struct FolderDrain {
     pub hard_ignored: Vec<String>,
     /// 因长时间拿不到块而放弃的路径与缺失块数。
     pub stall_dropped: Vec<(String, usize)>,
-    /// 初始索引交换的结论(`fallback` / `skipped` / `request-served`)。只报一次。
+    /// 初始索引交换的结论(`fallback` / `fallback-suppressed` / `skipped` /
+    /// `request-served`)。只报一次。
     pub initial_outcome: Option<&'static str>,
 }
 
@@ -757,6 +763,7 @@ impl SessionActor {
                 disk_blocked: None,
                 peers: Vec::new(),
                 sinks: Vec::new(),
+                full_index_sent: Rc::new(std::cell::RefCell::new(HashMap::new())),
             };
             if let Err(error) = self.add_folder(folder) {
                 tracing::warn!(%error, "目录索引加载失败");
@@ -941,6 +948,7 @@ pub fn build_folder(
         disk_blocked: None,
         peers: Vec::new(),
         sinks: Vec::new(),
+        full_index_sent: Rc::new(std::cell::RefCell::new(HashMap::new())),
     })
 }
 
@@ -1163,5 +1171,52 @@ mod tests {
 
         // 点名不存在的目录:空操作,不崩
         assert!(actor.handle(Cmd::ScanFolder { folder: "gone".to_string() }));
+    }
+
+    /// 数一条接收端里的全量索引帧(不关心内容,空索引也算一份全量)。
+    fn count_fulls(rx: &mut tokio::sync::mpsc::UnboundedReceiver<Outbound>) -> usize {
+        let mut n = 0;
+        while let Ok(frame) = rx.try_recv() {
+            if matches!(
+                frame,
+                Outbound::Entries {
+                    full: true,
+                    relayed: false,
+                    ..
+                }
+            ) {
+                n += 1;
+            }
+        }
+        n
+    }
+
+    #[test]
+    fn initial_fallback_suppressed_on_reattach_within_window() {
+        // 2026-11-04 风暴回归:旧版对端不认指纹,每次会话重建都触发兜底全量;
+        // 窗口内 + 本机指纹未变时,重连后的兜底必须被抑制(对齐 MoonBit/Node)。
+        let dir = TempDir::new("suppress");
+        let root = dir.path().join("root");
+        std::fs::create_dir_all(&root).unwrap();
+        let mut folder =
+            build_folder("f1", &root, dir.path(), IgnoreRuleset::from_lines(&[])).unwrap();
+        let now = crate::peer::wall_clock();
+
+        // 第一次 attach:台账为空,兜底照发全量
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+        folder.open_peer("local".to_string(), "dev-b".to_string(), tx);
+        folder.peer(0).unwrap().begin_initial_exchange();
+        folder.peer(0).unwrap().poll_timeouts(now + 2_500);
+        folder.flush_outbound();
+        assert_eq!(count_fulls(&mut rx), 1);
+
+        // 会话重建(同设备重开一条连接,旧连接 dispose):窗口内指纹未变 → 抑制
+        folder.peer(0).unwrap().dispose();
+        let (tx2, mut rx2) = tokio::sync::mpsc::unbounded_channel();
+        folder.open_peer("local".to_string(), "dev-b".to_string(), tx2);
+        folder.peer(1).unwrap().begin_initial_exchange();
+        folder.peer(1).unwrap().poll_timeouts(now + 5_000);
+        folder.flush_outbound();
+        assert_eq!(count_fulls(&mut rx2), 0, "窗口内重连不得重发同指纹全量");
     }
 }

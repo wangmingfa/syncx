@@ -589,6 +589,14 @@ const SNAPSHOT_TIMEOUT_MS = 20_000;
 const SNAPSHOT_CHUNK_ENTRIES = 2000;
 /** 片数上限(仅用于校验对端声明的 total,挡异常/恶意消息造成内存膨胀)。 */
 const MAX_SNAPSHOT_CHUNKS = 500;
+/**
+ * 兜底全量重发的抑制窗口(60s):同一 (目录, 对端) 在窗口内已发过「指纹相同」
+ * 的全量时,重连后的 2s 兜底不再重发。旧版对端不认指纹消息,每次会话重建都
+ * 触发兜底;链路抖动连续重建时就是全目录 × 全量的重发风暴(2026-11-04 实测:
+ * 一次抖动 6 目录 × 双 transport 9 连发)。窗口外或指纹变了照发,旧对端的
+ * 收敛最坏延迟一个窗口。对齐 MoonBit/Rust 的 INITIAL_FALLBACK_SUPPRESS_MS。
+ */
+const FULL_INDEX_SUPPRESS_MS = 60_000;
 
 /**
  * 单文件内容对比的体积上限(2 MiB)。
@@ -753,6 +761,13 @@ export class SyncSessionManager {
   private readonly writtenPeerUrls = new Map<string, string>();
   private readonly reconnectTimers = new Map<string, ReturnType<typeof setTimeout>>();
   private readonly reconnectAttempts = new Map<string, number>();
+  /**
+   * (folderId:remoteDeviceId) → 最近一次兜底/被索要全量的时刻与本机指纹:
+   * 抑制闸的跨 attach 记忆(会话重建不清,见 FULL_INDEX_SUPPRESS_MS 与
+   * gateFullIndexResend)。条目两个标量字段,规模以「目录 × 对端」为上界,
+   * 不做主动清理。
+   */
+  private readonly fullIndexSent = new Map<string, { at: number; fingerprint: string }>();
   // 跟踪所有 peer socket(入站 + 出站),关闭时统一断开,避免客户端 socket
   // 保持事件循环活跃导致进程无法退出。
   private readonly peerSockets = new Set<WebSocket>();
@@ -2930,7 +2945,12 @@ export class SyncSessionManager {
       // 初始索引交换的观测点(见 peer.beginInitialIndexExchange):指纹一致时全量
       // 互换被省掉,这正是本条优化的收益点,info 留痕;等不到回应退回全量(旧对端 /
       // attach 竞态)与旧行为等价,也留痕便于日后区分「真省了」和「没走到」。
-      onInitialIndexOutcome: (outcome) => {
+      // 初始索引交换的观测点(见 peer.beginInitialIndexExchange):指纹一致时全量
+      // 互换被省掉,这正是本条优化的收益点,info 留痕;等不到回应退回全量(旧对端 /
+      // attach 竞态)与旧行为等价,也留痕便于日后区分「真省了」和「没走到」。
+      // fallback-suppressed 由抑制闸自己留痕,这里不再重复;request-served 附带
+      // 指纹,入账台账供后续窗口内的兜底抑制。
+      onInitialIndexOutcome: (outcome, fingerprint) => {
         if (outcome === 'skipped') {
           this.logger.info(
             `initial index exchange skipped (fingerprint match): folder ${folder.id} peer ${session.remoteDeviceId}`,
@@ -2939,8 +2959,17 @@ export class SyncSessionManager {
           this.logger.info(
             `index fingerprint unanswered (old peer or attach race); sending full index: folder ${folder.id} peer ${session.remoteDeviceId}`,
           );
+        } else if (outcome === 'request-served' && fingerprint) {
+          this.fullIndexSent.set(`${folder.id}:${session.remoteDeviceId}`, {
+            at: Date.now(),
+            fingerprint,
+          });
         }
       },
+      // 兜底全量的抑制闸(见 gateFullIndexResend):链路抖动 + 旧版对端时,
+      // 每次重连都把全目录的全量重发一遍 —— 同指纹的重复字节不出第二遍。
+      initialFallbackGate: (fingerprint) =>
+        this.gateFullIndexResend(folder.id, session.remoteDeviceId, fingerprint),
     });
     session.peers.set(folder.id, peer);
     folder.peers.set(session.remoteDeviceId, peer);
@@ -2950,6 +2979,27 @@ export class SyncSessionManager {
     // index-request,本机照旧发全量;旧对端不认识指纹消息则由 2s 兜底发全量
     // —— 三条路都与旧的「无条件发全量」收敛等价。
     peer.beginInitialIndexExchange();
+  }
+
+  /**
+   * 兜底全量重发的抑制闸(见 SyncPeerDeps.initialFallbackGate):同一 (目录,
+   * 对端) 在窗口内已发过「指纹相同」的全量时返回 false 拦下重发 —— 对端手里
+   * 的快照已是当前索引,重发的是一模一样的字节。台账锚在实际发出时刻:窗口内
+   * 连续抑制不挪锚,窗口一过自然放行。指纹变化说明本机有新变更,立即放行。
+   */
+  private gateFullIndexResend(folderId: string, deviceId: string, fingerprint: string): boolean {
+    const key = `${folderId}:${deviceId}`;
+    const prev = this.fullIndexSent.get(key);
+    const now = Date.now();
+    if (prev && now - prev.at < FULL_INDEX_SUPPRESS_MS && prev.fingerprint === fingerprint) {
+      this.logger.info(
+        `suppress duplicate full index resend: folder ${folderId} peer ${deviceId} (sent ` +
+          `${Math.round((now - prev.at) / 1000)}s ago, fingerprint unchanged)`,
+      );
+      return false;
+    }
+    this.fullIndexSent.set(key, { at: now, fingerprint });
+    return true;
   }
 
   /** 从一个存活会话上摘除指定目录的 peer/transport(设备被移出目录的 devices 时)。 */

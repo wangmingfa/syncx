@@ -31,7 +31,12 @@ function fingerprintingTransport() {
 function makePeer(
   transport: PeerTransport,
   local: Map<string, IndexEntry>,
-  opts: { fallbackMs?: number; onOutcome?: (o: 'skipped' | 'fallback' | 'request-served') => void; e2eKey?: Buffer } = {},
+  opts: {
+    fallbackMs?: number;
+    onOutcome?: (o: 'skipped' | 'fallback' | 'fallback-suppressed' | 'request-served', fingerprint?: string) => void;
+    gate?: (fingerprint: string) => boolean;
+    e2eKey?: Buffer;
+  } = {},
 ) {
   return createSyncPeer({
     transport,
@@ -41,6 +46,7 @@ function makePeer(
     deviceId: 'DEV-A',
     initialIndexFallbackMs: opts.fallbackMs,
     onInitialIndexOutcome: opts.onOutcome,
+    initialFallbackGate: opts.gate,
     ...(opts.e2eKey ? { e2eKey: opts.e2eKey } : {}),
   });
 }
@@ -92,6 +98,44 @@ describe('initial index exchange (fingerprint skip)', () => {
     await new Promise((r) => setTimeout(r, 30));
     expect(sentFull).toEqual([[...local.values()]]);
     expect(outcomes).toEqual(['fallback']);
+  });
+
+  it('passes the local fingerprint to the fallback gate and outcome', async () => {
+    const { transport, sentFull } = fingerprintingTransport();
+    const seen: string[] = [];
+    const outcomes: Array<[string, string | undefined]> = [];
+    const peer = makePeer(transport, local, {
+      fallbackMs: 5,
+      gate: (fp) => {
+        seen.push(fp);
+        return true;
+      },
+      onOutcome: (o, fp) => outcomes.push([o, fp]),
+    });
+
+    peer.beginInitialIndexExchange();
+    await new Promise((r) => setTimeout(r, 30));
+    expect(seen).toEqual([indexFingerprint([...local.values()])]);
+    expect(outcomes).toEqual([['fallback', indexFingerprint([...local.values()])]]);
+    expect(sentFull).toEqual([[...local.values()]]);
+  });
+
+  it('suppresses the fallback resend when the gate declines (storm guard)', async () => {
+    const { transport, sentFull } = fingerprintingTransport();
+    const outcomes: string[] = [];
+    const peer = makePeer(transport, local, {
+      fallbackMs: 5,
+      gate: () => false,
+      onOutcome: (o) => outcomes.push(o),
+    });
+
+    peer.beginInitialIndexExchange();
+    await new Promise((r) => setTimeout(r, 30));
+    expect(sentFull).toEqual([]);
+    expect(outcomes).toEqual(['fallback-suppressed']);
+    // 结算位照旧落定:迟到的表态不再触发任何发送
+    peer.onIndexAck();
+    expect(sentFull).toEqual([]);
   });
 
   it('a late ack after the fallback does not send the full index twice', async () => {

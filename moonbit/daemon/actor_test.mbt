@@ -833,6 +833,57 @@ async test "actor 回环: 初始交换 2s 无应答,兜底补发全量恰好一�
 }
 
 ///|
+/// 兜底抑制判定的纯核:窗口内同指纹抑制;窗口外或指纹变化放行
+/// (2026-11-04 风暴修复的判定核)。
+async test "actor: 兜底抑制判定(窗口内同指纹抑制,变化放行)" {
+  let fp = "fp-1"
+  // 窗口内同指纹:抑制
+  assert_true(@daemon.initial_fallback_suppressed(2000L, 1000L, fp, fp))
+  // 恰在窗口边界(60s):不再抑制
+  assert_false(@daemon.initial_fallback_suppressed(61_000L, 1000L, fp, fp))
+  // 窗口内但指纹变了:本机有新变更,放行
+  assert_false(@daemon.initial_fallback_suppressed(2000L, 1000L, fp, fp + "x"))
+}
+
+///|
+/// 重连风暴回归:同设备重新 PeerOpen(会话重建)后,窗口内 + 本机指纹未变
+/// 的兜底不再重发全量 —— 旧版对端场景下一次抖动只付一次全量代价。
+async test "actor 回环: 重连后窗口内兜底不再重发同指纹全量" {
+  let root_a = actor_fresh_root("suppress-a")
+  actor_mkdir(root_a)
+  let root_b = actor_fresh_root("suppress-b")
+  actor_mkdir(root_b)
+  let spec_a = actor_make_spec(root_a)
+  let spec_b = actor_make_spec(root_b)
+  @async.with_task_group() <| group => {
+    let env = actor_loop_start(group, spec_a, spec_b, drop_fingerprints=true)
+    assert_true(
+      actor_wait_until(() => env.handle_a.snapshot().folders[0].peers == 1),
+    )
+    // 第一次 attach:兜底照发(台账为空)
+    assert_true(actor_wait_until(() => env.fulls_from_a.length() >= 1))
+    // 会话重建(同设备同目录重新 PeerOpen,链路抖动的最小复现):兜底
+    // 死线重新挂上,但窗口内指纹未变 → 抑制,不产生第二份全量。
+    let _ = env.handle_a.send(
+      @daemon.Cmd::PeerOpen(
+        folder="f1",
+        remote_device_id="DEV-B",
+        sink=env.sink_a,
+      ),
+    )
+    assert_true(
+      actor_wait_until(() => env.handle_a.snapshot().folders[0].peers == 1),
+    )
+    let _ = env.handle_a.send(
+      @daemon.Cmd::PollTimeouts(now=@daemon.now_ms() + 5000L),
+    )
+    @async.sleep(300)
+    assert_eq(env.fulls_from_a.length(), 1)
+    actor_loop_stop(env)
+  }
+}
+
+///|
 async test "actor 回环: 限速下出站块响应被令牌桶压住" {
   let root_b = actor_fresh_root("rate-b")
   // 30 个小文件 × 50B = 1500B;B 配 1 KB/s(桶容量 1024B):

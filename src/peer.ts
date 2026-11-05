@@ -219,11 +219,22 @@ export interface SyncPeerDeps {
   initialIndexFallbackMs?: number;
   /**
    * 初始索引交换的观测点(日志/度量用):
-   *  - 'skipped'        指纹一致,全量互换被省掉(优化的收益点);
-   *  - 'fallback'       等不到回应,退回发全量(旧对端 / 竞态,与旧行为等价);
-   *  - 'request-served' 对端发现不一致索要全量,已照发(与旧行为等价,不记日志)。
+   *  - 'skipped'              指纹一致,全量互换被省掉(优化的收益点);
+   *  - 'fallback'             等不到回应,退回发全量(旧对端 / 竞态,与旧行为等价);
+   *  - 'fallback-suppressed'  兜底被抑制闸拦下(窗口内已发过同指纹全量),未发;
+   *  - 'request-served'       对端发现不一致索要全量,已照发(与旧行为等价,不记日志)。
+   * fallback / request-served 附带发出时的本机指纹,上层据此记台账驱动抑制闸。
    */
-  onInitialIndexOutcome?: (outcome: 'skipped' | 'fallback' | 'request-served') => void;
+  onInitialIndexOutcome?: (
+    outcome: 'skipped' | 'fallback' | 'fallback-suppressed' | 'request-served',
+    fingerprint?: string,
+  ) => void;
+  /**
+   * 兜底全量的抑制闸:兜底定时器到点时带上「当时」的本机指纹询问上层;
+   * 返回 false 则不发(窗口内已向同一对端发过同指纹全量,重发是风暴)。
+   * 上层在闸内记台账;不设 = 永远照发(旧测试路径)。
+   */
+  initialFallbackGate?: (fingerprint: string) => boolean;
   /**
    * 接收认领台账(同一共享目录的**所有** SyncPeer 共享同一个 Map,由上层创建传入):
    * 设备对之间至多两条连接(每方向一条,设计内),每条会话各挂一份 SyncPeer,
@@ -452,7 +463,7 @@ let NEXT_CLAIM_ID = 1;
  * complete, then apply it via the executor.
  */
 export function createSyncPeer(deps: SyncPeerDeps): SyncPeer {
-  const { transport, localIndex, executor, readLocalBlock, readLocalChunk, deviceId, remoteDeviceId, root, onEvent, onTraffic, readIgnoreLines, receiveOnly, getConflictPolicy, getOnDemand, isPausedPath, checkDiskSpace, onHardIgnoredDropped, onLanded, onStallDrop, e2eKey, receiveLedger, onDriftAudit, driftState, initialIndexFallbackMs, onInitialIndexOutcome } = deps;
+  const { transport, localIndex, executor, readLocalBlock, readLocalChunk, deviceId, remoteDeviceId, root, onEvent, onTraffic, readIgnoreLines, receiveOnly, getConflictPolicy, getOnDemand, isPausedPath, checkDiskSpace, onHardIgnoredDropped, onLanded, onStallDrop, e2eKey, receiveLedger, onDriftAudit, driftState, initialIndexFallbackMs, onInitialIndexOutcome, initialFallbackGate } = deps;
   const pending = new Map<string, PendingEntry>();
   // 逐块跟踪超时重试:块响应丢失/丢弃时自动重发,避免文件永远收不齐
   const pendingBlocks = new Map<string, PendingBlockRequest>();
@@ -1635,7 +1646,14 @@ export function createSyncPeer(deps: SyncPeerDeps): SyncPeer {
         initialFallbackTimer = undefined;
         if (initialExchangeSettled) return;
         initialExchangeSettled = true;
-        onInitialIndexOutcome?.('fallback');
+        // 抑制闸:窗口内已向同一对端发过同指纹全量时不重发(链路抖动风暴,
+        // 见上层 gateFullIndexResend)。指纹按「当时」的索引现算 —— 变了就照发。
+        const fingerprint = indexFingerprint([...localIndex.values()]);
+        if (initialFallbackGate && !initialFallbackGate(fingerprint)) {
+          onInitialIndexOutcome?.('fallback-suppressed', fingerprint);
+          return;
+        }
+        onInitialIndexOutcome?.('fallback', fingerprint);
         sendFullIndexSnapshot();
       }, INITIAL_INDEX_FALLBACK_MS);
       initialFallbackTimer.unref?.();
@@ -1666,7 +1684,9 @@ export function createSyncPeer(deps: SyncPeerDeps): SyncPeer {
 
     onIndexRequest(): void {
       settleInitialExchange();
-      onInitialIndexOutcome?.('request-served');
+      // 对端主动索要 = 正面证据,永远照发;附带指纹供上层入账,后续窗口内的
+      // 兜底重发才有抑制依据。
+      onInitialIndexOutcome?.('request-served', indexFingerprint([...localIndex.values()]));
       sendFullIndexSnapshot();
     },
 
