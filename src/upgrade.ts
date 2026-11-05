@@ -27,6 +27,23 @@ export function normalizeUpgradeTag(input?: string): string {
 }
 
 /**
+ * 「版本一致锁 / 从对端升级资格」专用的比较口径:剥掉预发布后缀,只比 x.y.z 基数。
+ *
+ * 为什么不直接用 compareVersions:pack:local 打的本地构建带时间戳后缀
+ * (0.4.1-20261105.1105),而 semver 里同基数的预发布排在正式版**之前**——不剥的
+ * 话,装了时间戳包的设备会被版本一致锁判成「落后于」跑正式版的配对设备,开机就被
+ * 不可关闭的弹窗逼着「从对方升级」回正式版,本地构建装完即废。时间戳只是构建标识,
+ * 不表达版本演进:剥后缀后,时间戳包与正式版、以及任意两枚时间戳包,同基数一律视为
+ * 一致;锁与拉取资格只由真正的基数演进(0.4.1 → 0.4.2)驱动。
+ * 已知取舍:npm 预发布通道(0.5.0-beta.1 ↔ 0.5.0-beta.2)不再互锁——当前没有
+ * 这种发布形态,换取本地构建体系不被锁误伤。
+ */
+export function stripPrerelease(v: string): string {
+  const i = v.indexOf('-');
+  return i > 0 ? v.slice(0, i) : v;
+}
+
+/**
  * 比较两个 semver 版本号:相等返回 0,a 更大返回正数,b 更大返回负数。
  * 规则与 scripts/release.mjs 的 cmpSemver 同源:
  * - 先比 maj.min.patch(数值);

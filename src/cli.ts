@@ -48,7 +48,7 @@ import { resolveSharePath } from './executor.js';
 import { renderSystemdUnit, renderLaunchdPlist, renderWindowsService } from './install.js';
 import { createLogger } from './logger.js';
 import { runUpgrade } from './upgrade.js';
-import { compareVersions } from './upgrade.js';
+import { compareVersions, stripPrerelease } from './upgrade.js';
 import { consumeUpdateDoneFile, inspectPackage, isBundledRuntime, runSelfUpdate, runtimeVersion } from './selfupdate.js';
 import { extractBackendPackage, localTargetTriple, runBackendSwap, sniffBackendPackage } from './backend-swap.js';
 import { createUpdateChecker, downloadTarball } from './update-check.js';
@@ -646,7 +646,10 @@ export async function run(args: ParsedArgs): Promise<void> {
         ...config.knownDevices.map((d) => d.id),
         ...folderDevices.keys(),
       ]);
-      // 自更新资格只认打包态 + 双方都是具体 semver:dev↔build 混跑不做跨形态更新
+      // 自更新资格只认打包态 + 双方都是具体 semver:dev↔build 混跑不做跨形态更新。
+      // 比较口径剥预发布后缀(见 stripPrerelease):pack:local 的时间戳构建
+      // (0.4.1-20261105.1105)不算落后于同基数正式版,否则版本一致锁会把
+      // 本地构建一开机就逼着升回正式版
       const selfVersion = runtimeVersion();
       const isRealVersion = (v: string | undefined): v is string =>
         !!v && v !== 'dev' && /^\d+\.\d+\.\d+/.test(v);
@@ -671,7 +674,7 @@ export async function run(args: ParsedArgs): Promise<void> {
           canUpgrade:
             isRealVersion(selfVersion) &&
             isRealVersion(link.version) &&
-            compareVersions(selfVersion, link.version) < 0,
+            compareVersions(stripPrerelease(selfVersion), stripPrerelease(link.version)) < 0,
         });
       }
       const syncProgress = manager.getSyncProgress();

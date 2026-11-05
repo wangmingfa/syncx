@@ -3,7 +3,7 @@ import { spawn } from 'node:child_process';
 import { mkdtempSync, writeFileSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { compareVersions, isDaemonRunning, normalizeUpgradeTag, runUpgrade } from '../src/upgrade.js';
+import { compareVersions, isDaemonRunning, normalizeUpgradeTag, runUpgrade, stripPrerelease } from '../src/upgrade.js';
 import { parseArgs } from '../src/args.js';
 
 describe('normalizeUpgradeTag', () => {
@@ -53,6 +53,23 @@ describe('compareVersions', () => {
   it('handles dirty input without throwing', () => {
     expect(compareVersions('unknown', '0.1.3')).toBeLessThanOrEqual(0);
     expect(compareVersions('', '0.1.3')).toBeLessThanOrEqual(0);
+  });
+});
+
+describe('stripPrerelease(版本一致锁口径)', () => {
+  it('剥掉预发布后缀,纯版本原样保留', () => {
+    expect(stripPrerelease('0.4.1-20261105.1105')).toBe('0.4.1');
+    expect(stripPrerelease('0.4.1-beta.3')).toBe('0.4.1');
+    expect(stripPrerelease('0.4.1')).toBe('0.4.1');
+  });
+
+  it('时间戳构建与同基数正式版视为一致——版本一致锁不触发', () => {
+    expect(compareVersions(stripPrerelease('0.4.1-20261105.1105'), stripPrerelease('0.4.1'))).toBe(0);
+    expect(compareVersions(stripPrerelease('0.4.1-20261105.0900'), stripPrerelease('0.4.1-20261105.1105'))).toBe(0);
+  });
+
+  it('基数演进照常比出先后(0.4.2 > 0.4.1 的时间戳构建)', () => {
+    expect(compareVersions(stripPrerelease('0.4.2'), stripPrerelease('0.4.1-20261105.1105'))).toBeGreaterThan(0);
   });
 });
 

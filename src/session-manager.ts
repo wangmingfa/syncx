@@ -70,7 +70,7 @@ import { OfferRetryLedger, type TrackedOffer } from './net/offer-retry.js';
 import type { DeviceIdentity } from './identity.js';
 import type { PeerRuntime, ProgressCounts, RelayActivity, TransferFile, ScheduleState } from './status.js';
 import { isBundledRuntime, packSelfTgz, runSelfUpdate, runtimeVersion, sha256Hex } from './selfupdate.js';
-import { compareVersions } from './upgrade.js';
+import { compareVersions, stripPrerelease } from './upgrade.js';
 import { NETWORK_OFFLINE_BACKOFF_MS, offlineAwareReconnectDelay, reconnectDelayMs } from './args.js';
 import { hasRoutableInterface } from './net/offline-probe.js';
 import { isSelfPeerUrl, localInterfaceAddresses } from './net/peer-address.js';
@@ -3175,7 +3175,12 @@ export class SyncSessionManager {
     if (targetVersion === 'dev') throw new Error('对方为 dev 运行态,没有可拉取的产物');
     if (!isBundledRuntime()) throw new Error('本机为 dev 运行态,不支持自更新');
     const mine = runtimeVersion();
-    if (compareVersions(mine, targetVersion) >= 0) throw new Error(`本机 ${mine} 不低于对方 ${targetVersion},无需升级`);
+    // 与 canUpgrade 同口径剥预发布后缀(见 upgrade.ts stripPrerelease):时间戳
+    // 本地构建与同基数正式版互不为「新版」,拉取资格只由基数演进驱动
+    if (
+      compareVersions(stripPrerelease(mine), stripPrerelease(targetVersion)) >= 0
+    )
+      throw new Error(`本机 ${mine} 不低于对方 ${targetVersion},无需升级`);
 
     const requestId = randomBytes(8).toString('hex');
     const resp = await new Promise<Extract<ControlMessage, { kind: 'self-binary-response' }>>((resolve, reject) => {
