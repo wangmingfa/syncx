@@ -415,6 +415,9 @@ pub struct SessionActor {
   priv mut schedule_tick : Int32
   /// 本机时区(懒加载一次;解析失败退 UTC,判定永不锁死)。
   priv mut local_zone : @time.Zone?
+  /// 节假日日历仓库(装配层创建共享;「工作日/休息日」判定的数据源,
+  /// 无数据时退化按星期几判 —— 见 daemon/holidays.mbt 三条硬约束)。
+  holidays : HolidayStore
   /// 最近一次刷新的时段状态行与横幅(随 Snapshot/poll 刷新,publish 直读;
   /// 与 Node「判定只在后端做一份,前端只渲染」同口径)。
   priv mut schedule_rows : Array[ScheduleStateRow]
@@ -510,6 +513,7 @@ pub fn new_session_actor(
   device_id : String,
   specs : Array[FolderSpec],
   on_git_notify~ : async (@net.ControlMessage) -> Unit = _ => (),
+  holidays~ : HolidayStore = HolidayStore::new(""),
 ) -> SessionActor raise IndexStoreError {
   let folders : Array[Folder] = []
   for spec in specs {
@@ -540,6 +544,7 @@ pub fn new_session_actor(
     schedule_signature: "",
     schedule_tick: 0,
     local_zone: None,
+    holidays,
     schedule_rows: [],
     schedule_banner: None,
   }
@@ -562,8 +567,9 @@ pub fn start_session_actor(
   device_id : String,
   specs : Array[FolderSpec],
   on_git_notify~ : async (@net.ControlMessage) -> Unit = _ => (),
+  holidays~ : HolidayStore = HolidayStore::new(""),
 ) -> ActorHandle raise IndexStoreError {
-  let actor = new_session_actor(device_id, specs, on_git_notify~)
+  let actor = new_session_actor(device_id, specs, on_git_notify~, holidays~)
   let handle = actor.handle()
   group.spawn_bg(allow_failure=true) <| () => { actor.run() }
   // 周期泵:驱动重试到期 / 租约衰减 / 限速重放。actor 退出关队列后停止。

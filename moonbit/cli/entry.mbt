@@ -126,18 +126,44 @@ pub async fn run_start(args : StartArgs) -> Unit {
 
   // 6. 装配:actor → PeerServer → API → mDNS → 常驻
   let specs = build_folder_specs(config_dir, config)
+  // 节假日日历仓库:actor 判定 / API 面板 / 刷新循环三方共享同一实例
+  // (缓存落配置目录,与 Node 的 holidays-<year>.json 同名同格式)
+  let holiday_store : @daemon.HolidayStore = @daemon.HolidayStore::new(
+    config_dir,
+  )
+  holiday_store.apply_config(
+    auto_fetch=config.holiday_auto_fetch,
+    source_url=config.holiday_source_url,
+    overrides=config.calendar_overrides,
+  )
   @async.with_task_group() <| group => {
     // 本地提交通知的注入点(actor 创建早于镜像循环,先挂占位回调,镜像循环
     // 就绪后换上真投递):actor 检测到新提交 → 这里 → 镜像台账广播
     let git_notify_sink : Ref[async (@net.ControlMessage) -> Unit] = Ref(_ => ())
-    let handle = @daemon.start_session_actor(group, identity.device_id, specs, on_git_notify=notify => {
-      let emit = git_notify_sink.val
-      emit(notify)
-    }) catch {
+    let handle = @daemon.start_session_actor(
+      group,
+      identity.device_id,
+      specs,
+      on_git_notify=notify => {
+        let emit = git_notify_sink.val
+        emit(notify)
+      },
+      holidays=holiday_store,
+    ) catch {
       e => fatal("索引库打开失败:\{@daemon.IndexStoreError::to_text(e)}")
     }
     // 同步时段上下文先行入队(周期泵 60s 巡检之前,横幅首帧就有值)
     let _ = handle.send(schedule_cmd(config))
+    // 节假日日历刷新循环:启动即刷一次(盘上缓存灌内存 + 缺数据才拉网络),
+    // 之后 24h 一拍;12 月起顺带预备下一年,跨年零点不出现按星期几判的空窗。
+    // 判定路径只读内存,本循环的写入都在 await 间隙之后,协作式调度下安全。
+    group.spawn_bg(allow_failure=true, no_wait=true) <| () => {
+      for ;; {
+        let zone = @time.local_zone() catch { _ => @time.utc_zone }
+        holiday_store.refresh(zone, @daemon.now_ms())
+        @async.sleep(@daemon.HOLIDAY_REFRESH_INTERVAL_MS.to_int())
+      }
+    }
     // 数据面:Secure 两阶段握手;server 引用由 handlers 的闭包在注册后补挂。
     // 会话注册表:对端元数据(hello 宣告)生命周期跟随会话,/api/status.devices
     // 的在线态从这里拉(device_status provider 在装配段回填)。
@@ -443,6 +469,8 @@ pub async fn run_start(args : StartArgs) -> Unit {
       mirror.retry_folder(folder_id)
     })
     api_options.traffic = Some(() => traffic_cell.val)
+    // 节假日日历仓库(actor 判定与日历面板共读;None = 路由 503)
+    api_options.holidays = Some(holiday_store)
     // 配置热重载回调:任何写路由成功落盘后触发(Node 的 configWatcher +
     // reload 语义收拢成一个同步入口)。职责面:
     //   1. 重读盘上配置灌进共享单元格 —— 镜像循环 / fs-watch 对账 / 拨号
@@ -464,6 +492,12 @@ pub async fn run_start(args : StartArgs) -> Unit {
       // 全局时段规则 / 临时放行不在目录参数集里,单独投递(重启后按同一
       // 到期时刻收住;放行取消即刻收口)
       let _ = handle.send(schedule_cmd(fresh))
+      // 节假日设置(自动拉取开关 / 源地址 / 手动覆盖)快照即时更新
+      holiday_store.apply_config(
+        auto_fetch=fresh.holiday_auto_fetch,
+        source_url=fresh.holiday_source_url,
+        overrides=fresh.calendar_overrides,
+      )
       api_options.settings = Some(@api.settings_json(fresh))
       api_options.device_infos = @api.device_infos_json(fresh)
       // git 台账恢复:热重载写入的盘上 pending 记录采纳进内存(与重启同

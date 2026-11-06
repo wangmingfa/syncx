@@ -708,7 +708,7 @@ fn sanitize_calendar_overrides(v : Json?) -> Map[String, String]? {
 
 ///|
 /// `YYYY-MM-DD` 且是真实存在的日期(1970..=2100)。
-fn is_real_date_key(key : String) -> Bool {
+pub fn is_real_date_key(key : String) -> Bool {
   if key.char_length() != 10 {
     return false
   }

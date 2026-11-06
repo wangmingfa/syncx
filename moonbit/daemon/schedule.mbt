@@ -9,9 +9,9 @@
 ///  - **全局 ∩ 目录取交集**:全局是硬闸门,任一在窗口外即停摆,并给出
 ///    「被谁挡住」与下一个边界时刻(横幅据此写「23:00 自动恢复」);
 ///  - **临时放行期间一律视为窗口内**(同时解开全局与目录两层);
-///  - 「工作日/休息日」MoonBit 后端尚未接节假日日历(全局缺口项),注入
-///    core.weekday_workday_fallback 的退化口径 —— 与 Node「无日历数据」
-///    完全一致,绝不为拉不到日历把目录锁死。
+///  - 「工作日/休息日」由装配层注入的节假日仓库裁决(daemon/holidays.mbt:
+///    手动覆盖 > holidays-<year>.json 缓存 > 周一~五退化),与 Node 同口径
+///    —— 绝不为拉不到日历把目录锁死。
 
 ///|
 /// 判定结论(与状态行分离;纯函数可离线对拍 Node)。
@@ -142,7 +142,8 @@ fn SessionActor::local_zone_or_utc(self : SessionActor) -> @time.Zone {
 }
 
 ///|
-/// 单目录此刻的时段判定(do_scan 闸门等运行点用)。
+/// 单目录此刻的时段判定(do_scan 闸门等运行点用)。节假日仓库由装配层
+/// 注入;无日历数据时 is_workday_fn 内部退化按星期几判,口径不变。
 fn SessionActor::schedule_verdict_now(
   self : SessionActor,
   folder : Folder,
@@ -154,7 +155,7 @@ fn SessionActor::schedule_verdict_now(
     self.schedule_override_until,
     now_ms(),
     zone,
-    @core.weekday_workday_fallback,
+    self.holidays.is_workday_fn(),
   )
 }
 
@@ -166,7 +167,7 @@ fn SessionActor::schedule_verdict_now(
 fn SessionActor::refresh_schedule(self : SessionActor) -> Unit {
   let zone = self.local_zone_or_utc()
   let now = now_ms()
-  let is_workday : @core.IsWorkday = @core.weekday_workday_fallback
+  let is_workday : @core.IsWorkday = self.holidays.is_workday_fn()
   let rows : Array[ScheduleStateRow] = []
   let mut blocked = 0
   let mut any_active = false

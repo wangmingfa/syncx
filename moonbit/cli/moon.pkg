@@ -15,6 +15,7 @@ import {
   "wangmingfa/syncx/daemon",
   "wangmingfa/syncx/log",
   "wangmingfa/syncx/net",
+  "moonbitlang/x/time",
 }
 
 import {

@@ -62,6 +62,10 @@ pub(all) struct ApiOptions {
   /// status 回缺省形状、retry 回 503)。形态对齐 Node getGitAutoCommitStatus
   /// 的台账部分(lock 由 api 层现查合并;maxAttempts 由提供器带上)。
   mut git_commit_status : ((String) -> Json?)?
+  /// 节假日日历仓库(装配层创建共享;None = 日历路由回 503、status 不上线
+  /// calendarStatus 段 —— 「缺字段 = 旧后端」口径)。actor 判定与日历面板
+  /// 共读同一实例,见 daemon/holidays.mbt。
+  mut holidays : @daemon.HolidayStore?
   /// 手动重试自动提交的镜像入口(None = 未接镜像,回 503;形状照
   /// Node retryGitAutoCommit:{ ok, hash?, error?, attempts })。
   mut git_commit_retry : (async (String) -> Json)?
@@ -130,6 +134,7 @@ pub fn ApiOptions::new(
     traffic: None,
     git_commit_status: None,
     git_commit_retry: None,
+    holidays: None,
     on_config_changed,
   }
 }
@@ -219,6 +224,27 @@ pub fn settings_json(config : @core.Config) -> Json {
     "fsWatchFallbackScanSecs",
     Json::number(config.fs_watch_fallback_scan_secs().to_double()),
   )
+  // 节假日日历设置(对齐 Node GlobalSettingsStatus:autoFetch 缺省开,
+  // 与 `!== false` 同口径;sourceUrl 只在显式配置时上线,缺省源单列)
+  map.set(
+    "holidayAutoFetch",
+    Json::boolean(config.holiday_auto_fetch != Some(false)),
+  )
+  match config.holiday_source_url {
+    Some(url) => map.set("holidaySourceUrl", Json::string(url))
+    None => ()
+  }
+  map.set("holidaySourceDefault", Json::string(@core.DEFAULT_HOLIDAY_SOURCE))
+  match config.calendar_overrides {
+    Some(ov) => {
+      let items : Map[String, Json] = Map([])
+      for key, kind in ov {
+        items.set(key, Json::string(kind))
+      }
+      map.set("calendarOverrides", Json::object(items))
+    }
+    None => ()
+  }
   Json::object(map)
 }
 
@@ -401,6 +427,11 @@ pub fn status_json(options : ApiOptions) -> Json {
         None => ()
       }
     }
+    None => ()
+  }
+  // 节假日日历状态(诊断口径:该年是否已有数据 / 覆盖条数 / 最近拉取失败原因)
+  match options.holidays {
+    Some(store) => map.set("calendarStatus", store.status(current_year_utc()))
     None => ()
   }
   Json::object(map)
@@ -696,6 +727,11 @@ pub fn build_app(options : ApiOptions) -> @mocket.App {
   })
   app.post("/api/schedule/override", event => {
     handle_schedule_override(options, event)
+  })
+  // 节假日日历(面板读取 + 手动覆盖;覆盖落 config 后热重载灌进仓库)
+  app.get("/api/calendar", event => handle_calendar_get(options, event))
+  app.post("/api/calendar/override", event => {
+    handle_calendar_override(options, event)
   })
   app.post("/api/folders/git-strip-co-authored", event => {
     handle_folder_git_strip_co_authored(options, event)
