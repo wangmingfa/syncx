@@ -5,6 +5,7 @@ import {
   "moonbitlang/async",
   "moonbitlang/async/aqueue",
   "moonbitlang/core/debug",
+  "moonbitlang/core/json",
   "moonbitlang/x/time",
   "wangmingfa/syncx/core",
   "wangmingfa/syncx/net",
@@ -37,6 +38,10 @@ pub const GIT_PUSH_TIMEOUT_MS : Int32 = 120_000
 pub const GIT_REWRITE_TIMEOUT_MS : Int32 = 120_000
 
 pub const GIT_UNPUSHED_LIMIT : Int32 = 50
+
+pub const HOLIDAY_FETCH_TIMEOUT_MS : Int32 = 15_000
+
+pub const HOLIDAY_REFRESH_INTERVAL_MS : Int64 = 86400000
 
 pub const MAX_BLOCK_RETRIES : Int32 = 3
 
@@ -106,6 +111,8 @@ pub fn head_read_absent() -> HeadRead
 
 pub fn index_fingerprint(Array[Entry]) -> String
 
+pub fn initial_fallback_suppressed(Int64, Int64, String, String) -> Bool
+
 pub fn is_commit_hash(String) -> Bool
 
 pub async fn is_git_repo(String) -> Bool
@@ -120,7 +127,7 @@ pub async fn list_unpushed_commits(String, limit? : Int32) -> Array[GitCommitEnt
 
 pub async fn mtime_ms(String) -> Int64?
 
-pub fn new_session_actor(String, Array[FolderSpec], on_git_notify? : async (@net.ControlMessage) -> Unit) -> SessionActor raise IndexStoreError
+pub fn new_session_actor(String, Array[FolderSpec], on_git_notify? : async (@net.ControlMessage) -> Unit, holidays? : HolidayStore) -> SessionActor raise IndexStoreError
 
 pub fn normalize_path(String) -> String
 
@@ -166,7 +173,7 @@ pub fn split_ext(String) -> (String, String)
 
 pub fn start_fs_watch(@async.TaskGroup[Unit], ActorHandle, () -> Array[FsWatchFolder], FsWatchOptions) -> WatchStats
 
-pub fn start_session_actor(@async.TaskGroup[Unit], String, Array[FolderSpec], on_git_notify? : async (@net.ControlMessage) -> Unit) -> ActorHandle raise IndexStoreError
+pub fn start_session_actor(@async.TaskGroup[Unit], String, Array[FolderSpec], on_git_notify? : async (@net.ControlMessage) -> Unit, holidays? : HolidayStore) -> ActorHandle raise IndexStoreError
 
 pub fn strip_co_authored_lines(String) -> String
 
@@ -412,6 +419,29 @@ pub enum HeadRead {
   Error(String)
 }
 
+pub struct HolidayStore {
+  config_dir : String
+  mem : Map[Int32, Map[String, String]]
+  meta : Map[Int32, Int64]
+  mut last_error : String?
+  mut overrides : Map[String, String]?
+  mut auto_fetch : Bool?
+  mut source_url : String?
+}
+pub fn HolidayStore::apply_config(Self, auto_fetch? : Bool?, source_url? : String?, overrides? : Map[String, String]?) -> Unit
+pub fn HolidayStore::day_type(Self, Int32, Int32, Int32) -> String?
+pub async fn HolidayStore::ensure_year_loaded(Self, Int32) -> Unit
+pub fn HolidayStore::is_workday(Self, Int32, Int32, Int32) -> Bool
+pub fn HolidayStore::is_workday_fn(Self) -> (Int32, Int32, Int32) -> Bool
+pub fn HolidayStore::is_year_fetched(Self, Int32) -> Bool
+pub fn HolidayStore::mem_year(Self, Int32) -> Map[String, String]?
+pub fn HolidayStore::new(String) -> Self
+pub async fn HolidayStore::refresh(Self, @time.Zone, Int64) -> Unit
+pub async fn HolidayStore::save_year(Self, Int32, Map[String, String]) -> Unit
+pub fn HolidayStore::source_url_for(Self, Int32) -> String
+pub fn HolidayStore::status(Self, Int32) -> @json.Json
+pub fn HolidayStore::year_days(Self, Int32) -> @json.Json
+
 pub struct IndexCounts {
   entries : Int64
   tombstones : Int64
@@ -534,6 +564,7 @@ pub(all) struct ScheduleVerdict {
 }
 
 pub struct SessionActor {
+  holidays : HolidayStore
   // private fields
 }
 pub fn SessionActor::handle(Self) -> ActorHandle
