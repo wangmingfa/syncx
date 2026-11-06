@@ -1,0 +1,88 @@
+# 三后端测试门禁:push 后自动跑项目的全部测试(Node / Rust / MoonBit)。
+#
+# MoonBit 安装方式对齐 MoonUI 的 ci.yml(官方脚本,无官方 CI Action);
+# runner 的 registry index 是安装器带的快照,先 `moon update` 再测。
+#
+# 前置依赖:
+#  - Rust 的 build.rs 会校验 dist/web/client.js(rust-embed 把前端编进二进制),
+#    所以 Rust job 先用 Node 构建前端产物再 cargo test;
+#  - Node 的 build-artifact.test.ts 依赖 dist/syncx.js 与 dist/web/,先 build 再 test。
+name: CI
+
+on:
+  push:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  node:
+    name: Node 后端测试
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22' # engines: >=22.13(package.json)
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Build (web + single)
+        run: npm run build
+
+      - name: Test
+        run: npm test
+
+  rust:
+    name: Rust 后端测试
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+
+      - name: Install dependencies
+        run: npm ci
+
+      # rust-embed 编译期把 dist/web 整个编进二进制,目录缺失直接编译失败
+      - name: Build web assets
+        run: npm run build:web
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: rust
+
+      - name: Test
+        run: cargo test --manifest-path rust/Cargo.toml --workspace
+
+  moonbit:
+    name: MoonBit 后端测试
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Install MoonBit
+        run: |
+          curl -fsSL https://cli.moonbitlang.com/install/unix.sh | bash
+          echo "$HOME/.moon/bin" >> "$GITHUB_PATH"
+
+      - name: Show toolchain
+        run: moon version --all
+
+      - name: Update registry index
+        run: moon update
+
+      - name: Test
+        run: moon test
+        working-directory: moonbit
