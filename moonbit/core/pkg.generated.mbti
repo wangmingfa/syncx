@@ -14,6 +14,8 @@ pub const CDC_MIN_CHUNK : Int32 = 262144
 
 pub const CONFLICT_COPY_PATTERN : String = "^(.+)\\.sync-conflict-[0-9a-z]+(?:-[0-9a-z]+)?-([A-Z2-7]{10})(\\.[^./]*)?$"
 
+pub const DEFAULT_HOLIDAY_SOURCE : String = "https://cdn.jsdelivr.net/gh/NateScarlet/holiday-cn@master/{year}.json"
+
 pub const FORMAT_VERSION : Int32 = 1
 
 pub const FS_WATCH_FALLBACK_SCAN_SECS : Int32 = 600
@@ -48,6 +50,8 @@ pub fn compare_versions(Map[String, Int64], Map[String, Int64]) -> VersionRelati
 
 pub fn days_from_civil(Int32, Int32, Int32) -> Int64
 
+pub fn effective_holiday_source(Config) -> String
+
 pub fn format_schedule_summary(Array[ScheduleRule]?) -> String
 
 pub fn hard_ignore_names() -> Array[String]
@@ -62,6 +66,8 @@ pub fn is_conflict_copy_name(String) -> Bool
 
 pub fn is_hard_ignored(String) -> Bool
 
+pub fn is_real_date_key(String) -> Bool
+
 pub fn is_scratch_segment(String) -> Bool
 
 pub fn merge_versions(Map[String, Int64], Map[String, Int64]) -> Map[String, Int64]
@@ -74,9 +80,13 @@ pub fn normalize_peer_url(String) -> String
 
 pub fn normalize_schedule(@json.Json) -> Array[ScheduleRule]?
 
+pub fn normalize_schedule_opt(@json.Json?) -> Array[ScheduleRule]?
+
 pub fn parse_config(String) -> Config
 
 pub fn parse_conflict_copy_name(String) -> (String, String)?
+
+pub fn parse_holiday_payload(@json.Json?) -> Map[String, String]
 
 pub fn parse_ignore_rules(Array[String]) -> Array[IgnoreRule]
 
@@ -84,11 +94,15 @@ pub fn plan_path(String, IndexEntry?, IndexEntry?) -> PlanAction?
 
 pub fn schedule_is_unbounded(Array[ScheduleRule]?) -> Bool
 
+pub fn schedule_to_json(Array[ScheduleRule]?) -> @json.Json?
+
 pub fn scratch_suffixes() -> Array[String]
 
 pub fn split_ranges(Int32) -> Array[(Int32, Int32)]
 
 pub fn vectors_equal(Map[String, Int64], Map[String, Int64]) -> Bool
+
+pub fn weekday_workday_fallback(Int32, Int32, Int32) -> Bool
 
 pub fn within_schedule(Array[ScheduleRule]?, CivilMoment, (Int32, Int32, Int32) -> Bool) -> Bool
 
@@ -133,7 +147,7 @@ pub(all) struct Config {
   mut pause_on_low_battery : Bool?
   mut battery_pause_threshold : Int32?
   mut sync_schedule : @json.Json?
-  mut schedule_override_until : Int32?
+  mut schedule_override_until : Int64?
   mut holiday_auto_fetch : Bool?
   mut holiday_source_url : String?
   mut calendar_overrides : Map[String, String]?
@@ -288,7 +302,7 @@ pub(all) struct SharedFolder {
   receive_only : Bool?
   instance_id : String?
   mut paused : Bool?
-  schedule : @json.Json?
+  mut schedule : @json.Json?
   git_sync : String?
   conflict_policy : String?
   strip_co_authored : Bool?

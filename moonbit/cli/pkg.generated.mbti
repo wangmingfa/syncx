@@ -188,6 +188,7 @@ pub struct GitMirror {
   // private fields
 }
 pub async fn GitMirror::adopt_pending(Self) -> Unit
+pub fn GitMirror::commit_status(Self, String) -> @json.Json?
 pub fn GitMirror::deferred_of(Self, String) -> GitDeferredMirror?
 pub async fn GitMirror::flush(Self) -> Unit
 pub fn GitMirror::has_slot(Self, String) -> Bool
@@ -198,6 +199,7 @@ pub fn GitMirror::on_git_ack(Self, String, String, String) -> Unit
 pub async fn GitMirror::on_local_git_notify(Self, @net.ControlMessage) -> Unit
 pub fn GitMirror::on_notify(Self, @net.ControlMessage, String?) -> Unit
 pub fn GitMirror::processed_size(Self) -> Int32
+pub async fn GitMirror::retry_folder(Self, String) -> @json.Json
 pub fn GitMirror::slot_attempts(Self, String) -> Int32
 
 pub struct PeerSenders {
@@ -234,6 +236,8 @@ pub(all) struct PendingGitNotify {
   mut retry_at : Int64?
   mut blocked_since : Int64?
   mut warned : Bool
+  mut last_error : String?
+  mut last_error_at : Int64?
 }
 
 pub(all) struct PushOutcome {
