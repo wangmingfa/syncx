@@ -22,7 +22,7 @@ use std::path::{Path, PathBuf};
 use syncx_core::blockstore::{hash_block, split_ranges, BLOCK_SIZE};
 use syncx_core::ignore::{is_hard_ignored, is_conflict_copy_name, is_scratch_segment, IgnoreRuleset};
 
-use crate::entry::{tombstone_of, StoredEntry, MTIME_TOLERANCE_MS};
+use crate::entry::{tombstone_of, StoredEntry};
 use crate::indexstore::IndexStore;
 use crate::partial::PARTIAL_TTL_MS;
 
@@ -282,15 +282,16 @@ fn is_changed(ctx: &mut WalkCtx<'_>, rel: &str, abs: &Path) -> bool {
     let Some(mtime) = mtime_ms(&meta) else {
         return true; // 拿不到时间戳就没有免哈希依据
     };
-    // 免哈希快速路径:大小与 mtime 在容忍窗口内即视为未改动(兼容 FAT32 2s 精度)
+    // 免哈希快速路径:大小与 mtime 完全一致才视为未改动;容忍窗口内的 mtime
+    // 抖动落到下面的内容哈希确认(FAT32 粒度、写入竞态都只付一次哈希)
     if prev.is_unchanged(size, mtime) {
         return false;
     }
     // 大小相同但 mtime 变化(或旧数据无 mtime)才做内容哈希对比
     if size == prev.size && blocks_match_on_disk(abs, &prev.blocks) {
-        // 内容未变仅 mtime 变化:写回新 mtime,避免下次扫描重复整文件哈希。
-        // mtime 不在同步协议内,不递增版本、不触发广播。
-        if prev.mtime.is_none() || (mtime - prev.mtime.unwrap_or(0)).abs() > MTIME_TOLERANCE_MS {
+        // 内容未变仅 mtime 变化:写回新 mtime,把 diff 归零 —— 否则容忍窗口内
+        // 的抖动会每轮重复整文件哈希。mtime 不在同步协议内,不递增版本、不触发广播。
+        if prev.mtime.is_none() || prev.mtime.unwrap_or(0) != mtime {
             let mut updated = (*prev).clone();
             updated.mtime = Some(mtime);
             let _ = ctx.index.save_entry(&updated);

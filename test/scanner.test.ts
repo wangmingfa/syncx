@@ -44,6 +44,54 @@ describe('scanFolder', () => {
     rmDir(dir);
   });
 
+  /**
+   * 写入竞态回归(2026-11-09 MoonUI 两文件实测):扫描若落在一次写入完成前,
+   * 索引记下中间内容的哈希与「恰好同尺寸」的条目;写入完成后 mtime 只前进几十
+   * ms —— 曾经的「mtime 差在 2s 容忍窗口内即免检」会让这个条目永远不被重哈希,
+   * 本机索引永远宣告旧哈希,对端索块被哈希闸门拒收,传输死锁。现在窗口内的
+   * mtime 抖动必须落到内容哈希确认。
+   */
+  it('detects a same-size rewrite whose mtime stays inside the tolerance window', () => {
+    const { dir, root, index } = setup();
+    const rel = 'assets/logo/luna_draw.js';
+    const mid = 'A'.repeat(128);
+    const fin = 'B'.repeat(128); // 同尺寸改写
+    mkdirSync(join(root, 'assets/logo'), { recursive: true });
+
+    // 第一笔:扫描器在写入完成前抢跑 —— 条目持有中间内容哈希,mtime 与磁盘一致
+    writeFileSync(join(root, rel), mid);
+    const midMtime = statSync(join(root, rel)).mtimeMs;
+    index.saveEntry({
+      path: rel,
+      version: new Map([['DEV-A', 1]]),
+      size: mid.length,
+      deleted: false,
+      blocks: [hashBlock(Buffer.from(mid))],
+      mtime: midMtime,
+    });
+
+    // 写入完成:内容变了、字节数不变,mtime 被人工拨回「窗口内 +80ms」
+    writeFileSync(join(root, rel), fin);
+    const shifted = midMtime + 80;
+    utimesSync(join(root, rel), new Date(shifted), new Date(shifted));
+
+    expect(scanFolder(root, index, [], 'DEV-A').changed).toEqual([rel]);
+
+    // 收敛后(调用方按 changed 更新索引):内容未变、mtime 已写回 —— 后续扫描
+    // diff 归零,不再反复整文件哈希
+    index.saveEntry({
+      path: rel,
+      version: new Map([['DEV-A', 2]]),
+      size: fin.length,
+      deleted: false,
+      blocks: [hashBlock(Buffer.from(fin))],
+      mtime: shifted,
+    });
+    expect(scanFolder(root, index, [], 'DEV-A').changed).toEqual([]);
+    index.close();
+    rmDir(dir);
+  });
+
   it('counts conflict copies for the badge but never indexes them (hard ignore)', () => {
     const { dir, root, index } = setup();
     writeFileSync(join(root, 'a.txt'), 'real file');
@@ -195,24 +243,26 @@ describe('scanFolder', () => {
     rmDir(dir);
   });
 
-  it('tolerates mtime drift within 2s for FAT32 compatibility', () => {
+  it('tolerates mtime drift within 2s via content-hash confirmation (FAT32 compatibility)', () => {
     const { dir, root, index } = setup();
     writeFileSync(join(root, 'a.txt'), 'content');
     const s = statSync(join(root, 'a.txt'));
-    // 索引记录的 mtime 与文件实际 mtime 相差 1.5s(FAT32 2s 精度场景)
+    // FAT32 粒度抖动:索引 mtime 与磁盘相差 1.5s,内容一致
     index.saveEntry({
       path: 'a.txt',
       version: new Map([['DEV-A', 1]]),
       size: s.size,
       deleted: false,
-      blocks: ['stale-hash'],
+      blocks: [hashBlock(Buffer.from('content'))],
       mtime: s.mtimeMs - 1500,
     });
 
     const { changed } = scanFolder(root, index, [], 'DEV-A');
 
-    // 在容忍窗口内,不重算哈希
+    // 窗口内的抖动走内容哈希确认:内容未变 → 不报改动;同时把 mtime 写回磁盘值,
+    // diff 归零,后续扫描回到免哈希快速路径(不会每轮重复付一次哈希)
     expect(changed).toEqual([]);
+    expect(index.getEntry('a.txt')?.mtime).toBe(s.mtimeMs);
     index.close();
     rmDir(dir);
   });

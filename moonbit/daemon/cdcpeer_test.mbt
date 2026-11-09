@@ -564,7 +564,8 @@ async test "cdc 回环冒烟: 第二轮只传变化槽位" {
     assert_true(landed_v1, msg="首轮应完整落地 v1")
     env.requests.clear()
     // 等过扫描器的 mtime 容忍窗口(MTIME_TOLERANCE_MS=2s,FAT32 兼容):
-    // 同尺寸改写若落在窗口内会被 is_unchanged 吞掉,第二轮扫描就检测不到
+    // 2026-11-09 起窗口内抖动已改为内容哈希确认,不再吞改动 —— 保留等待
+    // 只为测试节奏稳定,不再承担正确性
     @async.sleep(2300)
     // 第二轮:中部同长改写 64 字节 → 只传变化的 CDC 槽位
     let v2_fa = v1_fa.copy()

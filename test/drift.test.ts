@@ -98,7 +98,13 @@ function seed(root: string, rel: string, data: Buffer, over: Partial<IndexEntry>
   const target = join(root, rel);
   mkdirSync(join(target, '..'), { recursive: true });
   writeFileSync(target, data);
-  return { ...mkEntry(rel, data, over), mtime: statSync(target).mtimeMs };
+  // mtime 钉在整毫秒并回写:哨兵免检判据收紧为「mtime 完全一致」后,corruptByte
+  // 的 mtime 复位经 Date/utimes 往返会截掉亚毫秒 —— 条目与盘上差零点几毫秒,
+  // 样本就被误判 index stale,哨兵什么都验不了。
+  const ms = Math.trunc(statSync(target).mtimeMs);
+  const d = new Date(ms);
+  utimesSync(target, d, d);
+  return { ...mkEntry(rel, data, over), mtime: ms };
 }
 
 /**
@@ -641,7 +647,11 @@ describe('哨兵接线:peer 侧的门控与上报', () => {
   function seed2(root: string, rel: string, data: Buffer): IndexEntry {
     const target = join(root, rel);
     writeFileSync(target, data);
-    return { ...mkEntry(rel, data), mtime: statSync(target).mtimeMs };
+    // 同 seed():mtime 钉整毫秒,corruptByte 的 Date/utimes 复位才不损失精度
+    const ms = Math.trunc(statSync(target).mtimeMs);
+    const d = new Date(ms);
+    utimesSync(target, d, d);
+    return { ...mkEntry(rel, data), mtime: ms };
   }
 
   it('闲时跑一轮:计数行必须出现,哪怕什么都没检出', async () => {
@@ -837,6 +847,11 @@ describe('接线:session-manager 的本地巡检按时钟跑(peer=local)', () =>
       const h = bootLocal('syncx-drift-local-');
       try {
         writeFileSync(join(h.share, 'victim.bin'), Buffer.alloc(64, 3));
+        // 同 seed():mtime 钉整毫秒再首轮扫描。否则索引记下带亚毫秒小数的 mtime,
+        // corruptByte 经 Date/utimes 复位只剩整毫秒,严格判据下这零点几毫秒会被
+        // 扫描器当成真实改动重新索引,坏字节就轮不到哨兵来抓了
+        const victimMs = Math.trunc(statSync(join(h.share, 'victim.bin')).mtimeMs);
+        utimesSync(join(h.share, 'victim.bin'), new Date(victimMs), new Date(victimMs));
         await h.manager.runScan(); // 第一轮:扫描器把条目建进索引,巡检干净收场
         const first = h.auditLines();
         expect(first.length).toBe(1);

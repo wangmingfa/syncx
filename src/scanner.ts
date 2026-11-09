@@ -9,11 +9,19 @@ import { pruneScratchFile } from './partial-store.js';
 import { blocksMatchOnDisk } from './blockstore.js';
 import { incrementVersion } from './version.js';
 
-/** FAT32 mtime 精度为 2 秒,免哈希快速路径用容忍窗口避免误判。 */
+/** FAT32 mtime 精度为 2 秒;容忍窗口内的 mtime 抖动走内容哈希确认,不直接免检。 */
 const MTIME_TOLERANCE_MS = 2000;
 
 /**
- * 免哈希快速路径:大小与修改时间都在容忍窗口内则视为未改动,跳过整文件重算。
+ * 免哈希快速路径:大小相同**且 mtime 完全一致**才视为未改动,跳过整文件重算。
+ *
+ * 曾经的实现是「mtime 差在 2 秒容忍窗口内即免检」——那把窗口内的**真实改动**也
+ * 永久吞掉了:扫描若恰落在一次写入完成前(读到中间态,size 恰好与最终一致),
+ * 之后每一轮 |mtime 差| ≈ 80ms 都在窗口内,这条目就再也不重哈希 —— 本机索引
+ * 永远宣告旧哈希,对端按旧哈希索块、本机供出新内容被接收端哈希闸门拒收,
+ * 传输死锁(2026-11-09 MoonUI 两文件实测)。现在只有 mtime 完全一致才免检;
+ * 窗口内的抖动(FAT32 粒度、touch、写入完成前的竞态)落到调用方的「内容哈希
+ * 对比 + 写回新 mtime」路径 —— 一次整文件哈希后 diff 归零,不会每轮重复付。
  *
  * 导出它不只是为了复用那 2 秒的容忍窗口,而是为了**共用同一条口径**:「这条目的块哈希
  * 还代表不代表盘上的字节」。drift 哨兵(见 drift.ts 的检查 B)只审 isUnchanged 成立的
@@ -23,7 +31,7 @@ const MTIME_TOLERANCE_MS = 2000;
 export function isUnchanged(entry: IndexEntry, stat: { size: number; mtimeMs: number }): boolean {
   if (stat.size !== entry.size) return false;
   if (entry.mtime === undefined) return false;
-  return Math.abs(stat.mtimeMs - entry.mtime) <= MTIME_TOLERANCE_MS;
+  return stat.mtimeMs === entry.mtime;
 }
 
 export interface ScanDiff {
@@ -197,15 +205,16 @@ export function scanFolder(
         } catch {
           continue; // 文件在扫描途中被删
         }
-        // 免哈希快速路径:大小与 mtime 在容忍窗口内则视为未改动(兼容 FAT32 2s 精度)
+        // 免哈希快速路径:大小与 mtime 完全一致才视为未改动;容忍窗口内的 mtime
+        // 抖动落到下面的内容哈希确认(FAT32 粒度、写入竞态都只付一次哈希)
         if (stat && isUnchanged(prev, stat)) {
           continue;
         }
         // 大小相同但 mtime 变化(或旧数据无 mtime)才做内容哈希对比
         if (stat && stat.size === prev.size && !contentChanged(prev, abs)) {
-          // 内容未变仅 mtime 变化:写回新 mtime,避免下次扫描重复整文件哈希。
-          // mtime 不在同步协议内,不递增版本、不触发广播。
-          if (prev.mtime === undefined || Math.abs(stat.mtimeMs - prev.mtime) > MTIME_TOLERANCE_MS) {
+          // 内容未变仅 mtime 变化:写回新 mtime,把 diff 归零 —— 否则容忍窗口内
+          // 的抖动会每轮重复整文件哈希。mtime 不在同步协议内,不递增版本、不触发广播。
+          if (prev.mtime === undefined || stat.mtimeMs !== prev.mtime) {
             index.saveEntry({ ...prev, mtime: stat.mtimeMs });
           }
           continue;
@@ -344,9 +353,9 @@ export async function scanFolderAsync(
           continue;
         }
         if (statInfo && statInfo.size === prev.size && !contentChanged(prev, abs)) {
-          // 内容未变仅 mtime 变化:写回新 mtime,避免下次扫描重复整文件哈希。
-          // mtime 不在同步协议内,不递增版本、不触发广播。
-          if (prev.mtime === undefined || Math.abs(statInfo.mtimeMs - prev.mtime) > MTIME_TOLERANCE_MS) {
+          // 内容未变仅 mtime 变化:写回新 mtime,把 diff 归零 —— 否则容忍窗口内
+          // 的抖动会每轮重复整文件哈希。mtime 不在同步协议内,不递增版本、不触发广播。
+          if (prev.mtime === undefined || statInfo.mtimeMs !== prev.mtime) {
             index.saveEntry({ ...prev, mtime: statInfo.mtimeMs });
           }
           continue;

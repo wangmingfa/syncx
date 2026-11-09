@@ -12,10 +12,11 @@ use syncx_core::version::VersionVector;
 
 /// 扫描免哈希快速路径的容忍窗口(毫秒)。
 ///
-/// FAT32 的 mtime 精度是 2 秒,不设容忍就会把「刚写完、时间戳只差几百毫秒」的
-/// 文件判成改动,每轮扫描把整个目录的哈希重算一遍。取值与 Node 侧
-/// `src/scanner.ts` 的 `MTIME_TOLERANCE_MS` **必须一致** —— 两边判据不同,
-/// 同一条目在一端「未改动」在另一端「已改动」,同步轮次会因此对不上。
+/// 历史语义:FAT32 的 mtime 精度是 2 秒,免哈希判定曾对窗口内的 mtime 差直接
+/// 免检 —— 那会把「写入竞态落在窗口内」的真实改动永久吞掉(2026-11-09 MoonUI
+/// 实测,见 [`StoredEntry::is_unchanged`] 注释)。2026-11-09 起免检收紧为
+/// mtime 完全一致,窗口内的抖动改走「内容哈希对比 + 写回新 mtime」收敛,本
+/// 常量仅保留作跨后端口径标记(取值仍与 Node 侧 `src/scanner.ts` 一致)。
 pub const MTIME_TOLERANCE_MS: i64 = 2000;
 
 /// 索引里的一条本机条目。
@@ -73,9 +74,14 @@ impl StoredEntry {
     /// 盘上这份文件是否与条目「未改动」。
     ///
     /// 与 Node 的 `isUnchanged` 逐条对齐:尺寸必须相等;`mtime` 缺失一律视为
-    /// **可能已改**(没有时间戳就没有免哈希的依据);时间差在容忍窗口内才算未改。
-    /// drift 哨兵与本函数共用同一口径,各写一遍的话一边认 2 秒、另一边不认,
-    /// 哨兵就会开始报假案。
+    /// **可能已改**(没有时间戳就没有免哈希的依据);mtime **完全一致**才算未改。
+    /// 曾经的「差在容忍窗口内即免检」会把窗口内的真实改动永久吞掉 —— 扫描落在
+    /// 一次写入完成前(读到中间态且 size 恰好一致)之后,每轮 |mtime 差| 都只有
+    /// 几十 ms,条目再也不重哈希,本机索引永远宣告旧哈希,对端索块被哈希闸门
+    /// 拒收,传输死锁(2026-11-09 MoonUI 两文件实测)。窗口内的抖动(FAT32 粒度、
+    /// touch、写入竞态)落到调用方的「内容哈希对比 + 写回新 mtime」路径 —— 一次
+    /// 整文件哈希后 diff 归零,不会每轮重复付。drift 哨兵与本函数共用同一口径,
+    /// 各写一遍的话口径不一致,哨兵就会开始报假案。
     pub fn is_unchanged(&self, size: u64, mtime_ms: i64) -> bool {
         if size != self.size {
             return false;
@@ -83,7 +89,7 @@ impl StoredEntry {
         let Some(prev) = self.mtime else {
             return false;
         };
-        (mtime_ms - prev).abs() <= MTIME_TOLERANCE_MS
+        mtime_ms == prev
     }
 
     /// 该条目能否上线宣告。占位条目盘上没有实体,宣告等于谎称「我供得出内容」。
@@ -104,5 +110,37 @@ pub fn tombstone_of(entry: &StoredEntry, device_id: &str) -> StoredEntry {
         clens: None,
         mtime: None,
         placeholder: false,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn entry(mtime: Option<i64>) -> StoredEntry {
+        StoredEntry {
+            path: "a".into(),
+            version: VersionVector::new(),
+            size: 12345,
+            deleted: false,
+            blocks: vec!["h".into()],
+            cdh: None,
+            clens: None,
+            mtime,
+            placeholder: false,
+        }
+    }
+
+    #[test]
+    fn is_unchanged_requires_exact_mtime() {
+        // 2026-11-09 修复回归:容忍窗口内的 mtime 抖动不得免检 —— 窗口免检曾把
+        // 写入竞态的真实改动永久吞掉(扫描读到中间态且 size 恰好一致),本机索引
+        // 永远宣告旧哈希,对端索块被哈希闸门拒收,传输死锁
+        let e = entry(Some(1_762_000_000_000));
+        assert!(e.is_unchanged(12345, 1_762_000_000_000));
+        assert!(!e.is_unchanged(12345, 1_762_000_000_000 - 1999));
+        assert!(!e.is_unchanged(12345, 1_762_000_000_000 + 2000));
+        assert!(!e.is_unchanged(12344, 1_762_000_000_000));
+        assert!(!entry(None).is_unchanged(12345, 1_762_000_000_000));
     }
 }

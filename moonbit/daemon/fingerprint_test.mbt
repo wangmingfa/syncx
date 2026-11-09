@@ -117,9 +117,12 @@ test "fingerprint: 内容不同则指纹不同" {
 ///|
 test "fingerprint: is_unchanged 快速路径判据" {
   let e = fp_entry_a(1762000000000L)
-  // 尺寸相等 + mtime 在容忍窗口内 → 未改动
-  assert_true(e.is_unchanged(12345L, 1762000000000L - 1999L))
-  assert_true(e.is_unchanged(12345L, 1762000000000L + 2000L))
+  // mtime 完全一致 → 未改动(免哈希)
+  assert_true(e.is_unchanged(12345L, 1762000000000L))
+  // 容忍窗口内的 mtime 抖动 → 不再免检,交给内容哈希确认
+  // (2026-11-09 修复:窗口免检曾把写入竞态的真实改动永久吞掉)
+  assert_true(!e.is_unchanged(12345L, 1762000000000L - 1999L))
+  assert_true(!e.is_unchanged(12345L, 1762000000000L + 2000L))
   // 超出容忍窗口 → 可能已改
   assert_true(!e.is_unchanged(12345L, 1762000000000L + 2001L))
   // 尺寸不同 → 一定变了

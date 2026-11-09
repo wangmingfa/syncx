@@ -40,7 +40,12 @@ pub const PARTIAL_TTL_MS : Int64 = 7L * 24L * 3600L * 1000L
 ///
 /// 与 Node `isUnchanged` / Rust `StoredEntry::is_unchanged` 逐条对齐:尺寸必须
 /// 相等;`mtime` 缺失一律视为**可能已改**(没有时间戳就没有免哈希的依据);
-/// 时间差在容忍窗口内才算未改。
+/// mtime **完全一致**才算未改。曾经的「差在容忍窗口内即免检」会把窗口内的
+/// 真实改动永久吞掉 —— 扫描落在一次写入完成前(读到中间态且 size 恰好一致)
+/// 之后,每轮 |mtime 差| 都只有几十 ms,条目再也不重哈希,本机索引永远宣告
+/// 旧哈希,对端索块被哈希闸门拒收,传输死锁(2026-11-09 MoonUI 两文件实测)。
+/// 窗口内的抖动(FAT32 粒度、touch、写入竞态)现在落到调用方的「内容哈希对比
+/// + 写回新 mtime」路径 —— 一次整文件哈希后 diff 归零,不会每轮重复付。
 pub fn Entry::is_unchanged(
   self : Entry,
   size : Int64,
@@ -51,14 +56,7 @@ pub fn Entry::is_unchanged(
   }
   match self.mtime {
     None => false
-    Some(prev) => {
-      let diff = mtime_ms - prev
-      if diff < 0L {
-        -diff <= MTIME_TOLERANCE_MS
-      } else {
-        diff <= MTIME_TOLERANCE_MS
-      }
-    }
+    Some(prev) => mtime_ms == prev
   }
 }
 
@@ -374,20 +372,18 @@ async fn is_changed(
     Some(t) => t
     None => return true // 拿不到时间戳就没有免哈希依据
   }
-  // 免哈希快速路径:大小与 mtime 在容忍窗口内即视为未改动(兼容 FAT32 2s 精度)
+  // 免哈希快速路径:大小与 mtime 完全一致才视为未改动;容忍窗口内的 mtime
+  // 抖动落到下面的内容哈希确认(FAT32 粒度、写入竞态都只付一次哈希)
   if prev.is_unchanged(size, mtime) {
     return false
   }
   // 大小相同但 mtime 变化(或旧数据无 mtime)才做内容哈希对比
   if size == prev.size && blocks_match_on_disk(abs, prev.blocks) {
-    // 内容未变仅 mtime 变化:写回新 mtime,避免下次扫描重复整文件哈希。
-    // mtime 不在同步协议内,不递增版本、不触发广播。
+    // 内容未变仅 mtime 变化:写回新 mtime,把 diff 归零 —— 否则容忍窗口内的
+    // 抖动会每轮重复整文件哈希。mtime 不在同步协议内,不递增版本、不触发广播。
     match prev.mtime {
       None => save_mtime(index, prev, mtime)
-      Some(old) =>
-        if mtime - old > MTIME_TOLERANCE_MS || old - mtime > MTIME_TOLERANCE_MS {
-          save_mtime(index, prev, mtime)
-        }
+      Some(old) => if mtime != old { save_mtime(index, prev, mtime) }
     }
     return false
   }
