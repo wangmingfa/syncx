@@ -64,18 +64,18 @@ fn bench_entry(path : String, size : Int64, b : Int64) -> @core.IndexEntry {
 /// 规划负载:2000 条索引。4% 对端缺失(send),10% 对端更新(receive),
 /// 其余双方一致(无动作)—— 三类路径都走到。
 fn bench_plan_maps() -> (Map[String, @core.IndexEntry], Map[String, @core.IndexEntry]) {
-  let local : Map[String, @core.IndexEntry] = Map([])
+  let local_side : Map[String, @core.IndexEntry] = Map([])
   let remote : Map[String, @core.IndexEntry] = Map([])
   for i in 0..<2000 {
     let path = "dir\{i % 37}/file\{i}.bin"
     let size = i.to_int64() * 977L + 1024L
-    local.set(path, bench_entry(path, size, 1L))
+    local_side.set(path, bench_entry(path, size, 1L))
     if i % 25 == 0 {
       continue
     }
     remote.set(path, bench_entry(path, size, if i % 10 == 0 { 2L } else { 1L }))
   }
-  (local, remote)
+  (local_side, remote)
 }
 
 ///|
@@ -120,9 +120,9 @@ test "bench sha256-64k" (it : @bench.T) {
 
 ///|
 test "bench plan-2000" (it : @bench.T) {
-  let (local, remote) = bench_plan_maps()
+  let (local_side, remote) = bench_plan_maps()
   it.bench(fn() {
-    let actions = @core.build_plan(local, remote)
+    let actions = @core.build_plan(local_side, remote)
     it.keep(actions.length())
   })
 }

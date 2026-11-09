@@ -7,8 +7,8 @@
 ///|
 /// 造 2000 条线上条目:字段形态与 plan 基准同一套(两个假哈希块 + 双设备版本向量),
 /// mtime 带小数毫秒 —— 这是线上形态(NTFS/ext4/APFS 的 stat 都给分数)。
-fn bench_wire_entries() -> Array[WireEntry] {
-  let out : Array[WireEntry] = []
+fn bench_wire_entries() -> Array[@net.WireEntry] {
+  let out : Array[@net.WireEntry] = []
   for i in 0..<2000 {
     out.push({
       path: "dir\{i % 37}/file\{i}.bin",
