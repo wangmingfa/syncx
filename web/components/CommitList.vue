@@ -1,6 +1,10 @@
 <script setup lang="ts">
 import { computed, ref, watch } from 'vue';
+import { NDropdown } from 'naive-ui';
+import type { DropdownOption } from 'naive-ui';
 import { apiJson, errText } from '../utils/api';
+import { copyText } from '../utils/clipboard';
+import { useToast } from '../composables/useToast';
 import type { GitCommitDiffData, GitCommitEntry, GitCommitFileEntry, GitCommitFilesData } from '../types';
 import FileDiffModal from './FileDiffModal.vue';
 
@@ -21,6 +25,30 @@ const props = defineProps<{
   /** 提交列表(新→旧),调用方加载好传入。 */
   commits: GitCommitEntry[];
 }>();
+
+const { showToast } = useToast();
+
+/* ---------------- 三点菜单:复制 commit id / 复制提交信息 ---------------- */
+
+/** 菜单项两处弹窗同一份,模块级常量即可(无每行差异)。 */
+const COMMIT_MENU_OPTIONS: DropdownOption[] = [
+  { key: 'copy-hash', label: '复制 commit id' },
+  { key: 'copy-message', label: '复制提交信息' },
+];
+
+/** 提交完整消息:首行(subject)+ 正文(body);没有正文时就是首行。 */
+function fullMessageOf(c: GitCommitEntry): string {
+  return c.body ? `${c.subject}\n${c.body}` : c.subject;
+}
+
+/** 复制并轻提示;复制内容按 key 区分(commit id = 行内展示的短哈希)。 */
+function onCommitMenu(c: GitCommitEntry, key: string | number): void {
+  const what = key === 'copy-hash' ? 'hash' : 'message';
+  const text = what === 'hash' ? c.hash : fullMessageOf(c);
+  void copyText(text).then((ok) =>
+    showToast(ok ? (what === 'hash' ? '已复制 commit id' : '已复制提交信息') : '复制失败', ok ? undefined : 'alert'),
+  );
+}
 
 /** 展开着的提交(哈希集合);用替换 Set 触发响应式,与 GitChangesModal 的折叠同款。 */
 const expanded = ref<Set<string>>(new Set());
@@ -186,6 +214,15 @@ function fmtDate(iso: string): string {
       <div class="commit-list__row">
         <span class="commit-list__hash">{{ c.hash }}</span>
         <span class="commit-list__subject" :title="c.subject">{{ c.subject }}</span>
+        <!-- 三点菜单:点击/回车不能冒泡到行(否则顺手展开),挡在容器上 ——
+             与下方文件清单区同一手法;菜单本体由 naive 挂到 body,选择不会冒泡回来。 -->
+        <span class="commit-list__menu" @click.stop @keydown.enter.stop>
+          <n-dropdown trigger="click" :options="COMMIT_MENU_OPTIONS" @select="onCommitMenu.bind(null, c)">
+            <button type="button" class="commit-list__menu-btn" title="复制 commit id / 提交信息" :aria-label="`提交 ${c.hash} 的更多操作`">
+              <svg viewBox="0 0 12 12" width="11" height="11" fill="currentColor" aria-hidden="true"><circle cx="2" cy="6" r="1.2" /><circle cx="6" cy="6" r="1.2" /><circle cx="10" cy="6" r="1.2" /></svg>
+            </button>
+          </n-dropdown>
+        </span>
         <span class="commit-list__chev" :class="{ 'is-open': isExpanded(c.hash) }" :title="isExpanded(c.hash) ? '收起' : '展开正文与文件清单'" aria-hidden="true">
           <svg viewBox="0 0 12 12" width="9" height="9" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><path d="M4.5 2.5 8 6l-3.5 3.5" /></svg>
         </span>
@@ -310,6 +347,30 @@ function fmtDate(iso: string): string {
 
 .commit-list__chev.is-open {
   transform: rotate(90deg);
+}
+
+/* 三点菜单按钮:幽灵按钮,行 hover 已给边界色,这里只在自身 hover/聚焦时点亮 */
+.commit-list__menu {
+  flex: none;
+  display: inline-flex;
+}
+
+.commit-list__menu-btn {
+  appearance: none;
+  border: none;
+  background: none;
+  color: var(--muted);
+  display: inline-flex;
+  align-items: center;
+  padding: 3px 4px;
+  border-radius: 5px;
+  cursor: pointer;
+}
+
+.commit-list__menu-btn:hover,
+.commit-list__menu-btn:focus-visible {
+  color: var(--text);
+  background: color-mix(in srgb, var(--online) 10%, transparent);
 }
 
 .commit-list__meta {
