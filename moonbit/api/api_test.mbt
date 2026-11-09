@@ -299,25 +299,36 @@ async fn probe_http(url : String) -> Int32? {
 /// `127.0.0.1:0` 探测取得,重跑不冲突。
 async test "真实 HTTP:随机端口起服务,/health 与 /api/status 可达" {
   @async.with_task_group() <| group => {
-    // 先绑 :0 让内核挑一个空闲端口,随即释放给 mocket 监听
-    let probe = @socket.TcpServer(
-      @socket.Addr::parse("127.0.0.1:0") catch {
-        _ => panic()
-      },
-    )
-    let port = probe.addr.port()
-    probe.close()
-    let base = "http://127.0.0.1:\{port}"
-    let app = @api.build_app(test_options())
-    group.spawn_bg(no_wait=true) <| () => { app.listen("127.0.0.1:\{port}") }
-    // 后台拉起可能有窗口期,连接被拒时退避重试(总量 ~5s,超时即测试失败)
+    // 「探针拿端口 → close → mocket 监听」之间有竞态窗口:端口可能被并行执行的
+    // 其他测试(moon test 默认并行)或本机其他进程抢走。mocket 的 App::listen 是
+    // noraise 的,抢不到只是静默失败,表现为健康探测一直不通 —— 所以整段
+    // 「挑端口 → 起服务 → 探活」失败就换一个新端口重来,而不是死等 5 秒后判死。
+    let mut base = ""
     let mut ready = false
-    for _ in 0..<100 {
-      if probe_http("\{base}/health") is Some(200) {
-        ready = true
+    for _attempt in 0..<3 {
+      // 先绑 :0 让内核挑一个空闲端口,随即释放给 mocket 监听
+      let probe = @socket.TcpServer(
+        @socket.Addr::parse("127.0.0.1:0") catch {
+          _ => panic()
+        },
+      )
+      let port = probe.addr.port()
+      probe.close()
+      let candidate = "http://127.0.0.1:\{port}"
+      let app = @api.build_app(test_options())
+      group.spawn_bg(no_wait=true) <| () => { app.listen("127.0.0.1:\{port}") }
+      // 后台拉起可能有窗口期,连接被拒时退避重试(单次尝试 ~1.5s,起不来就换端口)
+      for _ in 0..<30 {
+        if probe_http("\{candidate}/health") is Some(200) {
+          base = candidate
+          ready = true
+          break
+        }
+        @async.sleep(50)
+      }
+      if ready {
         break
       }
-      @async.sleep(50)
     }
     assert_true(ready)
     // /health:JSON 形态
