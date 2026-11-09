@@ -25,3 +25,9 @@ hostname = "0.4"
 
 [dev-dependencies]
 tokio = { workspace = true, features = ["full"] }
+
+# 线上编解码基准(与 Node/MoonBit 同负载,见 benches/wire_bench.rs):
+# harness = false → 手工计时,不引 criterion。
+[[bench]]
+name = "wire_bench"
+harness = false

@@ -151,20 +151,20 @@ pub fn split_ranges(data_len : Int32) -> Array[(Int32, Int32)] {
 // 表与初始向量在 new 时重建:不在顶层持有,避免依赖全局初始化顺序。
 
 ///|
-fn sha256_k() -> FixedArray[UInt64] {
-  let k = FixedArray::make(64, 0UL)
-  let vals = [
-    0x428a2f98UL, 0x71374491UL, 0xb5c0fbcfUL, 0xe9b5dba5UL, 0x3956c25bUL, 0x59f111f1UL,
-    0x923f82a4UL, 0xab1c5ed5UL, 0xd807aa98UL, 0x12835b01UL, 0x243185beUL, 0x550c7dc3UL,
-    0x72be5d74UL, 0x80deb1feUL, 0x9bdc06a7UL, 0xc19bf174UL, 0xe49b69c1UL, 0xefbe4786UL,
-    0x0fc19dc6UL, 0x240ca1ccUL, 0x2de92c6fUL, 0x4a7484aaUL, 0x5cb0a9dcUL, 0x76f988daUL,
-    0x983e5152UL, 0xa831c66dUL, 0xb00327c8UL, 0xbf597fc7UL, 0xc6e00bf3UL, 0xd5a79147UL,
-    0x06ca6351UL, 0x14292967UL, 0x27b70a85UL, 0x2e1b2138UL, 0x4d2c6dfcUL, 0x53380d13UL,
-    0x650a7354UL, 0x766a0abbUL, 0x81c2c92eUL, 0x92722c85UL, 0xa2bfe8a1UL, 0xa81a664bUL,
-    0xc24b8b70UL, 0xc76c51a3UL, 0xd192e819UL, 0xd6990624UL, 0xf40e3585UL, 0x106aa070UL,
-    0x19a4c116UL, 0x1e376c08UL, 0x2748774cUL, 0x34b0bcb5UL, 0x391c0cb3UL, 0x4ed8aa4aUL,
-    0x5b9cca4fUL, 0x682e6ff3UL, 0x748f82eeUL, 0x78a5636fUL, 0x84c87814UL, 0x8cc70208UL,
-    0x90befffaUL, 0xa4506cebUL, 0xbef9a3f7UL, 0xc67178f2UL,
+fn sha256_k() -> FixedArray[UInt32] {
+  let k : FixedArray[UInt32] = FixedArray::make(64, 0)
+  let vals : Array[UInt32] = [
+    0x428a2f98, 0x71374491, 0xb5c0fbcf, 0xe9b5dba5, 0x3956c25b, 0x59f111f1,
+    0x923f82a4, 0xab1c5ed5, 0xd807aa98, 0x12835b01, 0x243185be, 0x550c7dc3,
+    0x72be5d74, 0x80deb1fe, 0x9bdc06a7, 0xc19bf174, 0xe49b69c1, 0xefbe4786,
+    0x0fc19dc6, 0x240ca1cc, 0x2de92c6f, 0x4a7484aa, 0x5cb0a9dc, 0x76f988da,
+    0x983e5152, 0xa831c66d, 0xb00327c8, 0xbf597fc7, 0xc6e00bf3, 0xd5a79147,
+    0x06ca6351, 0x14292967, 0x27b70a85, 0x2e1b2138, 0x4d2c6dfc, 0x53380d13,
+    0x650a7354, 0x766a0abb, 0x81c2c92e, 0x92722c85, 0xa2bfe8a1, 0xa81a664b,
+    0xc24b8b70, 0xc76c51a3, 0xd192e819, 0xd6990624, 0xf40e3585, 0x106aa070,
+    0x19a4c116, 0x1e376c08, 0x2748774c, 0x34b0bcb5, 0x391c0cb3, 0x4ed8aa4a,
+    0x5b9cca4f, 0x682e6ff3, 0x748f82ee, 0x78a5636f, 0x84c87814, 0x8cc70208,
+    0x90befffa, 0xa4506ceb, 0xbef9a3f7, 0xc67178f2,
   ]
   for i in 0..<64 {
     k[i] = vals[i]
@@ -173,14 +173,17 @@ fn sha256_k() -> FixedArray[UInt64] {
 }
 
 ///|
-fn sha256_rotr(x : UInt64, n : Int32) -> UInt64 {
-  ((x >> n) | (x << (32 - n))) & U32_MASK
+fn sha256_rotr(x : UInt32, n : Int32) -> UInt32 {
+  (x >> n) | (x << (32 - n))
 }
 
 ///|
 /// 流式 SHA-256。逐段喂字节,`hex()` 收尾取十六进制摘要(小写)。
 struct Sha256 {
-  h : FixedArray[UInt64]
+  h : FixedArray[UInt32]
+  /// 轮常量表:new 时建一次。原先在 process_block 里每块重建,
+  /// 64KB 就是 1024 次表分配 + 初始化(实测占掉约三成耗时)。
+  k : FixedArray[UInt32]
   buf : FixedArray[Byte]
   mut buf_len : Int32
   /// 已处理字节数
@@ -189,27 +192,33 @@ struct Sha256 {
 
 ///|
 fn Sha256::new() -> Sha256 {
-  let h = FixedArray::make(8, 0UL)
-  let init = [
-    0x6a09e667UL, 0xbb67ae85UL, 0x3c6ef372UL, 0xa54ff53aUL, 0x510e527fUL, 0x9b05688cUL,
-    0x1f83d9abUL, 0x5be0cd19UL,
+  let h : FixedArray[UInt32] = FixedArray::make(8, 0)
+  let init : Array[UInt32] = [
+    0x6a09e667, 0xbb67ae85, 0x3c6ef372, 0xa54ff53a, 0x510e527f, 0x9b05688c,
+    0x1f83d9ab, 0x5be0cd19,
   ]
   for i in 0..<8 {
     h[i] = init[i]
   }
-  { h, buf: FixedArray::make(64, b'\x00'), buf_len: 0, total: 0L, }
+  {
+    h,
+    k: sha256_k(),
+    buf: FixedArray::make(64, b'\x00'),
+    buf_len: 0,
+    total: 0L,
+  }
 }
 
 ///|
 fn Sha256::process_block(self : Sha256, block : FixedArray[Byte]) -> Unit {
-  let k = sha256_k()
-  let w = FixedArray::make(64, 0UL)
+  let k = self.k
+  let w : FixedArray[UInt32] = FixedArray::make(64, 0)
   for i in 0..<16 {
     let j = i * 4
-    w[i] = (block[j].to_uint64() << 24) |
-      (block[j + 1].to_uint64() << 16) |
-      (block[j + 2].to_uint64() << 8) |
-      block[j + 3].to_uint64()
+    w[i] = (block[j].to_uint() << 24) |
+      (block[j + 1].to_uint() << 16) |
+      (block[j + 2].to_uint() << 8) |
+      block[j + 3].to_uint()
   }
   for i in 16..<64 {
     let s0 = sha256_rotr(w[i - 15], 7) ^
@@ -218,7 +227,8 @@ fn Sha256::process_block(self : Sha256, block : FixedArray[Byte]) -> Unit {
     let s1 = sha256_rotr(w[i - 2], 17) ^
       sha256_rotr(w[i - 2], 19) ^
       (w[i - 2] >> 10)
-    w[i] = (w[i - 16] + s0 + w[i - 7] + s1) & U32_MASK
+    // UInt32 加法按 2^32 回绕,正是 SHA-256 要的语义,无需再逐次掩码
+    w[i] = w[i - 16] + s0 + w[i - 7] + s1
   }
   let mut a = self.h[0]
   let mut b = self.h[1]
@@ -232,27 +242,27 @@ fn Sha256::process_block(self : Sha256, block : FixedArray[Byte]) -> Unit {
     let s1 = sha256_rotr(e, 6) ^ sha256_rotr(e, 11) ^ sha256_rotr(e, 25)
     // ch = (e & f) ^ (!e & g),改写成无按位取反的等价形式
     let ch = g ^ (e & (f ^ g))
-    let temp1 = (hh + s1 + ch + k[i] + w[i]) & U32_MASK
+    let temp1 = hh + s1 + ch + k[i] + w[i]
     let s0 = sha256_rotr(a, 2) ^ sha256_rotr(a, 13) ^ sha256_rotr(a, 22)
     let maj = (a & b) ^ (a & c) ^ (b & c)
-    let temp2 = (s0 + maj) & U32_MASK
+    let temp2 = s0 + maj
     hh = g
     g = f
     f = e
-    e = (d + temp1) & U32_MASK
+    e = d + temp1
     d = c
     c = b
     b = a
-    a = (temp1 + temp2) & U32_MASK
+    a = temp1 + temp2
   }
-  self.h[0] = (self.h[0] + a) & U32_MASK
-  self.h[1] = (self.h[1] + b) & U32_MASK
-  self.h[2] = (self.h[2] + c) & U32_MASK
-  self.h[3] = (self.h[3] + d) & U32_MASK
-  self.h[4] = (self.h[4] + e) & U32_MASK
-  self.h[5] = (self.h[5] + f) & U32_MASK
-  self.h[6] = (self.h[6] + g) & U32_MASK
-  self.h[7] = (self.h[7] + hh) & U32_MASK
+  self.h[0] = self.h[0] + a
+  self.h[1] = self.h[1] + b
+  self.h[2] = self.h[2] + c
+  self.h[3] = self.h[3] + d
+  self.h[4] = self.h[4] + e
+  self.h[5] = self.h[5] + f
+  self.h[6] = self.h[6] + g
+  self.h[7] = self.h[7] + hh
 }
 
 ///|
@@ -320,7 +330,7 @@ fn Sha256::hex(self : Sha256) -> String {
     let word = self.h[i]
     let mut shift : Int32 = 28
     while shift >= 0 {
-      let nib = ((word >> shift) & 0xFUL).to_int()
+      let nib = ((word >> shift) & 0xF).reinterpret_as_int()
       sb.write_char(digits[nib])
       shift -= 4
     }

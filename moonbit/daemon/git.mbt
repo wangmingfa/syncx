@@ -177,6 +177,9 @@ pub(all) struct AutoCommitResult {
   hash : String?
   /// 失败原因(stderr 首行或异常消息)。
   error : String?
+  /// 清单内本机从未见过(批量 add 的 pathspec 匹配不到)、被逐文件容错跳过的
+  /// 路径。仅成功时非空;跳过不是失败,不烧重试计数,由调用方记日志留痕。
+  skipped_files : Array[String]
 }
 
 ///|
@@ -590,14 +593,20 @@ fn first_token(s : String) -> String {
 }
 
 ///|
-/// 把 lines 从 start 起用换行接回一个字符串(完整提交消息 = 首行 + 正文)。
+/// 把 lines 从 start 起接回完整提交消息:lines[start] 是 subject(%s),其后是
+/// 正文行(%b)。格式串里 %s 与 %b 只隔一个换行,标题后的那个空行不在输出里 ——
+/// 这里必须补回:缺了它,镜像提交落库后标题与正文同属一段,git 的 %s 会把
+/// 整段折成一行(正文以空格接进 subject),对端弹窗里消息就糊成一块。
 fn join_lines_from(lines : Array[String], start : Int32) -> String {
   let mut out = ""
   for i in start..<lines.length() {
-    if i > start {
-      out = out + "\n"
+    if i == start {
+      out = out + lines[i]
+    } else if i == start + 1 {
+      out = out + "\n\n" + lines[i]
+    } else {
+      out = out + "\n" + lines[i]
     }
-    out = out + lines[i]
   }
   out
 }
@@ -712,6 +721,11 @@ pub fn git_files_desc(changed : Array[String]) -> String {
 /// (旧对端没给清单)才退回全量兜底。内容已在本地(staged 无差异)时仍落
 /// --allow-empty 空提交:两端提交链对齐是既有契约,范围收敛后空提交不再吞
 /// 任何内容,链上多一笔镜像记录无害。
+///
+/// 陌生路径容错(与 Node git-monitor.ts autoCommit 同款):批量 add 对匹配
+/// 不到的 pathspec 一票否决,清单来自对端、接收端索引滞后时一个路径就能让整
+/// 笔提交落不了 —— 批量失败降级逐文件 stage,匹配不到的记入 skipped_files
+/// 由调用方记日志,能落的先落,提交照常进行;跳过不是失败,不烧重试计数。
 pub async fn auto_commit(
   folder : String,
   message : String,
@@ -722,6 +736,7 @@ pub async fn auto_commit(
     skipped: false,
     hash: None,
     error: Some(err),
+    skipped_files: [],
   }
   // 基线 HEAD:提交阶段失败后的「实际成功」探测用它判前进
   let before_head = get_last_commit_hash(folder)
@@ -729,36 +744,70 @@ pub async fn auto_commit(
   // 在途中间态挡在外面(负向 pathspec / 精确清单不冲突)。add 阶段失败不
   // 探测:提交还没跑,HEAD 不可能因本次提交前进(探测也只会落回失败,白花
   // 两笔 git 调用),直接按失败上报。
-  let paths : Array[String] = {
-    let trimmed : Array[String] = []
-    for path in changed_files {
-      let t = path.trim().to_owned()
-      if t != "" {
-        trimmed.push(t)
-      }
-    }
-    if trimmed.length() > 0 {
-      trimmed
-    } else {
-      scratch_pathspecs()
+  //
+  // 陌生路径容错:批量 add 对匹配不到的 pathspec 一票否决(fatal: pathspec …
+  // did not match any files),而清单来自对端 —— 对端删除了本机从未收到过的
+  // 文件、新文件缺块未落地,一个路径就能让整笔镜像提交落不了,5 连败后通知
+  // 再被下一条覆盖,整笔蒸发(2026-11-09 MoonUI 实测)。故清单分支批量失败
+  // 时降级逐文件 stage:匹配不到的跳过并记入 skipped_files(调用方记日志),
+  // 能落的先落,提交照常进行。跳过不是失败 —— 不烧重试计数。只有「git 不认
+  // 识这个路径」类错误才容错;index.lock 占用、拉起失败等照旧按失败上报,
+  // 绝不能把整笔清单静默跳空后落一笔空提交。无清单的全量兜底没有可收窄的
+  // 对象,批量失败仍按失败上报。
+  let trimmed : Array[String] = []
+  for path in changed_files {
+    let t = path.trim().to_owned()
+    if t != "" {
+      trimmed.push(t)
     }
   }
-  let (add_code, _, add_err) = run_git(
-    "git",
-    folder,
-    ["add", "-A", "--", ..paths],
-  ) catch {
-    SpawnFailed(m) => return fail("git 拉起失败:\{m}")
-    GitFailed(m) => return fail(m)
-  }
-  if add_code != 0 {
-    return fail(
-      if first_line(add_err) != "" {
+  let skipped : Array[String] = []
+  if trimmed.length() > 0 {
+    let (add_code, _, add_err) = run_git(
+      "git",
+      folder,
+      ["add", "-A", "--", ..trimmed],
+    ) catch {
+      SpawnFailed(m) => return fail("git 拉起失败:\{m}")
+      GitFailed(m) => return fail(m)
+    }
+    if add_code != 0 {
+      let batch_err = if first_line(add_err) != "" {
         first_line(add_err)
       } else {
         "git add 失败(退出码 \{add_code})"
-      },
-    )
+      }
+      // 只有「git 不认识这个路径」类错误才降级;其余照旧失败
+      if stageable_err(batch_err) {
+        for path in trimmed {
+          match stage_one(folder, path) {
+            Staged => ()
+            SkipPath => skipped.push(path)
+            HardFail(m) => return fail(m)
+          }
+        }
+      } else {
+        return fail(batch_err)
+      }
+    }
+  } else {
+    let (add_code, _, add_err) = run_git(
+      "git",
+      folder,
+      ["add", "-A", "--", ..scratch_pathspecs()],
+    ) catch {
+      SpawnFailed(m) => return fail("git 拉起失败:\{m}")
+      GitFailed(m) => return fail(m)
+    }
+    if add_code != 0 {
+      return fail(
+        if first_line(add_err) != "" {
+          first_line(add_err)
+        } else {
+          "git add 失败(退出码 \{add_code})"
+        },
+      )
+    }
   }
   // 提交:参数数组形式,不走 shell,无注入面。失败走 HEAD 探测再定成败
   let (commit_code, _, commit_err) = run_git("git", folder, [
@@ -784,7 +833,43 @@ pub async fn auto_commit(
   }
   // 新提交哈希:rev-parse 在 commit 之后失败极罕见,如实报错而非静默
   let hash = get_last_commit_hash(folder) catch { _ => None }
-  { success: true, skipped: false, hash, error: None, }
+  { success: true, skipped: false, hash, error: None, skipped_files: skipped, }
+}
+
+///|
+/// 「git 不认识这个路径」类 add 失败(pathspec 匹配不到 / 被 .gitignore 挡住):
+/// 唯一允许容错跳过的失败形态;index.lock 占用、拉起失败等不在其列。
+fn stageable_err(err : String) -> Bool {
+  err.contains("did not match any files") || err.contains("paths are ignored")
+}
+
+///|
+/// 逐文件 stage 的单个路径结果。
+priv enum StageOneOutcome {
+  /// 路径已暂存(含登记删除)。
+  Staged
+  /// git 不认识这个路径 —— 跳过,由调用方记入 skipped_files 留痕。
+  SkipPath
+  /// 其他失败(index.lock、拉起失败等),按原口径上报,不容错。
+  HardFail(String)
+}
+
+///|
+/// 逐文件 stage 单个路径(`git add -A -- path`):批量 add 一票否决后的容错
+/// 降级专用。判定口径与 stageable_err 一致。
+async fn stage_one(folder : String, path : String) -> StageOneOutcome {
+  let (code, _, err) = run_git("git", folder, ["add", "-A", "--", path]) catch {
+    _ => return HardFail("git add 拉起失败")
+  }
+  if code == 0 {
+    return Staged
+  }
+  let text = first_line(err)
+  if stageable_err(text) {
+    SkipPath
+  } else {
+    HardFail(text)
+  }
 }
 
 ///|
@@ -811,12 +896,13 @@ async fn commit_failed_probe(
           skipped: false,
           hash: Some(after),
           error: None,
+          skipped_files: [],
         }
       }
     }
     None => ()
   }
-  { success: false, skipped: false, hash: None, error: Some(err), }
+  { success: false, skipped: false, hash: None, error: Some(err), skipped_files: [], }
 }
 
 ///|
@@ -842,7 +928,7 @@ pub async fn auto_commit_if_dirty(
   message : String,
 ) -> AutoCommitResult {
   if !has_uncommitted_changes(folder) {
-    return { success: true, skipped: true, hash: None, error: None, }
+    return { success: true, skipped: true, hash: None, error: None, skipped_files: [], }
   }
   auto_commit(folder, message)
 }

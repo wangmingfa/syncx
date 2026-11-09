@@ -931,6 +931,16 @@ impl RuntimeOps {
                 "git auto-commit ok: {folder_id} ({})",
                 outcome.hash.as_deref().unwrap_or("")
             );
+            // 逐文件容错跳过的路径(本机 git 从未见过,批量 add 会一票否决的那
+            // 种):这笔提交照常落,但跳过的文件没有任何后续机制会再认领 —— 必须
+            // 留痕。
+            if !outcome.skipped.is_empty() {
+                tracing::warn!(
+                    "git mirror commit skipped {} path(s) absent from this repo (commit proceeds): {folder_id}: {}",
+                    outcome.skipped.len(),
+                    outcome.skipped.join(", "),
+                );
+            }
             // 基线推到镜像提交后的 HEAD:不推的话下一轮巡检会把这笔镜像提交
             // 当成「本机新提交」再广播回去(死循环)。
             let baseline = outcome

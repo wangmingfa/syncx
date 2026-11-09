@@ -2251,6 +2251,13 @@ export class SyncSessionManager {
       );
       if (result.success) {
         this.logger.info(`auto-commit success: ${folder.id} -> ${result.hash?.slice(0, 8)}`);
+        // 逐文件容错跳过的路径(本机 git 从未见过,批量 add 会一票否决的那种):
+        // 这笔提交照常落,但跳过的文件没有任何后续机制会再认领 —— 必须留痕。
+        if (result.skippedPaths?.length) {
+          this.logger.warn(
+            `git mirror commit skipped ${result.skippedPaths.length} path(s) absent from this repo (commit proceeds): ${folder.id}: ${result.skippedPaths.join(', ')}`,
+          );
+        }
         this.settlePendingGitNotify(folder);
         // 更新基线并落盘:防止扫描循环把这个自动提交误判为「新提交」再广播回去(死循环防护)
         this.setGitBaseline(folder, result.hash ?? (await getLastCommitHash(folder.path)));
@@ -2368,6 +2375,11 @@ export class SyncSessionManager {
         this.logger.info(
           `git drift healed: ${folder.id} -> ${result.hash?.slice(0, 8)} (${aligned.length} 个文件: ${aligned.slice(0, 10).join(', ')}${aligned.length > 10 ? ' …' : ''})`,
         );
+        if (result.skippedPaths?.length) {
+          this.logger.warn(
+            `git drift heal skipped ${result.skippedPaths.length} path(s) absent from this repo (commit proceeds): ${folder.id}: ${result.skippedPaths.join(', ')}`,
+          );
+        }
       } else {
         const error = result.error ?? 'git auto-commit failed';
         this.logger.warn(`git drift heal commit failed: ${folder.id}: ${error}`);

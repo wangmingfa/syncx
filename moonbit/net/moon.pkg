@@ -18,3 +18,7 @@ import {
   "moonbitlang/async/websocket",
   "wangmingfa/syncx/core",
 }
+
+import {
+  "moonbitlang/core/bench",
+} for "test"

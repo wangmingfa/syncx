@@ -242,6 +242,31 @@ async test "auto_commit:changed_files 精确 stage,通知外改动不被吞" {
 }
 
 ///|
+/// 陌生路径容错:清单里混入本机 git 从未见过的路径(对端删除了本机从未收到
+/// 过的文件、新文件缺块未落地),批量 add 一票否决会让整笔提交落不了 ——
+/// 降级逐文件 stage 后能落的照常落,陌生路径记入 skipped_files;跳过不是
+/// 失败,不烧重试计数。
+async test "auto_commit:清单内陌生路径跳过,其余照常提交" {
+  let repo = fresh_repo("skip-unknown")
+  commit_file(repo, "a.txt", "v1", "init")
+  @fs.write_file("\{repo}/b.txt", "new")
+  let r = @daemon.auto_commit(
+    repo,
+    "syncx: 镜像",
+    changed_files=["b.txt", "scripts/never-received.py"],
+  )
+  assert_true(r.success)
+  assert_true(is_none(r.error))
+  // 只有陌生路径被跳过
+  assert_eq(r.skipped_files.length(), 1)
+  assert_eq(r.skipped_files[0], "scripts/never-received.py")
+  // b.txt 照常进了这笔提交,工作树不留残渣
+  let names = git_out(repo, ["show", "--name-only", "--format=", "HEAD"])
+  assert_true(names.contains("b.txt"))
+  assert_false(@daemon.has_uncommitted_changes(repo))
+}
+
+///|
 async test "自动提交:非仓库目录降级为跳过" {
   let dir = git_tmp_dir("notrepo")
   let r = @daemon.auto_commit_if_dirty(dir, "msg")
@@ -333,6 +358,32 @@ async test "镜像提交信息格式:单笔原样,多笔带批次脉络" {
     ]),
     "feat: c\n\nfeat: b",
   )
+}
+
+///|
+async test "get_commit_info:full_message 保留标题与正文间的空行" {
+  // 格式串里 %s 与 %b 只隔一个换行,重组时必须把标题后的空行补回:丢了它,
+  // 镜像提交落库后标题与正文同段,git 的 %s 会把整段折成一行(2026-11-06
+  // 对端「提交信息糊成一块」的根因)。
+  let repo = fresh_repo("fullmsg")
+  commit_file(repo, "a.txt", "v1", "init: a")
+  let first = unwrap_or_panic(@daemon.get_last_commit_hash(repo), "应有基线提交")
+  commit_file(repo, "b.txt", "v1", "feat: 标题\n\n正文第一段\n正文第二段")
+  let second = unwrap_or_panic(@daemon.get_last_commit_hash(repo), "应有新提交")
+  let info = unwrap_or_panic(
+    @daemon.get_commit_info(repo, first, second),
+    "应收集到批次信息",
+  )
+  assert_eq(info.message, "feat: 标题")
+  assert_eq(info.full_message, "feat: 标题\n\n正文第一段\n正文第二段")
+  // 单行消息不加多余空行
+  commit_file(repo, "c.txt", "v1", "chore: 单行")
+  let third = unwrap_or_panic(@daemon.get_last_commit_hash(repo), "应有第三笔")
+  let single = unwrap_or_panic(
+    @daemon.get_commit_info(repo, second, third),
+    "应收集到单行批次",
+  )
+  assert_eq(single.full_message, "chore: 单行")
 }
 
 ///|

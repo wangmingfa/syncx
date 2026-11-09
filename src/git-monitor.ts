@@ -37,6 +37,7 @@ type GitExecOptions = ExecFileOptions & {
   cwd: string;
   encoding?: 'utf8' | 'buffer';
   windowsHide?: boolean;
+  stdio?: ('pipe' | 'ignore' | 'inherit')[];
 };
 
 /** perf 记账:超过慢请求阈值(SYNCX_SLOW_REQ_MS 同源,缺省 300ms)记一笔 `[perf] git ...`,定位「卡在哪个仓库的哪条命令」;未注入探针且未开 SYNCX_PERF_LOG 时零开销。 */
@@ -216,7 +217,12 @@ export async function getCommitInfo(folderPath: string, fromHash: string, toHash
     const hash = lines[0]!.trim();
     const parentHash = lines[1]!.trim().split(/\s+/)[0] || '';
     const message = lines[2]!.trim();
-    const fullMessage = lines.slice(2).join('\n').trim();
+    // 标题与正文之间补回空行:%s 与 %b 在格式串里只隔一个 \n,直接 join 会把
+    // 标题后的空行丢掉 —— 镜像提交落库后标题与正文同属一段,git 的 %s 会把
+    // 整段折成一行(正文以空格接进 subject),对端弹窗里消息就糊成一块。
+    const fullMessage = lines.length > 3
+      ? `${lines[2]}\n\n${lines.slice(3).join('\n')}`
+      : lines[2]!;
 
     // 获取变更文件列表
     const diffNameOnly = await gitRun(
@@ -676,6 +682,8 @@ export interface AutoCommitResult {
   hash?: string;
   /** 失败原因(失败时) */
   error?: string;
+  /** 清单内本机从未见过(批量 add 的 pathspec 匹配不到)、被逐文件容错跳过的路径。仅成功时带回;跳过不是失败,不烧重试计数。 */
+  skippedPaths?: string[];
 }
 
 /**
@@ -690,6 +698,13 @@ export interface AutoCommitResult {
  * 内容已在本地(staged 无差异)时仍落一笔 --allow-empty 空提交:两端提交链
  * 对齐是既有契约(git-sync 链路测试锚定),范围收敛后空提交不再吞任何内容,
  * 链上多一笔镜像记录无害。
+ *
+ * 陌生路径容错:批量 `add -A -- <清单>` 对匹配不到的 pathspec 一票否决
+ * (fatal: pathspec … did not match any files),而清单来自对端 —— 对端删除了
+ * 本机从未收到过的文件、新文件缺块未落地,一个路径就能让整笔镜像提交落不了,
+ * 5 连败后通知再被下一条覆盖,整笔蒸发(2026-11-09 MoonUI 实测)。故批量失败
+ * 时降级逐文件 stage:匹配不到的跳过并经 skippedPaths 带回给调用方记日志,
+ * 能落的先落,提交照常进行。跳过不是失败 —— 不烧重试计数。
  *
  * 超时后探测:超时只保证「进程没在期限内退出」,不保证「提交没发生」
  * —— 慢盘 fsync、post-commit hook 卡顿都会让提交对象早已落盘而进程被杀。此时若
@@ -709,12 +724,37 @@ export async function autoCommit(folderPath: string, message: string, changedFil
       // stage:有清单按清单精确 stage(含删除 —— `add -A -- path` 同样登记删除),
       // 无清单退回全量;两种路径都把 syncx 的在途中间态挡在外面(见 SCRATCH_PATHSPECS)
       const paths = (changedFiles ?? []).filter((s) => s.trim());
-      await gitExecRaw(['add', '-A', '--', ...(paths.length > 0 ? paths : SCRATCH_PATHSPECS)], {
+      const addOpts: GitExecOptions = {
         cwd: folderPath,
         stdio: ['ignore', 'ignore', 'pipe'],
         windowsHide: true,
         timeout: 10000,
-      });
+      };
+      const skippedPaths: string[] = [];
+      // 只有「git 不认识这个路径」类错误才容错跳过;index.lock 占用、拉起失败等
+      // 照旧按失败上报,绝不能把整笔清单静默跳空后落一笔空提交。
+      const stageableErr = (err: unknown): boolean =>
+        /did not match any files|paths are ignored/.test(err instanceof Error ? err.message : String(err));
+      if (paths.length > 0) {
+        try {
+          await gitExecRaw(['add', '-A', '--', ...paths], addOpts);
+        } catch (err) {
+          if (!stageableErr(err)) throw err;
+          // 批量失败 = 清单里有本机 git 从未见过的 pathspec。逐文件重试:
+          // 匹配不到的跳过(带回给调用方记日志),能落的先落。
+          for (const p of paths) {
+            try {
+              await gitExecRaw(['add', '-A', '--', p], addOpts);
+            } catch (perErr) {
+              if (!stageableErr(perErr)) throw perErr;
+              skippedPaths.push(p);
+            }
+          }
+        }
+      } else {
+        // 无清单(旧对端)的全量兜底没有可收窄的对象,批量失败仍按失败上报
+        await gitExecRaw(['add', '-A', '--', ...SCRATCH_PATHSPECS], addOpts);
+      }
 
       // 提交:使用参数数组形式避免 shell 注入
       await gitExecRaw(['commit', '-m', message, '--allow-empty'], {
@@ -726,7 +766,11 @@ export async function autoCommit(folderPath: string, message: string, changedFil
 
       // 获取新提交哈希
       const hash = await revParseHeadRaw(folderPath);
-      return { success: true, hash: hash ?? undefined };
+      return {
+        success: true,
+        hash: hash ?? undefined,
+        skippedPaths: skippedPaths.length > 0 ? skippedPaths : undefined,
+      };
     } catch (err) {
       // HEAD 前进且消息与本次一致 = 提交实际成功。消息不一致(并发了他程序提交)
       // 保守按失败走原路 —— 那是罕见场景,且账目归调用方的基线/通知逻辑管。

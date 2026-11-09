@@ -235,6 +235,7 @@ pub(all) struct AutoCommitResult {
   skipped : Bool
   hash : String?
   error : String?
+  skipped_files : Array[String]
 }
 
 pub(all) enum Cmd {

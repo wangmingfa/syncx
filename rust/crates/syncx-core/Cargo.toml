@@ -9,8 +9,16 @@ rust-version.workspace = true
 [dependencies]
 serde.workspace = true
 serde_json.workspace = true
-sha2 = "0.10"
+# "asm" = sha2-asm(C 实现,吃到 SHA-NI 硬件指令):纯 Rust 实现实测只有它的
+# ~1/5 吞吐(基准 sha256-64k:119µs → 23µs 级),Node 侧 OpenSSL 一直是硬件路径。
+sha2 = { version = "0.10", features = ["asm"] }
 regex = "1"
 
 [dev-dependencies]
 insta = { version = "1", features = ["json"] }
+
+# 核心算法基准(与 Node/MoonBit 同负载,见 benches/core_bench.rs):
+# harness = false → 手工计时,不引 criterion。
+[[bench]]
+name = "core_bench"
+harness = false

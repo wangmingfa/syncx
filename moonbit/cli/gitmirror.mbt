@@ -697,6 +697,18 @@ pub async fn GitMirror::flush(self : GitMirror) -> Unit {
           },
         ),
       ])
+      // 逐文件容错跳过的路径(本机 git 从未见过,批量 add 会一票否决的那种):
+      // 这笔提交照常落,但跳过的文件没有任何后续机制会再认领 —— 必须留痕。
+      if result.skipped_files.length() > 0 {
+        @log.warn(
+          "git mirror commit skipped {N} path(s) absent from this repo (commit proceeds): {Folder}: {Files}",
+          [
+            Json::number(result.skipped_files.length().to_double()),
+            Json::string(folder_id),
+            Json::string(preview_of(result.skipped_files)),
+          ],
+        )
+      }
       let _ = self.slots.remove(folder_id)
       // 基线推进 + 去重登记:防止扫描循环把这笔镜像提交误判为「本地新提交」
       // 再广播回去(死循环防护;cmd 由 actor 按序处理,异步但必达)
@@ -949,6 +961,16 @@ async fn GitMirror::heal_deferred(self : GitMirror) -> Unit {
           Json::string(if aligned.length() > 10 { " …" } else { "" }),
         ],
       )
+      if result.skipped_files.length() > 0 {
+        @log.warn(
+          "git drift heal skipped {N} path(s) absent from this repo (commit proceeds): {Folder}: {Files}",
+          [
+            Json::number(result.skipped_files.length().to_double()),
+            Json::string(folder_id),
+            Json::string(preview_of(result.skipped_files)),
+          ],
+        )
+      }
     } else {
       let error = match result.error {
         Some(e) => e

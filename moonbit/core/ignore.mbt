@@ -104,6 +104,33 @@ fn build_regex(pattern : String) -> @regexp.Regexp? {
 }
 
 ///|
+/// 免正则的快速匹配形态。实际规则集里绝大多数是「字面量」(`node_modules`、
+/// `.git`)或「*.后缀」(`*.log`),它们等价于一次字符串比较;进正则引擎
+/// 单次要 ~750ns,字面量比较在个位 ns 级 —— 规则一多、路径一多差距就是
+/// 数量级(基准 ignore-2k 实测 64ms 里正则占一半以上)。
+priv enum FastMatcher {
+  Literal(String) // 整段相等
+  Suffix(String) // 整段后缀(模式形如 `*.xyz`,其余部分无通配符且无 `/`)
+}
+
+///|
+/// 快速形态分析:纯字面量(无 `*` `?`)→ 整段相等;`*.后缀`(首个 `*` 后
+/// 不再有任何通配符、且无 `/`)→ 后缀比较;其余返回 None,留给正则。
+/// 注意 `*` 后带 `/` 的模式走的是全路径锚定语义,后缀比较不再等价,必须回正则。
+fn fast_matcher_of(pattern : String) -> FastMatcher? {
+  if !pattern.contains("*") && !pattern.contains("?") {
+    return Some(Literal(pattern))
+  }
+  if pattern.has_prefix("*") && !pattern.has_prefix("**") {
+    let rest = pattern[1:pattern.length()].to_owned()
+    if rest != "" && !rest.contains("*") && !rest.contains("?") && !rest.contains("/") {
+      return Some(Suffix(rest))
+    }
+  }
+  None
+}
+
+///|
 /// 编译后的规则:把「以 `/` 结尾 = 仅目录」「以 `/` 开头 = 锚定」等前缀语义
 /// 在构造时解析掉,避免每个路径都重新算一遍。
 struct CompiledRule {
@@ -112,6 +139,9 @@ struct CompiledRule {
   full_path_mode : Bool
   /// `None` 表示该模式不会匹配任何路径(清洗后为空)。
   regex : @regexp.Regexp?
+  /// 快速路径(见 FastMatcher);仅当 regex 编译成功才给 —— 与
+  /// 「编译失败 = 该模式永不命中」的既有口径一致。
+  fast : FastMatcher?
 }
 
 ///|
@@ -131,7 +161,13 @@ fn CompiledRule::compile(rule : IgnoreRule) -> CompiledRule {
     anchored || pattern.contains("/")
   }
   let regex = if pattern == "" { None } else { build_regex(pattern) }
-  { rule, full_path_mode, regex, } // dir_only 折进 matches 的访问器,不单独存字段
+  // 仅当正则编译成功才给快速路径 —— 与「编译失败 = 该模式永不命中」的既有口径一致。
+  let fast : FastMatcher? = if regex is Some(_) {
+    fast_matcher_of(pattern)
+  } else {
+    None
+  }
+  { rule, full_path_mode, regex, fast, } // dir_only 折进 matches 的访问器,不单独存字段
 }
 
 ///|
@@ -152,41 +188,49 @@ fn split_segments(rel_path : String) -> Array[String] {
 }
 
 ///|
-/// 单条规则是否命中该相对路径。
-///
-/// `is_dir` 只在目录规则下起作用:它决定最后一段能否被当作「被忽略的目录自身」。
-fn CompiledRule::matches(
-  self : CompiledRule,
-  rel_path : String,
-  is_dir : Bool,
-) -> Bool {
-  let re = match self.regex {
-    Some(re) => re
-    None => return false
-  }
-  fn match_full(p : String) -> Bool {
-    if self.full_path_mode {
-      match re.match_(p) {
-        Some(_) => true
+/// 一次匹配判定:快速路径(字面量/后缀)优先,否则进正则。
+/// 语义与原先的 `re.match_(s) is Some(_)` 完全一致(见 hit 的调用方)。
+fn CompiledRule::hit(self : CompiledRule, s : String) -> Bool {
+  match self.fast {
+    Some(Literal(l)) => s == l
+    Some(Suffix(sfx)) => s.has_suffix(sfx)
+    None =>
+      match self.regex {
+        Some(re) => re.match_(s) is Some(_)
         None => false
       }
-    } else {
-      for segment in split_segments(p) {
-        match re.match_(segment) {
-          Some(_) => return true
-          None => continue
-        }
-      }
-      false
-    }
+  }
+}
+
+///|
+/// 单条规则是否命中该相对路径(段已由调用方切好,规则间共享,不再逐规则重切)。
+///
+/// `is_dir` 只在目录规则下起作用:它决定最后一段能否被当作「被忽略的目录自身」。
+fn CompiledRule::matches_with(
+  self : CompiledRule,
+  rel_path : String,
+  segments : Array[String],
+  is_dir : Bool,
+) -> Bool {
+  // regex 为 None 时 fast 也必为 None(compile 里只在正则编译成功后才给快速路径),
+  // 这里一句话保住「该模式永不命中」的口径。
+  if self.regex is None {
+    return false
   }
   if !self.dir_only() {
-    return match_full(rel_path)
+    if self.full_path_mode {
+      return self.hit(rel_path)
+    }
+    for segment in segments {
+      if self.hit(segment) {
+        return true
+      }
+    }
+    return false
   }
   // 目录规则:忽略一个目录等价于忽略它下面的全部内容,而拿到的是**文件**路径,
   // 所以要逐级回溯目录前缀。只比字面量前缀的话挡不住子目录里的同名目录
   // (`admin/node_modules/**` 会漏),那正是 Node 侧修过的事故形态。
-  let segments = split_segments(rel_path)
   let dir_depth = if is_dir {
     segments.length()
   } else {
@@ -199,17 +243,15 @@ fn CompiledRule::matches(
   }
   if self.full_path_mode {
     for i in 1..<=dir_depth {
-      let prefix = segments[0:i].join("/")
-      if match_full(prefix) {
+      if self.hit(segments[0:i].join("/")) {
         return true
       }
     }
     return false
   }
   for i in 0..<dir_depth {
-    match re.match_(segments[i]) {
-      Some(_) => return true
-      None => continue
+    if self.hit(segments[i]) {
+      return true
     }
   }
   false
@@ -245,9 +287,11 @@ pub fn IgnoreRuleset::is_ignored(
   rel_path : String,
   is_dir : Bool,
 ) -> Bool {
+  // 段只切一次,规则间共享:逐规则重切是 ignore-2k 的另一半开销来源。
+  let segments = split_segments(rel_path)
   let mut ignored = false
   for rule in self.rules {
-    if rule.matches(rel_path, is_dir) {
+    if rule.matches_with(rel_path, segments, is_dir) {
       ignored = !rule.rule.negated
     }
   }
@@ -262,9 +306,10 @@ pub fn IgnoreRuleset::last_matched(
   rel_path : String,
   is_dir : Bool,
 ) -> IgnoreRule? {
+  let segments = split_segments(rel_path)
   let mut last : IgnoreRule? = None
   for rule in self.rules {
-    if rule.matches(rel_path, is_dir) {
+    if rule.matches_with(rel_path, segments, is_dir) {
       last = Some(rule.rule)
     }
   }

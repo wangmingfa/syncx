@@ -18,6 +18,7 @@
     "dev:moonbit": "concurrently -n vite,syncx-mbt -c blue,green \"sleep 1 && vite dev --config vite.config.ts\" \"cd moonbit && moon run cli -- start --host 0.0.0.0 --expose-control --dev-vite http://127.0.0.1:5173 --port 23000 --control-port 9384 --config-dir ../.syncx-dev\"",
     "test": "vitest run",
     "test:watch": "vitest",
+    "bench": "vitest bench",
     "typecheck": "tsc --noEmit && tsc --noEmit -p tsconfig.test.json && vue-tsc --noEmit -p tsconfig.web.json",
     "build": "npm run build:web && npm run build:single",
     "build:app": "tsc",

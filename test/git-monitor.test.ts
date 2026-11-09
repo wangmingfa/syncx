@@ -154,9 +154,9 @@ describe('commit info collection', async () => {
 
       const info = (await getCommitInfo(repo, first, second))!;
       expect(info.message).toBe('标题行');
-      expect(info.fullMessage).toContain('标题行');
-      expect(info.fullMessage).toContain('正文第一段');
-      expect(info.fullMessage).toContain('正文第二段');
+      // 标题与正文之间必须补回空行:丢了它,镜像提交落库后 git 的 %s 会把
+      // 整段折成一行(对端弹窗里消息糊成一块的根因)
+      expect(info.fullMessage).toBe('标题行\n\n正文第一段\n\n正文第二段');
     } finally {
       rmDir(repo);
     }
@@ -247,6 +247,32 @@ describe('auto commit', async () => {
       expect(result.success).toBe(true);
       expect(result.hash).not.toBe(baseline);
       expect(git(repo, ['log', '-1', '--format=%s']).trim()).toBe('对端的提交,本机恰好无改动');
+    } finally {
+      rmDir(repo);
+    }
+  });
+
+  /**
+   * 陌生路径容错:清单里混入本机 git 从未见过的路径(对端删除了本机从未收到过
+   * 的文件、新文件缺块未落地),批量 add 会一票否决(fatal: pathspec … did not
+   * match any files),整笔提交落不了 —— 5 连败后通知还会被下一条覆盖,整笔蒸发。
+   * 降级逐文件 stage 后:能落的照常落,陌生路径记入 skippedPaths 带回;跳过不是
+   * 失败,不烧重试。
+   */
+  it.skipIf(!HAS_GIT)('stages the known paths and reports skipped ones when the list contains paths unknown to this repo', async () => {
+    const repo = tempGitRepo();
+    try {
+      writeFileSync(join(repo, 'a.txt'), 'A');
+      commitAll(repo, '基线');
+      writeFileSync(join(repo, 'b.txt'), 'B');
+
+      const result = await autoCommit(repo, '来自对端的提交信息', ['b.txt', 'scripts/never-received.py']);
+      expect(result.success).toBe(true);
+      expect(result.skippedPaths).toEqual(['scripts/never-received.py']);
+      expect(git(repo, ['log', '-1', '--format=%s']).trim()).toBe('来自对端的提交信息');
+      // b.txt 照常进了这笔提交,工作树不留残渣
+      expect(git(repo, ['status', '--porcelain']).trim()).toBe('');
+      expect(git(repo, ['ls-files']).trim().split(/\r?\n/).sort()).toEqual(['a.txt', 'b.txt']);
     } finally {
       rmDir(repo);
     }

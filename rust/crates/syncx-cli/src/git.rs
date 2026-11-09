@@ -240,7 +240,16 @@ pub fn get_commit_info(folder_path: &Path, from_hash: &str, to_hash: &str) -> Op
         .unwrap_or("")
         .to_string();
     let message = lines[2].trim().to_string();
-    let full_message = lines[2..].join("\n").trim().to_string();
+    // 标题与正文之间补回空行:%s 与 %b 在格式串里只隔一个 \n,直接 join 会把
+    // 标题后的空行丢掉 —— 镜像提交落库后标题与正文同属一段,git 的 %s 会把
+    // 整段折成一行(正文以空格接进 subject),对端弹窗里消息就糊成一块。
+    let full_message = if lines.len() > 3 {
+        format!("{}\n\n{}", lines[2], lines[3..].join("\n"))
+    } else {
+        lines[2].to_string()
+    }
+    .trim()
+    .to_string();
 
     let diff_name_only = git_text(
         folder_path,
@@ -682,6 +691,9 @@ pub struct AutoCommitResult {
     pub success: bool,
     pub hash: Option<String>,
     pub error: Option<String>,
+    /// 清单内本机从未见过(批量 add 的 pathspec 匹配不到)、被逐文件容错跳过
+    /// 的路径。仅成功时非空;跳过不是失败,不烧重试计数,由调用方记日志留痕。
+    pub skipped: Vec<String>,
 }
 
 /// 执行自动提交:`git add -A -- <清单|SCRATCH排除> && git commit -m <message>`。
@@ -697,6 +709,11 @@ pub struct AutoCommitResult {
 /// 内容已在本地(staged 无差异)时仍落一笔 `--allow-empty` 空提交:两端提交链
 /// 对齐是既有契约(git-sync 链路测试锚定),范围收敛后空提交不再吞任何内容,
 /// 链上多一笔镜像记录无害。
+///
+/// 陌生路径容错(与 Node 侧 `src/git-monitor.ts` 的 autoCommit 同款):批量 add
+/// 对匹配不到的 pathspec 一票否决,清单来自对端、接收端索引滞后时一个路径就能
+/// 让整笔提交落不了 —— 批量失败降级逐文件 stage,匹配不到的记入 skipped 由
+/// 调用方记日志,能落的先落,提交照常进行;跳过不是失败,不烧重试计数。
 ///
 /// 超时后探测(与 Node 侧 `src/git-monitor.ts` 的 autoCommit 同款):spawn 超时只
 /// 保证「进程没在期限内退出」,不保证「提交没发生」—— 慢盘 fsync、post-commit hook
@@ -738,13 +755,64 @@ pub fn auto_commit(
         Some(_) => None,
         None => Some("git add 执行失败".to_string()),
     };
+    // 陌生路径容错:批量 add 对匹配不到的 pathspec 一票否决(fatal: pathspec …
+    // did not match any files),而清单来自对端 —— 对端删除了本机从未收到过的
+    // 文件、新文件缺块未落地,一个路径就能让整笔镜像提交落不了,5 连败后通知
+    // 再被下一条覆盖,整笔蒸发(2026-11-09 MoonUI 实测)。故清单分支批量失败
+    // 时降级逐文件 stage:匹配不到的跳过并记入 skipped(调用方记日志),能落
+    // 的先落,提交照常进行。跳过不是失败 —— 不烧重试计数。只有「git 不认识
+    // 这个路径」类错误才容错;index.lock 占用、拉起失败等照旧按失败上报,绝
+    // 不能把整笔清单静默跳空后落一笔空提交。无清单的全量兜底没有可收窄的对
+    // 象,批量失败仍按失败上报。
+    let mut skipped: Vec<String> = Vec::new();
     if let Some(error) = stage_error {
-        // stage 失败则 commit 根本没跑,不存在「实际成功」,无需探测
-        return AutoCommitResult {
-            success: false,
-            hash: None,
-            error: Some(error),
-        };
+        let stageable = !paths.is_empty()
+            && (error.contains("did not match any files") || error.contains("paths are ignored"));
+        if !stageable {
+            // stage 失败则 commit 根本没跑,不存在「实际成功」,无需探测
+            return AutoCommitResult {
+                success: false,
+                hash: None,
+                error: Some(error),
+                skipped,
+            };
+        }
+        // 批量失败 = 清单里有本机 git 从未见过的 pathspec。逐文件重试:
+        // 匹配不到的跳过(带回给调用方记日志),能落的先落。
+        for path in paths {
+            let per = run_git(folder_path, &["add", "-A", "--", path], 10_000, 1024 * 1024);
+            let staged_ok = match &per {
+                Some(output) => output.success,
+                None => false,
+            };
+            if staged_ok {
+                continue;
+            }
+            let per_error = match per {
+                Some(output) => {
+                    let text = output.stderr.trim();
+                    if text.is_empty() {
+                        "git add 执行失败".to_string()
+                    } else {
+                        text.to_string()
+                    }
+                }
+                None => "git add 执行失败".to_string(),
+            };
+            // 逐文件失败同样只容「路径不认识」类错误,其余照旧上报
+            if per_error.contains("did not match any files")
+                || per_error.contains("paths are ignored")
+            {
+                skipped.push(path.to_string());
+            } else {
+                return AutoCommitResult {
+                    success: false,
+                    hash: None,
+                    error: Some(per_error),
+                    skipped,
+                };
+            }
+        }
     }
 
     // 参数数组形式,不经 shell —— 消息里有引号/换行都不会被解释
@@ -756,6 +824,7 @@ pub fn auto_commit(
                 success: true,
                 hash: get_last_commit_hash(folder_path),
                 error: None,
+                skipped,
             };
         }
     }
@@ -767,6 +836,7 @@ pub fn auto_commit(
             success: true,
             hash: Some(hash),
             error: None,
+            skipped,
         };
     }
     let error = match &commit_output {
@@ -784,6 +854,7 @@ pub fn auto_commit(
         success: false,
         hash: None,
         error: Some(error),
+        skipped,
     }
 }
 
@@ -1388,6 +1459,81 @@ mod tests {
         std::fs::remove_file(dir.join("b.txt.syncx-tmp")).unwrap();
 
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn get_commit_info_keeps_blank_line_between_subject_and_body() {
+        // 格式串里 %s 与 %b 只隔一个换行,重组时必须把标题后的空行补回:丢了它,
+        // 镜像提交落库后标题与正文同段,git 的 %s 会把整段折成一行(2026-11-06
+        // 对端「提交信息糊成一块」的根因)。
+        let dir = std::env::temp_dir().join(format!(
+            "syncx-cli-git-fullmsg-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let mut init = Command::new("git");
+        init.args(["init", "-q"]).current_dir(&dir);
+        hide_console(&mut init);
+        let initialized = init.status().map(|status| status.success()).unwrap_or(false);
+        if !initialized {
+            let _ = std::fs::remove_dir_all(&dir);
+            return;
+        }
+        for (key, value) in [("user.email", "t@example.com"), ("user.name", "T")] {
+            let mut config = Command::new("git");
+            config.args(["config", key, value]).current_dir(&dir);
+            hide_console(&mut config);
+            let _ = config.status();
+        }
+
+        std::fs::write(dir.join("a.txt"), "one\n").unwrap();
+        let first = auto_commit(&dir, "init", None).hash.expect("基线提交");
+        let committed = auto_commit(&dir, "feat: 标题\n\n正文第一段\n正文第二段", None);
+        assert!(committed.success, "{:?}", committed.error);
+        let second = committed.hash.expect("新提交");
+        let info = get_commit_info(&dir, &first, &second).expect("应收集到批次信息");
+        assert_eq!(info.message, "feat: 标题");
+        assert_eq!(info.full_message, "feat: 标题\n\n正文第一段\n正文第二段");
+
+        // 单行消息不加多余空行
+        std::fs::write(dir.join("b.txt"), "two\n").unwrap();
+        let third = auto_commit(&dir, "chore: 单行", None).hash.expect("第三笔");
+        let single = get_commit_info(&dir, &second, &third).expect("单行批次");
+        assert_eq!(single.full_message, "chore: 单行");
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn auto_commit_skips_paths_unknown_to_this_repo() {
+        // 陌生路径容错:清单里混入本机 git 从未见过的路径(对端删除了本机从未
+        // 收到过的文件、新文件缺块未落地),批量 add 一票否决会让整笔提交落
+        // 不了 —— 降级逐文件 stage 后能落的照常落,陌生路径记入 skipped;跳过
+        // 不是失败,不烧重试计数。
+        let root = probe_temp_root("skip-unknown");
+        if init_probe_repo(&root).is_none() {
+            let _ = std::fs::remove_dir_all(&root);
+            return;
+        }
+        std::fs::write(root.join("a.txt"), "one\n").unwrap();
+        auto_commit(&root, "init", None);
+        std::fs::write(root.join("b.txt"), "two\n").unwrap();
+
+        let result = auto_commit(
+            &root,
+            "镜像提交",
+            Some(&["b.txt".to_string(), "scripts/never-received.py".to_string()]),
+        );
+        assert!(result.success, "{:?}", result.error);
+        assert_eq!(result.skipped, vec!["scripts/never-received.py".to_string()]);
+        // b.txt 照常进了这笔提交,工作树不留残渣
+        assert!(!has_uncommitted_changes(&root));
+
+        let _ = std::fs::remove_dir_all(&root);
     }
 
     /// hook 探测两测共用的临时仓库根目录(带进程号 + 纳秒,避免并发撞名)。

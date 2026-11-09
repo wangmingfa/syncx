@@ -197,6 +197,15 @@ pub fn heal_deferred_mirror(ops: &RuntimeOps, config: &Config) {
                 preview.join(", "),
                 if aligned.len() > 10 { " …" } else { "" },
             );
+            // 逐文件容错跳过的路径(本机 git 从未见过):这笔提交照常落,但跳过
+            // 的文件没有任何后续机制会再认领 —— 必须留痕。
+            if !outcome.skipped.is_empty() {
+                tracing::warn!(
+                    "git drift heal skipped {} path(s) absent from this repo (commit proceeds): {folder_id}: {}",
+                    outcome.skipped.len(),
+                    outcome.skipped.join(", "),
+                );
+            }
             // 收敛提交不在这里推基线:同轮 check_local_commits 的新提交检测会把它
             // 当作新 HEAD 正常广播给对端并对齐基线 —— 自愈自己不推基线,广播免了。
         } else {
