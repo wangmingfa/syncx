@@ -1617,6 +1617,13 @@ html[data-theme='dark'] .chip-menu__item--danger {
   max-width: 740px;
 }
 
+/* 「自动提交失败」弹窗加宽(默认 520 → 720,用户要求 +200:失败原因里的 git
+   命令行与路径清单很长,默认宽度下折行糊成一团)。该弹窗不挂 wide,覆盖报
+   `.modal.x` 双类把特异度提到 (0,2,0),写法与 .settings-modal 同一条规矩。 */
+.modal.git-commit-error-modal {
+  max-width: 720px;
+}
+
 /* 使用指南正文。这几个类名早就写在模板里,却一直没有对应样式:<ol class="guide-steps">
    的默认序号会和手写的 ①②③④ 叠成「1. ①」,各步之间也没有间距。这里补上基础排版,
    并去掉默认 marker(编号由正文自带,否则重复)。 */
