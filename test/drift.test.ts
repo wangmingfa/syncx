@@ -104,7 +104,9 @@ function seed(root: string, rel: string, data: Buffer, over: Partial<IndexEntry>
   const ms = Math.trunc(statSync(target).mtimeMs);
   const d = new Date(ms);
   utimesSync(target, d, d);
-  return { ...mkEntry(rel, data, over), mtime: ms };
+  // 回读盘上真值当条目 mtime:个别平台/文件系统会把 utimes 写入收敛到自己的时间
+  // 粒度,直接拿写入值当条目 mtime 会与盘上差出一点,哨兵免检闸全判 unreadable
+  return { ...mkEntry(rel, data, over), mtime: statSync(target).mtimeMs };
 }
 
 /**
@@ -400,7 +402,13 @@ describe('本地轮(runLocalAudit):只做 B', () => {
       n: 8,
       verify: (samples) => f.executor.verifySampledSlots(samples),
     });
-    expect(summary).toMatchObject({ candidates: 2, sampled: 2, declared: 0, disk: 1, unreadable: 0 });
+    expect(summary, `findings=${JSON.stringify(findings)}`).toMatchObject({
+      candidates: 2,
+      sampled: 2,
+      declared: 0,
+      disk: 1,
+      unreadable: 0,
+    });
     expect(findings).toEqual([expect.objectContaining({ kind: 'disk', path: 'broken.bin', slot: 0 })]);
     // 只报不回修:坏字节还在原处,哨兵不裁决「谁的内容是对的」
     expect(readFileSync(join(f.root, 'broken.bin'))).toEqual(after);
@@ -429,7 +437,7 @@ describe('检查 B:本机宣告 vs 盘上字节(executor.verifySampledSlots)', (
       { entry: e, cdc: false, slot: 0 },
       { entry: e, cdc: false, slot: 1 },
     ]);
-    expect(verdicts[0]!.kind).toBe('ok');
+    expect(verdicts[0]!.kind, `verdicts=${JSON.stringify(verdicts)}`).toBe('ok');
     const drift = verdicts[1] as Extract<SlotVerdict, { kind: 'drift' }>;
     expect(drift.kind).toBe('drift');
     expect(drift.slot).toBe(1);
@@ -472,9 +480,8 @@ describe('检查 B:本机宣告 vs 盘上字节(executor.verifySampledSlots)', (
     // 声明的切法是 [0,3) [3,8) [8,20):除第 0 块外,与 i*BLOCK_SIZE 没有一处重合
     const e = withCdc(seed(root, 'cdc.bin', data), data, [3, 5, 12]);
     const executor = createLocalExecutor(root, index, join(root, '.syncx-trash'));
-    expect(
-      executor.verifySampledSlots(e.cdh!.map((_, slot) => ({ entry: e, cdc: true, slot }))).map((v) => v.kind),
-    ).toEqual(['ok', 'ok', 'ok']);
+    const fresh = executor.verifySampledSlots(e.cdh!.map((_, slot) => ({ entry: e, cdc: true, slot })));
+    expect(fresh.map((v) => v.kind), `fresh=${JSON.stringify(fresh)}`).toEqual(['ok', 'ok', 'ok']);
     corruptByte(join(root, 'cdc.bin'), 5); // 坏在 CDC 第 1 块([3,8) 之内)
     const after = executor.verifySampledSlots(e.cdh!.map((_, slot) => ({ entry: e, cdc: true, slot })));
     expect(after.map((v) => v.kind)).toEqual(['ok', 'drift', 'ok']);
@@ -647,11 +654,11 @@ describe('哨兵接线:peer 侧的门控与上报', () => {
   function seed2(root: string, rel: string, data: Buffer): IndexEntry {
     const target = join(root, rel);
     writeFileSync(target, data);
-    // 同 seed():mtime 钉整毫秒,corruptByte 的 Date/utimes 复位才不损失精度
+    // 同 seed():mtime 钉整毫秒再回读盘上真值,corruptByte 的 Date/utimes 复位才不损失精度
     const ms = Math.trunc(statSync(target).mtimeMs);
     const d = new Date(ms);
     utimesSync(target, d, d);
-    return { ...mkEntry(rel, data), mtime: ms };
+    return { ...mkEntry(rel, data), mtime: statSync(target).mtimeMs };
   }
 
   it('闲时跑一轮:计数行必须出现,哪怕什么都没检出', async () => {
@@ -695,7 +702,11 @@ describe('哨兵接线:peer 侧的门控与上报', () => {
       n: 8,
       verify: (samples) => h.executor.verifySampledSlots(samples),
     });
-    expect(local.summary).toMatchObject({ declared: 0, disk: 1, unreadable: 0 });
+    expect(local.summary, `findings=${JSON.stringify(local.findings)}`).toMatchObject({
+      declared: 0,
+      disk: 1,
+      unreadable: 0,
+    });
     expect(local.findings[0]!.kind).toBe('disk');
     h.dispose();
   });
