@@ -5,6 +5,7 @@
 // (x86_64/aarch64 × linux-gnu/apple-darwin/windows-msvc)。另提供当前可执行
 // 文件路径、pid 与进程存活探测(看门狗等旧进程退出用)。
 #include "moonbit.h"
+#include <stdio.h>
 #include <string.h>
 #include <stdlib.h>
 #if defined(_WIN32) || defined(_WIN64)
