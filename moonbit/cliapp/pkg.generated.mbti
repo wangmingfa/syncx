@@ -203,6 +203,7 @@ pub fn GitMirror::on_notify(Self, @net.ControlMessage, String?) -> Unit
 pub fn GitMirror::processed_size(Self) -> Int32
 pub async fn GitMirror::retry_folder(Self, String) -> @json.Json
 pub fn GitMirror::slot_attempts(Self, String) -> Int32
+pub fn GitMirror::slot_notify_files(Self, String) -> (Array[String], Array[String])
 
 pub struct PeerSenders {
   // private fields
