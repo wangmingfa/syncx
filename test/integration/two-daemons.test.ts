@@ -1009,19 +1009,22 @@ describe('initial index exchange: fingerprint skip + reconnect log separation', 
       await waitFor(() => daemonLog(a).includes('session closed; reconnecting'));
       await waitFor(() => /dial to .* failed: .*(ECONNREFUSED|ECONNRESET)/.test(daemonLog(a)));
 
-      // 重启 B(同目录同端口,索引从盘上恢复):两侧索引相等 → 双方都应记「指纹一致跳过」
+      // 重启 B(同目录同端口,索引从盘上恢复):两侧索引相等 → 双方都应记「指纹一致跳过」。
+      // 等待放宽到 60s:杀 B 后 A 会按退避节奏重连拨不通的地址,B 重启主动拨 A 才建起
+      // 第二条会话 —— 真实双进程 + 断连退避在 CI 慢机上 30s 窗口不够(2026-11-10 实测)。
       startDaemon(b, [`ws://127.0.0.1:${a.peerPort}`], [a.deviceId]);
       await waitFor(
         () =>
           daemonLog(a).includes('initial index exchange skipped (fingerprint match)') &&
           daemonLog(b).includes('initial index exchange skipped (fingerprint match)'),
+        60_000,
       );
 
       await stopChildren();
       rmDir(a.dir);
       rmDir(b.dir);
     },
-    60000,
+    120_000,
   );
 });
 

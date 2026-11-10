@@ -4225,18 +4225,21 @@ export class SyncSessionManager {
       } else {
         // 换地址即替换:摘掉本机先前为这台设备写过的那条,再写新地址。
         // 只清「本机写过的」—— 用户手填的地址一律不动。
+        // 落盘在前、日志在后:外部观察者(测试/运维)等到日志行时,config 必然
+        // 已经写好 —— 两行之间若有窗口,CI 慢机上就会出现「日志说学到了,
+        // 读配置却没有」的假阴性(2026-11-10 实测)。
         const written = this.writtenPeerUrls.get(remoteDeviceId);
         if (written && written !== learnedUrl) {
           removePeer(this.configPath, written);
           this.logger.info(`peer ${remoteDeviceId} address changed: dropped stale ${written}`);
         }
-        this.logger.info(`learned peer ${remoteDeviceId} reachable at ${learnedUrl} (reverse discovery)`);
         try {
           addPeer(this.configPath, learnedUrl);
           this.writtenPeerUrls.set(remoteDeviceId, learnedUrl);
         } catch {
           // learnedUrl 必为 ws://,正常情况下不会抛
         }
+        this.logger.info(`learned peer ${remoteDeviceId} reachable at ${learnedUrl} (reverse discovery)`);
       }
     }
     this.startSyncSession(socket, remoteDeviceId, key, learnedUrl, undefined, caps);
