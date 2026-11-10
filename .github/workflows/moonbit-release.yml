@@ -13,8 +13,10 @@
 #
 # MoonBit native 无交叉编译工具链(与 mvm 同策略),arm 目标靠原生 arm runner:
 #   aarch64-linux → ubuntu-24.04-arm;aarch64-windows → windows-11-arm;
-#   x86_64-darwin → macos-15-intlarge(intel 大核;macos-13 runner 已被
-#   GitHub 淘汰,排队永远等不到),arm64 darwin → macos-15。
+#   arm64 darwin → macos-15。
+#   没有 x86_64-apple-darwin:MoonBit 官方工具链未发布 darwin-x86_64 二进制
+#   (cli.moonbitlang.com/binaries 403),Intel Mac 用户暂无 moonbit 后端包;
+#   免费 runner 也已无 intel 形态(macos-13 退役,macos-15-intlarge 仅付费)。
 
 name: Release MoonBit Binaries
 
@@ -38,8 +40,6 @@ jobs:
             os: ubuntu-latest
           - target: aarch64-unknown-linux-gnu
             os: ubuntu-24.04-arm
-          - target: x86_64-apple-darwin
-            os: macos-15-intlarge
           - target: aarch64-apple-darwin
             os: macos-15
           - target: x86_64-pc-windows-msvc
