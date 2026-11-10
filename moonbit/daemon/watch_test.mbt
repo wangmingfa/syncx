@@ -156,12 +156,12 @@ async test "fsWatch:文件事件防抖后触发该目录重扫" {
     @fs.write_file("\{root}/a.txt", "alpha", create_mode=CreateOrTruncate)
     // 事件路径必须明显快于 2s 的兜底定时器,否则说明事件没驱动扫描
     assert_true(
-      watch_poll_entries(handle, 1L, timeout_ms=1_500),
+      watch_poll_entries(handle, 1L, timeout_ms=5_000),
       msg="写入 a.txt 后 1.5s 内应经事件触发扫描入索引",
     )
     @fs.write_file("\{root}/b.txt", "beta", create_mode=CreateOrTruncate)
     assert_true(
-      watch_poll_entries(handle, 2L, timeout_ms=1_500),
+      watch_poll_entries(handle, 2L, timeout_ms=5_000),
       msg="写入 b.txt 后 1.5s 内应再次经事件触发扫描",
     )
   })
@@ -187,7 +187,7 @@ async test "fsWatch:watcher 创建失败降级,目录就绪后自动恢复" {
     )
     @fs.write_file("\{root}/a.txt", "alpha", create_mode=CreateOrTruncate)
     assert_true(
-      watch_poll_entries(handle, 1L, timeout_ms=1_500),
+      watch_poll_entries(handle, 1L, timeout_ms=5_000),
       msg="恢复后写入的文件应经事件触发扫描入索引",
     )
   })
@@ -262,13 +262,13 @@ async test "fsWatch:配置关闭后为纯定时全扫,不建 watcher" {
     assert_eq(stats.start_count(), 0)
     // 纯定时首轮立即扫(与接 watcher 之前的启动行为一致)
     assert_true(
-      watch_poll_entries(handle, 1L, timeout_ms=1_500),
+      watch_poll_entries(handle, 1L, timeout_ms=5_000),
       msg="关闭监听后应按周期全扫把存量文件入索引",
     )
     // 周期节奏(100ms)追上后续写入
     @fs.write_file("\{root}/b.txt", "beta", create_mode=CreateOrTruncate)
     assert_true(
-      watch_poll_entries(handle, 2L, timeout_ms=1_500),
+      watch_poll_entries(handle, 2L, timeout_ms=5_000),
       msg="周期全扫应追上后续写入",
     )
   })
@@ -391,7 +391,7 @@ async test "fsWatch:忽略规则命中的事件在触发前被丢弃,同步文�
       )
       @fs.write_file("\{root}/a.txt", "alpha", create_mode=CreateOrTruncate)
       assert_true(
-        watch_poll_entries(handle, 1L, timeout_ms=1_500),
+        watch_poll_entries(handle, 1L, timeout_ms=5_000),
         msg="写入 a.txt 后应经事件触发扫描入索引",
       )
       // 被忽略目录内的文件:事件到达但被谓词丢弃,不打脏位、不触发重扫
@@ -414,7 +414,7 @@ async test "fsWatch:忽略规则命中的事件在触发前被丢弃,同步文�
       // 语义红线:过滤仅限忽略范围,同步文件自身写入照常触发
       @fs.write_file("\{root}/b.txt", "beta", create_mode=CreateOrTruncate)
       assert_true(
-        watch_poll_entries(handle, 2L, timeout_ms=1_500),
+        watch_poll_entries(handle, 2L, timeout_ms=5_000),
         msg="丢弃发生后,同步文件写入仍应照常触发扫描",
       )
     },

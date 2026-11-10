@@ -44,7 +44,9 @@ async fn git_in(cwd : String, args : Array[String]) -> Unit {
 /// 初始化一个可提交的空仓库(配好 user.name/email,免得依赖全局 git 配置)。
 async fn fresh_repo(tag : String) -> String {
   let dir = git_tmp_dir(tag)
-  git_in(dir, ["init", "-q"])
+  // 显式 -b main:git 2.28+ 支持;CI(Ubuntu 26.04,git 2.56)的 init 默认
+  // 分支仍是 master,不钉住的话「最新提交挂分支装饰」类断言就按平台翻车
+  git_in(dir, ["init", "-q", "-b", "main"])
   git_in(dir, ["config", "user.name", "syncx-test"])
   git_in(dir, ["config", "user.email", "t@example.com"])
   dir
