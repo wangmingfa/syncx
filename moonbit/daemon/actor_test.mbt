@@ -265,6 +265,16 @@ async test "actor: 增量规划不回推未提及的条目" {
       @daemon.Cmd::PeerOpen(folder="f1", remote_device_id="dev-b", sink~),
     )
     let _ = sink.get() // 指纹帧
+    // 初始交换兜底由真实墙钟驱动:PeerOpen 2s 后周期泵必发一次兜底全量。
+    // 本地毫秒级跑完断言无感;慢机(CI)上处理到这里可能已越过 2s,兜底帧
+    // 会插进后面「出站只许块请求」的断言窗口(2026-11-10 实测)。注入一拍
+    // 快进让它确定性地发完并消费掉,恰此一帧,后续窗口内不再有协议帧。
+    let _ = handle.send(@daemon.Cmd::PollTimeouts(now=@daemon.now_ms() + 3000L))
+    let _ = handle.sync_snapshot()
+    match sink.get() {
+      Entries(..) => () // 兜底全量帧,恰此一帧
+      _ => fail("兜底快进后应恰有一帧全量索引")
+    }
     // 增量索引只提 a.txt(对端改过它);c.txt 没提到 ≠ 对端缺失
     let delta : Array[@net.WireEntry] = [
       actor_wire_entry("a.txt", "changed", [("dev-a", 1L), ("dev-b", 1L)]),
