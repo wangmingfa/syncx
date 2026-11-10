@@ -108,8 +108,12 @@ fn ws_block_response(
 
 ///|
 /// 收一帧文本(超时回 None):解析后的 JSON 对象;非法内容按 None 处理。
+/// 超时给 10s:api 黑盒 exe 里十几个测试并行共用一个事件循环,慢机
+/// (CI runner)上 git clone / tar 子进程会把循环拖出秒级卡顿 —— 3s
+/// 超时在本地全绿、CI 上第一帧就超时 panic,native 后端未捕获 panic
+/// 是 abort 整个 exe(SIGABRT),殃及所有并行测试(2026-11-10 CI 实测)。
 async fn ws_recv_frame(conn : @websocket.Conn) -> Json? {
-  let text : String? = @async.with_timeout_opt(3000, () => {
+  let text : String? = @async.with_timeout_opt(10000, () => {
     let msg = conn.recv()
     @utf8.decode_lossy(msg.read_all().binary())
   }) catch {
