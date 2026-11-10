@@ -1,0 +1,314 @@
+// Generated using `moon info`, DON'T EDIT IT
+package "wangmingfa/syncx/cliapp"
+
+import {
+  "moonbitlang/core/json",
+  "wangmingfa/syncx/api",
+  "wangmingfa/syncx/core",
+  "wangmingfa/syncx/daemon",
+  "wangmingfa/syncx/net",
+}
+
+// Values
+pub const BINARY_NAME : String = "syncx-mb"
+
+pub const CONFIG_LOCK_STALE_MS : Int64 = 30_000
+
+pub const CONFIG_LOCK_TIMEOUT_MS : Int64 = 5_000
+
+pub const DEFAULT_CONTROL_PORT : Int32 = 8384
+
+pub const DEFAULT_PEER_PORT : Int32 = 22000
+
+pub const DEFAULT_UPGRADE_TAG : String = "latest"
+
+pub const DIAL_SUPERVISOR_TICK_MS : Int32 = 3000
+
+pub const GITHUB_REPO : String = "wangmingfa/syncx"
+
+pub const GIT_AUTO_COMMIT_MAX_ATTEMPTS : Int32 = 5
+
+pub const GIT_AUTO_COMMIT_RETRY_MS : Int64 = 60000
+
+pub const GIT_DRAIN_CAP_MS : Int64 = 60000
+
+pub const GIT_NOTIFY_MAX_RESENDS : Int32 = 5
+
+pub const HEALTH_MARKER_TIMEOUT_MS : Int64 = 30_000
+
+pub const MAX_UPLOAD_PACKAGE_BYTES : Int32 = 67108864
+
+pub const MIN_UPLOAD_PACKAGE_BYTES : Int32 = 4096
+
+pub const MIRROR_FLUSH_PERIOD_MS : Int32 = 2000
+
+pub const OLD_EXIT_WAIT_MS : Int64 = 120_000
+
+pub const PROCESSED_REMOTE_CAP : Int32 = 1000
+
+pub const PROCESSED_REMOTE_EVICT : Int32 = 500
+
+pub const RECONNECT_BASE_MS : Int32 = 1000
+
+pub const RECONNECT_MAX_MS : Int32 = 30000
+
+pub const UPDATE_MARKER_ENV : String = "SYNCX_UPDATE_MARKER"
+
+pub const UPLOAD_KILL_PARENT_GRACE_MS : Int64 = 600
+
+pub fn asset_name(String, String) -> String
+
+pub fn build_banner_lines(String, String, Int32, Int32, String, Array[String], String?, String) -> Array[String]
+
+pub fn build_update_restart(Array[String]) -> UpdateRestart
+
+pub async fn check_for_update() -> UpdateInfo
+
+pub fn compare_semver(String, String) -> Int32
+
+pub fn control_port_of_args(Array[String]) -> Int32
+
+pub fn default_config_path() -> String
+
+pub fn detect_target() -> String raise UpdateError
+
+pub fn drain_gate(Int32, Bool, Int64?, Int64) -> DrainGate
+
+pub async fn extract_package(Bytes, min_bytes? : Int32) -> Result[UploadedPackage, String]
+
+pub async fn fetch_release(String?) -> ReleaseAsset
+
+pub fn health_url_of_args(Array[String]) -> String
+
+pub async fn inspect_uploaded_package(Bytes, min_bytes? : Int32) -> Result[@api.InspectedPackage, String]
+
+pub async fn install_backend_binary(UploadedPackage, String) -> Result[String, String]
+
+pub async fn install_from_release(String?, UpdateRestart?) -> String
+
+pub fn is_dev_mode(StartArgs, Bool) -> Bool
+
+pub let known_commands : Array[String]
+
+pub fn known_target_triples() -> Array[String]
+
+pub async fn load_config_file(String) -> @core.Config
+
+pub fn log_git_commit_ack(String, String, String) -> Unit
+
+pub let loopback_hosts : Array[String]
+
+pub fn merge_device_status(Array[@json.Json], PeerSessionRegistry) -> Array[@json.Json]
+
+pub async fn mirror_flush_loop(GitMirror) -> Unit
+
+pub async fn mutate_config(String, (@core.Config) -> Bool) -> Result[Unit, String]
+
+pub fn normalize_upgrade_tag(String?) -> String raise UpdateError
+
+pub async fn npm_install_global(String, npm_cmd? : String) -> Result[Unit, String]
+
+pub fn parent_dir_of(String) -> String
+
+pub fn parse_backend_dir_name(String) -> (String, String, String)?
+
+pub fn parse_checksums(String, String) -> String?
+
+pub fn parse_start_args(Array[String]) -> Result[StartArgs, String]
+
+pub async fn perform_upload_swap(Bytes, String, min_bytes? : Int32, npm_cmd? : String) -> Result[String, String]
+
+pub fn pick_mode(Array[String]) -> Result[CliMode, String]
+
+pub fn pick_release(Array[@json.Json], String?) -> ReleaseAsset?
+
+pub fn reconnect_delay_ms(Int32) -> Int32
+
+pub fn resolve_config_path(StartArgs) -> String
+
+pub async fn resolve_global_syncx_entry(npm_cmd? : String) -> Result[String, String]
+
+pub async fn run_from_argv() -> Unit
+
+pub async fn run_start(StartArgs) -> Unit
+
+pub async fn run_update_swap(String) -> Int32
+
+pub async fn save_config_atomic(String, @core.Config) -> Unit raise CliError
+
+pub fn sibling_with_suffix(String, String) -> String
+
+pub async fn spawn_upload_swap(String, String, String, UpdateRestart, health_url? : String?) -> Unit raise UpdateError
+
+pub fn target_triple(String, String) -> String?
+
+pub fn valid_semver(String) -> Bool
+
+// Errors
+pub(all) suberror CliError {
+  Fatal(String)
+}
+pub fn CliError::to_text(Self) -> String
+
+pub(all) suberror UpdateError {
+  InvalidTag(String)
+  Http(String)
+  NoRelease(String)
+  ChecksumFailed(String)
+  Unsupported(String)
+  Io(String)
+}
+pub fn UpdateError::to_text(Self) -> String
+
+// Types and methods
+pub(all) enum CliMode {
+  UpdateSwap(String)
+  Start(StartArgs)
+  Version
+}
+
+pub(all) struct DrainGate {
+  flush_now : Bool
+  reasons : String
+  blocked_since : Int64?
+}
+
+pub(all) struct GitCommitLedger {
+  notify : @net.ControlMessage
+  mut targets : Array[String]
+  mut attempts : Map[String, Int32]
+  broadcast : Bool
+}
+
+pub(all) struct GitDeferredMirror {
+  hash : String
+  message : String
+  files : Array[String]
+}
+
+pub struct GitMirror {
+  // private fields
+}
+pub async fn GitMirror::adopt_pending(Self) -> Unit
+pub fn GitMirror::commit_status(Self, String) -> @json.Json?
+pub fn GitMirror::deferred_of(Self, String) -> GitDeferredMirror?
+pub async fn GitMirror::flush(Self) -> Unit
+pub fn GitMirror::has_slot(Self, String) -> Bool
+pub fn GitMirror::ledger_attempt_of(Self, String, String, broadcast? : Bool) -> Int32?
+pub fn GitMirror::ledger_targets(Self, String, broadcast? : Bool) -> Array[String]?
+pub fn GitMirror::new(config_of~ : () -> @core.Config, config_file~ : String, registry~ : PeerSessionRegistry, senders~ : PeerSenders, handle~ : @daemon.ActorHandle) -> Self
+pub fn GitMirror::on_git_ack(Self, String, String, String) -> Unit
+pub async fn GitMirror::on_local_git_notify(Self, @net.ControlMessage) -> Unit
+pub fn GitMirror::on_notify(Self, @net.ControlMessage, String?) -> Unit
+pub fn GitMirror::processed_size(Self) -> Int32
+pub async fn GitMirror::retry_folder(Self, String) -> @json.Json
+pub fn GitMirror::slot_attempts(Self, String) -> Int32
+
+pub struct PeerSenders {
+  // private fields
+}
+pub fn PeerSenders::devices(Self) -> Array[String]
+pub fn PeerSenders::new() -> Self
+pub fn PeerSenders::register(Self, String, async (@net.WireMessage) -> Bool) -> Unit
+pub async fn PeerSenders::send_to(Self, String, @net.WireMessage) -> Bool
+pub fn PeerSenders::unregister(Self, String) -> Unit
+
+pub(all) struct PeerSessionMeta {
+  version : String?
+  platform : String?
+  hostname : String?
+  url : String?
+}
+
+pub struct PeerSessionRegistry {
+  // private fields
+}
+pub fn PeerSessionRegistry::devices(Self) -> Array[String]
+pub fn PeerSessionRegistry::lookup(Self, String) -> PeerSessionMeta?
+pub fn PeerSessionRegistry::new() -> Self
+pub fn PeerSessionRegistry::register(Self, String, PeerSessionMeta) -> Unit
+pub fn PeerSessionRegistry::register_hello(Self, String, String, String?, String?) -> Unit
+pub fn PeerSessionRegistry::size(Self) -> Int32
+pub fn PeerSessionRegistry::unregister(Self, String) -> Unit
+
+pub(all) struct PendingGitNotify {
+  notify : @net.ControlMessage
+  via : String?
+  mut attempts : Int32
+  mut retry_at : Int64?
+  mut blocked_since : Int64?
+  mut warned : Bool
+  mut last_error : String?
+  mut last_error_at : Int64?
+}
+
+pub(all) struct PushOutcome {
+  sent : Array[String]
+  offline : Array[String]
+  dropped : Array[String]
+}
+
+pub(all) struct ReleaseAsset {
+  version : String
+  url : String
+  checksums_url : String?
+}
+
+pub(all) struct StartArgs {
+  mut config_path : String?
+  mut config_dir : String?
+  mut host : String?
+  mut port : Int32?
+  mut control_port : Int32?
+  mut log_file : String?
+  mut dev_vite_url : String?
+  mut expose_control : Bool
+  positionals : Array[String]
+}
+
+pub(all) struct UpdateInfo {
+  latest : String
+  current : String
+  tarball_url : String
+}
+
+pub(all) struct UpdateJob {
+  parent_pid : Int32
+  staging : String
+  exe : String
+  old_exe : String
+  marker : String
+  done : String
+  restart_args : Array[String]?
+  restart_cwd : String?
+  log_file : String?
+  wait_ms : Int64
+  verify_ms : Int64
+  version : String
+  restart_exe : String?
+  no_swap : Bool
+  kill_parent_ms : Int64
+  health_url : String?
+}
+pub fn UpdateJob::from_json(@json.Json) -> Self?
+pub fn UpdateJob::to_json(Self) -> @json.Json
+
+pub(all) struct UpdateRestart {
+  args : Array[String]
+  cwd : String?
+  log_file : String?
+}
+
+pub(all) struct UploadedPackage {
+  backend : String
+  version : String
+  target : String?
+  name : String?
+  work_dir : String
+  root : String
+  binary : String?
+}
+
+// Type aliases
+
+// Traits
