@@ -276,6 +276,28 @@ pub fn GitMirror::has_slot(self : GitMirror, folder_id : String) -> Bool {
 }
 
 ///|
+/// 观测:挂起通知槽里的文件清单与批次 subject(合并验证用;测试用)。
+pub fn GitMirror::slot_notify_files(
+  self : GitMirror,
+  folder_id : String,
+) -> (Array[String], Array[String]) {
+  match self.slots.get(folder_id) {
+    Some(s) =>
+      match s.notify {
+        GitCommitNotify(changed_files~, commit_subjects~, ..) => (
+          changed_files,
+          match commit_subjects {
+            Some(list) => list
+            None => []
+          },
+        )
+        _ => ([], [])
+      }
+    None => ([], [])
+  }
+}
+
+///|
 /// 观测:挂起通知槽的已尝试次数(无槽 = -1;测试用)。
 pub fn GitMirror::slot_attempts(self : GitMirror, folder_id : String) -> Int32 {
   match self.slots.get(folder_id) {
@@ -389,6 +411,80 @@ fn GitMirror::folder_of(
 }
 
 ///|
+/// 被覆盖通知的清单合并:镜像提交改范围收敛后,接收方只 stage 通知声明的路径 ——
+/// 覆盖旧槽时丢弃旧清单,只出现在旧 changed_files 里的文件从此不进任何镜像提交,
+/// 在接收方 worktree 永久挂成「已改未提交」(2026-11-10 ws 超时一笔被 fs-watch
+/// 一笔顶掉漏 moonbit/api/ws_test.mbt 实测)。镜像提交锚定新通知的哈希与消息,
+/// changed_files 与 commit_subjects 取两侧并集。
+fn merge_slot_notify(
+  old : @net.ControlMessage,
+  new_notify : @net.ControlMessage,
+) -> @net.ControlMessage {
+  let old_files : Array[String] = match old {
+    GitCommitNotify(changed_files~, ..) => changed_files
+    _ => return new_notify
+  }
+  let old_subjects : Array[String]? = match old {
+    GitCommitNotify(commit_subjects~, ..) => commit_subjects
+    _ => None
+  }
+  match new_notify {
+    GitCommitNotify(
+      from_device_id~,
+      folder_id~,
+      commit_hash~,
+      commit_message~,
+      changed_files~,
+      diff_stat~,
+      commit_subjects~,
+      parent_hash~,
+      version~,
+      hostname~,
+      platform~,
+      runtime~,
+    ) => {
+      let merged_files : Array[String] = []
+      for f in changed_files {
+        merged_files.push(f)
+      }
+      for f in old_files {
+        if !merged_files.contains(f) {
+          merged_files.push(f)
+        }
+      }
+      let merged_subjects : Array[String] = match commit_subjects {
+        Some(list) => list
+        None => []
+      }
+      match old_subjects {
+        Some(list) =>
+          for s in list {
+            if !merged_subjects.contains(s) {
+              merged_subjects.push(s)
+            }
+          }
+        None => ()
+      }
+      GitCommitNotify(
+        from_device_id~,
+        folder_id~,
+        commit_hash~,
+        commit_message~,
+        changed_files=merged_files,
+        diff_stat~,
+        commit_subjects=Some(merged_subjects),
+        parent_hash~,
+        version~,
+        hostname~,
+        platform~,
+        runtime~,
+      )
+    }
+    other => other
+  }
+}
+
+///|
 /// 处理对端发来的 git 提交通知:**只入队,不立即提交**(闸门见 flush)。
 /// 同步函数:只做配置闸与去重,不碰 git(仓库探测挪到 flush,这样入站
 /// 回调保持同步、通知到了先记账)。
@@ -426,7 +522,14 @@ pub fn GitMirror::on_notify(
     return
   }
   self.processed_add(hash)
-  // 单槽覆盖:新消息顶掉旧槽,上一笔的失败次数与退避一起归零,新消息立刻试一次
+  // 单槽覆盖:新消息顶掉旧槽,上一笔的失败次数与退避一起归零,新消息立刻试一次。
+  // 覆盖时必须**合并**旧槽清单:镜像提交范围收敛后接收方只 stage 通知声明的路径,
+  // 丢弃旧清单 = 只出现在旧 changed_files 里的文件从此不进任何镜像提交
+  // (2026-11-10 ws 超时一笔被 fs-watch 一笔顶掉漏 moonbit/api/ws_test.mbt 实测)
+  let notify = match self.slots.get(folder_id) {
+    Some(old) => merge_slot_notify(old.notify, notify)
+    None => notify
+  }
   self.slots.set(folder_id, {
     notify,
     via,
@@ -1038,6 +1141,12 @@ async fn GitMirror::relay(
     return
   }
   let folder_id = folder.folder_id()
+  // 中继槽覆盖同样合并欠账清单(见 merge_slot_notify):中继只走一跳,
+  // 远端漏收旧笔时它没有别的机会再听到,清单并集由新这笔补齐
+  let notify = match self.relay_ledger.get(folder_id) {
+    Some(old) => merge_slot_notify(old.notify, notify)
+    None => notify
+  }
   let ledger : GitCommitLedger = {
     notify,
     targets,
@@ -1106,6 +1215,16 @@ pub async fn GitMirror::on_local_git_notify(
   if !plan.watch_local {
     // off / receive 只进不出:不广播
     return
+  }
+  // 覆盖旧台账时合并欠账清单(见 merge_slot_notify):范围收敛后接收方只 stage
+  // 通知声明的路径,旧欠账文件随覆盖丢弃就再也不进接收方的镜像提交
+  let notify = match self.broadcast_ledger.get(folder_id) {
+    Some(old) => merge_slot_notify(old.notify, notify)
+    None => notify
+  }
+  let changed = match notify {
+    GitCommitNotify(changed_files~, ..) => changed_files
+    _ => changed
   }
   // 目标 = 该目录共享的全部设备(含当前离线的 —— 离线不耗次数,重连补投)
   let targets : Array[String] = []

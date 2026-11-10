@@ -772,6 +772,12 @@ impl RuntimeOps {
                 notice.from_device_id,
                 notice.commit_message.lines().next().unwrap_or("")
             );
+            // 覆盖旧挂起槽时合并欠账清单(与发送方台账合并同因同果):范围收敛后
+            // 旧 changed_files 里的文件随覆盖丢弃就再也不进任何镜像提交
+            let notice = match state.pending.get(folder_id) {
+                Some(old) => git_sync::merge_notice_files(old, notice),
+                None => notice,
+            };
             state.pending.insert(folder_id.to_string(), notice);
         }
         self.notify_hub();

@@ -373,6 +373,53 @@ async test "镜像 flush:来源会话不在则挂起,在线且树干净则跳过
 }
 
 ///|
+async test "镜像 intake:覆盖旧槽时合并欠账清单" {
+  // 范围收敛后接收方只 stage 通知声明的路径 —— 新通知覆盖旧槽若丢弃旧清单,
+  // 只出现在旧 changed_files 里的文件从此不进任何镜像提交(2026-11-10 实测:
+  // ws 超时修复一笔被 fs-watch 一笔顶掉,漏 moonbit/api/ws_test.mbt)
+  @async.with_task_group() <| group => {
+    let repo = gm_fresh_repo("merge-slot")
+    gm_commit(repo, "keep.txt", "v1", "init")
+    let config = @core.parse_config(
+      "{\"sharedFolders\":[{\"path\":\"\{repo}\",\"id\":\"f1\",\"gitSync\":\"full\"}]}",
+    )
+    let (mirror, handle, _) = gm_mirror(
+      group,
+      config,
+      @cliapp.PeerSessionRegistry::new(),
+      @cliapp.PeerSenders::new(),
+    )
+    // 第一笔入队(未结算),第二笔覆盖:清单必须并集
+    mirror.on_notify(
+      gm_notify(
+        "DEV-A",
+        "f1",
+        "h-1",
+        message="feat: 第一笔",
+        changed=["a.txt"],
+        subjects=Some(["feat: 第一笔"]),
+      ),
+      Some("DEV-A"),
+    )
+    mirror.on_notify(
+      gm_notify(
+        "DEV-A",
+        "f1",
+        "h-2",
+        message="feat: 第二笔",
+        changed=["b.txt"],
+        subjects=Some(["feat: 第二笔"]),
+      ),
+      Some("DEV-A"),
+    )
+    let (files, subjects) = mirror.slot_notify_files("f1")
+    assert_true(files.contains("a.txt") && files.contains("b.txt"))
+    assert_true(subjects.contains("feat: 第一笔") && subjects.contains("feat: 第二笔"))
+    let _ = handle.send(@daemon.Cmd::Shutdown)
+  }
+}
+
+///|
 async test "镜像 flush:范围收敛 + 多笔脉络消息 + 中继与回声登记" {
   @async.with_task_group() <| group => {
     let repo = gm_fresh_repo("mirror")

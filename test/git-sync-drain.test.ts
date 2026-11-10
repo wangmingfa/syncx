@@ -135,14 +135,14 @@ async function shutdown(manager: SyncSessionManager): Promise<void> {
   manager.close();
 }
 
-function notify(hash: string, message = 'feat: 远端提交'): NotifyMsg {
+function notify(hash: string, message = 'feat: 远端提交', changedFiles: string[] = ['a.txt']): NotifyMsg {
   return {
     kind: 'git-commit-notify',
     fromDeviceId: 'PEER000001',
     folderId: 'main',
     commitHash: hash,
     commitMessage: message,
-    changedFiles: ['a.txt'],
+    changedFiles,
     parentHash: '0'.repeat(40),
   };
 }
@@ -345,6 +345,27 @@ describe('git auto-commit deferred until receive ledger drains', async () => {
     expect(git(share, ['log', '-1', '--format=%B']).trim()).toBe('feat: 单独一笔');
 
     (manager as unknown as { close(): void }).close();
+  });
+
+  it.skipIf(!HAS_GIT)('merges the superseded notify files when a newer notify overwrites the pending slot', async () => {
+    // 接收侧单槽被覆盖时同样要合并清单:旧通知未结算就来了新通知,只在新清单里的
+    // 文件随新镜像提交收齐,只出现在旧清单里的文件也不能丢(2026-11-10 实测)
+    const { share, manager, folder } = boot('receive');
+    const internals = manager as unknown as Internals;
+    try {
+      internals.onGitCommitNotify(notify('1'.repeat(40), 'feat: 第一笔', ['a.txt']));
+      land(folder, share, 'a.txt', 'A');
+      // 第二笔到达:旧槽未结算就被覆盖 —— 旧清单若丢弃,a.txt 永远不进镜像提交
+      internals.onGitCommitNotify(notify('2'.repeat(40), 'feat: 第二笔', ['b.txt']));
+      land(folder, share, 'b.txt', 'B');
+      await internals.flushPendingGitNotify();
+      expect(git(share, ['log', '-1', '--format=%s'])).toBe('feat: 第二笔');
+      expect(git(share, ['status', '--porcelain'])).toBe('');
+      const files = git(share, ['show', '--name-only', '--format=', 'HEAD']).split('\n').filter(Boolean);
+      expect(files.sort()).toEqual(['a.txt', 'b.txt']);
+    } finally {
+      await shutdown(manager);
+    }
   });
 
   it.skipIf(!HAS_GIT)('dedupes a redelivered notify before it is ever queued', async () => {
@@ -878,6 +899,52 @@ describe('git commit broadcast reaches every device of the folder', async () => 
     const resent = sent.find((s) => s.deviceId === 'PEER000001')?.msg;
     if (resent?.kind !== 'git-commit-notify') throw new Error('PEER000001 没有收到 git 提交通知');
     expect(resent.commitHash).toBe(head);
+
+    (manager as unknown as { close(): void }).close();
+  });
+
+  /**
+   * 台账覆盖必须**合并**清单:镜像提交改范围收敛后,接收方只 stage 通知声明的路径。
+   * 第一笔未回执就被第二笔覆盖的话,只出现在第一笔 changedFiles 里的文件从此不在
+   * 任何通知里,接收方 worktree 永久挂成「已改未提交」(2026-11-10 ws 超时修复一笔
+   * 被 fs-watch 一笔顶掉漏 moonbit/api/ws_test.mbt 实测)。
+   */
+  it.skipIf(!HAS_GIT)('merges the unacked ledger files when a newer commit overwrites the broadcast', async () => {
+    const { dir, share, manager, folder } = boot('full', ['PEER000001']);
+    const internals = manager as unknown as Internals;
+    let online = new Set<string>();
+    const sent = spyControls(manager, (deviceId) => online.has(deviceId));
+
+    await internals.checkGitCommits(); // 首轮建基线
+
+    // 第一笔:对端不在线,广播进待回执台账(spy 拦下投递)
+    writeFileSync(join(share, 'a.txt'), 'one');
+    git(share, ['add', '-A']);
+    git(share, ['commit', '-qm', 'feat: 第一笔']);
+    await internals.checkGitCommits();
+    const head1 = git(share, ['rev-parse', 'HEAD']);
+    expect(folder.gitBroadcast?.msg.commitHash).toBe(head1);
+    expect(folder.gitBroadcast?.msg.changedFiles).toContain('a.txt');
+
+    // 第二笔覆盖台账:旧欠账文件必须并入 —— 只带新清单,接收方漏提交旧文件
+    writeFileSync(join(share, 'b.txt'), 'two');
+    git(share, ['add', '-A']);
+    git(share, ['commit', '-qm', 'feat: 第二笔']);
+    await internals.checkGitCommits();
+    const head2 = git(share, ['rev-parse', 'HEAD']);
+    expect(folder.gitBroadcast?.msg.commitHash).toBe(head2);
+    expect(folder.gitBroadcast?.msg.changedFiles).toEqual(expect.arrayContaining(['a.txt', 'b.txt']));
+    expect(folder.gitBroadcast?.msg.commitSubjects).toEqual(['feat: 第一笔', 'feat: 第二笔']);
+    // 合并后的台账落盘(重启后 readGitPending 读回的也是这份)
+    expect(broadcastOnDisk(dir)).toMatchObject({ commitHash: head2 });
+
+    // 对端上线补投:送达的通知同样带合并清单
+    online = new Set(['PEER000001']);
+    sent.length = 0;
+    await internals.checkGitCommits();
+    const resent = sent[0]?.msg;
+    if (resent?.kind !== 'git-commit-notify') throw new Error('没有补投 git 提交通知');
+    expect(resent.changedFiles).toEqual(expect.arrayContaining(['a.txt', 'b.txt']));
 
     (manager as unknown as { close(): void }).close();
   });

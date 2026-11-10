@@ -285,6 +285,31 @@ pub fn check_local_commits(ops: &RuntimeOps, config: &Config, now: i64) {
     }
 }
 
+/// 被覆盖通知的清单合并:镜像提交改范围收敛后,接收方只 stage 通知声明的路径 ——
+/// 覆盖旧台账/旧槽时丢弃旧清单,只出现在旧 changed_files 里的文件从此不进任何
+/// 镜像提交,在接收方 worktree 永久挂成「已改未提交」(2026-11-10 ws 超时一笔被
+/// fs-watch 一笔顶掉漏 moonbit/api/ws_test.mbt 实测)。镜像提交锚定新通知的哈希
+/// 与消息,changed_files 与 commit_subjects 取两侧并集。
+pub(super) fn merge_notice_files(old: &GitNotice, fresh: GitNotice) -> GitNotice {
+    let mut merged = fresh;
+    for file in &old.changed_files {
+        if !merged.changed_files.contains(file) {
+            merged.changed_files.push(file.clone());
+        }
+    }
+    let subjects = merged
+        .commit_subjects
+        .get_or_insert_with(Vec::new);
+    if let Some(old_subjects) = &old.commit_subjects {
+        for subject in old_subjects {
+            if !subjects.contains(subject) {
+                subjects.push(subject.clone());
+            }
+        }
+    }
+    merged
+}
+
 /// 向目录的每一台对端广播一笔本机提交,并把名单原样记入待回执台账。
 fn broadcast(
     ops: &RuntimeOps,
@@ -301,6 +326,15 @@ fn broadcast(
         commit_subjects: Some(info.commit_subjects.clone()),
         parent_hash: info.parent_hash.clone(),
         via_device_id: None,
+    };
+    // 覆盖旧广播台账时合并欠账清单(见 merge_notice_files):范围收敛后旧欠账
+    // 文件随覆盖丢弃,接收方就再也不收它们
+    let notice = match ops.git_state.lock() {
+        Ok(state) => match state.broadcast.get(folder_id) {
+            Some(old) => merge_notice_files(&old.notice, notice),
+            None => notice,
+        },
+        Err(_) => notice,
     };
     let targets = folder.devices.clone();
     let mut attempts = std::collections::HashMap::new();
@@ -327,7 +361,7 @@ fn broadcast(
     tracing::info!(
         "git commit broadcast: {folder_id} {hash8} \"{}\" ({} 个文件)",
         info.message,
-        info.changed_files.len()
+        notice.changed_files.len()
     );
     if !outcome.pending.is_empty() {
         tracing::info!(
@@ -372,8 +406,17 @@ pub fn relay_notice(ops: &RuntimeOps, folder_id: &str, notice: &GitNotice) {
         ops.set_git_ledger(folder_id, "relay", None);
         return;
     }
+    // 中继槽覆盖同样合并欠账清单(见 merge_notice_files):中继只走一跳,
+    // 远端漏收旧笔时它没有别的机会再听到
+    let notice = match ops.git_state.lock() {
+        Ok(state) => match state.relay.get(folder_id) {
+            Some(old) => merge_notice_files(&old.notice, notice.clone()),
+            None => notice.clone(),
+        },
+        Err(_) => notice.clone(),
+    };
     let mut attempts = std::collections::HashMap::new();
-    let outcome = push_targets(ops, notice, folder_id, &targets, &mut attempts);
+    let outcome = push_targets(ops, &notice, folder_id, &targets, &mut attempts);
     let ledger = if outcome.pending.is_empty() {
         None
     } else {

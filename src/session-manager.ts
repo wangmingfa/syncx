@@ -2579,20 +2579,36 @@ export class SyncSessionManager {
    */
   private broadcastGitCommit(folder: FolderState, info: CommitInfo): void {
     const devices = folder.config.devices ?? [];
+    // 新的一笔覆盖旧台账时必须**合并**旧清单:镜像提交改成范围收敛(bd72cb9)后,
+    // 接收方只 stage 清单里声明的路径 —— 旧台账未回执就被覆盖的话,只出现在旧
+    // changedFiles 里的文件从此不在任何通知里,在接收方 worktree 永久挂成
+    // 「已改未提交」(2026-11-10 ws 超时修复一笔被 fs-watch 一笔顶掉漏
+    // moonbit/api/ws_test.mbt 实测;注释里「接收方 git add -A 全量扫」的旧前提
+    // 已随范围收敛消失)。合并后由新这笔的镜像提交一并收齐;旧文件内容早已随
+    // 数据面落地,个别仍在途的由接收方内容对齐闸 + 漂移台账自愈兜底。
+    const stale = folder.gitBroadcast;
+    let changedFiles = info.changedFiles;
+    let commitSubjects = info.commitSubjects;
+    if (stale && stale.msg.commitHash !== info.hash) {
+      changedFiles = [...new Set([...stale.msg.changedFiles, ...info.changedFiles])];
+      commitSubjects = [
+        ...new Set([...(stale.msg.commitSubjects ?? []), ...(info.commitSubjects ?? [])]),
+      ];
+    }
     const msg: GitCommitNotifyMsg = {
       kind: 'git-commit-notify',
       fromDeviceId: this.identity.deviceId,
       folderId: folder.id,
       commitHash: info.hash,
       commitMessage: info.fullMessage,
-      changedFiles: info.changedFiles,
+      changedFiles,
       diffStat: info.diffStat,
-      commitSubjects: info.commitSubjects,
+      commitSubjects,
       parentHash: info.parentHash,
     };
     const attempts = new Map<string, number>();
     const pending = devices.length ? this.pushGitNotifyTargets(msg, devices, attempts).pending : [];
-    // 新的一笔覆盖旧台账:接收方 `git add -A` 全量扫,内容随最新这笔一起到(未回执者重新起账)
+    // 未回执者重新起账(attempts 归零),但欠账清单已并入新通知,不随覆盖丢失
     this.setGitBroadcast(folder, pending.length ? { msg, targets: pending, attempts } : null);
     this.logger.info(
       `git commit broadcast: ${folder.id} ${info.hash.slice(0, 8)} "${info.message.split('\n')[0]}" (${info.changedFiles.length} 个文件: ${info.changedFiles.slice(0, 10).join(', ')}${info.changedFiles.length > 10 ? ` …等 ${info.changedFiles.length} 个` : ''})`,
@@ -2638,7 +2654,21 @@ export class SyncSessionManager {
       return;
     }
 
-    folder.pendingGitNotify = { msg, viaDeviceId: hopDeviceId };
+    // 覆盖旧槽时合并旧清单:结算改成范围收敛后,只出现在旧 changedFiles 里的
+    // 文件若随覆盖丢弃,就再也不进任何镜像提交(与发送方台账合并同因同果,
+    // 见 broadcastGitCommit)。镜像提交锚定新通知的哈希与消息,清单取并集。
+    let merged = msg;
+    const stale = folder.pendingGitNotify;
+    if (stale && stale.msg.commitHash !== msg.commitHash) {
+      merged = {
+        ...msg,
+        changedFiles: [...new Set([...stale.msg.changedFiles, ...msg.changedFiles])],
+        commitSubjects: [
+          ...new Set([...(stale.msg.commitSubjects ?? []), ...(msg.commitSubjects ?? [])]),
+        ],
+      };
+    }
+    folder.pendingGitNotify = { msg: merged, viaDeviceId: hopDeviceId };
     // 新消息覆盖旧槽:上一笔的失败次数与退避一起归零,让新消息立刻试一次
     folder.gitAutoCommitAttempts = 0;
     folder.gitAutoCommitRetryAt = undefined;
