@@ -202,12 +202,13 @@ describe('FolderWatchHub:失效重建与降级', () => {
 
       // 删除后原地重建(inode 变化):Linux 上旧 inotify watch 已静默死亡且无 error 事件,
       // 对账以「建 watch 时的目录身份」发现失效。不能只 rm+mkdir:ext4 会把刚释放的
-      // inode 立刻复用给紧邻的 mkdir,身份没变就对账不出失效 —— 先在旁边建个新目录
-      // 再 rename 换入,inode 必然不同(rename 不改 inode)。
+      // inode 立刻复用给紧邻的 mkdir —— **replacement 也必须建在 rm 之前**(先占住一个
+      // 与 dirA 不同的 inode,rm 释放的旧 inode 就轮不到它),否则 rename 换入后身份
+      // 照样没变,对账发现不了失效(2026-11-10 CI 实测:rm→mkdir 顺序仍复现)。
       calls.length = 0;
-      rmSync(dirA, { recursive: true, force: true });
       const replacement = `${dirA}-rebuild`;
       mkdirSync(replacement, { recursive: true });
+      rmSync(dirA, { recursive: true, force: true });
       renameSync(replacement, dirA);
       hub.syncFolders([{ id: 'a', path: dirA }]);
       expect(hub.hasWatcher('a')).toBe(true);
