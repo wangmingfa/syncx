@@ -224,9 +224,13 @@ export async function getCommitInfo(folderPath: string, fromHash: string, toHash
       ? `${lines[2]}\n\n${lines.slice(3).join('\n')}`
       : lines[2]!;
 
-    // 获取变更文件列表
+    // 获取变更文件列表。--no-renames 必须带:rename 检测会把「删旧+增新」折叠成
+    // 一条改名记录,--name-only 只输出新路径 —— 镜像提交按这份清单做范围收敛,
+    // 旧路径缺失就意味着对端的镜像提交只 add 不删,旧文件从此挂在 worktree 当
+    // 「已删除未提交」(2026-11-10 cli→cliapp 重构实测,徽标常驻改动 14)。禁用
+    // rename 检测让两侧都进清单,git add 对旧路径按 index 条目 stage 删除。
     const diffNameOnly = await gitRun(
-      ['diff', '--name-only', `${fromHash}..${toHash}`],
+      ['diff', '--name-only', '--no-renames', `${fromHash}..${toHash}`],
       {
         cwd: folderPath,
         encoding: 'utf8',

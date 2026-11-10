@@ -554,8 +554,12 @@ pub async fn get_commit_info(
   let parent_hash = first_token(lines[1])
   let message = lines[2]
   let full_message = join_lines_from(lines, 2)
-  // 变更文件列表(diff --name-only 对空范围正常退出)
-  let diff_out = git_ok(folder, ["diff", "--name-only", range]) catch {
+  // 变更文件列表(diff --name-only 对空范围正常退出)。--no-renames 必须带:
+  // rename 检测会把「删旧+增新」折叠成一条改名记录,--name-only 只输出新路径
+  // —— 镜像提交按这份清单做范围收敛,旧路径缺失就意味着对端的镜像提交只
+  // add 不删,旧文件从此挂在 worktree 当「已删除未提交」(2026-11-10 实测)。
+  // 禁用 rename 检测让两侧都进清单,git add 对旧路径按 index 条目 stage 删除。
+  let diff_out = git_ok(folder, ["diff", "--name-only", "--no-renames", range]) catch {
     _ => return None
   }
   let changed_files = split_nonempty(diff_out, "\n")

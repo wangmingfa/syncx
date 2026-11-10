@@ -251,9 +251,14 @@ pub fn get_commit_info(folder_path: &Path, from_hash: &str, to_hash: &str) -> Op
     .trim()
     .to_string();
 
+    // --no-renames 必须带:rename 检测会把「删旧+增新」折叠成一条改名记录,
+    // --name-only 只输出新路径 —— 镜像提交按这份清单做范围收敛,旧路径缺失
+    // 就意味着对端的镜像提交只 add 不删,旧文件从此挂在 worktree 当「已删除
+    // 未提交」(2026-11-10 cli→cliapp 重构实测)。禁用 rename 检测让两侧都进
+    // 清单,git add 对旧路径按 index 条目 stage 删除。
     let diff_name_only = git_text(
         folder_path,
-        &["diff", "--name-only", &range],
+        &["diff", "--name-only", "--no-renames", &range],
         5_000,
         1024 * 1024,
     )

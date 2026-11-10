@@ -178,6 +178,25 @@ describe('commit info collection', async () => {
       rmDir(repo);
     }
   });
+
+  it.skipIf(!HAS_GIT)('a pure rename commit lists BOTH sides of the rename in changedFiles', async () => {
+    const repo = tempGitRepo();
+    try {
+      writeFileSync(join(repo, 'old.txt'), 'A');
+      const first = commitAll(repo, '初始提交');
+
+      // 纯 rename(git mv):rename 检测会把「删旧+增新」折叠成一条记录,
+      // --name-only 只输出新路径 —— 镜像提交按清单收敛时就只 add 不删,
+      // 对端旧文件永远挂在 worktree 当「已删除未提交」(2026-11-10 实测)
+      git(repo, ['mv', 'old.txt', 'renamed.txt']);
+      const second = commitAll(repo, '重命名文件');
+
+      const info = (await getCommitInfo(repo, first, second))!;
+      expect([...info.changedFiles].sort()).toEqual(['old.txt', 'renamed.txt']);
+    } finally {
+      rmDir(repo);
+    }
+  });
 });
 
 describe('auto commit', async () => {
