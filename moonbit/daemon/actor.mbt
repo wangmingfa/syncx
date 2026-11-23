@@ -257,6 +257,11 @@ pub(all) struct FolderSpec {
   versions_dir : String?
   versions_per_path : Int32?
   rules : @core.IgnoreRuleset
+  /// 规则原文(与 rules 同源,装配层一次折算两处喂入)。规则变更回溯清理按它
+  /// 去重:内容没变就短路,不重复跑 purge。MoonBit 目前规则源恒为空(cliapp 的
+  /// .gitignore/.syncxignore 载入 TODO 落地后,rules 与 rules_lines 必须一起换,
+  /// 绝不允许判定函数与清理指纹漂移出两套行来源)。
+  rules_lines : Array[String]
   receive_only : Bool
   conflict_policy : ConflictPolicy
   paused : Bool
@@ -359,7 +364,10 @@ priv struct Folder {
   /// 本机内存索引(与索引库同步维护;扫描 / 落地 / 控制面三条写入路径都在
   /// actor 任务上,故无需锁)。
   local_index : Map[String, Entry]
-  rules : @core.IgnoreRuleset
+  mut rules : @core.IgnoreRuleset
+  /// 规则原文指纹(见 FolderSpec.rules_lines):热重载按它去重,没变化就不
+  /// 重复跑回溯清理。
+  mut rules_lines : Array[String]?
   /// 运行期可变字段(mut):配置热重载按新 spec 就地更新 —— 索引库、内存
   /// 索引与会话态跨重载保留,只有这几项跟随配置走。
   mut receive_only : Bool
@@ -484,13 +492,14 @@ fn make_folder(spec : FolderSpec) -> Folder raise IndexStoreError {
   for entry in index.list_entries() {
     local_index.set(entry.path, entry)
   }
-  {
+  let folder : Folder = {
     id: spec.id,
     root: spec.root,
     index,
     executor: make_executor(spec),
     local_index,
     rules: spec.rules,
+    rules_lines: Some(spec.rules_lines),
     receive_only: spec.receive_only,
     conflict_policy: spec.conflict_policy,
     paused: spec.paused,
@@ -504,6 +513,67 @@ fn make_folder(spec : FolderSpec) -> Folder raise IndexStoreError {
     git_watcher: { root: spec.root, mode: spec.git_sync, last_hash: None, },
     schedule: spec.schedule,
     full_index_sent: Map([]),
+  }
+  // 装载期回溯清理(与 Node createFolderState / Rust load_index 同口径):
+  // 硬忽略条目连墓碑一起断根,软忽略只摘活条目(墓碑是删除传播载体,保留),
+  // 单文件暂停路径双向冻结,不动。
+  folder.purge_now_ignored(root_tombstones=true)
+  folder
+}
+
+///|
+/// 回溯清理:把「不再参与同步」的索引条目从索引库与 local_index 中摘除
+/// (与 Node session-manager 的 purgeNowIgnoredEntries / Rust 的
+/// purge_now_ignored 同口径)。
+///
+/// 规则每轮重读(Node/Rust)或热重载(MoonBit)会带来规则变更,但索引库只会
+/// 增量写:规则生效之前扫进去的条目(如 .gitignore 补 target/ 之前的构建产物,
+/// 2026-11-23 实测 10.4 万条)不会被追认删除,长期滞留 —— 指纹永远含这些僵尸,
+/// 对端每次会话都因指纹不等索要全量索引,弱机端要反复消化几万条,追平从秒级
+/// 退化到分钟级。
+///
+/// 口径:活条目(非墓碑)命中硬忽略或现行软规则即摘除(库 + 内存双侧);墓碑
+/// 默认保留 —— 它是删除传播的载体;仅装载期(root_tombstones=true)把硬忽略
+/// 墓碑一并断根。单文件暂停的路径双向冻结,不动。摘除**不产生墓碑**(墓碑会把
+/// 对端的真实文件删进回收站);静默摘除让两端各自收敛 —— 对端升级到带同款
+/// 清理的版本后自会摘掉这些条目,指纹重新一致。过渡期(对端旧版本)它会在
+/// 全量交换时把这些条目回推,本机接收闸门按现行规则过滤,不落盘 —— 有噪声、
+/// 无损伤。
+fn Folder::purge_now_ignored(
+  self : Folder,
+  root_tombstones~ : Bool = false,
+) -> Unit {
+  let stale : Array[String] = []
+  for path, entry in self.local_index {
+    if self.paused_files.contains(path) {
+      continue // 单文件暂停:双向冻结
+    }
+    let purge = if entry.deleted {
+      root_tombstones && @core.is_hard_ignored(path)
+    } else {
+      @core.is_hard_ignored(path) || self.rules.is_ignored(path, false)
+    }
+    if purge {
+      stale.push(path)
+    }
+  }
+  for path in stale {
+    self.index.remove_entry(path) catch {
+      e => {
+        @log.warn(
+          "回溯清理:条目 {Path} 出库失败({Detail}),下轮装载再试",
+          [Json::string(path), Json::string(IndexStoreError::to_text(e))],
+        )
+        continue
+      }
+    }
+    let _ = self.local_index.remove(path)
+  }
+  if stale.length() > 0 {
+    @log.info(
+      "回溯清理:目录 {Folder} 摘除 {Count} 条不再参与同步的索引条目",
+      [Json::string(self.id), Json::string(stale.length().to_string())],
+    )
   }
 }
 
@@ -935,6 +1005,16 @@ async fn SessionActor::do_reconfigure(
           folder.git_sync = spec.git_sync
           folder.git_watcher.mode = spec.git_sync
           folder.schedule = spec.schedule
+          // 规则变更回溯清理:规则原文变了才刷新判定并 purge(活条目摘除、
+          // 墓碑保留;与 Rust Folder::refresh_rules 同口径)。MoonBit 目前
+          // 规则源恒为空(见 FolderSpec.rules_lines 注释),此去重常态短路;
+          // cliapp 的规则载入 TODO 落地后,热重载是这里唯一的规则变更入口
+          // (Node/Rust 还有「规则每轮重读」,MoonBit 规则接上时同样要补)。
+          if folder.rules_lines != Some(spec.rules_lines) {
+            folder.rules_lines = Some(spec.rules_lines)
+            folder.rules = spec.rules
+            folder.purge_now_ignored()
+          }
           rebuilt.push(folder)
         } else {
           // 换根:删 + 建

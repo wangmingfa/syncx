@@ -703,7 +703,8 @@ fn build_folder_specs(
   for folder in config.shared_folders {
     let hash = short_hash(folder.index_key())
     // TODO(cli):.gitignore / .syncxignore 规则载入(当前空规则集,
-    // 硬忽略仍生效);folderIdentity 收养待接。
+    // 硬忽略仍生效);folderIdentity 收养待接。rules 与 rules_lines 必须
+    // 同源(后者供回溯清理按内容去重),接入时两处一起换。
     specs.push({
       id: folder.folder_id(),
       root: folder.path,
@@ -712,6 +713,7 @@ fn build_folder_specs(
       versions_dir: Some("\{config_dir}/versions/\{hash}"),
       versions_per_path,
       rules: @core.IgnoreRuleset::from_lines([]),
+      rules_lines: [],
       receive_only: folder.is_receive_only(),
       conflict_policy: conflict_policy_of(folder.conflict_policy),
       // 暂停闸:目录级或全局暂停(config.paused,Node 同语义)任一命中;

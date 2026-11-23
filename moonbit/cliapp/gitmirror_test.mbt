@@ -214,6 +214,7 @@ async fn gm_mirror_repo(
     versions_dir: None,
     versions_per_path: None,
     rules: @core.IgnoreRuleset::from_lines([]),
+    rules_lines: [],
     receive_only: false,
     conflict_policy: @daemon.ConflictPolicy::KeepBoth,
     paused: false,

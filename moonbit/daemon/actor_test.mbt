@@ -62,6 +62,7 @@ async fn actor_make_spec(
     versions_dir: None,
     versions_per_path: None,
     rules: @core.IgnoreRuleset::from_lines(ignore_lines),
+    rules_lines: ignore_lines,
     receive_only: false,
     conflict_policy: @daemon.ConflictPolicy::KeepBoth,
     paused: false,
@@ -1131,5 +1132,145 @@ async test "actor 徽标:独立循环把改动/未推送计数写进快照" {
       }),
     )
     actor_loop_stop(env)
+  }
+}
+
+///|
+/// 播种一条索引条目(回溯清理测试用;deleted=true 即墓碑,size/blocks 随之清零)。
+fn retro_seed(
+  store : @daemon.IndexStore,
+  path : String,
+  deleted~ : Bool = false,
+) -> Unit raise @daemon.IndexStoreError {
+  store.save_entry({
+    path,
+    version: Map([("retro-dev", 1L)]),
+    size: if deleted {
+      0L
+    } else {
+      5L
+    },
+    deleted,
+    blocks: if deleted {
+      []
+    } else {
+      ["aaaa"]
+    },
+    cdh: None,
+    clens: None,
+    mtime: None,
+    placeholder: false,
+  })
+}
+
+///|
+/// 用独立连接查库里某路径的条目数(回溯清理测试断言「库侧摘干净」用)。
+fn retro_db_count(
+  index_path : String,
+  path : String,
+) -> Int64 raise @sqlite.SqliteError {
+  let db = @sqlite.open(index_path)
+  let stmt = db.prepare("SELECT COUNT(*) AS n FROM entries WHERE path = ?")
+  stmt.bind_text(1, path)
+  let _ = stmt.step()
+  let n = stmt.column_int(0)
+  stmt.finalize()
+  db.close()
+  n
+}
+
+///|
+/// 把查询结果折成「路径在不在」表。
+fn retro_present(entries : Array[@daemon.Entry]) -> Map[String, Bool] {
+  let present : Map[String, Bool] = Map([])
+  for e in entries {
+    present.set(e.path, true)
+  }
+  present
+}
+
+///|
+/// 回溯清理(装载期):硬忽略条目连墓碑一起断根;软忽略只摘活条目(墓碑是
+/// 删除传播载体,保留);单文件暂停路径双向冻结。库与内存双侧都要摘干净
+/// (与 Node createFolderState / Rust load_index 同口径)。
+async test "回溯清理:装载期摘除硬忽略条目与不再参与同步的活条目" {
+  @async.with_task_group() <| group => {
+    let root = actor_fresh_root("retro-load")
+    let spec = actor_make_spec(root, ignore_lines=["tmp/"])
+    let store = @daemon.IndexStore::open(spec.index_path)
+    retro_seed(store, "keep.txt")
+    retro_seed(store, "tmp/gone.o")
+    retro_seed(store, "tmp/tomb.o", deleted=true)
+    retro_seed(store, ".git/x")
+    retro_seed(store, ".git/y", deleted=true)
+    retro_seed(store, "hold.txt")
+    store.close()
+    let handle = @daemon.start_session_actor(
+      group,
+      "retro-dev",
+      [{ ..spec, paused_files: ["hold.txt"] }],
+    )
+    let present = retro_present(
+      handle.entry_lookup(
+        "f1",
+        ["keep.txt", "tmp/gone.o", "tmp/tomb.o", ".git/x", ".git/y", "hold.txt"],
+      ),
+    )
+    assert_true(present.contains("keep.txt"), msg="普通活条目保留")
+    assert_true(
+      present.contains("tmp/tomb.o"),
+      msg="软忽略墓碑保留(删除传播载体)",
+    )
+    assert_true(present.contains("hold.txt"), msg="单文件暂停条目不动")
+    assert_false(present.contains("tmp/gone.o"), msg="软忽略活条目摘除(内存)")
+    assert_false(present.contains(".git/x"), msg="硬忽略活条目摘除(内存)")
+    assert_false(present.contains(".git/y"), msg="硬忽略墓碑一并断根(内存)")
+    assert_eq(retro_db_count(spec.index_path, "tmp/gone.o"), 0L, msg="软忽略活条目摘除(库)")
+    assert_eq(retro_db_count(spec.index_path, ".git/x"), 0L, msg="硬忽略活条目摘除(库)")
+    assert_eq(retro_db_count(spec.index_path, ".git/y"), 0L, msg="硬忽略墓碑断根(库)")
+    assert_eq(retro_db_count(spec.index_path, "tmp/tomb.o"), 1L, msg="软忽略墓碑留库")
+    let _ = handle.send(@daemon.Cmd::Shutdown)
+  }
+}
+
+///|
+/// 回溯清理(规则变更):Reconfigure 换规则后摘除新规则命中的活条目(库 +
+/// 内存双侧),墓碑保留 —— 与 Rust refresh_rules / Node 规则变更路径同口径。
+async test "回溯清理:规则变更摘除活条目但保留墓碑" {
+  @async.with_task_group() <| group => {
+    let root = actor_fresh_root("retro-rule")
+    let spec = actor_make_spec(root)
+    let store = @daemon.IndexStore::open(spec.index_path)
+    retro_seed(store, "keep.txt")
+    retro_seed(store, "target/a.o")
+    retro_seed(store, "target/b.o", deleted=true)
+    store.close()
+    let handle = @daemon.start_session_actor(group, "retro-dev", [spec])
+    // 先删 b.o 生成墓碑再改规则(模拟「规则加入前索引里已有墓碑」的历史形态):
+    // 空规则起步,改规则的唯一入口是 Reconfigure。
+    let _ = handle.send(
+      @daemon.Cmd::Reconfigure(
+        specs=[
+          {
+            ..spec,
+            rules: @core.IgnoreRuleset::from_lines(["target/"]),
+            rules_lines: ["target/"],
+          },
+        ],
+      ),
+    )
+    let present = retro_present(
+      handle.entry_lookup("f1", ["keep.txt", "target/a.o", "target/b.o"]),
+    )
+    assert_true(present.contains("keep.txt"), msg="普通活条目保留")
+    assert_true(present.contains("target/b.o"), msg="墓碑保留(删除传播载体)")
+    assert_false(
+      present.contains("target/a.o"),
+      msg="新规则命中的活条目已摘除(内存)",
+    )
+    assert_eq(retro_db_count(spec.index_path, "target/a.o"), 0L, msg="活条目摘除(库)")
+    assert_eq(retro_db_count(spec.index_path, "target/b.o"), 1L, msg="墓碑留库")
+    assert_eq(retro_db_count(spec.index_path, "keep.txt"), 1L, msg="普通活条目留库")
+    let _ = handle.send(@daemon.Cmd::Shutdown)
   }
 }

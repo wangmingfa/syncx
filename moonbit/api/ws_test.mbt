@@ -41,6 +41,7 @@ async fn ws_make_spec(root : String) -> @daemon.FolderSpec {
     versions_dir: None,
     versions_per_path: None,
     rules: @core.IgnoreRuleset::from_lines([]),
+    rules_lines: [],
     receive_only: false,
     conflict_policy: @daemon.ConflictPolicy::KeepBoth,
     paused: false,

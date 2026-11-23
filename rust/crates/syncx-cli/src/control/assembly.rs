@@ -202,6 +202,7 @@ pub fn folder_specs(ops: &RuntimeOps, config: &Config) -> Vec<FolderSpec> {
         .iter()
         .map(|folder| {
             let index_path = folder_index_path(&ops.config_dir, folder);
+            let rules_lines = ops.ignore_lines(folder);
             FolderSpec {
                 id: folder.folder_id(),
                 root: PathBuf::from(&folder.path),
@@ -210,7 +211,8 @@ pub fn folder_specs(ops: &RuntimeOps, config: &Config) -> Vec<FolderSpec> {
                 trash_dir: folder_trash_path(&ops.config_dir, folder),
                 versions_dir: folder_versions_path(&ops.config_dir, folder),
                 versions_per_path: Some(config.versions_per_path() as usize),
-                rules: IgnoreRuleset::from_lines(&ops.ignore_lines(folder)),
+                rules: IgnoreRuleset::from_lines(&rules_lines),
+                rules_lines,
                 receive_only: folder.is_receive_only(),
                 conflict_policy: conflict_policy(folder.conflict_policy.as_deref()),
                 paused: folder.is_paused(),
@@ -1227,6 +1229,19 @@ fn spawn_scan_loop(ops: Arc<RuntimeOps>, health: Arc<WatchHealth>) {
                 health.healthy(),
             );
             tokio::time::sleep(interval).await;
+            // 每轮扫描前重读忽略规则(与 Node 扫描管线「规则每轮重读」同口径):
+            // .gitignore 是目录里的普通文件,不走配置热重载,不重读的话规则变更要等
+            // 一次配置 reload 才生效。actor 侧按规则原文去重(refresh_rules),没变化
+            // 时零成本短路,不会白刷 peers 判定函数,也不会重复回溯清理。
+            for folder in &config.shared_folders {
+                if folder.is_paused() {
+                    continue;
+                }
+                let _ = ops.actor.send(Cmd::ReloadIgnore {
+                    folder: folder.folder_id(),
+                    lines: ops.ignore_lines(folder),
+                });
+            }
             if !ops.actor.send(Cmd::Scan) {
                 break;
             }

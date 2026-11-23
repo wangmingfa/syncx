@@ -20,7 +20,7 @@ use std::path::{Path, PathBuf};
 use std::rc::Rc;
 use std::sync::{mpsc, Arc, Mutex};
 
-use syncx_core::ignore::IgnoreRuleset;
+use syncx_core::ignore::{is_hard_ignored, IgnoreRuleset};
 use syncx_core::plan::IndexEntry;
 use syncx_net::wire::{WireBlockRequest, WireBlockResponse, WireEntry};
 
@@ -42,6 +42,10 @@ pub struct Folder {
     pub local_index: SharedIndex,
     pub ledger: SharedLedger,
     pub rules: IgnoreRuleset,
+    /// 规则原文指纹(装配层 composed_ignore_lines 的产物)。每轮扫描前 CLI 会重读
+    /// 发来 `Cmd::ReloadIgnore`,这里用于去重:内容没变就短路,不白刷 peers 的判定
+    /// 函数、也不重复跑回溯清理。
+    pub rules_lines: Option<Vec<String>>,
     pub receive_only: bool,
     pub conflict_policy: ConflictPolicy,
     /// 暂停(目录级):数据面整体停摆,控制面照常。
@@ -187,10 +191,61 @@ impl Folder {
     ///
     /// 连接建立后再改 `.syncxignore` 也即时生效 —— 快照一份就要等重连,那正是
     /// ADR-0012 里「改了规则不生效,文件还是被覆盖」的形态。
+    ///
+    /// 每轮扫描前 CLI 都会把重读的规则发过来(与 Node 扫描管线「规则每轮重读」
+    /// 同口径,.gitignore 是目录里的普通文件,不走配置热重载),所以这里先按内容
+    /// 去重:没变化直接短路,避免每 30 秒白刷一遍 peers 判定函数。
     pub fn refresh_rules(&mut self, lines: &[String]) {
+        if self.rules_lines.as_deref() == Some(lines) {
+            return;
+        }
+        self.rules_lines = Some(lines.to_vec());
         self.rules = IgnoreRuleset::from_lines(lines);
         for peer in self.peers.iter_mut().flatten() {
             peer.set_rules(self.rules.clone());
+        }
+        // 规则变更回溯清理:把「不再参与同步」的历史活条目摘除(库 + local_index)
+        self.purge_now_ignored();
+    }
+
+    /// 回溯清理:ignore 规则变更后,把「不再参与同步」的历史活条目从索引库与
+    /// local_index 中摘除(与 Node session-manager 的 purgeNowIgnoredEntries 同口径)。
+    ///
+    /// 规则每轮重读,但索引库只会增量写:规则加入之前扫进去的条目(如 .gitignore
+    /// 补 target/ 之前的 rust/target 构建产物,2026-11-23 实测 10.4 万条)不会被
+    /// 追认删除,长期滞留 —— 指纹永远含这些僵尸,对端每次会话都因指纹不等索要
+    /// 全量索引,弱机端要反复消化几万条,追平从秒级退化到分钟级。
+    ///
+    /// 只摘**非墓碑**:墓碑(deleted)是删除传播的载体,保留;单文件暂停的路径双向
+    /// 冻结,不动。摘除**不产生墓碑**(与扫描器拒绝为忽略路径生成墓碑同一理由:
+    /// 墓碑会把对端的真实文件删进回收站);静默摘除让两端各自收敛 —— 对端升级到
+    /// 带同款清理的版本后,它自己的扫描也会摘掉这些条目,指纹重新一致。过渡期
+    /// (对端旧版本)它会在全量交换时把这些条目回推,本机接收闸门按现行规则过滤,
+    /// 不落盘 —— 有噪声、无损伤。
+    fn purge_now_ignored(&self) {
+        let stale: Vec<String> = self
+            .local_index
+            .borrow()
+            .iter()
+            .filter(|(path, entry)| {
+                !entry.deleted
+                    && !self.paused_files.iter().any(|p| p == *path)
+                    && (is_hard_ignored(path) || self.rules.is_ignored(path, false))
+            })
+            .map(|(path, _)| path.clone())
+            .collect();
+        let mut removed = 0usize;
+        for path in &stale {
+            if self.index.remove_entry(path).is_ok() {
+                self.local_index.borrow_mut().remove(path);
+                removed += 1;
+            }
+        }
+        if removed > 0 {
+            tracing::info!(
+                folder = %self.root.display(),
+                "回溯清理 {removed} 条不再参与同步的索引条目(忽略规则变更后)"
+            );
         }
     }
 
@@ -283,11 +338,23 @@ impl Folder {
     }
 
     /// 从索引库重新装入内存索引(启动时一次)。
+    ///
+    /// 装载期回溯清理(与 [`Self::purge_now_ignored`] 同口径):硬忽略条目**含墓碑**
+    /// 一起断根(2026-09-15 的 .git 入库事故遗留);用户级规则命中的活条目摘除 ——
+    /// 规则加入之前扫进去的条目早已不参与同步,滞留库里只白占空间。两类都不产生
+    /// 墓碑,静默收敛;单文件暂停的路径不动。
     pub fn load_index(&self) -> Result<(), StoreError> {
         let entries = self.index.list_entries()?;
         let mut index = self.local_index.borrow_mut();
         index.clear();
         for entry in entries {
+            let purgeable = !self.paused_files.iter().any(|p| p == &entry.path)
+                && (is_hard_ignored(&entry.path)
+                    || (!entry.deleted && self.rules.is_ignored(&entry.path, false)));
+            if purgeable {
+                let _ = self.index.remove_entry(&entry.path);
+                continue;
+            }
             index.insert(entry.path.clone(), entry);
         }
         Ok(())
@@ -417,6 +484,8 @@ pub struct FolderSpec {
     pub versions_dir: PathBuf,
     pub versions_per_path: Option<usize>,
     pub rules: IgnoreRuleset,
+    /// 规则原文(见 [`Folder::rules_lines`])。
+    pub rules_lines: Vec<String>,
     pub receive_only: bool,
     pub conflict_policy: ConflictPolicy,
     pub paused: bool,
@@ -724,7 +793,14 @@ impl SessionActor {
                             .all(|entry| entry.deleted);
                     }
                 }
+                let rules_changed =
+                    existing.rules_lines.as_deref() != Some(spec.rules_lines.as_slice());
                 existing.rules = spec.rules;
+                existing.rules_lines = Some(spec.rules_lines);
+                if rules_changed {
+                    // 配置热重载改了忽略规则:同口径回溯清理(新目录走 load_index 清)
+                    existing.purge_now_ignored();
+                }
                 existing.receive_only = spec.receive_only;
                 existing.conflict_policy = spec.conflict_policy;
                 existing.paused = spec.paused;
@@ -754,6 +830,7 @@ impl SessionActor {
                 local_index: Rc::new(std::cell::RefCell::new(std::collections::BTreeMap::new())),
                 ledger: Rc::new(std::cell::RefCell::new(HashMap::new())),
                 rules: spec.rules,
+                rules_lines: Some(spec.rules_lines),
                 receive_only: spec.receive_only,
                 conflict_policy: spec.conflict_policy,
                 paused: spec.paused,
@@ -939,6 +1016,7 @@ pub fn build_folder(
         local_index: Rc::new(std::cell::RefCell::new(std::collections::BTreeMap::new())),
         ledger: Rc::new(std::cell::RefCell::new(HashMap::new())),
         rules,
+        rules_lines: None,
         receive_only: false,
         conflict_policy: ConflictPolicy::KeepBoth,
         paused: false,
@@ -1218,5 +1296,116 @@ mod tests {
         folder.peer(1).unwrap().poll_timeouts(now + 5_000);
         folder.flush_outbound();
         assert_eq!(count_fulls(&mut rx2), 0, "窗口内重连不得重发同指纹全量");
+    }
+
+    #[test]
+    fn rule_change_purges_now_ignored_live_entries_but_keeps_tombstones() {
+        // 2026-11-23 实测回归:.gitignore 补 target/ 之前,rust/target 十万级构建产物
+        // 已入库;索引只增不删,指纹永远含僵尸,对端每次会话都因指纹不等索要全量,
+        // 弱机端追平退化到分钟级。口径:活条目摘除(库 + local_index),墓碑保留。
+        let dir = TempDir::new("purge");
+        let root = dir.path().join("root");
+        std::fs::create_dir_all(root.join("target")).unwrap();
+        std::fs::write(root.join("keep.txt"), b"keep").unwrap();
+        std::fs::write(root.join("target/a.o"), b"junk-a").unwrap();
+        std::fs::write(root.join("target/b.o"), b"junk-b").unwrap();
+        let mut folder =
+            build_folder("f1", &root, dir.path(), IgnoreRuleset::from_lines(&[])).unwrap();
+
+        // 首扫:target/ 尚未被忽略,全部正常入库
+        folder.scan("dev-local", &[]).unwrap();
+        assert!(folder.local_index.borrow().contains_key("target/a.o"));
+
+        // 规则化之前的真实删除先生成墓碑(此时 target/ 还没被忽略,扫描器肯写墓碑)
+        std::fs::remove_dir_all(root.join("target")).unwrap();
+        folder.scan("dev-local", &[]).unwrap();
+        assert!(folder
+            .local_index
+            .borrow()
+            .get("target/b.o")
+            .map(|e| e.deleted)
+            .unwrap_or(false));
+
+        // 重建 a.o:活条目;此时加规则 → 回溯清理只摘活条目,墓碑原样保留
+        std::fs::create_dir_all(root.join("target")).unwrap();
+        std::fs::write(root.join("target/a.o"), b"junk-a-v2").unwrap();
+        folder.scan("dev-local", &[]).unwrap();
+        assert!(!folder
+            .local_index
+            .borrow()
+            .get("target/a.o")
+            .map(|e| e.deleted)
+            .unwrap_or(true));
+
+        folder.refresh_rules(&["target/".to_string()]);
+        let index_now = folder.local_index.borrow();
+        assert!(index_now.get("target/a.o").is_none(), "活条目应从 local_index 摘除");
+        let tomb = index_now
+            .get("target/b.o")
+            .expect("墓碑必须保留(删除传播的载体)");
+        assert!(tomb.deleted);
+        assert!(index_now.contains_key("keep.txt"));
+        drop(index_now);
+        let db_rows = folder.index.list_entries().unwrap();
+        assert!(
+            !db_rows.iter().any(|e| e.path == "target/a.o"),
+            "活条目也应从索引库摘除"
+        );
+        assert!(
+            db_rows.iter().any(|e| e.path == "target/b.o" && e.deleted),
+            "墓碑在库里保留"
+        );
+    }
+
+    #[test]
+    fn load_index_roots_out_hard_ignored_and_now_ignored_entries() {
+        // 装载期同口径清理:硬忽略(含墓碑)断根,用户级规则命中的活条目摘除,
+        // 规则命中的墓碑保留。
+        let dir = TempDir::new("purge-load");
+        let root = dir.path().join("root");
+        std::fs::create_dir_all(&root).unwrap();
+        let folder =
+            build_folder("f1", &root, dir.path(), IgnoreRuleset::from_lines(&["tmp/".to_string()])).unwrap();
+        // 直接造库:keep(合法)、tmp/live(规则命中的活条目)、tmp/gone(规则命中的墓碑)、
+        // .git/x(硬忽略,含墓碑两条)
+        let seed = |path: &str, deleted: bool| {
+            folder
+                .index
+                .save_entry(&StoredEntry {
+                    path: path.to_string(),
+                    version: std::collections::BTreeMap::from([(
+                        "dev-local".to_string(),
+                        if deleted { 2 } else { 1 },
+                    )]),
+                    size: 1,
+                    deleted,
+                    blocks: Vec::new(),
+                    cdh: None,
+                    clens: None,
+                    mtime: None,
+                    placeholder: false,
+                })
+                .unwrap();
+        };
+        seed("keep.txt", false);
+        seed("tmp/live.o", false);
+        seed("tmp/gone.o", true);
+        seed(".git/x", false);
+        seed(".git/y", true);
+
+        folder.load_index().unwrap();
+        let index_now = folder.local_index.borrow();
+        assert!(index_now.contains_key("keep.txt"));
+        assert!(!index_now.contains_key("tmp/live.o"), "规则命中的活条目装载即摘");
+        assert!(
+            index_now.get("tmp/gone.o").map(|e| e.deleted).unwrap_or(false),
+            "规则命中的墓碑保留(删除传播载体)"
+        );
+        assert!(!index_now.contains_key(".git/x"), "硬忽略活条目断根");
+        assert!(!index_now.contains_key(".git/y"), "硬忽略墓碑一并断根");
+        drop(index_now);
+        let db_rows = folder.index.list_entries().unwrap();
+        assert!(db_rows.iter().all(|e| e.path != "tmp/live.o"));
+        assert!(db_rows.iter().all(|e| e.path != ".git/x" && e.path != ".git/y"));
     }
 }
