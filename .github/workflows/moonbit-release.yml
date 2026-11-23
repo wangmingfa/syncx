@@ -143,11 +143,13 @@ jobs:
           case "$VERSION" in
             *-*) PRERELEASE="--prerelease" ;;
           esac
-          # 与 rust-release.yml 共用同一个 Release:已存在则只补资产
-          if gh release view "$GITHUB_REF_NAME" >/dev/null 2>&1; then
-            gh release upload "$GITHUB_REF_NAME" dist/* --clobber
+          # 与 rust-release.yml 共用同一个 Release:已存在则只补资产。
+          # 本 job 没有 checkout,工作目录不是 git 仓库,gh 必须 -R 显式指定
+          # 仓库,否则它靠 git remote 推断会报「not a git repository」。
+          if gh release view -R "$GITHUB_REPOSITORY" "$GITHUB_REF_NAME" >/dev/null 2>&1; then
+            gh release upload -R "$GITHUB_REPOSITORY" "$GITHUB_REF_NAME" dist/* --clobber
           else
-            gh release create "$GITHUB_REF_NAME" dist/* \
+            gh release create -R "$GITHUB_REPOSITORY" "$GITHUB_REF_NAME" dist/* \
               --title "syncx $VERSION" \
               --generate-notes \
               $PRERELEASE
