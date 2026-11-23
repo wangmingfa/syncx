@@ -5,6 +5,9 @@ node_modules/
 dist/
 build/
 out/
+# cargo / moon 构建目录(此前漏配,rust/target 十万级构建文件被扫描同步,
+# 2026-11-23 实测把弱机端追平拖到分钟级)
+target/
 
 # 日志
 *.log

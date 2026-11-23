@@ -28,7 +28,6 @@ import { openIndexStore, type IndexStore } from './indexstore.js';
 import { createLocalExecutor, resolveSharePath, type LocalExecutor } from './executor.js';
 import {
   filterIndexedEntries,
-  HARD_IGNORE_NAMES,
   isHardIgnored,
   isIgnoredPath,
   parseIgnoreRules,
@@ -38,6 +37,7 @@ import {
   writeSyncxIgnoreLines,
   explainIgnore,
   BUILTIN_IGNORE_LINES,
+  type IgnoreRule,
   type IgnoreVerdict,
 } from './ignore.js';
 import type { WebhookEvent } from './webhook.js';
@@ -719,6 +719,13 @@ export class SyncSessionManager {
   /** 目录错误 → webhook 的去重:同一目录同一条错误只外推一次(扫描会反复记同一错误)。 */
   private readonly lastWebhookError = new Map<string, string>();
   /**
+   * 回溯清理的节流键:每个目录最近一次执行「规则变更回溯清理」时的 ignoreLines 指纹。
+   * 扫描每轮都会跑,但清理是 O(索引条数)×规则数的全表遍历,弱机上不便宜 —— 只在
+   * 规则内容真正变化后的第一轮执行(createFolderState 装载时已用同批规则清过,首轮
+   * 天然跳过;之后的轮次键相同直接短路)。
+   */
+  private readonly lastPurgeRulesKey = new Map<string, string>();
+  /**
    * folder-sync-list 日志降噪:记每个对端最近一条 info 日志的「消息内容指纹 + 时刻」。
    * 会话建立/重连会让对端在 1 秒内重播同一份宣告 6-10 条(生产日志实证),内容没变
    * 就是纯噪声 —— 重复期间降 debug,内容指纹(含 pendingFolderIds)变了才回到 info。
@@ -1296,30 +1303,83 @@ export class SyncSessionManager {
     // 索引快照只取一次:下面三处(硬忽略断根 / 本地索引 / 基线判定)都要用,
     // 而 listEntries 是全表扫描,启动时对每个目录重复调用不划算。
     const stored = index.listEntries();
-    // 断根:硬忽略路径(见 HARD_IGNORE_NAMES)的历史条目直接从库里删掉。旧版本曾把
-    // .git 当普通内容索引(2026-09-15 事故),这些遗留条目是删除传播的种子——把它们
-    // 从库里清掉,配合 filterIndexedEntries 的过滤,本机再不可能就 .git 外推任何东西。
-    const purgeable = stored.filter((entry) => isHardIgnored(entry.path));
-    for (const entry of purgeable) {
-      index.removeEntry(entry.path);
+    // 忽略规则每设备本地:.gitignore(默认并入,可按目录关闭)+ .syncxignore(优先级更高)
+    const ignoreLines = readFolderIgnoreLines(f.path, f.useGitignore !== false);
+    const loadRules = parseIgnoreRules(ignoreLines);
+    // 装载期回溯清理(与扫描期的 purgeNowIgnoredEntries 同口径):
+    //  - 硬忽略路径:历史条目(含墓碑)直接断根。旧版本曾把 .git 当普通内容索引
+    //    (2026-09-15 事故),这些遗留条目是删除传播的种子——清掉后配合
+    //    filterIndexedEntries 的过滤,本机再不可能就 .git 外推任何东西。
+    //  - 用户级规则命中的**活条目**:规则加入之前扫进去的条目(如 .gitignore 补
+    //    target/ 之前的 rust/target 构建产物,2026-11-23 实测 10.4 万条)早已被
+    //    filterIndexedEntries 挡在 localIndex 之外,但仍滞留在库里白占空间;一并
+    //    摘除,把库收敛回真实内容。
+    //  两类都**不产生墓碑**(computeTombstones 拒绝忽略路径墓碑的同一理由:墓碑会把
+    //  对端的真实文件删进回收站);静默摘除让两端各自收敛。墓碑(deleted=1)对用户级
+    //  规则是删除传播的载体,按 filterIndexedEntries 的口径保留,只摘活条目。
+    const purgeable = new Set(
+      stored
+        .filter(
+          (entry) =>
+            !f.pausedFiles?.includes(entry.path) &&
+            (isHardIgnored(entry.path) || (!entry.deleted && isIgnoredPath(loadRules, entry.path, false))),
+        )
+        .map((entry) => entry.path),
+    );
+    for (const path of purgeable) {
+      index.removeEntry(path);
     }
-    if (purgeable.length > 0) {
+    if (purgeable.size > 0) {
       this.logger.info(
-        `folder ${f.path}: removed ${purgeable.length} legacy hard-ignored entr${purgeable.length === 1 ? 'y' : 'ies'} from the index (${HARD_IGNORE_NAMES.join('/')} are never synced)`,
+        `folder ${f.path}: removed ${purgeable.size} legacy ignored entr${purgeable.size === 1 ? 'y' : 'ies'} from the index (never synced again)`,
       );
     }
     // 剔除后的条目才是这个目录真正的索引内容;基线判定也基于它:库里若只剩硬忽略条目,
     // 清完即视为空索引建基线,而不是把首扫的存量文件当成「新增」刷一屏同步记录。
-    const usable = purgeable.length === 0 ? stored : stored.filter((entry) => !isHardIgnored(entry.path));
-    // 忽略规则每设备本地:.gitignore(默认并入,可按目录关闭)+ .syncxignore(优先级更高)
-    const ignoreLines = readFolderIgnoreLines(f.path, f.useGitignore !== false);
+    const usable = purgeable.size === 0 ? stored : stored.filter((entry) => !purgeable.has(entry.path));
     const localIndex = new Map(
-      filterIndexedEntries(parseIgnoreRules(ignoreLines), usable).map((e) => [e.path, e]),
+      filterIndexedEntries(loadRules, usable).map((e) => [e.path, e]),
     );
     // 索引为空 → 首扫是建基线(存量文件不算新增);索引有存量 → 首扫 diff 是
     // daemon 离线期间的真实改动,要写同步记录
     const baselinePending = usable.length === 0;
     return { id, indexKey, path: f.path, index, executor, localIndex, ignoreLines, transports: [], peers: new Map(), transportDevice: new Map(), receiveLedger: new Map(), driftState: { lastAt: 0, round: 0 }, localAuditState: { lastAt: 0, round: 0 }, config: f, baselinePending, conflictCount: 0, gitChangeCount: 0, gitUnpushedCount: 0, lastCommitHash: f.gitLastCommitHash ?? null, processedRemoteCommits: new Set(), gitBroadcast: readGitPending(id, f.gitBroadcastPending), pendingGitNotify: null, gitDrainWarned: false, gitAutoCommitAttempts: 0, gitRelay: readGitPending(id, f.gitRelayPending), gitDeferredMirror: readGitDeferredMirror(f.gitDeferredMirror), diskBlocked: false };
+  }
+
+  /**
+   * 回溯清理:ignore 规则变更后,把「不再参与同步」的历史活条目从索引库与
+   * localIndex 中摘除。仅在规则内容相对上次执行有变化的那一轮跑
+   * (见 lastPurgeRulesKey;createFolderState 装载时已用同批规则清过,首轮天然跳过)。
+   *
+   * 规则每轮重读,但索引库只会增量写:规则加入之前扫进去的条目(如 .gitignore 补
+   * target/ 之前的 rust/target 构建产物,2026-11-23 实测 10.4 万条)不会被追认删除,
+   * 长期滞留 —— 指纹永远含这些僵尸,对端每次会话都因指纹不等索要全量索引,弱机端
+   * (手机)要反复消化几万条,追平从秒级退化到分钟级。
+   *
+   * 只摘**非墓碑**:墓碑(deleted=1)是删除传播的载体,按 filterIndexedEntries 的口径
+   * 保留;单文件暂停的路径双向冻结,同样不动。摘除**不产生墓碑** —— 与
+   * computeTombstones 拒绝忽略路径墓碑同一理由(墓碑会把对端的真实文件删进回收站);
+   * 静默摘除让两端各自收敛:对端升级到带同款清理的版本后,它自己的扫描也会摘掉这些
+   * 条目,指纹重新一致。过渡期(对端旧版本)它会在全量交换时把这些条目回推,本机
+   * 接收闸门按现行规则过滤,不落盘 —— 有噪声、无损伤。
+   */
+  private purgeNowIgnoredEntries(folder: FolderState, rules: IgnoreRule[]): void {
+    const key = folder.ignoreLines.join('\n');
+    if (this.lastPurgeRulesKey.get(folder.id) === key) return;
+    this.lastPurgeRulesKey.set(folder.id, key);
+    const removed: string[] = [];
+    for (const [path, entry] of folder.localIndex) {
+      if (entry.deleted || folder.config.pausedFiles?.includes(path) === true) continue;
+      if (!isIgnoredPath(rules, path, false)) continue;
+      folder.index.removeEntry(path);
+      folder.localIndex.delete(path);
+      removed.push(path);
+    }
+    if (removed.length > 0) {
+      this.logger.info(
+        `folder ${folder.path}: 回溯清理 ${removed.length} 条不再参与同步的索引条目(忽略规则变更后)`,
+      );
+    }
   }
 
   /**
@@ -1715,6 +1775,10 @@ export class SyncSessionManager {
       let diff;
       try {
         folder.ignoreLines = readFolderIgnoreLines(folder.path, folder.config.useGitignore !== false);
+        // 规则变更回溯清理:仅在规则相对上次清理有变化的那一轮执行(见
+        // purgeNowIgnoredEntries),把不再参与同步的历史条目从索引/localIndex 摘除
+        const scanRules = parseIgnoreRules(folder.ignoreLines);
+        this.purgeNowIgnoredEntries(folder, scanRules);
         // 嵌套共享根:排除自身,其余共享根传入扫描器,使父目录不再重复索引子目录文件
         const nestedRoots = otherRoots.filter((r) => r !== resolve(folder.path));
         // 异步扫描(scanFolderAsync):遍历语义与同步版 scanFolder 完全一致,
@@ -1723,7 +1787,7 @@ export class SyncSessionManager {
         diff = await scanFolderAsync(
           folder.path,
           folder.index,
-          parseIgnoreRules(folder.ignoreLines),
+          scanRules,
           this.identity.deviceId,
           nestedRoots,
         );
