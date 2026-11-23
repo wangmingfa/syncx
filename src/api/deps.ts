@@ -69,6 +69,8 @@ export interface ControlServerDeps {
   /** 添加一个已知对端设备 ID(按 ID 配对,不依赖邀请码)。可选 address 直接写入
    *  config.peers 并立即直连,用于跨网段/无 mDNS 时手动指定对方 ws:// 地址。 */
   addDevice?: (deviceId: string, address?: string) => void;
+  /** 编辑某已知设备的对端地址(IP/端口)。设备 ID 不变,仅换地址并重连。 */
+  editDevice?: (deviceId: string, address: string) => void;
   /** 移除一个已知对端设备(同时从各目录 devices 中摘除)。 */
   removeDevice?: (deviceId: string) => void;
   /** 精确设置某目录的设备列表(按目录多选设备的提交)。 */

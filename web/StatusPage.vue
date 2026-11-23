@@ -32,6 +32,7 @@ import ConflictModal from './components/ConflictModal.vue';
 import TrafficModal from './components/TrafficModal.vue';
 import ConfirmModal from './components/ConfirmModal.vue';
 import EditFolderModal from './components/EditFolderModal.vue';
+import EditDeviceModal from './components/EditDeviceModal.vue';
 import AuthPasswordModal from './components/AuthPasswordModal.vue';
 import LogsModal from './components/LogsModal.vue';
 import TopologyModal from './components/TopologyModal.vue';
@@ -60,6 +61,8 @@ const { confirmState, askConfirm } = useConfirm(busy);
 // 各业务 composable 共享的核心依赖
 const deps: CoreDeps = { status, busy, isDev, refreshStatus, post, askConfirm };
 const devices = useDevices(deps);
+// 设备编辑弹窗:挂载点在本页模板,状态(编辑目标/关闭/保存)来自 useDevices
+const { editDeviceTarget, closeEditDevice, saveDeviceAddress } = devices;
 const folders = useFolders(deps);
 const offers = useOffers(deps);
 // 目录级差异弹窗(Mac 端功能):状态经 provide 展开进 context,FolderDiffModal 自取
@@ -253,6 +256,15 @@ provide(StatusContextKey, {
       :busy="busy"
       @close="editDevicesOpen = false"
       @save="saveEditDevices"
+    />
+
+    <!-- 设备编辑弹窗:只改对端 IP/端口,设备 ID 只读 -->
+    <EditDeviceModal
+      :open="!!editDeviceTarget"
+      :device="editDeviceTarget"
+      :busy="busy"
+      @close="closeEditDevice"
+      @save="saveDeviceAddress"
     />
 
     <!-- 登录密码弹窗 -->

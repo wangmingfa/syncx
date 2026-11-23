@@ -61,6 +61,40 @@ pub fn try_routes(state: &AppState, ctx: &Ctx) -> Option<Response> {
         });
     }
 
+    // POST /api/devices/address : 编辑某已知设备的对端地址(IP/端口)。
+    // 设备 ID 只用来定位,不可变更;地址必须是 ws:// 形式(Node 同款校验)。
+    // 成功后热重载配置:出站对账循环按新 peers 清单补拨;若对端此刻在线,
+    // 由 daemon 侧对账保持既有会话,下次恢复/重连自然走新地址。
+    if ctx.method_is("POST") && path == "/api/devices/address" {
+        let Ok(body) = ctx.json() else {
+            return Some(util::json_invalid());
+        };
+        let Some(device_id) = non_empty_string(body.get("deviceId")) else {
+            return Some(util::error(StatusCode::BAD_REQUEST, "deviceId is required"));
+        };
+        let Some(address) = non_empty_string(body.get("address")) else {
+            return Some(util::error(StatusCode::BAD_REQUEST, "address is required"));
+        };
+        if !address.to_ascii_lowercase().starts_with("ws://") {
+            return Some(util::error(
+                StatusCode::BAD_REQUEST,
+                "address must start with ws://",
+            ));
+        }
+        return Some(match mutate::set_known_device_address(&state.config, &device_id, &address) {
+            Ok(_) => {
+                notify(state);
+                util::ok_true()
+            }
+            Err(mutate::MutateError::Invalid(message)) => {
+                util::error(StatusCode::BAD_REQUEST, &message)
+            }
+            Err(mutate::MutateError::Io(_)) => {
+                util::error(StatusCode::BAD_REQUEST, "failed to update device address")
+            }
+        });
+    }
+
     // DELETE /api/devices?deviceId=xxx : 移除一个已知对端设备
     if ctx.method_is("DELETE") && path == "/api/devices" {
         let Some(device_id) = ctx.param("deviceId").filter(|value| !value.is_empty()) else {

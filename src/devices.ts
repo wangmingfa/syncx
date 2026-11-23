@@ -754,13 +754,48 @@ export function listKnownDevices(configPath: string): DeviceConfig[] {
   return loadConfig(configPath).knownDevices;
 }
 
-/** 添加一个已知设备 ID(已存在则幂等)。 */
-export function addKnownDevice(configPath: string, deviceId: string): void {
+/**
+ * 添加一个已知设备 ID(已存在则幂等)。
+ * address 给出时一并记录该设备的对端地址(规范化后落盘),让设备卡在离线时仍能展示
+ * IP:端口;已存在且地址未变时视为无改动,避免无谓写盘。
+ */
+export function addKnownDevice(configPath: string, deviceId: string, address?: string): void {
   if (!deviceId) throw new Error('请填写设备 ID');
-  if (listKnownDevices(configPath).some((d) => d.id === deviceId)) return; // 幂等
+  const next = address ? normalizePeerUrl(address) : undefined;
   mutateConfig(configPath, (config) => {
-    config.knownDevices.push({ id: deviceId });
+    const existing = config.knownDevices.find((d) => d.id === deviceId);
+    if (existing) {
+      if (!next || existing.address === next) return false; // 幂等
+      existing.address = next;
+      return;
+    }
+    config.knownDevices.push(next ? { id: deviceId, address: next } : { id: deviceId });
   });
+}
+
+/**
+ * 更新某已知设备的对端地址(设备卡「编辑」)。设备 ID 是定位键,不参与修改。
+ * 返回更新前的地址(调用方据此摘掉 config.peers 里的旧条目);此前没有记录则为 undefined。
+ * 设备不在 knownDevices 时补一条(目录卡上可能存在只被指派、未显式配对的设备)。
+ */
+export function setKnownDeviceAddress(configPath: string, deviceId: string, address: string): string | undefined {
+  if (!deviceId) throw new Error('请填写设备 ID');
+  if (!/^ws:\/\//i.test(address)) {
+    throw new Error(`对端地址必须以 ws:// 开头:「${address}」`);
+  }
+  const next = normalizePeerUrl(address);
+  let prev: string | undefined;
+  mutateConfig(configPath, (config) => {
+    const dev = config.knownDevices.find((d) => d.id === deviceId);
+    if (!dev) {
+      config.knownDevices.push({ id: deviceId, address: next });
+      return;
+    }
+    prev = dev.address;
+    if (prev === next) return false; // 地址未变:不写盘
+    dev.address = next;
+  });
+  return prev;
 }
 
 /** 添加一个手动配置的对端地址(已存在则幂等)。仅接受 ws:// 开头的地址;

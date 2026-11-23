@@ -78,6 +78,46 @@ test "peers 规范化:v4-mapped 前缀剥离 + 去重" {
 }
 
 ///|
+test "已知设备地址:配对登记落盘 + 编辑换地址不改 ID + peers 换血" {
+  let config = @core.Config::new()
+
+  // 添加带地址:knownDevices.address 登记(对齐 Node addKnownDevice:不动 peers,
+  // peers 由调用方 addPeer 负责)
+  assert_true(config.add_known_device("DEV1", Some("ws://10.0.0.5:22000")))
+  assert_eq(config.known_devices[0].address, Some("ws://10.0.0.5:22000"))
+  // 幂等:同地址重复添加无变更
+  assert_false(config.add_known_device("DEV1", Some("ws://10.0.0.5:22000")))
+
+  // 编辑:换地址,设备 ID 不变,旧地址从 peers 摘除,返回旧地址
+  let (changed, prev) = config.set_known_device_address("DEV1", "ws://10.0.0.9:22100")
+  assert_true(changed)
+  assert_eq(prev, Some("ws://10.0.0.5:22000"))
+  assert_eq(config.known_devices[0].id, "DEV1")
+  assert_eq(config.known_devices[0].address, Some("ws://10.0.0.9:22100"))
+  assert_true(config.peers.contains("ws://10.0.0.9:22100"))
+  assert_false(config.peers.contains("ws://10.0.0.5:22000"))
+
+  // 地址未变:无写盘级变更
+  let (changed, prev) = config.set_known_device_address("DEV1", "ws://10.0.0.9:22100")
+  assert_false(changed)
+  assert_eq(prev, Some("ws://10.0.0.9:22100"))
+
+  // 只被目录指派、未显式配对的设备:编辑时补一条,prev 为 None
+  let (changed, prev) = config.set_known_device_address("DEV2", "ws://10.0.0.7:22000")
+  assert_true(changed)
+  assert_eq(prev, None)
+  assert_eq(config.known_devices[1].address, Some("ws://10.0.0.7:22000"))
+}
+
+///|
+test "已知设备地址:to_json/parse 往返保留 address" {
+  let config = @core.Config::new()
+  let _ = config.add_known_device("DEV1", Some("ws://10.0.0.5:22000"))
+  let round = @core.parse_config(config.to_json().stringify())
+  assert_eq(round.known_devices[0].address, Some("ws://10.0.0.5:22000"))
+}
+
+///|
 test "日历覆盖清洗:非法日期与非法值剔除" {
   let raw = "{\"calendarOverrides\":{\"2026-10-01\":\"workday\",\"2026-02-30\":\"workday\",\"bad-key\":\"holiday\",\"2026-10-02\":\"nonsense\"}}"
   let config = @core.parse_config(raw)

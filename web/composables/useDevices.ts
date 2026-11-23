@@ -23,6 +23,12 @@ export function useDevices(deps: CoreDeps): {
   askUpgrade: (p: DeviceInfo) => void;
   /** 一键添加「附近发现的设备」:直接带 mDNS 学到的地址配对。 */
   addDiscovered: (d: DiscoveredDevice) => Promise<void>;
+  /** 非空 = 正在编辑该设备的对端地址(设备 ID 只读,可改 IP/端口)。 */
+  editDeviceTarget: Ref<DeviceInfo | null>;
+  openEditDevice: (p: DeviceInfo) => void;
+  closeEditDevice: () => void;
+  /** 保存设备地址:设备 ID 不变,只换 IP/端口并触发重连。 */
+  saveDeviceAddress: (payload: { deviceId: string; host: string; port: string }) => Promise<void>;
 } {
   const { status, busy, refreshStatus, post, askConfirm } = deps;
   const { showToast } = useToast();
@@ -121,6 +127,55 @@ export function useDevices(deps: CoreDeps): {
     }
   }
 
+  // ---- 编辑设备地址(设备 ID 不可改,只换 IP/端口) ----
+  /** 非空 = 正在编辑该设备的对端地址。 */
+  const editDeviceTarget = ref<DeviceInfo | null>(null);
+
+  function openEditDevice(p: DeviceInfo): void {
+    editDeviceTarget.value = p;
+  }
+
+  function closeEditDevice(): void {
+    editDeviceTarget.value = null;
+  }
+
+  /** 拼对端 ws 地址:IPv6 主机补方括号,端口取整数(1–65535)。 */
+  function buildPeerAddress(host: string, port: number): string {
+    const bare = host.replace(/^\[|\]$/g, '');
+    return `ws://${bare.includes(':') ? `[${bare}]` : bare}:${port}`;
+  }
+
+  /** 保存编辑后的地址;设备 ID 只作定位,提交时不会变更。 */
+  async function saveDeviceAddress(payload: { deviceId: string; host: string; port: string }): Promise<void> {
+    if (busy.value) return;
+    const host = payload.host.trim();
+    if (!host) {
+      showToast('请填写设备 IP 或主机名');
+      return;
+    }
+    const portRaw = payload.port.trim() || DEFAULT_PEER_PORT;
+    const port = Number(portRaw);
+    if (!Number.isInteger(port) || port < 1 || port > 65535) {
+      showToast('端口需为 1–65535 的整数');
+      return;
+    }
+    busy.value = true;
+    try {
+      await apiJson('/api/devices/address', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ deviceId: payload.deviceId, address: buildPeerAddress(host, port) }),
+      });
+      showToast('设备地址已更新');
+      editDeviceTarget.value = null;
+      await refreshStatus();
+    } catch (e) {
+      showToast(errText(e, '保存失败,请重试'), 'alert');
+    } finally {
+      busy.value = false;
+    }
+  }
+
   /** 点设备卡「移除」:列出会从哪些共享目录里摘掉它(目录本身保留),确认后才执行。 */
   function askRemoveDevice(deviceId: string): void {
     // 受影响的目录 = devices 里含该设备的目录;others 用于区分「仅共享给它」的目录
@@ -173,5 +228,9 @@ export function useDevices(deps: CoreDeps): {
     askRemoveDevice,
     askUpgrade,
     addDiscovered,
+    editDeviceTarget,
+    openEditDevice,
+    closeEditDevice,
+    saveDeviceAddress,
   };
 }

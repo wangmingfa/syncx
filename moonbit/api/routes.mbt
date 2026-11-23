@@ -94,6 +94,10 @@ fn device_to_json(device : @core.DeviceConfig) -> Json {
     Some(name) => map.set("name", Json::string(name))
     None => ()
   }
+  match device.address {
+    Some(addr) => map.set("address", Json::string(addr))
+    None => ()
+  }
   Json::object(map)
 }
 
@@ -304,8 +308,9 @@ pub async fn handle_add_device(
     None => return json_error(event, @mocket.BadRequest, "deviceId is required")
   }
   let config = load_config(options.config_file)
-  // 幂等登记:已存在不重复(core add_known_device 内部去重)
-  let _ = config.add_known_device(device_id)
+  // 幂等登记:已存在不重复(core add_known_device 内部去重);address 非空时
+  // 一并记录到 knownDevices,设备离线/重启后设备卡仍能展示 IP:端口
+  let _ = config.add_known_device(device_id, non_empty_string(obj, "address"))
   match non_empty_string(obj, "address") {
     Some(address) => {
       // warn 只对非法前缀(Node addPeer 的 throw 点);幂等重复走 add_peer
@@ -357,6 +362,50 @@ pub async fn handle_remove_device(
   // 配置热重载:重建目录集(共享名单已联动摘除)+ 会话面对账 —— 不再共享
   // 任何目录的既有连接由装配层主动断开(Node forgetAndCloseSessions 同职责);
   // 「清理学习到的对端地址」依赖地址学习,尚未实现,残留项
+  notify_config_changed(options)
+  @mocket.HttpResponse(@mocket.OK).json(ok_true())
+}
+
+///|
+/// POST /api/devices/address:编辑某已知设备的对端地址(设备卡「编辑」;
+/// Node routes/devices.ts 同款)。设备 ID 只用来定位,不可变更;deviceId 与
+/// address 均必填,address 必须以 ws:// 开头(校验文案与 Node 一致)。
+/// 成功 → 200 `{ok:true}`(Node 编辑路由回 200,与添加路由的 201 不同);
+/// 设备不存在时补一条 knownDevices(与 Node setKnownDeviceAddress 同口径)。
+/// 换地址后热重载配置:出站拨号对账循环按新 peers 清单补拨;旧地址已由
+/// core set_known_device_address 从 peers 摘除。
+pub async fn handle_set_device_address(
+  options : ApiOptions,
+  event : @mocket.MocketEvent,
+) -> &Responder {
+  let body = match parse_json_body(event) {
+    Some(body) => body
+    None => return json_error(event, @mocket.BadRequest, "invalid json body")
+  }
+  let obj = match body {
+    Object(obj) => obj
+    _ => return json_error(event, @mocket.BadRequest, "invalid json body")
+  }
+  let device_id = match non_empty_string(obj, "deviceId") {
+    Some(id) => id
+    None => return json_error(event, @mocket.BadRequest, "deviceId is required")
+  }
+  let address = match non_empty_string(obj, "address") {
+    Some(addr) => addr
+    None => return json_error(event, @mocket.BadRequest, "address is required")
+  }
+  if address.to_lower().strip_prefix("ws://") is None {
+    return json_error(event, @mocket.BadRequest, "address must start with ws://")
+  }
+  let config = load_config(options.config_file)
+  let _ = config.set_known_device_address(device_id, address)
+  save_config(options.config_file, config) catch {
+    _ => return json_error(event, @mocket.BadRequest, "failed to update device address")
+  }
+  // 刷新 status.devices 快照:编辑后设备卡立即带新地址
+  options.device_infos = device_infos_json(config)
+  // 配置热重载:出站拨号对账循环按新 peers 清单补拨(Node editDevice 的
+  // 「离线立即拨新地址」职责由对账节拍承担)
   notify_config_changed(options)
   @mocket.HttpResponse(@mocket.OK).json(ok_true())
 }

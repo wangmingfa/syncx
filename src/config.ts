@@ -422,6 +422,11 @@ export interface DeviceConfig {
   id: string;
   /** 可选备注名,仅本机展示用。 */
   name?: string;
+  /**
+   * 最近一次已知/手填的对端地址(ws://host:port)。用于设备离线或 daemon 重启后
+   * 仍能在设备卡上展示 IP:端口,并作为重连目标;undefined = 从未记录过地址。
+   */
+  address?: string;
 }
 
 /**

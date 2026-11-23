@@ -72,9 +72,12 @@ export function progressText(p: SyncProgressItem): string {
   return '已同步';
 }
 
-/** 地址(host:port)与主机名合并到一行,避免纵向多占一行;两者都可能缺失。 */
+/** 地址(host:port)与主机名合并到一行,避免纵向多占一行;两者都可能缺失。
+ *  在线时优先用当前会话的实际地址,离线回退到配置里持久化的地址(address),
+ *  因此设备离线也能看到 IP:端口。 */
 export function deviceAddrLine(p: DeviceInfo): string {
-  return [p.url ? stripWs(p.url) : '', p.hostname].filter(Boolean).join(' · ');
+  const addr = p.url ?? p.address;
+  return [addr ? stripWs(addr) : '', p.hostname].filter(Boolean).join(' · ');
 }
 
 /**

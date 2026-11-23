@@ -617,7 +617,8 @@ fn derive_e2e_key(passphrase: &str) -> Result<Value, String> {
     }))
 }
 
-/// 添加已知设备(幂等)。`address` 非空时同时写入 `peers` 并规范化。
+/// 添加已知设备(幂等)。`address` 非空时同时写入 `peers` 与 knownDevices 的
+/// `address` 字段(设备离线/重启后设备卡仍能展示 IP:端口),均已规范化。
 pub fn add_device(
     store: &ConfigStore,
     device_id: &str,
@@ -635,9 +636,14 @@ pub fn add_device(
         config::normalize_peer_url(value)
     });
     store.mutate(|config| {
-        if !config.known_devices.iter().any(|d| d.id == device_id) {
+        if let Some(existing) = config.known_devices.iter_mut().find(|d| d.id == device_id) {
+            if let Some(address) = &address {
+                existing.address = Some(address.clone());
+            }
+        } else {
             config.known_devices.push(crate::config::DeviceConfig {
                 id: device_id.to_string(),
+                address: address.clone(),
                 ..Default::default()
             });
         }
@@ -649,6 +655,51 @@ pub fn add_device(
         Ok::<_, std::io::Error>(true)
     })?;
     Ok(())
+}
+
+/// 更新某已知设备的对端地址(设备卡「编辑」;Node cli.editDevice 同口径)。
+/// 设备 ID 是定位键,不参与修改;一次 mutate 内完成三件事:knownDevices.address
+/// 更新、新地址入 peers、旧地址从 peers 摘除(避免失效 IP 留在配置里被反复拨号)。
+/// 返回更新前的地址(调用方日志/测试用);地址必须以 ws:// 开头;设备不在
+/// knownDevices 时补一条;新地址与旧地址相同则不写盘。
+pub fn set_known_device_address(
+    store: &ConfigStore,
+    device_id: &str,
+    address: &str,
+) -> Result<Option<String>, MutateError> {
+    if device_id.is_empty() {
+        return invalid("请填写设备 ID");
+    }
+    if !address.to_ascii_lowercase().starts_with("ws://") {
+        return invalid(format!("对端地址必须以 ws:// 开头:「{address}」"));
+    }
+    let next = config::normalize_peer_url(address);
+    let mut prev: Option<String> = None;
+    store.mutate(|config| {
+        if let Some(device) = config.known_devices.iter_mut().find(|d| d.id == device_id) {
+            prev = device.address.clone();
+            if prev.as_deref() == Some(next.as_str()) {
+                // 地址未变:不写盘
+                return Ok::<_, std::io::Error>(false);
+            }
+            device.address = Some(next.clone());
+        } else {
+            config.known_devices.push(crate::config::DeviceConfig {
+                id: device_id.to_string(),
+                address: Some(next.clone()),
+                ..Default::default()
+            });
+        }
+        // peers 换地址:新地址入库(幂等),旧地址摘除
+        if !config.peers.contains(&next) {
+            config.peers.push(next.clone());
+        }
+        if let Some(old) = &prev {
+            config.peers.retain(|peer| peer != old);
+        }
+        Ok::<_, std::io::Error>(true)
+    })?;
+    Ok(prev)
 }
 
 /// 移除已知设备,同时从各目录的设备列表里摘除。
@@ -1121,6 +1172,40 @@ mod tests {
         let store = ConfigStore::new(dir.join("config.json"));
         store.save(&Config::new()).unwrap();
         (store, dir)
+    }
+
+    #[test]
+    fn add_device_persists_address_and_edit_swaps_it() {
+        let (store, dir) = temp_store("device-address");
+
+        // 添加带地址:knownDevices.address 与 peers 同时落盘
+        add_device(&store, "DEV1", Some("ws://10.0.0.5:22000")).unwrap();
+        let config = store.load();
+        assert_eq!(
+            config.known_devices[0].address.as_deref(),
+            Some("ws://10.0.0.5:22000")
+        );
+        assert!(config.peers.contains(&"ws://10.0.0.5:22000".to_string()));
+
+        // 编辑:换地址,设备 ID 不变,旧地址从 peers 摘除,返回旧地址
+        let prev = set_known_device_address(&store, "DEV1", "ws://10.0.0.9:22100").unwrap();
+        assert_eq!(prev.as_deref(), Some("ws://10.0.0.5:22000"));
+        let config = store.load();
+        assert_eq!(config.known_devices[0].id, "DEV1");
+        assert_eq!(
+            config.known_devices[0].address.as_deref(),
+            Some("ws://10.0.0.9:22100")
+        );
+        assert!(config.peers.contains(&"ws://10.0.0.9:22100".to_string()));
+        assert!(!config.peers.contains(&"ws://10.0.0.5:22000".to_string()));
+
+        // 非法地址拒绝;未记录地址的设备编辑返回 None
+        assert!(set_known_device_address(&store, "DEV1", "http://10.0.0.9:22000").is_err());
+        add_device(&store, "DEV2", None).unwrap();
+        let prev = set_known_device_address(&store, "DEV2", "ws://10.0.0.7:22000").unwrap();
+        assert_eq!(prev, None);
+
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]

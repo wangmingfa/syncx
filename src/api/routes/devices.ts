@@ -8,7 +8,7 @@ export async function tryDeviceRoutes(
   res: ServerResponse,
   deps: ControlServerDeps,
 ): Promise<boolean> {
-  const { addDevice, removeDevice, selfUpdate, shutdown, rescan, reconnect, setFolderPaused, setGlobalPaused, setGlobalSettings, testWebhook, restoreFolderVersion, deleteFolderVersion } = deps;
+  const { addDevice, editDevice, removeDevice, selfUpdate, shutdown, rescan, reconnect, setFolderPaused, setGlobalPaused, setGlobalSettings, testWebhook, restoreFolderVersion, deleteFolderVersion } = deps;
   const path = req.url ? pathname(req.url) : '/';
 
   // POST /api/devices : 添加一个已知对端设备 ID
@@ -28,6 +28,32 @@ export async function tryDeviceRoutes(
       sendJson(res, 201, { ok: true });
     } catch (e) {
       sendJson(res, 400, { error: e instanceof Error ? e.message : 'failed to add device' });
+    }
+    return true;
+  }
+
+  // POST /api/devices/address : 编辑某已知设备的对端地址(IP/端口)。
+  // 设备 ID 只用来定位,不可变更;地址必须是 ws:// 形式。
+  if (req.method === 'POST' && path === '/api/devices/address' && editDevice) {
+    try {
+      const raw = await readBody(req);
+      const body = (raw === '' ? {} : JSON.parse(raw)) as { deviceId?: unknown; address?: unknown };
+      if (typeof body.deviceId !== 'string' || body.deviceId === '') {
+        sendJson(res, 400, { error: 'deviceId is required' });
+        return true;
+      }
+      if (typeof body.address !== 'string' || body.address === '') {
+        sendJson(res, 400, { error: 'address is required' });
+        return true;
+      }
+      if (!/^ws:\/\//i.test(body.address)) {
+        sendJson(res, 400, { error: 'address must start with ws://' });
+        return true;
+      }
+      editDevice(body.deviceId, body.address);
+      sendJson(res, 200, { ok: true });
+    } catch (e) {
+      sendJson(res, 400, { error: e instanceof Error ? e.message : 'failed to update device address' });
     }
     return true;
   }

@@ -134,6 +134,11 @@ pub struct DeviceConfig {
     /// 可选备注名,仅本机展示用。
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub name: Option<String>,
+    /// 最近一次已知/手填的对端地址(ws://host:port)。设备离线或 daemon 重启后
+    /// 仍能在设备卡上展示 IP:端口,并作为重连目标;None = 从未记录过地址。
+    /// 与 Node DeviceConfig.address 同名同义(见 src/config.ts)。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub address: Option<String>,
     #[serde(flatten)]
     pub extra: Map<String, Value>,
 }
@@ -717,9 +722,11 @@ fn parse_device(value: Value) -> Option<DeviceConfig> {
     };
     let id = non_empty_str(object.remove("id"))?;
     let name = non_empty_str(object.remove("name"));
+    let address = non_empty_str(object.remove("address"));
     Some(DeviceConfig {
         id,
         name,
+        address,
         extra: object,
     })
 }

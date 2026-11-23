@@ -20,6 +20,9 @@ export interface DeviceStatus {
   deviceId: string;
   online: boolean;
   url?: string;
+  /** 本机配置里持久化的对端地址(ws://host:port)。设备离线或 daemon 重启后
+   *  outboundPeerUrls 为空时,设备卡仍据此展示 IP:端口并作为重连目标。 */
+  address?: string;
   /** 对端经 hello 宣告的主机名(node:os hostname);用于设备卡展示来源主机。
    *  undefined = 对端旧版本未发 hello,UI 不展示主机名。 */
   hostname?: string;

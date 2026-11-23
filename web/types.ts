@@ -71,6 +71,8 @@ export interface DeviceInfo {
   deviceId: string;
   online: boolean;
   url?: string;
+  /** 配置里持久化的对端地址(ws://host:port);离线或重启后仍可在卡片上展示 IP:端口。 */
+  address?: string;
   /** 对端主机名(hello 宣告);undefined=旧版本对端未发,不展示。 */
   hostname?: string;
   /** 对端运行平台(hello 宣告的 process.platform);undefined=旧版本对端未发,头像退回字母。 */

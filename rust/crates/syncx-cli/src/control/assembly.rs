@@ -549,6 +549,12 @@ pub fn get_status(runtime_ops: &RuntimeOps, extras: &Extras) -> Value {
             device_id: device_id.clone(),
             online: runtime_ops.is_connected(device_id),
             url: runtime_ops.peer_url_of(device_id),
+            // 持久化的对端地址:设备离线/重启后无会话 url 时,卡片仍能展示 IP:端口
+            address: config
+                .known_devices
+                .iter()
+                .find(|device| &device.id == device_id)
+                .and_then(|device| device.address.clone()),
             hostname: info.hostname,
             platform: info.platform,
             runtime: info.runtime,

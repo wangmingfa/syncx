@@ -1641,6 +1641,99 @@ describe('POST /api/devices/upgrade', () => {
   });
 });
 
+describe('POST /api/devices/address (编辑设备 IP/端口)', () => {
+  it('requires auth', async () => {
+    const server = createControlServer({
+      token: 'secret',
+      getStatus: () => ({}),
+      editDevice: () => {},
+    });
+    server.listen(0, '127.0.0.1');
+    await once(server, 'listening');
+    const port = (server.address() as AddressInfo).port;
+
+    const res = await fetchJson(port, '/api/devices/address', undefined, {
+      method: 'POST',
+      body: { deviceId: 'DEV1', address: 'ws://10.0.0.9:22000' },
+    });
+
+    expect(res.status).toBe(401);
+    server.close();
+  });
+
+  it('passes the device id and new address through unchanged', async () => {
+    const calls: Array<{ deviceId: string; address: string }> = [];
+    const server = createControlServer({
+      token: 'secret',
+      getStatus: () => ({}),
+      editDevice: (deviceId, address) => calls.push({ deviceId, address }),
+    });
+    server.listen(0, '127.0.0.1');
+    await once(server, 'listening');
+    const port = (server.address() as AddressInfo).port;
+
+    const res = await fetchJson(port, '/api/devices/address', 'secret', {
+      method: 'POST',
+      body: { deviceId: 'DEV1', address: 'ws://10.0.0.9:22100' },
+    });
+
+    expect(res.status).toBe(200);
+    expect(res.body).toMatchObject({ ok: true });
+    expect(calls).toEqual([{ deviceId: 'DEV1', address: 'ws://10.0.0.9:22100' }]);
+    server.close();
+  });
+
+  it('rejects a missing deviceId or a non-ws address without calling editDevice', async () => {
+    let called = false;
+    const server = createControlServer({
+      token: 'secret',
+      getStatus: () => ({}),
+      editDevice: () => {
+        called = true;
+      },
+    });
+    server.listen(0, '127.0.0.1');
+    await once(server, 'listening');
+    const port = (server.address() as AddressInfo).port;
+
+    const noId = await fetchJson(port, '/api/devices/address', 'secret', {
+      method: 'POST',
+      body: { address: 'ws://10.0.0.9:22000' },
+    });
+    const badAddr = await fetchJson(port, '/api/devices/address', 'secret', {
+      method: 'POST',
+      body: { deviceId: 'DEV1', address: 'http://10.0.0.9:22000' },
+    });
+
+    expect(noId.status).toBe(400);
+    expect(badAddr.status).toBe(400);
+    expect(called).toBe(false);
+    server.close();
+  });
+
+  it('returns 400 with the reason when editDevice throws', async () => {
+    const server = createControlServer({
+      token: 'secret',
+      getStatus: () => ({}),
+      editDevice: () => {
+        throw new Error('对端地址必须以 ws:// 开头');
+      },
+    });
+    server.listen(0, '127.0.0.1');
+    await once(server, 'listening');
+    const port = (server.address() as AddressInfo).port;
+
+    const res = await fetchJson(port, '/api/devices/address', 'secret', {
+      method: 'POST',
+      body: { deviceId: 'DEV1', address: 'ws://10.0.0.9:22000' },
+    });
+
+    expect(res.status).toBe(400);
+    expect(res.body).toMatchObject({ error: '对端地址必须以 ws:// 开头' });
+    server.close();
+  });
+});
+
 describe('POST /api/self-update (npm 自升级)', () => {
   it('requires auth', async () => {
     const server = createControlServer({

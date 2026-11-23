@@ -260,6 +260,11 @@ pub fn device_infos_json(config : @core.Config) -> Array[Json] {
     let item : Map[String, Json] = Map([])
     item.set("deviceId", Json::string(device.id))
     item.set("online", Json::boolean(false))
+    // 持久化的对端地址:设备离线/重启后仍能在卡片上展示 IP:端口
+    match device.address {
+      Some(addr) => item.set("address", Json::string(addr))
+      None => ()
+    }
     let assigned : Array[Json] = []
     for folder in config.shared_folders {
       for d in folder.devices {
@@ -797,6 +802,8 @@ pub fn build_app(options : ApiOptions) -> @mocket.App {
   // 设备增删(前端添加/移除设备;POST 走 body,DELETE 走 ?deviceId= 查询参数)
   app.post("/api/devices", event => handle_add_device(options, event))
   app.delete("/api/devices", event => handle_remove_device(options, event))
+  // 设备地址编辑(设备卡「编辑」):只改对端 IP/端口,设备 ID 不可变更
+  app.post("/api/devices/address", event => handle_set_device_address(options, event))
   app.post("/api/shutdown", event => handle_shutdown(options, event))
   // 上传安装包换入(预检只读;换入成功后旧进程由看门狗请退,见 upload.mbt)
   app.post("/api/self-update/upload/inspect", event => {

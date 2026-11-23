@@ -101,6 +101,10 @@ pub fn SharedFolder::use_gitignore_enabled(self : SharedFolder) -> Bool {
 pub(all) struct DeviceConfig {
   id : String
   name : String?
+  /// 最近一次已知/手填的对端地址(ws://host:port)。设备离线或 daemon 重启后
+  /// 仍能在设备卡上展示 IP:端口,并作为重连目标;None = 从未记录过地址。
+  /// 与 Node/Rust 的 DeviceConfig.address 同名同义。
+  mut address : String?
   mut extra : Map[String, Json]
 }
 
@@ -564,7 +568,7 @@ fn parse_device(value : Json) -> DeviceConfig? {
         Some(id) => id
         None => return None
       }
-      Some({ id, name: string_of(take(obj, "name")), extra: obj, })
+      Some({ id, name: string_of(take(obj, "name")), address: string_of(take(obj, "address")), extra: obj, })
     }
     _ => None
   }
@@ -883,6 +887,7 @@ pub fn Config::to_json(self : Config) -> Json {
       }
       dm.set("id", Json::string(device.id))
       set_string(dm, "name", device.name)
+      set_string(dm, "address", device.address)
       arr.push(Json::object(dm))
     }
     map.set("knownDevices", Json::array(arr))
@@ -1031,16 +1036,74 @@ pub fn normalize_peer_list(list : Array[String]) -> Array[String] {
 
 ///|
 /// 添加一个已知设备 ID(对齐 Node addKnownDevice:已存在则幂等不重复)。
-/// 返回 true = 本次新增,false = 已存在跳过。空 ID 由调用方(HTTP 层回
-/// 400)拦截,这里不再校验。
-pub fn Config::add_known_device(self : Config, device_id : String) -> Bool {
+/// address 非空时一并记录该设备的对端地址(规范化后落盘),让设备卡在离线时
+/// 仍能展示 IP:端口;已存在且地址未变视为无改动。返回 true = 本次有变更,
+/// false = 已存在且无地址更新。空 ID 由调用方(HTTP 层回 400)拦截。
+pub fn Config::add_known_device(
+  self : Config,
+  device_id : String,
+  address : String?
+) -> Bool {
+  let normalized = match address {
+    Some(addr) => Some(normalize_peer_url(addr))
+    None => None
+  }
   for device in self.known_devices {
     if device.id == device_id {
+      match normalized {
+        Some(addr) =>
+          if device.address != Some(addr) {
+            device.address = Some(addr)
+            return true
+          }
+        None => ()
+      }
       return false
     }
   }
-  self.known_devices.push({ id: device_id, name: None, extra: Map([]), })
+  self.known_devices.push({ id: device_id, name: None, address: normalized, extra: Map([]), })
   true
+}
+
+///|
+/// 更新某已知设备的对端地址(设备卡「编辑」;对齐 Node setKnownDeviceAddress
+/// + cli.editDevice 的 peers 换地址)。设备 ID 是定位键,不参与修改。
+/// address 必须是合法 ws:// 地址(HTTP 层校验,与 Node/Rust 路由同口径),
+/// 入库前经 normalize_peer_url 规范化。一次完成:knownDevices.address 更新、
+/// 新地址入 peers(add_peer 幂等)、旧地址从 peers 摘除。设备不在 knownDevices
+/// 时补一条。返回 (changed, prev):changed = 是否有写盘级变更(地址未变时为
+/// false);prev = 更新前的地址,此前没有记录则为 None。
+pub fn Config::set_known_device_address(
+  self : Config,
+  device_id : String,
+  address : String
+) -> (Bool, String?) {
+  let next = normalize_peer_url(address)
+  for device in self.known_devices {
+    if device.id == device_id {
+      let prev = device.address
+      if prev == Some(next) {
+        return (false, prev)
+      }
+      device.address = Some(next)
+      // peers 换地址:旧地址摘除(避免失效 IP 留在配置里被反复拨号),新地址入库
+      let kept : Array[String] = []
+      for peer in self.peers {
+        match prev {
+          Some(old) => if peer == old { continue }
+          None => ()
+        }
+        kept.push(peer)
+      }
+      self.peers = kept
+      let _ = self.add_peer(next)
+      return (true, prev)
+    }
+  }
+  // 设备不在 knownDevices(只被目录指派、未显式配对):补一条
+  self.known_devices.push({ id: device_id, name: None, address: Some(next), extra: Map([]), })
+  let _ = self.add_peer(next)
+  (true, None)
 }
 
 ///|

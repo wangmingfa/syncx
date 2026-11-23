@@ -2839,6 +2839,30 @@ export class SyncSessionManager {
     return this.outboundPeerUrls.get(deviceId);
   }
 
+  /**
+   * 设备卡「编辑」改地址后同步运行期状态:换掉 outbound 地址映射,
+   * 离线时立即按新地址拨号(在线会话保持不动,下次恢复/重连会用新地址)。
+   * 本机经反向发现写入 peers 的记录一并换掉,避免遗忘设备时删错旧条目。
+   */
+  updatePeerAddress(deviceId: string, url: string): void {
+    this.outboundPeerUrls.set(deviceId, url);
+    if (this.writtenPeerUrls.has(deviceId)) this.writtenPeerUrls.set(deviceId, url);
+    if (this.isPeerConnected(deviceId)) return;
+    const timer = this.reconnectTimers.get(deviceId);
+    if (timer) {
+      clearTimeout(timer);
+      this.reconnectTimers.delete(deviceId);
+    }
+    this.reconnectAttempts.delete(deviceId);
+    this.connectTo(url, {
+      onRejected: (error) =>
+        this.scheduleReconnect(deviceId, {
+          kind: 'dial-failed',
+          error: error instanceof Error ? error.message : String(error),
+        }),
+    });
+  }
+
   /** 忘记某对端的地址并断开其所有会话;返回关闭的会话数。 */
   forgetAndCloseSessions(deviceId: string): number {
     this.outboundPeerUrls.delete(deviceId);

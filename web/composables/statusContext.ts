@@ -48,6 +48,12 @@ export interface StatusContext extends FolderDiffApi {
   askUpgrade: (p: DeviceInfo) => void;
   /** 一键添加「附近发现的设备」:直接带 mDNS 学到的直连地址配对。 */
   addDiscovered: (d: DiscoveredDevice) => Promise<void>;
+  /** 非空 = 打开该设备的地址编辑弹窗(设备 ID 只读,可改 IP/端口)。 */
+  editDeviceTarget: Ref<DeviceInfo | null>;
+  openEditDevice: (p: DeviceInfo) => void;
+  closeEditDevice: () => void;
+  /** 保存设备地址(设备 ID 不变,只换 IP/端口并触发重连)。 */
+  saveDeviceAddress: (payload: { deviceId: string; host: string; port: string }) => Promise<void>;
   hoverDevices: Ref<string[]>;
   /** 反向拓扑联动:悬停设备卡时该设备 id(非空 = 设备→目录高亮进行中)。 */
   hoverDeviceId: Ref<string>;

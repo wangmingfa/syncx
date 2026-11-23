@@ -3,7 +3,7 @@ import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, statSync
 import { rmDir } from './helpers.js';
 import { tmpdir, homedir } from 'node:os';
 import { join, resolve } from 'node:path';
-import { addSharedFolder, removeSharedFolder, isPeerAllowed, addPeer, removePeer, acceptFolderInvitation, setFolderGitSync, setFolderGitLastCommitHash, setFolderConflictPolicy, setFolderGitStripCoAuthored } from '../src/devices.js';
+import { addSharedFolder, removeSharedFolder, isPeerAllowed, addPeer, removePeer, addKnownDevice, setKnownDeviceAddress, acceptFolderInvitation, setFolderGitSync, setFolderGitLastCommitHash, setFolderConflictPolicy, setFolderGitStripCoAuthored } from '../src/devices.js';
 import { loadConfig, type SharedFolderConfig } from '../src/config.js';
 
 function tempDir(): string {
@@ -650,6 +650,79 @@ describe('git strip co-authored settings', () => {
   it('rejects an unknown folder', () => {
     const { dir, configPath } = folderFixture();
     expect(() => setFolderGitStripCoAuthored(configPath, 'nope', true)).toThrow(/未找到共享目录/);
+    rmDir(dir);
+  });
+});
+
+describe('known device address (addKnownDevice / setKnownDeviceAddress)', () => {
+  it('persists the address given at pairing time', () => {
+    const dir = tempDir();
+    const configPath = join(dir, 'config.json');
+
+    addKnownDevice(configPath, 'DEV1', 'ws://10.0.0.5:22000');
+
+    const raw = JSON.parse(readFileSync(configPath, 'utf8'));
+    expect(raw.knownDevices).toEqual([{ id: 'DEV1', address: 'ws://10.0.0.5:22000' }]);
+    rmDir(dir);
+  });
+
+  it('is idempotent when the same address is added twice', () => {
+    const dir = tempDir();
+    const configPath = join(dir, 'config.json');
+
+    addKnownDevice(configPath, 'DEV1', 'ws://10.0.0.5:22000');
+    addKnownDevice(configPath, 'DEV1', 'ws://10.0.0.5:22000');
+
+    const raw = JSON.parse(readFileSync(configPath, 'utf8'));
+    expect(raw.knownDevices).toHaveLength(1);
+    expect(raw.knownDevices[0].address).toBe('ws://10.0.0.5:22000');
+    rmDir(dir);
+  });
+
+  it('updates the address without touching the device id and returns the previous one', () => {
+    const dir = tempDir();
+    const configPath = join(dir, 'config.json');
+    addKnownDevice(configPath, 'DEV1', 'ws://10.0.0.5:22000');
+
+    const prev = setKnownDeviceAddress(configPath, 'DEV1', 'ws://10.0.0.9:22100');
+
+    expect(prev).toBe('ws://10.0.0.5:22000');
+    const raw = JSON.parse(readFileSync(configPath, 'utf8'));
+    // 设备 ID 是定位键,编辑后不变
+    expect(raw.knownDevices).toEqual([{ id: 'DEV1', address: 'ws://10.0.0.9:22100' }]);
+    rmDir(dir);
+  });
+
+  it('normalizes ::ffff:-mapped IPv6 on write', () => {
+    const dir = tempDir();
+    const configPath = join(dir, 'config.json');
+
+    setKnownDeviceAddress(configPath, 'DEV1', 'ws://[::ffff:10.13.18.36]:22000');
+
+    const raw = JSON.parse(readFileSync(configPath, 'utf8'));
+    expect(raw.knownDevices[0].address).toBe('ws://10.13.18.36:22000');
+    rmDir(dir);
+  });
+
+  it('rejects a non-ws:// address', () => {
+    const dir = tempDir();
+    const configPath = join(dir, 'config.json');
+
+    expect(() => setKnownDeviceAddress(configPath, 'DEV1', 'http://10.0.0.5:22000')).toThrow('ws://');
+    rmDir(dir);
+  });
+
+  it('records the address for a device that only exists as a folder assignment', () => {
+    const dir = tempDir();
+    const configPath = join(dir, 'config.json');
+
+    // 目录里指派了、但 knownDevices 尚无该设备:编辑地址时应补一条
+    addSharedFolder(configPath, join(dir, 'docs'), ['DEV2']);
+    const prev = setKnownDeviceAddress(configPath, 'DEV2', 'ws://10.0.0.7:22000');
+
+    expect(prev).toBeUndefined();
+    const raw = JSON.parse(readFileSync(configPath, 'utf8'));
+    expect(raw.knownDevices).toEqual([{ id: 'DEV2', address: 'ws://10.0.0.7:22000' }]);
     rmDir(dir);
   });
 });

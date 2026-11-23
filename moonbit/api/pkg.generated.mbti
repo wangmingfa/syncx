@@ -114,6 +114,8 @@ pub async fn handle_restore_folder_version(ApiOptions, @mocket.MocketEvent) -> &
 
 pub async fn handle_schedule_override(ApiOptions, @mocket.MocketEvent) -> &@mocket.Responder
 
+pub async fn handle_set_device_address(ApiOptions, @mocket.MocketEvent) -> &@mocket.Responder
+
 pub async fn handle_shutdown(ApiOptions, @mocket.MocketEvent) -> &@mocket.Responder
 
 pub async fn handle_token_login(ApiOptions, @mocket.MocketEvent) -> &@mocket.Responder

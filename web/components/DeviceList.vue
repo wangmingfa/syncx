@@ -21,6 +21,7 @@ const {
   askRemoveDevice,
   askUpgrade,
   reconnect,
+  openEditDevice,
   deviceFolderCount,
   monogram,
   deviceAddrLine,
@@ -130,6 +131,8 @@ const qrOpen = ref(false);
         </span>
         <!-- 重连紧挨状态标签:动作跟着它要修的那种状态走,也省掉下方一整行 -->
         <span class="item-actions">
+          <!-- 编辑只改对端 IP/端口,设备 ID 不变;放在最前,与「移除」这类破坏性操作拉开 -->
+          <n-button size="small" tertiary class="btn-inline" :disabled="busy" @click="openEditDevice(p)">编辑</n-button>
           <n-button
             v-if="!p.online"
             size="small"
@@ -158,8 +161,10 @@ const qrOpen = ref(false);
           </span>
         </span>
       </div>
-      <div v-if="p.url || p.hostname" class="item-addr">
-        <span class="addr-label">{{ p.url ? '地址' : '主机名' }}</span><span class="addr-value mono">{{ deviceAddrLine(p) }}</span>
+      <!-- 地址行:在线用当前会话地址,离线回退到配置里持久化的地址,因此离线也看得到 IP:端口。
+           两者都没有时才退回只显示 hostname(旧版对端/从未记录地址)。 -->
+      <div v-if="p.url || p.address || p.hostname" class="item-addr">
+        <span class="addr-label">{{ p.url || p.address ? '地址' : '主机名' }}</span><span class="addr-value mono">{{ deviceAddrLine(p) }}</span>
       </div>
       <div v-if="p.online && p.canUpgrade" class="actions">
         <n-button size="small" type="warning" :disabled="busy" class="btn-upgrade" @click="askUpgrade(p)">

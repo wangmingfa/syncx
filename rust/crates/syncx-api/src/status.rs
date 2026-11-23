@@ -45,6 +45,10 @@ pub struct DeviceStatus {
     pub online: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub url: Option<String>,
+    /// 本机配置里持久化的对端地址(ws://host:port)。设备离线或 daemon 重启后
+    /// 无会话 url 时,设备卡仍据此展示 IP:端口(与 Node DeviceStatus.address 同名)。
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub address: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub hostname: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]

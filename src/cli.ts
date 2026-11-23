@@ -2,7 +2,7 @@ import type { ParsedArgs } from './args.js';
 import { basename, dirname, join, resolve } from 'node:path';
 import { homedir, hostname as osHostname } from 'node:os';
 import { loadOrCreateIdentity } from './identity.js';
-import { loadConfig, saveConfig, mutateConfig, folderTrashPath, folderVersionsPath, assertFormatVersion, FormatVersionError } from './config.js';
+import { loadConfig, saveConfig, mutateConfig, normalizePeerUrl, folderTrashPath, folderVersionsPath, assertFormatVersion, FormatVersionError } from './config.js';
 import { packageVersion } from './usage.js';
 import { readFolderIdentity, removeLegacyFolderMarker } from './folder-identity.js';
 import { migrateLegacyTrash } from './trash.js';
@@ -38,7 +38,7 @@ import { startLoopLagSampler, setProcessPerfSink } from './api/perf.js';
 import { listDirectory, resolveFolderSubpath, deleteFolderEntry } from './filebrowser.js';
 import { createShare, listShares, noteShareDownload, revokeShare, verifyShare } from './share.js';
 import { buildStatus, type DeviceStatus, type SyncProgress, type FolderErrorStatus } from './status.js';
-import { addSharedFolder, removeSharedFolder, isPeerAllowed, addKnownDevice, removeKnownDevice, addPeer, removePeer, setFolderDevices, setFolderGitignore, setGlobalSettings, acceptFolderInvitation, effectiveHolidaySource } from './devices.js';
+import { addSharedFolder, removeSharedFolder, isPeerAllowed, addKnownDevice, setKnownDeviceAddress, removeKnownDevice, addPeer, removePeer, setFolderDevices, setFolderGitignore, setGlobalSettings, acceptFolderInvitation, effectiveHolidaySource } from './devices.js';
 import { createHolidayStore, DEFAULT_HOLIDAY_SOURCE } from './holidays.js';
 import type { Schedule } from './schedule.js';
 import { markOfferAccepted, markOfferDeclined, restoreDeclinedOffer, listOpenOffers, findPendingOffer } from './offers.js';
@@ -660,6 +660,8 @@ export async function run(args: ParsedArgs): Promise<void> {
           deviceId,
           online: link.online,
           url: link.url,
+          // 持久化的对端地址:设备离线/重启后 outboundPeerUrls 为空时,卡片仍能展示 IP:端口
+          address: config.knownDevices.find((d) => d.id === deviceId)?.address,
           hostname: link.hostname,
           // 对端宣告的运行平台:undefined=旧版本对端未发,UI 退回字母头像
           platform: link.platform,
@@ -765,15 +767,20 @@ export async function run(args: ParsedArgs): Promise<void> {
     }),
     reconnect: (deviceId) => manager.forceReconnect(deviceId),
     addDevice: (deviceId, address) => {
-      addKnownDevice(configPath, deviceId);
-      logger.info(`known device added: ${deviceId}`);
-      // 跨网段/无 mDNS 时手动指定对方 ws:// 地址:写入 config.peers 并立即直连
+      // 跨网段/无 mDNS 时手动指定对方 ws:// 地址:写入 config.peers 并立即直连。
+      // 同时把地址记到 knownDevices,设备离线/重启后设备卡仍能展示 IP:端口。
+      let storedAddress: string | undefined;
       if (address) {
         try {
           addPeer(configPath, address);
+          storedAddress = address;
         } catch (e) {
           logger.warn(`invalid peer address ignored: ${e instanceof Error ? e.message : String(e)}`);
         }
+      }
+      addKnownDevice(configPath, deviceId, storedAddress);
+      logger.info(`known device added: ${deviceId}`);
+      if (address) {
         manager.connectTo(address, {
           onRejected: (error) =>
             logger.error(`connect to ${address} failed: ${error instanceof Error ? error.message : String(error)}`),
@@ -785,6 +792,20 @@ export async function run(args: ParsedArgs): Promise<void> {
       manager.notifyPairingIntent(deviceId);
       // knownDevices 直接改配置文件,不经过 manager 的热重载路径 —— 手动通知一次,
       // 否则新设备要等兜底重算才出现在设备卡片上
+      statusHub.notify();
+    },
+    // 设备卡「编辑」:只改对端地址(IP/端口),设备 ID 不变。
+    editDevice: (deviceId, address) => {
+      // 先入 peers(内部规范化并校验),非法地址直接抛给路由,避免只写了一半配置。
+      addPeer(configPath, address);
+      const normalized = normalizePeerUrl(address);
+      const prev = setKnownDeviceAddress(configPath, deviceId, normalized);
+      // 摘掉旧地址,避免失效 IP 继续留在 peers 里被启动/热重载反复拨号。
+      if (prev && prev !== normalized) {
+        removePeer(configPath, prev);
+      }
+      manager.updatePeerAddress(deviceId, normalized);
+      logger.info(`known device address updated: ${deviceId} → ${normalized}`);
       statusHub.notify();
     },
     removeDevice: (deviceId) => {
