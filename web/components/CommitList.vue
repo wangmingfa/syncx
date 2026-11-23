@@ -217,7 +217,11 @@ function fmtDate(iso: string): string {
         <!-- 三点菜单:点击/回车不能冒泡到行(否则顺手展开),挡在容器上 ——
              与下方文件清单区同一手法;菜单本体由 naive 挂到 body,选择不会冒泡回来。 -->
         <span class="commit-list__menu" @click.stop @keydown.enter.stop>
-          <n-dropdown trigger="click" :options="COMMIT_MENU_OPTIONS" @select="onCommitMenu.bind(null, c)">
+          <!-- 不能写成 onCommitMenu.bind(null, c):bind 是调用表达式,Vue 把
+               @select 的值当内联语句包成 $event => bind(...),触发时只求值出一个
+               被丢弃的 bound 函数,onCommitMenu 永远不执行 —— 表现为点菜单
+               「没反应」。必须显式箭头转发。 -->
+          <n-dropdown trigger="click" :options="COMMIT_MENU_OPTIONS" @select="(key: string | number) => onCommitMenu(c, key)">
             <button type="button" class="commit-list__menu-btn" title="复制 commit id / 提交信息" :aria-label="`提交 ${c.hash} 的更多操作`">
               <svg viewBox="0 0 12 12" width="11" height="11" fill="currentColor" aria-hidden="true"><circle cx="2" cy="6" r="1.2" /><circle cx="6" cy="6" r="1.2" /><circle cx="10" cy="6" r="1.2" /></svg>
             </button>
