@@ -161,7 +161,8 @@ const qrOpen = ref(false);
           </span>
         </span>
       </div>
-      <!-- 地址行:在线用当前会话地址,离线回退到配置里持久化的地址,因此离线也看得到 IP:端口。
+      <!-- 地址行:优先用配置里持久化的地址(编辑弹窗也是这个来源),没有才回退到当前会话地址。
+           反向发现会把入站握手学到的端口写进会话地址,否则卡片端口会和编辑框对不上。
            两者都没有时才退回只显示 hostname(旧版对端/从未记录地址)。 -->
       <div v-if="p.url || p.address || p.hostname" class="item-addr">
         <span class="addr-label">{{ p.url || p.address ? '地址' : '主机名' }}</span><span class="addr-value mono">{{ deviceAddrLine(p) }}</span>

@@ -73,10 +73,11 @@ export function progressText(p: SyncProgressItem): string {
 }
 
 /** 地址(host:port)与主机名合并到一行,避免纵向多占一行;两者都可能缺失。
- *  在线时优先用当前会话的实际地址,离线回退到配置里持久化的地址(address),
- *  因此设备离线也能看到 IP:端口。 */
+ *  优先用配置里持久化的地址(address)—— 编辑弹窗也从这个字段预填,两边必须一致;
+ *  当前会话地址(url)只作回退。反向发现会把入站握手学到的监听端口写进会话地址,
+ *  若优先显示它,用户填的 12222 就会被对端宣告的 22000 顶掉,卡片与编辑框对不上。 */
 export function deviceAddrLine(p: DeviceInfo): string {
-  const addr = p.url ?? p.address;
+  const addr = p.address ?? p.url;
   return [addr ? stripWs(addr) : '', p.hostname].filter(Boolean).join(' · ');
 }
 

@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'vitest';
-import { folderPathPlaceholder, visibleTransferFiles, XFER_FILE_LIMIT } from '../web/utils/format.js';
+import { deviceAddrLine, folderPathPlaceholder, visibleTransferFiles, XFER_FILE_LIMIT } from '../web/utils/format.js';
+import type { DeviceInfo } from '../web/types.js';
 
 /**
  * 目录输入框的路径示例必须按 **daemon 所在平台** 给。
@@ -60,5 +61,37 @@ describe('visibleTransferFiles(传输中文件列表折叠)', () => {
     const out = visibleTransferFiles(input, false);
     expect(out).not.toBe(input);
     expect(input).toHaveLength(8);
+  });
+});
+
+/**
+ * 设备卡地址行必须和「编辑设备」弹窗同源:都优先读配置里持久化的 address。
+ * 反向发现会把入站握手学到的监听端口写进会话 url,若卡片优先显示 url,
+ * 就会出现「填的是 12222、编辑框是 12222、卡片显示 22000」。
+ */
+describe('deviceAddrLine(设备卡地址行)', () => {
+  const device: DeviceInfo = {
+    deviceId: 'F3B5IGZFVC',
+    online: true,
+    address: 'ws://172.25.48.48:12222',
+    url: 'ws://172.25.48.48:22000',
+    hostname: 'fedora',
+    folders: [],
+  };
+
+  it('配置地址与会话地址不一致时显示配置地址(与编辑弹窗一致)', () => {
+    expect(deviceAddrLine(device)).toBe('172.25.48.48:12222 · fedora');
+  });
+
+  it('没有配置地址时回退到会话地址', () => {
+    expect(deviceAddrLine({ ...device, address: undefined })).toBe('172.25.48.48:22000 · fedora');
+  });
+
+  it('两者都没有时只显示主机名', () => {
+    expect(deviceAddrLine({ ...device, address: undefined, url: undefined })).toBe('fedora');
+  });
+
+  it('去掉 ws:// 前缀,IPv6 方括号保留', () => {
+    expect(deviceAddrLine({ ...device, address: 'ws://[2001:db8::1]:12222', hostname: undefined })).toBe('[2001:db8::1]:12222');
   });
 });
