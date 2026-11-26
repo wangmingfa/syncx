@@ -31,6 +31,7 @@ import { isSelfPeerUrl, localInterfaceAddresses } from './net/peer-address.js';
 import { createControlServer, type ControlServerDeps } from './api.js';
 import { createStatusHub } from './status-hub.js';
 import { createDirectService } from './direct.js';
+import { resolveDirectSaveDir } from './direct-save-path.js';
 import { createWebhookNotifier } from './webhook.js';
 import { createPowerGuard } from './powerguard.js';
 import { execFile } from 'node:child_process';
@@ -942,11 +943,11 @@ export async function run(args: ParsedArgs): Promise<void> {
       snapshot: () => direct.snapshot(),
       content: (id) => direct.content(id),
       remove: (id) => direct.remove(id),
-      reply: (id, accept, reason) => {
+      reply: (id, accept, reason, saveDir) => {
         const target = direct.snapshot().pending.find((p) => p.id === id);
         const tx = target ? manager.directTransport(target.from) : undefined;
         if (!tx) throw new Error('发送方已离线或不支持直发');
-        return direct.reply(id, accept, tx, reason);
+        return direct.reply(id, accept, tx, reason, saveDir);
       },
       sendText: (deviceId, text) => {
         const tx = manager.directTransport(deviceId);
@@ -959,6 +960,12 @@ export async function run(args: ParsedArgs): Promise<void> {
         return direct.sendFile(deviceId, file, tx);
       },
     },
+    // 另存目录每次请求现读配置:热重载后新加/移除的共享目录立刻算进禁区。
+    directSavePath: (input) =>
+      resolveDirectSaveDir(input, {
+        configDir,
+        sharedFolders: loadConfig(configPath).sharedFolders.map((f) => f.path),
+      }),
     // 待确认区下发 pending + declined:已忽略项灰显供「恢复」,兜住手误忽略
     getOffers: () => listOpenOffers(configPath),
     getFolderHistory: (folderId, limit, filter) => getSyncHistory(configPath, folderId, limit, filter),

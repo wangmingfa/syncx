@@ -54,7 +54,8 @@ export interface DirectApi {
   sendText: (deviceIds: string[]) => Promise<boolean>;
   /** 逐文件投送队列:一个失败继续下一个,返回是否全部成功。 */
   sendFile: (deviceIds: string[]) => Promise<boolean>;
-  reply: (id: string, accept: boolean) => Promise<void>;
+  /** saveTo 给出时走提权门(由 UI 负责),文件另存到 daemon 机器的该目录。 */
+  reply: (id: string, accept: boolean, saveTo?: string) => Promise<boolean>;
   removeItem: (id: string) => Promise<void>;
   copyItem: (item: DirectItem) => Promise<void>;
   downloadItem: (item: DirectItem) => Promise<void>;
@@ -258,13 +259,19 @@ export function useDirect(deps: CoreDeps & { copy: (text: string) => Promise<voi
     }
   }
 
-  async function reply(id: string, accept: boolean): Promise<void> {
+  async function reply(id: string, accept: boolean, saveTo?: string): Promise<boolean> {
     try {
-      await apiPost('/api/direct/reply', { id, accept });
-      showToast(accept ? '已接收,文件传输中' : '已拒绝');
+      await apiPost('/api/direct/reply', {
+        id,
+        accept,
+        ...(saveTo ? { saveTo } : {}),
+      });
+      showToast(accept ? (saveTo ? '已接收,文件将保存到指定目录' : '已接收,文件传输中') : '已拒绝');
       await deps.refreshStatus();
+      return true;
     } catch (e) {
       showToast(errText(e, '操作失败'), 'alert');
+      return false;
     }
   }
 

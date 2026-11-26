@@ -112,6 +112,10 @@ export interface DirectFileItem {
   name: string;
   size: number;
   sha256: string;
+  /** 落盘绝对路径(旧后端也有;UI 只在另存回执上展示)。 */
+  path?: string;
+  /** true = 接收时另存到了用户目录;删这条回执不会删真实文件。 */
+  external?: boolean;
 }
 
 export type DirectItem = DirectTextItem | DirectFileItem;

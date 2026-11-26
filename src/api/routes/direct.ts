@@ -95,6 +95,8 @@ export async function tryDirectRoutes(
   req: IncomingMessage,
   res: ServerResponse,
   deps: ControlServerDeps,
+  elevated = false,
+  reissueElevation: (res: ServerResponse) => void = () => {},
 ): Promise<boolean> {
   const path = req.url ? pathname(req.url) : '/';
   if (!path.startsWith('/api/direct')) return false;
@@ -145,12 +147,33 @@ export async function tryDirectRoutes(
   // POST /api/direct/reply : 接收方确认/拒绝一个待确认文件
   if (req.method === 'POST' && path === '/api/direct/reply') {
     try {
-      const body = JSON.parse(await readBody(req)) as { id?: unknown; accept?: unknown; reason?: unknown };
+      const body = JSON.parse(await readBody(req)) as { id?: unknown; accept?: unknown; reason?: unknown; saveTo?: unknown };
       if (typeof body.id !== 'string' || typeof body.accept !== 'boolean') {
         sendJson(res, 400, { error: '缺少 id 或 accept' });
         return true;
       }
-      const ok = direct.reply(body.id, body.accept, typeof body.reason === 'string' ? body.reason : undefined);
+      let saveDir: string | undefined;
+      if (body.saveTo !== undefined) {
+        if (body.accept !== true) {
+          sendJson(res, 400, { error: '只有接收文件时才能指定保存目录' });
+          return true;
+        }
+        // 普通「接收」落 daemon 收件箱,不需要提权;另存会写用户目录,与删除/终端同一条门。
+        if (!elevated) {
+          sendJson(res, 403, { error: '另存到指定目录需要验证:请用控制令牌或密码完成验证' });
+          return true;
+        }
+        if (typeof body.saveTo !== 'string' || !deps.directSavePath) {
+          sendJson(res, typeof body.saveTo === 'string' ? 503 : 400, {
+            error: typeof body.saveTo === 'string' ? '当前后端不支持另存到指定目录' : '保存目录格式不正确',
+          });
+          return true;
+        }
+        saveDir = deps.directSavePath(body.saveTo);
+        // 校验通过才续期:失败的请求不该靠错误输入延长提权窗口。
+        reissueElevation(res);
+      }
+      const ok = direct.reply(body.id, body.accept, typeof body.reason === 'string' ? body.reason : undefined, saveDir);
       sendJson(res, ok ? 200 : 404, ok ? { ok: true } : { error: '待确认项不存在或已处理' });
     } catch (e) {
       fail(res, e);

@@ -1,6 +1,6 @@
 import { afterEach, describe, expect, it } from 'vitest';
 import { createHash } from 'node:crypto';
-import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { once } from 'node:events';
@@ -9,6 +9,9 @@ import { request } from 'node:http';
 import { CAP_DIRECT1, PEER_CAPS } from '../src/handshake.js';
 import { decodeBinaryFrame, encodeBinaryFrame } from '../src/net/wire.js';
 import { createDirectService, DIRECT_CHUNK_BYTES, type DirectService, type DirectTransport } from '../src/direct.js';
+import { resolveDirectSaveDir } from '../src/direct-save-path.js';
+import { signSession, sessionSecret } from '../src/auth.js';
+import { ELEVATE_COOKIE } from '../src/api/helpers.js';
 import { createControlServer } from '../src/api.js';
 
 const dirs: string[] = [];
@@ -257,6 +260,123 @@ describe('device direct transfer', () => {
 
     const bad = await post('/api/direct/file?deviceId=AAAA&name=x.bin&size=10', data);
     expect(bad.status).toBe(400);
+    server.close();
+  });
+
+  it('另存到指定目录:文件落到用户目录,删回执不动真实文件', async () => {
+    const a = createDirectService({ configDir: tmp() });
+    const bConfig = tmp();
+    const b = createDirectService({ configDir: bConfig });
+    const { txA, txB } = pair(a, b);
+    const source = join(tmp(), 'save-me.txt');
+    const target = tmp();
+    const data = Buffer.from('save to my folder');
+    writeFileSync(source, data);
+    const id = a.sendFile('B', {
+      name: 'save-me.txt',
+      sourcePath: source,
+      size: data.length,
+      sha256: createHash('sha256').update(data).digest('hex'),
+    }, txA);
+    expect(b.reply(id, true, txB, undefined, target)).toBe(true);
+
+    const item = b.snapshot().inbox[0];
+    expect(item?.kind).toBe('file');
+    expect(item && 'external' in item ? item.external : false).toBe(true);
+    expect(item?.path?.startsWith(target)).toBe(true);
+    expect(readFileSync(item!.path ?? '')).toEqual(data);
+    // 收件箱里不该再留一份原文件
+    expect(existsSync(join(bConfig, 'inbox', 'files', 'save-me.txt'))).toBe(false);
+    expect(a.snapshot().transfers.find((t) => t.id === id)?.state).toBe('done');
+
+    expect(await b.remove(id!)).toBe(true);
+    expect(existsSync(item!.path ?? '')).toBe(true);
+    a.close();
+    b.close();
+  });
+
+  it('另存路径校验:挡住相对路径、共享目录、数据目录、系统目录', () => {
+    const base = tmp();
+    const configDir = join(base, 'config');
+    const shared = join(base, 'shared');
+    const home = join(base, 'home');
+    const downloads = join(home, 'Downloads');
+    for (const d of [configDir, join(configDir, 'inbox'), shared, join(shared, 'sub'), home, downloads]) mkdirSync(d, { recursive: true });
+    const opts = { configDir, sharedFolders: [shared], platform: 'darwin' as const, homeDir: home };
+
+    expect(resolveDirectSaveDir(downloads, opts)).toBe(realpathSync(downloads));
+    expect(() => resolveDirectSaveDir('Downloads', opts)).toThrow(/绝对路径/);
+    expect(() => resolveDirectSaveDir(shared, opts)).toThrow(/共享目录/);
+    expect(() => resolveDirectSaveDir(join(shared, 'sub'), opts)).toThrow(/共享目录/);
+    expect(() => resolveDirectSaveDir(join(configDir, 'inbox'), opts)).toThrow(/数据目录/);
+    expect(() => resolveDirectSaveDir(home, opts)).toThrow(/主目录/);
+    expect(() => resolveDirectSaveDir('/etc', opts)).toThrow(/系统目录/);
+    expect(() => resolveDirectSaveDir(join(base, 'missing'), opts)).toThrow(/不存在/);
+  });
+
+  it('HTTP:另存必须提权,服务端校验失败回中文原因', async () => {
+    let captured: string | undefined;
+    const configDir = tmp();
+    const server = createControlServer({
+      token: 'secret',
+      configDir,
+      getStatus: () => ({}),
+      directSavePath: (input) => {
+        if (input === '/bad') throw new Error('不能保存到已共享目录');
+        return `/validated:${input}`;
+      },
+      direct: {
+        snapshot: () => ({ inbox: [], pending: [], transfers: [] }),
+        content: async () => undefined,
+        remove: async () => true,
+        reply: (_id, _accept, _reason, saveDir) => { captured = saveDir; return true; },
+        sendText: () => 'dt-x',
+        sendFile: () => 'df-x',
+      },
+    });
+    server.listen(0, '127.0.0.1');
+    await once(server, 'listening');
+    const port = (server.address() as AddressInfo).port;
+    const post = (body: object, cookie?: string): Promise<{ status: number; text: string }> =>
+      new Promise((resolve, reject) => {
+        const payload = JSON.stringify(body);
+        const req = request(
+          {
+            host: '127.0.0.1', port, path: '/api/direct/reply', method: 'POST',
+            headers: {
+              Authorization: 'Bearer secret', 'Content-Type': 'application/json',
+              ...(cookie ? { Cookie: cookie } : {}),
+            },
+          },
+          (res) => {
+            let text = '';
+            res.setEncoding('utf8');
+            res.on('data', (c) => { text += c; });
+            res.on('end', () => resolve({ status: res.statusCode ?? 0, text }));
+          },
+        );
+        req.on('error', reject);
+        req.end(payload);
+      });
+    const cookie = `${ELEVATE_COOKIE}=${signSession(
+      { via: 'elevate', sub: 'su', exp: Date.now() + 600_000 },
+      sessionSecret('secret|elevate'),
+    )}`;
+
+    const denied = await post({ id: 'df-1', accept: true, saveTo: '/downloads' });
+    expect(denied.status).toBe(403);
+    expect(captured).toBeUndefined();
+
+    const ok = await post({ id: 'df-1', accept: true, saveTo: '/downloads' }, cookie);
+    expect(ok.status, ok.text).toBe(200);
+    expect(captured).toBe('/validated:/downloads');
+
+    const badPath = await post({ id: 'df-1', accept: true, saveTo: '/bad' }, cookie);
+    expect(badPath.status).toBe(400);
+    expect(JSON.parse(badPath.text).error).toContain('共享目录');
+
+    const rejectWithDir = await post({ id: 'df-1', accept: false, saveTo: '/downloads' }, cookie);
+    expect(rejectWithDir.status).toBe(400);
     server.close();
   });
 });

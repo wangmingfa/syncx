@@ -44,6 +44,8 @@ export interface DirectFileItem {
   size: number;
   sha256: string;
   path: string;
+  /** true = 接收时选择了「另存到指定目录」:path 指向用户目录,删回执不能删文件。 */
+  external?: boolean;
 }
 
 export type DirectItem = DirectTextItem | DirectFileItem;
@@ -90,7 +92,8 @@ export interface DirectApi {
   snapshot(): DirectSnapshot;
   content(id: string): Promise<{ item: DirectItem; data: Buffer } | undefined>;
   remove(id: string): Promise<boolean>;
-  reply(id: string, accept: boolean, reason?: string): boolean;
+  /** saveDir 给出时,收齐后落到该目录而不是收件箱(调用方已完成提权与路径校验)。 */
+  reply(id: string, accept: boolean, reason?: string, saveDir?: string): boolean;
   sendText(deviceId: string, text: string): string;
   sendFile(deviceId: string, file: { name: string; sourcePath: string; size: number; sha256: string }): string;
 }
@@ -148,6 +151,8 @@ interface IncomingTransfer {
   sha256: string;
   createdAt: number;
   tmpPath: string;
+  /** 接收方在确认时指定的另存目录;undefined = 落收件箱。 */
+  saveDir?: string;
   state: 'pending' | 'transferring';
   fd?: number;
   hash?: ReturnType<typeof createHash>;
@@ -193,8 +198,8 @@ export interface DirectService {
   handleControl(message: DirectControlMessage, from: string, tx: DirectTransport): void;
   /** 处理一个直发文件分片帧(会话已解密、已按连接归属)。 */
   handleChunk(frame: { header: Record<string, unknown>; body: Buffer }, from: string, tx: DirectTransport): void;
-  /** 接收方确认 / 拒绝一个待确认文件。 */
-  reply(id: string, accept: boolean, tx: DirectTransport, reason?: string): boolean;
+  /** 接收方确认 / 拒绝一个待确认文件;saveDir 给出时落到用户目录而非收件箱。 */
+  reply(id: string, accept: boolean, tx: DirectTransport, reason?: string, saveDir?: string): boolean;
   /** 连接掉线:失败与之相关的传输、清理临时文件(不再尝试发 cancel)。 */
   onPeerOffline(deviceId: string): void;
   /** daemon 关闭:停表并清理。 */
@@ -307,15 +312,16 @@ export function createDirectService(deps: DirectServiceDeps): DirectService {
     incoming.delete(inc.id);
   }
 
-  function uniqueFilePath(name: string): string {
+  /** 收件箱或用户指定目录里的不覆盖落点:同名一律加 (n) 后缀。 */
+  function uniqueFilePath(name: string, dir = filesDir): string {
     const safe = safeFileName(name);
-    let candidate = join(filesDir, safe);
+    let candidate = join(dir, safe);
     let n = 1;
     while (existsSync(candidate)) {
       const dot = safe.lastIndexOf('.');
       const stem = dot > 0 ? safe.slice(0, dot) : safe;
       const ext = dot > 0 ? safe.slice(dot) : '';
-      candidate = join(filesDir, `${stem} (${n++})${ext}`);
+      candidate = join(dir, `${stem} (${n++})${ext}`);
     }
     return candidate;
   }
@@ -384,7 +390,7 @@ export function createDirectService(deps: DirectServiceDeps): DirectService {
       notify();
       return;
     }
-    const finalPath = uniqueFilePath(inc.name);
+    const finalPath = uniqueFilePath(inc.name, inc.saveDir ?? filesDir);
     try {
       renameSync(inc.tmpPath, finalPath);
     } catch (err) {
@@ -402,6 +408,8 @@ export function createDirectService(deps: DirectServiceDeps): DirectService {
       size: inc.size,
       sha256: inc.sha256,
       path: finalPath,
+      // 另存到用户目录时收件箱只留回执;删回执绝不删用户盘上的真实文件。
+      ...(inc.saveDir ? { external: true } : {}),
     });
     saveIndex();
     incoming.delete(inc.id);
@@ -562,7 +570,7 @@ export function createDirectService(deps: DirectServiceDeps): DirectService {
       if (idx < 0) return false;
       const [item] = items.splice(idx, 1);
       saveIndex();
-      if (item) {
+      if (item && item.kind === 'file' && !item.external) {
         try { await fs.rm(item.path, { force: true }); } catch { /* 清理失败不影响索引 */ }
       }
       notify();
@@ -733,7 +741,7 @@ export function createDirectService(deps: DirectServiceDeps): DirectService {
       writeSequential(inc, tx);
     },
 
-    reply(id, accept, tx, reason) {
+    reply(id, accept, tx, reason, saveDir) {
       const inc = incoming.get(id);
       if (!inc || inc.state !== 'pending') return false;
       if (!accept) {
@@ -742,6 +750,8 @@ export function createDirectService(deps: DirectServiceDeps): DirectService {
         notify();
         return true;
       }
+      // 只在真正开始接收时记下另存目录;拒绝路径完全不碰用户文件系统。
+      inc.saveDir = saveDir;
       inc.state = 'transferring';
       inc.lastProgressAt = Date.now();
       try {

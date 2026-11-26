@@ -154,6 +154,12 @@ export interface ControlServerDeps {
    * 不传 = 路由返回 503;发送时的会话与能力检查在接线处完成。
    */
   direct?: DirectApi;
+  /**
+   * 直发「另存到指定目录」的 daemon 侧路径校验:输入是浏览器给的绝对路径,
+   * 返回规范化后的目录;非法位置(共享目录/数据目录/系统目录)抛中文错误。
+   * 不传 = 接收方不能使用另存入口(路由返回 503)。
+   */
+  directSavePath?: (input: string) => string;
   /** 列出待确认项(对方推送的配对 / 目录共享邀请)。 */
   getOffers?: () => unknown;
   /**

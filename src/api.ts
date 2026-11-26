@@ -90,7 +90,7 @@ export function createControlServer(deps: ControlServerDeps): Server {
         if (await tryDeviceRoutes(req, res, deps)) return;
         if (await tryOfferRoutes(req, res, deps)) return;
         // 设备间直发(ADR-0028):文本 / 文件投到在线对端收件箱,不进共享目录
-        if (await tryDirectRoutes(req, res, deps)) return;
+        if (await tryDirectRoutes(req, res, deps, auth.elevateOk(readCookie(req, ELEVATE_COOKIE)), auth.issueElevation)) return;
         // fleet 代理:多实例集中管理页经本机 daemon 转发远端 daemon(白名单收紧,见 routes/fleet.ts)
         if (await tryFleetRoutes(req, res)) return;
         // 分享链接管理面(列出/创建/撤销):创建需提权,列出与撤销仅需登录门
