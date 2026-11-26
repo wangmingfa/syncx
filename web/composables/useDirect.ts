@@ -2,14 +2,33 @@
  * 设备间直发的页面状态(ADR-0028):发送弹窗、待确认与收件箱操作都在这里,
  * 组件只负责渲染。数据本身走 status.direct(既有 WS 推送),这里不另起轮询。
  */
-import { ref, type Ref } from 'vue';
+import { computed, ref, type ComputedRef, type Ref } from 'vue';
 import type { DirectItem, DeviceInfo } from '../types';
 import type { CoreDeps } from './statusContext';
 import { useToast } from './useToast';
 import { apiJson, apiPost, errText } from '../utils/api';
 
+interface SendOutcome {
+  deviceId: string;
+  id?: string;
+  error?: string;
+}
+
+interface DirectBatchResponse {
+  id?: string;
+  ids?: string[];
+  results?: SendOutcome[];
+}
+
 export interface DirectApi {
   sendTarget: Ref<DeviceInfo | null>;
+  /** 弹窗里可勾选的目标(在线 + 支持 direct1),随 status 推送实时变化。 */
+  availableTargets: ComputedRef<DeviceInfo[]>;
+  /** 本次发送选中的设备 ID;从卡片点「发送」时默认只选那一台。 */
+  selectedDevices: Ref<string[]>;
+  toggleTarget: (deviceId: string) => void;
+  selectAllTargets: () => void;
+  clearTargets: () => void;
   openSend: (p: DeviceInfo) => void;
   closeSend: () => void;
   inboxOpen: Ref<boolean>;
@@ -18,8 +37,8 @@ export interface DirectApi {
   fileDraft: Ref<File | null>;
   sending: Ref<boolean>;
   canDirect: (p: DeviceInfo) => boolean;
-  sendText: (deviceId: string) => Promise<boolean>;
-  sendFile: (deviceId: string) => Promise<boolean>;
+  sendText: (deviceIds: string[]) => Promise<boolean>;
+  sendFile: (deviceIds: string[]) => Promise<boolean>;
   reply: (id: string, accept: boolean) => Promise<void>;
   removeItem: (id: string) => Promise<void>;
   copyItem: (item: DirectItem) => Promise<void>;
@@ -45,6 +64,7 @@ export function formatBytes(n: number): string {
 export function useDirect(deps: CoreDeps & { copy: (text: string) => Promise<void> }): DirectApi {
   const { showToast } = useToast();
   const sendTarget = ref<DeviceInfo | null>(null);
+  const selectedDevices = ref<string[]>([]);
   const inboxOpen = ref(false);
   const textDraft = ref('');
   const fileDraft = ref<File | null>(null);
@@ -52,20 +72,61 @@ export function useDirect(deps: CoreDeps & { copy: (text: string) => Promise<voi
 
   function openSend(p: DeviceInfo): void {
     sendTarget.value = p;
+    selectedDevices.value = [p.deviceId];
     textDraft.value = '';
     fileDraft.value = null;
   }
   function closeSend(): void {
     if (sending.value) return;
     sendTarget.value = null;
+    selectedDevices.value = [];
   }
 
   function canDirect(p: DeviceInfo): boolean {
     return p.online && (p.caps?.includes('direct1') ?? false);
   }
 
-  async function sendText(deviceId: string): Promise<boolean> {
+  const availableTargets = computed(() => deps.status.value.devices.filter(canDirect));
+
+  function toggleTarget(deviceId: string): void {
+    if (sending.value) return;
+    selectedDevices.value = selectedDevices.value.includes(deviceId)
+      ? selectedDevices.value.filter((id) => id !== deviceId)
+      : [...selectedDevices.value, deviceId];
+  }
+  function selectAllTargets(): void {
+    if (!sending.value) selectedDevices.value = availableTargets.value.map((d) => d.deviceId);
+  }
+  function clearTargets(): void {
+    if (!sending.value) selectedDevices.value = [];
+  }
+
+  /** 兼容单设备旧响应:没有 results 时用 id + 目标顺序兜一份。 */
+  function outcomes(res: DirectBatchResponse, ids: string[]): SendOutcome[] {
+    if (Array.isArray(res.results) && res.results.length) return res.results;
+    return ids.map((deviceId, i) => ({ deviceId, ...(i === 0 && res.id ? { id: res.id } : {}) }));
+  }
+
+  /** 部分失败也算发出去了:明确告诉用户几台成功、第一台失败的原因。 */
+  function reportBatch(results: SendOutcome[], noun: string): void {
+    const ok = results.filter((r) => r.id).length;
+    const failed = results.filter((r) => r.error);
+    if (!failed.length) {
+      showToast(`已发给 ${ok} 台${noun}`);
+      return;
+    }
+    const reason = failed[0]?.error ?? '未知原因';
+    if (ok) showToast(`已发给 ${ok} 台${noun}，${failed.length} 台失败：${reason}`, 'alert');
+    else showToast(reason, 'alert');
+  }
+
+  async function sendText(deviceIds: string[]): Promise<boolean> {
     if (sending.value) return false;
+    const ids = [...new Set(deviceIds.filter(Boolean))];
+    if (!ids.length) {
+      showToast('请至少选择一台设备', 'alert');
+      return false;
+    }
     const text = textDraft.value;
     if (!text.trim()) {
       showToast('请输入要发送的文本', 'alert');
@@ -73,10 +134,11 @@ export function useDirect(deps: CoreDeps & { copy: (text: string) => Promise<voi
     }
     sending.value = true;
     try {
-      await apiPost('/api/direct/text', { deviceId, text });
-      showToast('已发出,等待对方接收');
+      const res = await apiPost<DirectBatchResponse>('/api/direct/text', { deviceIds: ids, text });
+      reportBatch(outcomes(res, ids), '设备');
       await deps.refreshStatus();
       sendTarget.value = null;
+      selectedDevices.value = [];
       return true;
     } catch (e) {
       showToast(errText(e, '发送失败'), 'alert');
@@ -86,8 +148,13 @@ export function useDirect(deps: CoreDeps & { copy: (text: string) => Promise<voi
     }
   }
 
-  async function sendFile(deviceId: string): Promise<boolean> {
+  async function sendFile(deviceIds: string[]): Promise<boolean> {
     if (sending.value) return false;
+    const ids = [...new Set(deviceIds.filter(Boolean))];
+    if (!ids.length) {
+      showToast('请至少选择一台设备', 'alert');
+      return false;
+    }
     const file = fileDraft.value;
     if (!file) {
       showToast('请选择要发送的文件', 'alert');
@@ -100,15 +167,19 @@ export function useDirect(deps: CoreDeps & { copy: (text: string) => Promise<voi
     sending.value = true;
     try {
       // 指纹由 daemon 在暂存时计算:局域网 HTTP 下浏览器没有 crypto.subtle。
-      const url = `/api/direct/file?deviceId=${encodeURIComponent(deviceId)}&name=${encodeURIComponent(file.name)}&size=${file.size}`;
-      await apiJson(url, {
+      const query = new URLSearchParams();
+      for (const id of ids) query.append('deviceIds', id);
+      query.set('name', file.name);
+      query.set('size', String(file.size));
+      const res = await apiJson<DirectBatchResponse>(`/api/direct/file?${query.toString()}`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/octet-stream' },
         body: file,
       });
-      showToast('已发出,等待对方确认接收');
+      reportBatch(outcomes(res, ids), '设备，等待对方确认');
       await deps.refreshStatus();
       sendTarget.value = null;
+      selectedDevices.value = [];
       return true;
     } catch (e) {
       showToast(errText(e, '发送失败'), 'alert');
@@ -168,6 +239,11 @@ export function useDirect(deps: CoreDeps & { copy: (text: string) => Promise<voi
 
   return {
     sendTarget,
+    availableTargets,
+    selectedDevices,
+    toggleTarget,
+    selectAllTargets,
+    clearTargets,
     openSend,
     closeSend,
     inboxOpen,

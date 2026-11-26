@@ -1,6 +1,6 @@
 <script setup lang="ts">
-import { ref, watch } from 'vue';
-import { NButton, NInput } from 'naive-ui';
+import { computed, ref, watch } from 'vue';
+import { NButton, NCheckbox, NInput } from 'naive-ui';
 import type { DeviceInfo } from '../types';
 import type { DirectApi } from '../composables/useDirect';
 import ModalShell from './ModalShell.vue';
@@ -16,6 +16,11 @@ const emit = defineEmits<{ close: [] }>();
 
 const tab = ref<'text' | 'file'>('text');
 const fileInput = ref<HTMLInputElement | null>(null);
+const targetSummary = computed(() => {
+  const ids = props.direct.selectedDevices.value;
+  if (ids.length === 1) return ids[0] ?? props.device?.deviceId ?? '';
+  return `已选 ${ids.length} 台设备`;
+});
 
 watch(
   () => props.open,
@@ -30,9 +35,11 @@ function pickFile(e: Event): void {
 }
 
 function submit(): void {
-  if (!props.device || props.direct.sending.value) return;
-  if (tab.value === 'text') void props.direct.sendText(props.device.deviceId);
-  else void props.direct.sendFile(props.device.deviceId);
+  if (props.direct.sending.value) return;
+  const ids = [...props.direct.selectedDevices.value];
+  if (!ids.length) return;
+  if (tab.value === 'text') void props.direct.sendText(ids);
+  else void props.direct.sendFile(ids);
 }
 </script>
 
@@ -40,13 +47,36 @@ function submit(): void {
   <ModalShell
     :open="open && !!device"
     title="发送到设备"
-    :description="device?.deviceId ?? ''"
-    description-mono
+    :description="targetSummary"
+    :description-mono="direct.selectedDevices.value.length === 1"
     class="send-modal"
     :close-disabled="direct.sending.value"
     @close="emit('close')"
   >
     <div class="send-target">对方收到后会进入它的「收件箱」，不会写进任何共享目录。</div>
+    <div class="send-targets">
+      <div class="send-targets-head">
+        <span class="field__label">发送到（可多选）</span>
+        <span class="send-targets-actions">
+          <button type="button" :disabled="direct.sending.value" @click="direct.selectAllTargets()">全选</button>
+          <button type="button" :disabled="direct.sending.value" @click="direct.clearTargets()">清空</button>
+        </span>
+      </div>
+      <div v-if="direct.availableTargets.value.length" class="send-targets-list">
+        <n-checkbox
+          v-for="d in direct.availableTargets.value"
+          :key="d.deviceId"
+          :checked="direct.selectedDevices.value.includes(d.deviceId)"
+          :disabled="direct.sending.value"
+          class="send-target-row"
+          @update:checked="direct.toggleTarget(d.deviceId)"
+        >
+          <span class="send-target-id">{{ d.deviceId }}</span>
+          <span v-if="d.hostname" class="send-target-host">{{ d.hostname }}</span>
+        </n-checkbox>
+      </div>
+      <div v-else class="send-targets-empty">没有可直发的在线设备（需要对方也支持直发）</div>
+    </div>
     <div class="send-tabs" role="tablist" aria-label="发送内容类型">
       <button
         type="button"
@@ -90,7 +120,7 @@ function submit(): void {
 
     <template #footer>
       <n-button class="modal-cancel" :disabled="direct.sending.value" @click="emit('close')">取消</n-button>
-      <n-button type="primary" :loading="direct.sending.value" :disabled="busy || (tab === 'file' && !direct.fileDraft.value)" @click="submit">
+      <n-button type="primary" :loading="direct.sending.value" :disabled="busy || !direct.selectedDevices.value.length || (tab === 'file' && !direct.fileDraft.value)" @click="submit">
         {{ direct.sending.value ? '发送中' : '发送' }}
       </n-button>
     </template>
@@ -102,6 +132,63 @@ function submit(): void {
   margin-bottom: 12px;
   color: var(--muted-strong);
   font-size: 12px;
+}
+.send-targets {
+  margin-bottom: 14px;
+}
+.send-targets-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  margin-bottom: 6px;
+}
+.send-targets-actions {
+  display: inline-flex;
+  gap: 10px;
+}
+.send-targets-actions button {
+  padding: 0;
+  border: 0;
+  background: transparent;
+  color: var(--accent, #4f7cff);
+  font-size: 11px;
+  cursor: pointer;
+}
+.send-targets-actions button:disabled {
+  color: var(--muted);
+  cursor: not-allowed;
+}
+.send-targets-list {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  padding: 6px 8px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+}
+.send-target-row {
+  min-height: 26px;
+}
+.send-target-id {
+  margin-left: 4px;
+  font-family: var(--mono, ui-monospace, monospace);
+  font-size: 11px;
+}
+.send-target-host {
+  margin-left: 6px;
+  overflow: hidden;
+  color: var(--muted-strong);
+  font-size: 11px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.send-targets-empty {
+  padding: 10px;
+  border: 1px dashed var(--border);
+  border-radius: 8px;
+  color: var(--muted-strong);
+  font-size: 11px;
 }
 .send-tabs {
   display: inline-flex;

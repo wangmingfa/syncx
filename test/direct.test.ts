@@ -1,6 +1,6 @@
 import { afterEach, describe, expect, it } from 'vitest';
 import { createHash } from 'node:crypto';
-import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { once } from 'node:events';
@@ -93,6 +93,28 @@ describe('device direct transfer', () => {
     b.close();
   });
 
+  it('群发共用暂存文件:最后一笔结束才删除', () => {
+    const a = createDirectService({ configDir: tmp() });
+    const source = join(tmp(), 'shared.bin');
+    const data = Buffer.from('shared payload');
+    writeFileSync(source, data);
+    const tx: DirectTransport = { control: () => true, chunk: () => true };
+    const file = {
+      name: 'shared.bin',
+      sourcePath: source,
+      size: data.length,
+      sha256: createHash('sha256').update(data).digest('hex'),
+    };
+    const idB = a.sendFile('B', file, tx);
+    const idC = a.sendFile('C', file, tx);
+    expect(existsSync(source)).toBe(true);
+    a.handleControl({ kind: 'direct-result', id: idB, fromDeviceId: '', ok: true }, 'B', tx);
+    expect(existsSync(source)).toBe(true);
+    a.handleControl({ kind: 'direct-result', id: idC, fromDeviceId: '', ok: true }, 'C', tx);
+    expect(existsSync(source)).toBe(false);
+    a.close();
+  });
+
   it('拒绝:不收字节,发送方标记为失败', () => {
     const a = createDirectService({ configDir: tmp() });
     const b = createDirectService({ configDir: tmp() });
@@ -144,7 +166,7 @@ describe('device direct transfer', () => {
         content: async () => undefined,
         remove: async () => true,
         reply: () => true,
-        sendText: (_deviceId, text) => { sent.push(text); return 'dt-2'; },
+        sendText: (deviceId, text) => { sent.push(`${deviceId}:${text}`); return `dt-${deviceId}`; },
         sendFile: () => 'df-2',
       },
     });
@@ -174,12 +196,19 @@ describe('device direct transfer', () => {
     expect(JSON.parse(inbox.text)).toMatchObject({ inbox: [{ preview: '你好' }] });
     const sentRes = await get('/api/direct/text', { deviceId: 'AAAA', text: 'hi' }, 'POST');
     expect(sentRes.status).toBe(200);
-    expect(sent).toEqual(['hi']);
+    const batchRes = await get('/api/direct/text', { deviceIds: ['AAAA', 'BBBB'], text: 'batch' }, 'POST');
+    expect(batchRes.status).toBe(200);
+    expect(JSON.parse(batchRes.text).results).toMatchObject([
+      { deviceId: 'AAAA', id: 'dt-AAAA' },
+      { deviceId: 'BBBB', id: 'dt-BBBB' },
+    ]);
+    expect(sent).toEqual(['AAAA:hi', 'AAAA:batch', 'BBBB:batch']);
     server.close();
   });
 
   it('HTTP:文件上传按流暂存,daemon 侧计算指纹,大小不符直接拒绝', async () => {
     let captured: { name: string; size: number; sha256: string; sourcePath: string } | undefined;
+    const sentTo: string[] = [];
     const configDir = tmp();
     const server = createControlServer({
       token: 'secret',
@@ -191,7 +220,7 @@ describe('device direct transfer', () => {
         remove: async () => true,
         reply: () => true,
         sendText: () => 'dt-x',
-        sendFile: (_deviceId, file) => { captured = file; return 'df-x'; },
+        sendFile: (deviceId, file) => { captured = file; sentTo.push(deviceId); return `df-${deviceId}`; },
       },
     });
     server.listen(0, '127.0.0.1');
@@ -214,8 +243,13 @@ describe('device direct transfer', () => {
 
     const data = Buffer.alloc(700 * 1024, 0x5a);
     const expected = createHash('sha256').update(data).digest('hex');
-    const ok = await post(`/api/direct/file?deviceId=AAAA&name=${encodeURIComponent('包 名.bin')}&size=${data.length}`, data);
+    const ok = await post(`/api/direct/file?deviceIds=AAAA&deviceIds=BBBB&name=${encodeURIComponent('包 名.bin')}&size=${data.length}`, data);
     expect(ok.status, ok.text).toBe(200);
+    expect(sentTo).toEqual(['AAAA', 'BBBB']);
+    expect(JSON.parse(ok.text).results).toMatchObject([
+      { deviceId: 'AAAA', id: 'df-AAAA' },
+      { deviceId: 'BBBB', id: 'df-BBBB' },
+    ]);
     expect(captured?.name).toBe('包 名.bin');
     expect(captured?.size).toBe(data.length);
     expect(captured?.sha256).toBe(expected);

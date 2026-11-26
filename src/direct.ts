@@ -215,6 +215,8 @@ export function createDirectService(deps: DirectServiceDeps): DirectService {
   const incoming = new Map<string, IncomingTransfer>();
   /** 每个投送最近一次使用的 transport,供定时重发用(会话切书时随之更新)。 */
   const lastTx = new Map<string, DirectTransport>();
+  /** 群发时多笔投送共用同一份暂存文件:按路径计数,最后一笔结束才删。 */
+  const sourceRefs = new Map<string, number>();
   let items: DirectItem[] = readIndex();
   let timer: ReturnType<typeof setInterval> | undefined;
 
@@ -252,6 +254,20 @@ export function createDirectService(deps: DirectServiceDeps): DirectService {
     tx.control(to, message);
   }
 
+  /** 释放一笔投送对暂存文件的引用;只有群发的最后一笔才真正删文件。 */
+  function releaseSource(out: OutgoingTransfer): void {
+    const path = out.sourcePath;
+    if (!path) return;
+    out.sourcePath = undefined;
+    const left = (sourceRefs.get(path) ?? 1) - 1;
+    if (left > 0) {
+      sourceRefs.set(path, left);
+      return;
+    }
+    sourceRefs.delete(path);
+    try { rmSync(path, { force: true }); } catch { /* 清理失败不影响状态 */ }
+  }
+
   function cancelOutgoing(out: OutgoingTransfer, error: string, tx?: DirectTransport): void {
     if (out.fd !== undefined) {
       try { closeSync(out.fd); } catch { /* 已关闭 */ }
@@ -262,6 +278,7 @@ export function createDirectService(deps: DirectServiceDeps): DirectService {
       out.error = error;
     }
     out.finishedAt = Date.now();
+    releaseSource(out);
     if (tx && out.state === 'failed') {
       sendControl(tx, out.deviceId, { kind: 'direct-cancel', id: out.id, fromDeviceId: '', reason: error });
     }
@@ -276,9 +293,7 @@ export function createDirectService(deps: DirectServiceDeps): DirectService {
     out.state = ok ? 'done' : 'failed';
     out.error = ok ? undefined : (error ?? '传输失败');
     out.finishedAt = Date.now();
-    if (out.sourcePath) {
-      try { rmSync(out.sourcePath, { force: true }); } catch { /* 清理失败不影响状态 */ }
-    }
+    releaseSource(out);
     notify();
   }
 
@@ -424,10 +439,16 @@ export function createDirectService(deps: DirectServiceDeps): DirectService {
       lastProgressAt: Date.now(),
     };
     outgoing.set(out.id, out);
+    if (out.sourcePath) {
+      sourceRefs.set(out.sourcePath, (sourceRefs.get(out.sourcePath) ?? 0) + 1);
+    }
     // 只保留最近若干条,免得状态快照无限增长
     if (outgoing.size > 30) {
       const oldest = [...outgoing.values()].sort((a, b) => a.createdAt - b.createdAt)[0];
-      if (oldest) outgoing.delete(oldest.id);
+      if (oldest) {
+        releaseSource(oldest);
+        outgoing.delete(oldest.id);
+      }
     }
     notify();
     return out;
@@ -764,7 +785,9 @@ export function createDirectService(deps: DirectServiceDeps): DirectService {
         if (out.fd !== undefined) {
           try { closeSync(out.fd); } catch { /* 已关闭 */ }
         }
+        releaseSource(out);
       }
+      sourceRefs.clear();
       lastTx.clear();
     },
   };

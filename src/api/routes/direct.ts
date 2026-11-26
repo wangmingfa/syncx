@@ -48,6 +48,48 @@ function fail(res: ServerResponse, error: unknown, status = 400): void {
   sendJson(res, status, { error: error instanceof Error ? error.message : '直发请求失败' });
 }
 
+/** 一次发送最多选 20 台:避免浏览器误点「全选」时把 daemon 打满。 */
+const DIRECT_MAX_TARGETS = 20;
+
+/** 兼容旧的单设备 deviceId 与新的多设备 deviceIds,去重并保持传入顺序。 */
+function parseTargets(single: unknown, many: unknown): string[] {
+  const ids: string[] = [];
+  const seen = new Set<string>();
+  const add = (v: unknown): void => {
+    if (typeof v !== 'string') return;
+    const id = v.trim();
+    if (!id || seen.has(id)) return;
+    seen.add(id);
+    ids.push(id);
+  };
+  add(single);
+  if (Array.isArray(many)) for (const v of many) add(v);
+  return ids;
+}
+
+interface DirectSendResult {
+  deviceId: string;
+  id?: string;
+  error?: string;
+}
+
+/** 逐台投送:某台离线/旧版本不影响其它设备,失败原因随结果返回给 UI。 */
+function dispatch(ids: string[], send: (deviceId: string) => string): DirectSendResult[] {
+  return ids.map((deviceId) => {
+    try {
+      return { deviceId, id: send(deviceId) };
+    } catch (e) {
+      return { deviceId, error: e instanceof Error ? e.message : '发送失败' };
+    }
+  });
+}
+
+/** 保留单设备响应里的 id,老前端拿到它就能继续工作。 */
+function sendBatch(res: ServerResponse, ids: string[], results: DirectSendResult[]): void {
+  const first = results.find((r) => r.id);
+  sendJson(res, 200, { ...(first?.id ? { id: first.id } : {}), ids, results });
+}
+
 /** 直发域:未命中返回 false,交给后续路由处理。 */
 export async function tryDirectRoutes(
   req: IncomingMessage,
@@ -116,30 +158,30 @@ export async function tryDirectRoutes(
     return true;
   }
 
-  // POST /api/direct/text : 发送一段文本
+  // POST /api/direct/text : 发送一段文本(支持 deviceIds 多设备)
   if (req.method === 'POST' && path === '/api/direct/text') {
     try {
-      const body = JSON.parse(await readBody(req)) as { deviceId?: unknown; text?: unknown };
-      if (typeof body.deviceId !== 'string' || !body.deviceId || typeof body.text !== 'string') {
-        sendJson(res, 400, { error: '缺少 deviceId 或 text' });
+      const body = JSON.parse(await readBody(req)) as { deviceId?: unknown; deviceIds?: unknown; text?: unknown };
+      const ids = parseTargets(body.deviceId, body.deviceIds);
+      if (typeof body.text !== 'string' || !ids.length || ids.length > DIRECT_MAX_TARGETS) {
+        sendJson(res, 400, { error: '需要 1 ~ 20 台目标设备和文本内容' });
         return true;
       }
-      const id = direct.sendText(body.deviceId, body.text);
-      sendJson(res, 200, { id });
+      sendBatch(res, ids, dispatch(ids, (deviceId) => direct.sendText(deviceId, body.text as string)));
     } catch (e) {
       fail(res, e);
     }
     return true;
   }
 
-  // POST /api/direct/file?deviceId=&name=&size= : 流式暂存 + 发起文件直发
+  // POST /api/direct/file?deviceIds=&name=&size= : 流式暂存一次 + 发起多设备文件直发
   if (req.method === 'POST' && path === '/api/direct/file') {
     const url = new URL(req.url ?? '/', 'http://localhost');
-    const deviceId = url.searchParams.get('deviceId') ?? '';
+    const ids = parseTargets(url.searchParams.get('deviceId'), url.searchParams.getAll('deviceIds'));
     const name = url.searchParams.get('name') ?? '';
     const size = Number(url.searchParams.get('size'));
-    if (!deviceId || !name || !Number.isInteger(size) || size <= 0 || size > DIRECT_MAX_FILE_BYTES) {
-      sendJson(res, 400, { error: '文件参数不合法' });
+    if (!ids.length || ids.length > DIRECT_MAX_TARGETS || !name || !Number.isInteger(size) || size <= 0 || size > DIRECT_MAX_FILE_BYTES) {
+      sendJson(res, 400, { error: '需要 1 ~ 20 台目标设备及合法的文件参数' });
       return true;
     }
     if (!deps.configDir) {
@@ -153,8 +195,17 @@ export async function tryDirectRoutes(
     const staging = join(stagingDir, `out-${randomBytes(8).toString('hex')}`);
     try {
       const sha256 = await stageUpload(req, staging, size);
-      const id = direct.sendFile(deviceId, { name, sourcePath: staging, size, sha256 });
-      sendJson(res, 200, { id });
+      const file = { name, sourcePath: staging, size, sha256 };
+      let started = false;
+      const results = dispatch(ids, (deviceId) => {
+        const id = direct.sendFile(deviceId, file);
+        started = true;
+        return id;
+      });
+      // 一笔都没发出去时没有服务接管暂存文件,这里自己清理;
+      // 否则由 direct 服务按引用计数在最后一笔结束时删。
+      if (!started) rmSync(staging, { force: true });
+      sendBatch(res, ids, results);
     } catch (e) {
       rmSync(staging, { force: true });
       fail(res, e);
