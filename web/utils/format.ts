@@ -97,6 +97,30 @@ export function visibleTransferFiles<T>(files: readonly T[], expanded: boolean, 
   return expanded ? [...files] : files.slice(0, limit);
 }
 
+/** 常见图片 MIME → 扩展名。`+xml` 这类后缀要显式列出,不能直接拿子类型当扩展名。 */
+const IMAGE_EXT: Record<string, string> = {
+  'image/png': 'png',
+  'image/jpeg': 'jpg',
+  'image/gif': 'gif',
+  'image/webp': 'webp',
+  'image/bmp': 'bmp',
+  'image/svg+xml': 'svg',
+  'image/avif': 'avif',
+};
+
+/**
+ * 剪贴板图片的文件名。浏览器给的名字常常就是 `image.png`,同一秒粘两张会撞名、
+ * 接收方只能看到 `image (1).png` 分不清来源 —— 统一按「粘贴-年月日-时分秒」重命名。
+ * 同一批里第 2 张起加序号,避免一次粘贴多张时自己就重名。
+ */
+export function pastedImageName(mime: string, at = new Date(), seq = 1): string {
+  const sub = (mime.split('/')[1] ?? '').toLowerCase();
+  const ext = IMAGE_EXT[mime.toLowerCase()] ?? (sub.replace(/[^a-z0-9-]/g, '') || 'png');
+  const p = (n: number) => String(n).padStart(2, '0');
+  const stamp = `${at.getFullYear()}${p(at.getMonth() + 1)}${p(at.getDate())}-${p(at.getHours())}${p(at.getMinutes())}${p(at.getSeconds())}`;
+  return `粘贴-${stamp}${seq > 1 ? `-${seq}` : ''}.${ext}`;
+}
+
 /**
  * 共享目录输入框的路径示例文案。**必须按 daemon 所在平台给**(后端 status.platform):
  * 控制台经常被从另一台机器打开,用浏览器的 navigator 判断会给出错的示例 ——

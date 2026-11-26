@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { deviceAddrLine, folderPathPlaceholder, visibleTransferFiles, XFER_FILE_LIMIT } from '../web/utils/format.js';
+import { deviceAddrLine, folderPathPlaceholder, pastedImageName, visibleTransferFiles, XFER_FILE_LIMIT } from '../web/utils/format.js';
 import type { DeviceInfo } from '../web/types.js';
 
 /**
@@ -93,5 +93,37 @@ describe('deviceAddrLine(设备卡地址行)', () => {
 
   it('去掉 ws:// 前缀,IPv6 方括号保留', () => {
     expect(deviceAddrLine({ ...device, address: 'ws://[2001:db8::1]:12222', hostname: undefined })).toBe('[2001:db8::1]:12222');
+  });
+});
+
+/**
+ * 粘贴图片没有真名字:浏览器给的 blob 往往叫 `image.png`,同一秒粘两张就重名。
+ * 这里按「粘贴-年月日-时分秒」统一重命名,顺带把扩展名按 MIME 定死。
+ */
+describe('pastedImageName(粘贴图片命名)', () => {
+  const at = new Date(2026, 10, 26, 20, 30, 5); // 本地时间 2026-11-26 20:30:05
+
+  it('按时间戳命名并把扩展名统一成小写规范写法', () => {
+    expect(pastedImageName('image/png', at)).toBe('粘贴-20261126-203005.png');
+    expect(pastedImageName('image/jpeg', at)).toBe('粘贴-20261126-203005.jpg');
+    expect(pastedImageName('image/svg+xml', at)).toBe('粘贴-20261126-203005.svg');
+    expect(pastedImageName('IMAGE/WEBP', at)).toBe('粘贴-20261126-203005.webp');
+  });
+
+  it('同一批的第 2 张起加序号,不会自己和自己重名', () => {
+    expect(pastedImageName('image/png', at, 2)).toBe('粘贴-20261126-203005-2.png');
+  });
+
+  it('不认识的图片类型退回 MIME 子类型,再不行用 png', () => {
+    expect(pastedImageName('image/x-icon', at)).toBe('粘贴-20261126-203005.x-icon');
+    expect(pastedImageName('image/', at)).toBe('粘贴-20261126-203005.png');
+  });
+
+  it('名字里不带路径分隔符,接收方落盘时不会被拆成子目录', () => {
+    for (const mime of ['image/png', 'image/svg+xml', 'image/']) {
+      const name = pastedImageName(mime, at);
+      expect(name).not.toMatch(/[\\/]/);
+      expect(name.startsWith('粘贴-')).toBe(true);
+    }
   });
 });

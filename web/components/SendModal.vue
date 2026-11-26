@@ -1,8 +1,9 @@
 <script setup lang="ts">
-import { computed, ref, watch } from 'vue';
+import { computed, onBeforeUnmount, ref, watch } from 'vue';
 import { NButton, NCheckbox, NInput } from 'naive-ui';
 import type { DeviceInfo } from '../types';
 import type { DirectApi, SendFileItem } from '../composables/useDirect';
+import { pastedImageName } from '../utils/format';
 import ModalShell from './ModalShell.vue';
 
 /** 给在线设备直发文本或文件:两页签共用底部动作区,避免两个弹窗反复开关。 */
@@ -73,6 +74,53 @@ function pickFile(e: Event): void {
   // 清空 input,允许再次选同一批文件(否则 change 不触发)。
   input.value = '';
 }
+
+/**
+ * 剪贴板里的图片直接进文件队列:把截图发给对方是最常见的用法,不必先存盘再选文件。
+ * 只认图片文件,纯文本粘贴照旧走 textarea 的默认行为(这里不拦)。
+ */
+function pasteImages(data: DataTransfer | null): number {
+  if (!data) return 0;
+  const at = new Date();
+  const files: File[] = [];
+  for (const item of Array.from(data.items ?? [])) {
+    if (item.kind !== 'file' || !item.type.startsWith('image/')) continue;
+    const blob = item.getAsFile();
+    if (!blob) continue;
+    files.push(new File([blob], pastedImageName(item.type, at, files.length + 1), {
+      type: item.type,
+      lastModified: at.getTime(),
+    }));
+  }
+  if (!files.length) return 0;
+  props.direct.addFiles(files);
+  tab.value = 'file';
+  return files.length;
+}
+
+/**
+ * 监听挂在整个文档上,而不是弹窗 DOM:刚打开弹窗时焦点可能还停在设备卡的「发送」按钮上,
+ * 这时 Ctrl+V 的 target 在弹窗之外,挂 `.modal` 收不到。只处理「本弹窗是最上层」的情形 ——
+ * 收件箱、提权门叠在上面时,那里的粘贴不该被这里截走。
+ */
+function onPaste(e: ClipboardEvent): void {
+  if (props.direct.sending.value) return;
+  const overlays = document.querySelectorAll('.modal-overlay');
+  if (!overlays[overlays.length - 1]?.querySelector('.send-modal')) return;
+  if (!pasteImages(e.clipboardData)) return;
+  // 已经接住了:别让浏览器再往 textarea 里塞占位字符。
+  e.preventDefault();
+}
+
+watch(
+  () => props.open && !!props.device,
+  (visible) => {
+    if (visible) document.addEventListener('paste', onPaste);
+    else document.removeEventListener('paste', onPaste);
+  },
+  { immediate: true },
+);
+onBeforeUnmount(() => document.removeEventListener('paste', onPaste));
 
 function submit(): void {
   if (props.direct.sending.value) return;
@@ -145,7 +193,7 @@ function submit(): void {
         placeholder="输入要发给对方的一段文本（最多 64 KB）"
         :disabled="direct.sending.value"
       />
-      <p class="form-hint">对方在线会立刻收到；离线时内容先在本机排队，等它上线自动送达。文本按原样保存，可在收件箱里复制。</p>
+      <p class="form-hint">对方在线会立刻收到；离线时内容先在本机排队，等它上线自动送达。文本按原样保存，可在收件箱里复制。也可以直接粘贴截图（Ctrl/⌘+V），会当作文件发送。</p>
     </div>
 
     <div v-else class="send-pane">
@@ -167,7 +215,7 @@ function submit(): void {
         </div>
       </div>
       <p v-else class="form-hint">还没有选择文件。</p>
-      <p class="form-hint">单文件最大 100 MB、一次最多 20 个。对方需要点「接收」才会开始传输，文件落在其收件箱而非共享目录。</p>
+      <p class="form-hint">单文件最大 100 MB、一次最多 20 个；也可以直接粘贴截图。对方需要点「接收」才会开始传输，文件落在其收件箱而非共享目录。</p>
     </div>
 
     <template #footer>
