@@ -137,8 +137,12 @@ export interface DirectTransfer {
   name?: string;
   size: number;
   bytesDone: number;
-  /** paused = 链路断了、半截字节保留着,等对端重连后续传(10 分钟内)。 */
-  state: 'offering' | 'transferring' | 'paused' | 'done' | 'failed';
+  /**
+   * queued = 目标离线,内容留在本机排队(设备上线自动投递,24 小时内有效);
+   * paused = 链路断了、半截字节保留着,等对端重连后续传(10 分钟内);
+   * canceled = 用户主动取消了排队(不是失败)。
+   */
+  state: 'queued' | 'offering' | 'transferring' | 'paused' | 'done' | 'canceled' | 'failed';
   error?: string;
 }
 

@@ -11,6 +11,8 @@ import { apiJson, apiPost, errText } from '../utils/api';
 interface SendOutcome {
   deviceId: string;
   id?: string;
+  /** true = 目标离线,内容已进本机队列,等它上线自动投递。 */
+  queued?: boolean;
   error?: string;
 }
 
@@ -24,13 +26,16 @@ interface DirectBatchResponse {
 export interface SendFileItem {
   key: string;
   file: File;
-  state: 'pending' | 'sending' | 'done' | 'failed';
+  state: 'pending' | 'sending' | 'queued' | 'done' | 'failed';
   error?: string;
 }
 
 export interface DirectApi {
   sendTarget: Ref<DeviceInfo | null>;
-  /** 弹窗里可勾选的目标(在线 + 支持 direct1),随 status 推送实时变化。 */
+  /**
+   * 弹窗里可勾选的目标:在线且支持 direct1 的直接发,离线设备进排队
+   * (上线后自动投递)。在线但版本过旧的仍然不给勾 —— 排到超时也发不出去。
+   */
   availableTargets: ComputedRef<DeviceInfo[]>;
   /** 本次发送选中的设备 ID;从卡片点「发送」时默认只选那一台。 */
   selectedDevices: Ref<string[]>;
@@ -50,12 +55,19 @@ export interface DirectApi {
   /** 正在发送的文件对应的实时传输状态,来自 status.direct.transfers。 */
   transfers: ComputedRef<DirectTransfer[]>;
   sending: Ref<boolean>;
+  /** 在线且支持直发:可以立刻投送。 */
   canDirect: (p: DeviceInfo) => boolean;
+  /** 离线设备:可以排队,等它上线自动投递。 */
+  canQueue: (p: DeviceInfo) => boolean;
+  /** 这台设备是否只能排队(用于弹窗底部的按钮文案)。 */
+  isQueuedTarget: (p: DeviceInfo | undefined) => boolean;
   sendText: (deviceIds: string[]) => Promise<boolean>;
   /** 逐文件投送队列:一个失败继续下一个,返回是否全部成功。 */
   sendFile: (deviceIds: string[]) => Promise<boolean>;
   /** saveTo 给出时走提权门(由 UI 负责),文件另存到 daemon 机器的该目录。 */
   reply: (id: string, accept: boolean, saveTo?: string) => Promise<boolean>;
+  /** 取消一条还在排队的投送(设备离线时才有这个入口)。 */
+  cancelSend: (id: string) => Promise<void>;
   removeItem: (id: string) => Promise<void>;
   copyItem: (item: DirectItem) => Promise<void>;
   downloadItem: (item: DirectItem) => Promise<void>;
@@ -130,7 +142,16 @@ export function useDirect(deps: CoreDeps & { copy: (text: string) => Promise<voi
     return p.online && (p.caps?.includes('direct1') ?? false);
   }
 
-  const availableTargets = computed(() => deps.status.value.devices.filter(canDirect));
+  /** 离线的已配对设备:内容先排队,等它上线自动投递。 */
+  function canQueue(p: DeviceInfo): boolean {
+    return !p.online;
+  }
+
+  const availableTargets = computed(() => deps.status.value.devices.filter((d) => canDirect(d) || canQueue(d)));
+
+  function isQueuedTarget(p: DeviceInfo | undefined): boolean {
+    return !!p && canQueue(p);
+  }
 
   function toggleTarget(deviceId: string): void {
     if (sending.value) return;
@@ -151,17 +172,23 @@ export function useDirect(deps: CoreDeps & { copy: (text: string) => Promise<voi
     return ids.map((deviceId, i) => ({ deviceId, ...(i === 0 && res.id ? { id: res.id } : {}) }));
   }
 
-  /** 部分失败也算发出去了:明确告诉用户几台成功、第一台失败的原因。 */
+  /** 部分失败也算发出去了:明确告诉用户几台成功、几台排队、第一台失败的原因。 */
   function reportBatch(results: SendOutcome[], noun: string): void {
-    const ok = results.filter((r) => r.id).length;
+    const sent = results.filter((r) => r.id && !r.queued).length;
+    const queued = results.filter((r) => r.id && r.queued).length;
     const failed = results.filter((r) => r.error);
     if (!failed.length) {
-      showToast(`已发给 ${ok} 台${noun}`);
+      if (queued && sent) showToast(`已发给 ${sent} 台${noun}，${queued} 台离线已排队`);
+      else if (queued) showToast(`已排队 ${queued} 台${noun}，设备上线后自动发送`);
+      else showToast(`已发给 ${sent} 台${noun}`);
       return;
     }
     const reason = failed[0]?.error ?? '未知原因';
-    if (ok) showToast(`已发给 ${ok} 台${noun}，${failed.length} 台失败：${reason}`, 'alert');
-    else showToast(reason, 'alert');
+    const done = [
+      sent ? `${sent} 台已发出` : '',
+      queued ? `${queued} 台已排队` : '',
+    ].filter(Boolean).join('、');
+    showToast(done ? `${done}，${failed.length} 台失败：${reason}` : reason, 'alert');
   }
 
   async function sendText(deviceIds: string[]): Promise<boolean> {
@@ -221,6 +248,7 @@ export function useDirect(deps: CoreDeps & { copy: (text: string) => Promise<voi
     }
     sending.value = true;
     let okFiles = 0;
+    let queuedFiles = 0;
     const failures: string[] = [];
     try {
       for (const item of queue) {
@@ -233,6 +261,10 @@ export function useDirect(deps: CoreDeps & { copy: (text: string) => Promise<voi
             item.state = 'failed';
             item.error = failed.map((r) => `${r.deviceId}：${r.error}`).join('；');
             failures.push(`${item.file.name} ${failed.length} 台失败`);
+          } else if (results.every((r) => r.queued)) {
+            // 全部目标都离线:文件进了本机队列,别显示成「已发出」。
+            item.state = 'queued';
+            queuedFiles++;
           } else {
             item.state = 'done';
             okFiles++;
@@ -245,9 +277,11 @@ export function useDirect(deps: CoreDeps & { copy: (text: string) => Promise<voi
       }
       await deps.refreshStatus();
       if (failures.length) {
-        showToast(`${okFiles} 个文件已发出，${failures.length} 个失败：${failures[0]}`, 'alert');
+        showToast(`${okFiles + queuedFiles} 个文件已受理，${failures.length} 个失败：${failures[0]}`, 'alert');
       } else {
-        showToast(`${okFiles} 个文件已发出，等待对方确认`);
+        if (queuedFiles && okFiles) showToast(`${okFiles} 个文件已发出，${queuedFiles} 个排队等待设备上线`);
+        else if (queuedFiles) showToast(`${queuedFiles} 个文件已排队，设备上线后自动发送`);
+        else showToast(`${okFiles} 个文件已发出，等待对方确认`);
         // 全部成功才关弹窗;有失败时留着队列让用户重试失败的项。
         sendTarget.value = null;
         selectedDevices.value = [];
@@ -272,6 +306,16 @@ export function useDirect(deps: CoreDeps & { copy: (text: string) => Promise<voi
     } catch (e) {
       showToast(errText(e, '操作失败'), 'alert');
       return false;
+    }
+  }
+
+  async function cancelSend(id: string): Promise<void> {
+    try {
+      await apiPost('/api/direct/cancel', { id });
+      showToast('已取消排队');
+      await deps.refreshStatus();
+    } catch (e) {
+      showToast(errText(e, '取消失败'), 'alert');
     }
   }
 
@@ -331,9 +375,12 @@ export function useDirect(deps: CoreDeps & { copy: (text: string) => Promise<voi
     transfers,
     sending,
     canDirect,
+    canQueue,
+    isQueuedTarget,
     sendText,
     sendFile,
     reply,
+    cancelSend,
     removeItem,
     copyItem,
     downloadItem,

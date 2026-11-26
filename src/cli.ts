@@ -59,6 +59,16 @@ import { SyncSessionManager, type FolderDiffResult } from './session-manager.js'
 import { formatFolderDiff } from './diff-text.js';
 
 /**
+ * 直发不可用时的用户可见原因。离线不走这里(离线会进排队),所以这几条都是
+ * 「等下去也没用」的硬原因,要说得能直接照着修。
+ */
+function directUnavailableText(why: 'ready' | 'offline' | 'unsupported' | 'blocked'): string {
+  if (why === 'unsupported') return '对方版本不支持直发(请升级到支持 direct1 的版本)';
+  if (why === 'blocked') return '对方已不在互信设备列表里,请先重新配对';
+  return '设备当前离线';
+}
+
+/**
  * 目录索引里是否存在「活条目」(非墓碑)。用于启动收养标记前判断该目录是否曾同步过真实文件:
  * 有活条目 + 目录顶层为空,是「盘未挂载 / 目录被整体清空」的典型形态,此时不能贸然补标记。
  * 任何读取异常都按 false(无活条目)处理,不因诊断失败阻塞启动。
@@ -957,14 +967,21 @@ export async function run(args: ParsedArgs): Promise<void> {
       },
       sendText: (deviceId, text) => {
         const tx = manager.directTransport(deviceId);
-        if (!tx) throw new Error('设备离线或对方版本不支持直发(请升级到支持 direct1 的版本)');
-        return direct.sendText(deviceId, text, tx);
+        if (tx) return direct.sendText(deviceId, text, tx);
+        // 离线不再直接报错:交给 direct 服务排队,等对端上线自动投递。
+        // 在线但版本过旧 / 已不在互信列表时要立刻说清楚,别在队列里躺到超时。
+        const why = manager.directAvailability(deviceId);
+        if (why === 'offline') return direct.sendText(deviceId, text);
+        throw new Error(directUnavailableText(why));
       },
       sendFile: (deviceId, file) => {
         const tx = manager.directTransport(deviceId);
-        if (!tx) throw new Error('设备离线或对方版本不支持直发(请升级到支持 direct1 的版本)');
-        return direct.sendFile(deviceId, file, tx);
+        if (tx) return direct.sendFile(deviceId, file, tx);
+        const why = manager.directAvailability(deviceId);
+        if (why === 'offline') return direct.sendFile(deviceId, file);
+        throw new Error(directUnavailableText(why));
       },
+      cancelQueued: (id) => direct.cancelQueued(id),
     },
     // 另存目录每次请求现读配置:热重载后新加/移除的共享目录立刻算进禁区。
     directSavePath: (input) =>

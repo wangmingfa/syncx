@@ -12,7 +12,7 @@ import { Transform } from 'node:stream';
 import { pipeline } from 'node:stream/promises';
 import type { ControlServerDeps } from '../deps.js';
 import { pathname, readBody, sendJson } from '../helpers.js';
-import { DIRECT_MAX_FILE_BYTES } from '../../direct.js';
+import { DIRECT_MAX_FILE_BYTES, type DirectSendAck } from '../../direct.js';
 
 /** 写暂存文件:超出预期大小立刻失败,收尾核对字节数与 sha256。 */
 async function stageUpload(req: IncomingMessage, path: string, size: number): Promise<string> {
@@ -70,14 +70,17 @@ function parseTargets(single: unknown, many: unknown): string[] {
 interface DirectSendResult {
   deviceId: string;
   id?: string;
+  /** true = 目标离线,内容已进排队,等它上线自动投递。 */
+  queued?: boolean;
   error?: string;
 }
 
 /** 逐台投送:某台离线/旧版本不影响其它设备,失败原因随结果返回给 UI。 */
-function dispatch(ids: string[], send: (deviceId: string) => string): DirectSendResult[] {
+function dispatch(ids: string[], send: (deviceId: string) => DirectSendAck): DirectSendResult[] {
   return ids.map((deviceId) => {
     try {
-      return { deviceId, id: send(deviceId) };
+      const ack = send(deviceId);
+      return { deviceId, id: ack.id, ...(ack.queued ? { queued: true } : {}) };
     } catch (e) {
       return { deviceId, error: e instanceof Error ? e.message : '发送失败' };
     }
@@ -181,6 +184,22 @@ export async function tryDirectRoutes(
     return true;
   }
 
+  // POST /api/direct/cancel : 取消一条仍在排队的投送(设备离线时才有)
+  if (req.method === 'POST' && path === '/api/direct/cancel') {
+    try {
+      const body = JSON.parse(await readBody(req)) as { id?: unknown };
+      if (typeof body.id !== 'string') {
+        sendJson(res, 400, { error: '缺少投送 id' });
+        return true;
+      }
+      const ok = direct.cancelQueued(body.id);
+      sendJson(res, ok ? 200 : 404, ok ? { ok: true } : { error: '该投送不在排队中(可能已发出或已结束)' });
+    } catch (e) {
+      fail(res, e);
+    }
+    return true;
+  }
+
   // POST /api/direct/text : 发送一段文本(支持 deviceIds 多设备)
   if (req.method === 'POST' && path === '/api/direct/text') {
     try {
@@ -221,9 +240,9 @@ export async function tryDirectRoutes(
       const file = { name, sourcePath: staging, size, sha256 };
       let started = false;
       const results = dispatch(ids, (deviceId) => {
-        const id = direct.sendFile(deviceId, file);
+        const ack = direct.sendFile(deviceId, file);
         started = true;
-        return id;
+        return ack;
       });
       // 一笔都没发出去时没有服务接管暂存文件,这里自己清理;
       // 否则由 direct 服务按引用计数在最后一笔结束时删。

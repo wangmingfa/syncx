@@ -8,6 +8,7 @@ import { useStatusContext } from '../composables/statusContext';
 import { getDirectDropTarget, setDirectDropTarget } from '../composables/directDropTarget';
 import { osIconLabel } from '../utils/os-icon';
 import { backendIconLabel } from '../utils/backend-icon';
+import type { DeviceInfo } from '../types';
 
 const {
   status,
@@ -37,8 +38,13 @@ const {
 const qrOpen = ref(false);
 // 待确认的入站文件数:收件箱入口上的徽标,提醒对方正在等你点「接收」
 const pendingDirect = computed(() => status.value.direct?.pending.length ?? 0);
-// 拖拽悬停的设备 ID:只给「在线且支持直发」的卡片高亮,避免拖到旧设备后松手没反应。
+// 拖拽悬停的设备 ID:在线可直发、或离线可排队的卡片都能接,避免拖到旧设备后松手没反应。
 const dragOverId = ref<string | null>(null);
+
+/** 能接收拖入的文件:在线直发,或离线先排队。 */
+function canSendTo(p: DeviceInfo): boolean {
+  return direct.canDirect(p) || direct.canQueue(p);
+}
 
 function isFileDrag(e: DragEvent): boolean {
   return Array.from(e.dataTransfer?.types ?? []).includes('Files');
@@ -159,10 +165,10 @@ function onDrop(e: DragEvent, deviceId: string, canSend: boolean): void {
       }"
       @mouseenter="onDeviceEnter(p.deviceId)"
       @mouseleave="onDeviceLeave()"
-      @dragenter="onDragEnter($event, p.deviceId, direct.canDirect(p))"
-      @dragover="onDragOver($event, direct.canDirect(p))"
+      @dragenter="onDragEnter($event, p.deviceId, canSendTo(p))"
+      @dragover="onDragOver($event, canSendTo(p))"
       @dragleave="onDragLeave($event, p.deviceId)"
-      @drop="onDrop($event, p.deviceId, direct.canDirect(p))"
+      @drop="onDrop($event, p.deviceId, canSendTo(p))"
     >
       <div class="item-top">
         <span class="avatar" :class="p.online ? 'online' : 'offline'">
@@ -201,6 +207,17 @@ function onDrop(e: DragEvent, deviceId: string, canSend: boolean): void {
             </template>
             对方版本不支持直发,请升级后再试
           </n-tooltip>
+          <!-- 离线设备也能发:内容先在本机排队,等它上线自动投递(24 小时内有效)。 -->
+          <n-button
+            v-else
+            size="small"
+            type="primary"
+            tertiary
+            class="btn-inline"
+            :disabled="busy"
+            title="对方离线：内容会先在本机排队，等它上线自动投递（24 小时内有效）"
+            @click="direct.openSend(p)"
+          >发送</n-button>
           <!-- 编辑只改对端 IP/端口,设备 ID 不变;与「移除」这类破坏性操作拉开 -->
           <n-button size="small" tertiary class="btn-inline" :disabled="busy" @click="openEditDevice(p)">编辑</n-button>
           <n-button

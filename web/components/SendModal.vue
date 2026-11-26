@@ -32,6 +32,7 @@ function fileProgress(item: SendFileItem): number | null {
 }
 function fileStateLabel(item: SendFileItem): string {
   if (item.state === 'failed') return '失败';
+  if (item.state === 'queued') return '排队中';
   if (item.state === 'done') return '已发出';
   if (item.state === 'sending') {
     const pct = fileProgress(item);
@@ -39,6 +40,24 @@ function fileStateLabel(item: SendFileItem): string {
   }
   return '待发送';
 }
+
+/** 选中的设备全都离线时,按钮改口径:这次只是排队,不会立刻发出去。 */
+const queuedOnly = computed(() => {
+  const ids = props.direct.selectedDevices.value;
+  if (!ids.length) return false;
+  return ids.every((id) => {
+    const d = props.direct.availableTargets.value.find((t) => t.deviceId === id);
+    return d ? props.direct.isQueuedTarget(d) : false;
+  });
+});
+
+/** 底部主按钮文案:发送中 > 多文件 > 排队/发送。 */
+const submitLabel = computed(() => {
+  if (props.direct.sending.value) return '发送中';
+  const many = tab.value === 'file' ? props.direct.fileDrafts.value.length : 0;
+  if (many > 1) return queuedOnly.value ? `排队 ${many} 个文件` : `发送 ${many} 个文件`;
+  return queuedOnly.value ? '排队发送' : '发送';
+});
 
 watch(
   () => props.open,
@@ -74,7 +93,7 @@ function submit(): void {
     :close-disabled="direct.sending.value"
     @close="emit('close')"
   >
-    <div class="send-target">对方收到后会进入它的「收件箱」，不会写进任何共享目录。</div>
+    <div class="send-target">对方收到后会进入它的「收件箱」，不会写进任何共享目录；离线设备会先在本机排队，上线后自动发送（24 小时内有效）。</div>
     <div class="send-targets">
       <div class="send-targets-head">
         <span class="field__label">发送到（可多选）</span>
@@ -94,9 +113,10 @@ function submit(): void {
         >
           <span class="send-target-id">{{ d.deviceId }}</span>
           <span v-if="d.hostname" class="send-target-host">{{ d.hostname }}</span>
+          <span v-if="!d.online" class="send-target-offline">离线·排队</span>
         </n-checkbox>
       </div>
-      <div v-else class="send-targets-empty">没有可直发的在线设备（需要对方也支持直发）</div>
+      <div v-else class="send-targets-empty">没有可发送的设备（在线设备需支持直发；离线设备会先排队）</div>
     </div>
     <div class="send-tabs" role="tablist" aria-label="发送内容类型">
       <button
@@ -125,7 +145,7 @@ function submit(): void {
         placeholder="输入要发给对方的一段文本（最多 64 KB）"
         :disabled="direct.sending.value"
       />
-      <p class="form-hint">发送后对方会收到提示；文本按原样保存，可在收件箱里复制。</p>
+      <p class="form-hint">对方在线会立刻收到；离线时内容先在本机排队，等它上线自动送达。文本按原样保存，可在收件箱里复制。</p>
     </div>
 
     <div v-else class="send-pane">
@@ -153,7 +173,7 @@ function submit(): void {
     <template #footer>
       <n-button class="modal-cancel" :disabled="direct.sending.value" @click="emit('close')">取消</n-button>
       <n-button type="primary" :loading="direct.sending.value" :disabled="busy || !direct.selectedDevices.value.length || (tab === 'file' && !direct.fileDrafts.value.length)" @click="submit">
-        {{ direct.sending.value ? '发送中' : tab === 'file' && direct.fileDrafts.value.length > 1 ? `发送 ${direct.fileDrafts.value.length} 个文件` : '发送' }}
+        {{ submitLabel }}
       </n-button>
     </template>
   </ModalShell>
@@ -214,6 +234,16 @@ function submit(): void {
   font-size: 11px;
   text-overflow: ellipsis;
   white-space: nowrap;
+}
+/* 离线设备的排队标记:与「在线」用法不同,别做成绿色/成功色 */
+.send-target-offline {
+  flex: 0 0 auto;
+  margin-left: 8px;
+  padding: 1px 5px;
+  border-radius: 4px;
+  background: var(--surface-2, rgba(127, 127, 127, 0.14));
+  color: var(--muted-strong);
+  font-size: 10px;
 }
 .send-targets-empty {
   padding: 10px;

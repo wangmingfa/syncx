@@ -8,7 +8,7 @@ import type { AddressInfo } from 'node:net';
 import { request } from 'node:http';
 import { CAP_DIRECT1, PEER_CAPS } from '../src/handshake.js';
 import { decodeBinaryFrame, encodeBinaryFrame } from '../src/net/wire.js';
-import { createDirectService, DIRECT_CHUNK_BYTES, type DirectService, type DirectTransport } from '../src/direct.js';
+import { createDirectService, DIRECT_CHUNK_BYTES, DIRECT_MAX_QUEUED, type DirectService, type DirectTransport } from '../src/direct.js';
 import { resolveDirectSaveDir } from '../src/direct-save-path.js';
 import { signSession, sessionSecret } from '../src/auth.js';
 import { ELEVATE_COOKIE } from '../src/api/helpers.js';
@@ -59,7 +59,7 @@ describe('device direct transfer', () => {
     const a = createDirectService({ configDir: tmp() });
     const b = createDirectService({ configDir: tmp() });
     const { txA } = pair(a, b);
-    const id = a.sendText('B', '你好，syncx 直发', txA);
+    const id = a.sendText('B', '你好，syncx 直发', txA).id;
 
     expect(b.snapshot().inbox).toHaveLength(1);
     expect(b.snapshot().inbox[0]).toMatchObject({ kind: 'text', from: 'A', preview: '你好，syncx 直发' });
@@ -78,7 +78,7 @@ describe('device direct transfer', () => {
     writeFileSync(source, data);
     const sha256 = createHash('sha256').update(data).digest('hex');
 
-    const id = a.sendFile('B', { name: 'sub/dir/测试.bin', sourcePath: source, size: data.length, sha256 }, txA);
+    const id = a.sendFile('B', { name: 'sub/dir/测试.bin', sourcePath: source, size: data.length, sha256 }, txA).id;
     // 文件名按 basename 清洗,不保留来源路径
     expect(a.snapshot().transfers[0]?.name).toBe('测试.bin');
     expect(b.snapshot().pending[0]?.id).toBe(id);
@@ -108,8 +108,8 @@ describe('device direct transfer', () => {
       size: data.length,
       sha256: createHash('sha256').update(data).digest('hex'),
     };
-    const idB = a.sendFile('B', file, tx);
-    const idC = a.sendFile('C', file, tx);
+    const idB = a.sendFile('B', file, tx).id;
+    const idC = a.sendFile('C', file, tx).id;
     expect(existsSync(source)).toBe(true);
     a.handleControl({ kind: 'direct-result', id: idB, fromDeviceId: '', ok: true }, 'B', tx);
     expect(existsSync(source)).toBe(true);
@@ -129,7 +129,7 @@ describe('device direct transfer', () => {
       sourcePath: source,
       size: 5,
       sha256: createHash('sha256').update('hello').digest('hex'),
-    }, txA);
+    }, txA).id;
     expect(b.reply(id, false, txB, '现在不方便')).toBe(true);
     expect(b.snapshot().inbox).toHaveLength(0);
     expect(b.snapshot().pending).toHaveLength(0);
@@ -150,7 +150,7 @@ describe('device direct transfer', () => {
       sourcePath: source,
       size: data.length,
       sha256: createHash('sha256').update(data).digest('hex'),
-    }, txA);
+    }, txA).id;
     expect(b.reply(id, true, txB)).toBe(true);
     expect(b.snapshot().inbox).toHaveLength(0);
     expect(a.snapshot().transfers.find((t) => t.id === id)?.error).toContain('校验失败');
@@ -169,8 +169,9 @@ describe('device direct transfer', () => {
         content: async () => undefined,
         remove: async () => true,
         reply: () => true,
-        sendText: (deviceId, text) => { sent.push(`${deviceId}:${text}`); return `dt-${deviceId}`; },
-        sendFile: () => 'df-2',
+        sendText: (deviceId, text) => { sent.push(`${deviceId}:${text}`); return { id: `dt-${deviceId}`, queued: false }; },
+        sendFile: () => ({ id: 'df-2', queued: false }),
+        cancelQueued: () => true,
       },
     });
     server.listen(0, '127.0.0.1');
@@ -222,8 +223,9 @@ describe('device direct transfer', () => {
         content: async () => undefined,
         remove: async () => true,
         reply: () => true,
-        sendText: () => 'dt-x',
-        sendFile: (deviceId, file) => { captured = file; sentTo.push(deviceId); return `df-${deviceId}`; },
+        sendText: () => ({ id: 'dt-x', queued: false }),
+        sendFile: (deviceId, file) => { captured = file; sentTo.push(deviceId); return { id: `df-${deviceId}`, queued: false }; },
+        cancelQueued: () => true,
       },
     });
     server.listen(0, '127.0.0.1');
@@ -277,7 +279,7 @@ describe('device direct transfer', () => {
       sourcePath: source,
       size: data.length,
       sha256: createHash('sha256').update(data).digest('hex'),
-    }, txA);
+    }, txA).id;
     expect(b.reply(id, true, txB, undefined, target)).toBe(true);
 
     const item = b.snapshot().inbox[0];
@@ -330,8 +332,9 @@ describe('device direct transfer', () => {
         content: async () => undefined,
         remove: async () => true,
         reply: (_id, _accept, _reason, saveDir) => { captured = saveDir; return true; },
-        sendText: () => 'dt-x',
-        sendFile: () => 'df-x',
+        sendText: () => ({ id: 'dt-x', queued: false }),
+        sendFile: () => ({ id: 'df-x', queued: false }),
+        cancelQueued: () => true,
       },
     });
     server.listen(0, '127.0.0.1');
@@ -420,7 +423,7 @@ describe('device direct transfer', () => {
       sourcePath: source,
       size: data.length,
       sha256: createHash('sha256').update(data).digest('hex'),
-    }, txA);
+    }, txA).id;
     expect(b.snapshot().pending).toHaveLength(1);
 
     // 接收方确认后开始传;第一片送达即断链,发送方转入暂停而不是直接失败。
@@ -469,12 +472,117 @@ describe('device direct transfer', () => {
       sourcePath: source,
       size: data.length,
       sha256: createHash('sha256').update(data).digest('hex'),
-    }, tx);
+    }, tx).id;
     // 对方声称已经落盘一片,但本机这笔还没暂停过 → 不能信,直接失败(否则会静默丢一段)。
     a.handleControl({ kind: 'direct-reply', id, fromDeviceId: '', accept: true, offset: DIRECT_CHUNK_BYTES }, 'B', tx);
     const t = a.snapshot().transfers.find((x) => x.id === id);
     expect(t?.state).toBe('failed');
     expect(t?.error).toContain('续传位置不合法');
+    a.close();
+  });
+
+  it('离线排队:文本先进本机队列,设备上线后自动补发', () => {
+    const configDir = tmp();
+    const a = createDirectService({ configDir });
+    const b = createDirectService({ configDir: tmp() });
+    // 没有 tx = 目标离线:不报错,进队列
+    const ack = a.sendText('B', '等你上线再看', undefined);
+    expect(ack.queued).toBe(true);
+    expect(a.snapshot().transfers.find((t) => t.id === ack.id)).toMatchObject({ state: 'queued', kind: 'text' });
+    expect(b.snapshot().inbox).toHaveLength(0);
+    const queueFile = join(configDir, 'inbox', 'queue.json');
+    expect(JSON.parse(readFileSync(queueFile, 'utf8'))).toMatchObject([{ id: ack.id, deviceId: 'B', kind: 'text', text: '等你上线再看' }]);
+
+    // 设备离线事件不该把排队项打成失败
+    a.onPeerOffline('B');
+    expect(a.snapshot().transfers.find((t) => t.id === ack.id)?.state).toBe('queued');
+
+    // 会话建立:自动补发,落对方收件箱并回执
+    const { txA } = pair(a, b);
+    a.onPeerOnline('B', txA);
+    const textItem = b.snapshot().inbox[0];
+    expect(textItem?.kind === 'text' ? textItem.preview : '').toBe('等你上线再看');
+    expect(a.snapshot().transfers.find((t) => t.id === ack.id)?.state).toBe('done');
+    // 队列台账随之清空
+    expect(existsSync(queueFile)).toBe(false);
+    a.close();
+    b.close();
+  });
+
+  it('离线排队跨重启:暂存文件与台账都保留,重启后仍能投递', () => {
+    const configDir = tmp();
+    const bConfig = tmp();
+    const source = join(tmp(), 'queued.bin');
+    const data = Buffer.alloc(DIRECT_CHUNK_BYTES + 321);
+    for (let i = 0; i < data.length; i++) data[i] = (i * 3) % 251;
+    writeFileSync(source, data);
+    const sha256 = createHash('sha256').update(data).digest('hex');
+
+    const a1 = createDirectService({ configDir });
+    const ack = a1.sendFile('B', { name: 'queued.bin', sourcePath: source, size: data.length, sha256 }, undefined);
+    expect(ack.queued).toBe(true);
+    a1.close();
+    // 关闭 daemon 不能把排队项的暂存文件删掉,否则重启后队列指向空文件
+    expect(existsSync(source)).toBe(true);
+
+    const b = createDirectService({ configDir: bConfig });
+    const a2 = createDirectService({ configDir });
+    expect(a2.snapshot().transfers.find((t) => t.id === ack.id)).toMatchObject({ state: 'queued', name: 'queued.bin' });
+
+    const { txA, txB } = pair(a2, b);
+    a2.onPeerOnline('B', txA);
+    expect(b.snapshot().pending[0]?.id).toBe(ack.id);
+    expect(b.reply(ack.id, true, txB)).toBe(true);
+    const item = b.snapshot().inbox[0];
+    expect(readFileSync(item!.path ?? '').equals(data)).toBe(true);
+    expect(a2.snapshot().transfers.find((t) => t.id === ack.id)?.state).toBe('done');
+    // 投递成功后暂存文件才回收
+    expect(existsSync(source)).toBe(false);
+    a2.close();
+    b.close();
+  });
+
+  it('离线排队有上限:条数满了直接拒绝,不让暂存区无限膨胀', () => {
+    const a = createDirectService({ configDir: tmp() });
+    for (let i = 0; i < DIRECT_MAX_QUEUED; i++) {
+      expect(a.sendText('B', `第 ${i} 条`, undefined).queued).toBe(true);
+    }
+    expect(() => a.sendText('B', '再来一条', undefined)).toThrow(/排队已满/);
+    a.close();
+  });
+
+  it('取消排队:回收暂存文件并记为已取消(不是失败)', () => {
+    const configDir = tmp();
+    const source = join(tmp(), 'cancel.bin');
+    const data = Buffer.from('cancel me');
+    writeFileSync(source, data);
+    const a = createDirectService({ configDir });
+    const ack = a.sendFile('B', {
+      name: 'cancel.bin',
+      sourcePath: source,
+      size: data.length,
+      sha256: createHash('sha256').update(data).digest('hex'),
+    }, undefined);
+    expect(existsSync(source)).toBe(true);
+    expect(a.cancelQueued(ack.id)).toBe(true);
+    expect(a.snapshot().transfers.find((t) => t.id === ack.id)).toMatchObject({ state: 'canceled' });
+    expect(existsSync(source)).toBe(false);
+    expect(existsSync(join(configDir, 'inbox', 'queue.json'))).toBe(false);
+    // 已经结束的投送不能再取消
+    expect(a.cancelQueued(ack.id)).toBe(false);
+    a.close();
+  });
+
+  it('设备上线却不支持直发:排队项立刻失败,不必等满 24 小时', () => {
+    const configDir = tmp();
+    const a = createDirectService({ configDir });
+    const ack = a.sendText('B', '排着的东西', undefined);
+    a.failQueued('B', '对方版本不支持直发(请升级到支持 direct1 的版本)');
+    expect(a.snapshot().transfers.find((t) => t.id === ack.id)).toMatchObject({
+      state: 'failed',
+      error: '对方版本不支持直发(请升级到支持 direct1 的版本)',
+    });
+    expect(existsSync(join(configDir, 'inbox', 'queue.json'))).toBe(false);
     a.close();
   });
 });

@@ -3201,21 +3201,33 @@ export class SyncSessionManager {
   }
 
   /**
-   * 构造一台设备的直发通道。三道门:服务已启用、对端在 kx 里宣告 direct1 + binary1、
-   * 本机与该设备已建立互信(在 knownDevices 或某目录 devices 中)。
+   * 直发的可用性分类。与 directTransport 同一套判据,但把「为什么发不了」分开:
+   * 离线 = 可以排队等它上线;不支持 = 立刻报错,别让用户的东西在队列里躺 24 小时;
+   * blocked = 对端已不在互信列表(移除了设备/目录),发出去也不该被接收。
+   */
+  directAvailability(deviceId: string): 'ready' | 'offline' | 'unsupported' | 'blocked' {
+    if (!this.direct) return 'unsupported';
+    const session = this.peerSessions.get(deviceId);
+    if (!session || !this.sessionAlive(session)) return 'offline';
+    const caps = session.peerCaps ?? [];
+    if (!caps.includes(CAP_DIRECT1) || !caps.includes(CAP_BINARY1)) return 'unsupported';
+    const config = loadConfig(this.configPath);
+    if (!isPeerAllowed(deviceId, config.sharedFolders, config.knownDevices)) return 'blocked';
+    return 'ready';
+  }
+
+  /**
+   * 构造一台设备的直发通道,不可用时返回 undefined。三道门:服务已启用、
+   * 对端在 kx 里宣告 direct1 + binary1、本机与该设备已建立互信(在 knownDevices 或某目录 devices 中)。
    *
    * 最后一道常被忽略:未配对设备也能连上来发邀请,若不给这道门,它就能绕过共享关系
    * 直接往收件箱塞文件。其它功能走的是「目录 devices」闸门,直发不绑定目录,
    * 所以用 isPeerAllowed 的同一口径兜住。
    */
   directTransport(deviceId: string): DirectTransport | undefined {
-    if (!this.direct) return undefined;
+    if (this.directAvailability(deviceId) !== 'ready') return undefined;
     const session = this.peerSessions.get(deviceId);
-    if (!session || !this.sessionAlive(session)) return undefined;
-    const caps = session.peerCaps ?? [];
-    if (!caps.includes(CAP_DIRECT1) || !caps.includes(CAP_BINARY1)) return undefined;
-    const config = loadConfig(this.configPath);
-    if (!isPeerAllowed(deviceId, config.sharedFolders, config.knownDevices)) return undefined;
+    if (!session) return undefined;
     return {
       control: (to, message) => this.sendControlTo(to, message as ControlMessage),
       chunk: (to, id, seq, data) => {
@@ -4311,10 +4323,18 @@ export class SyncSessionManager {
       const tx = this.directTransport(remoteDeviceId);
       if (tx) this.direct!.handleChunk(frame, remoteDeviceId, tx);
     });
-    // 新会话就绪:此前因掉线暂停的直发在这里续上(没有暂停项时是空操作)。
+    // 新会话就绪:此前因掉线暂停的直发在这里续上;离线期间排队的内容也在这里补发。
     // 放在 attachPeerMessages 之后 —— 对端的 accept 要能从这条连接回来。
     const directTx = this.directTransport(remoteDeviceId);
-    if (directTx) this.direct?.onPeerOnline(remoteDeviceId, directTx);
+    if (directTx) {
+      this.direct?.onPeerOnline(remoteDeviceId, directTx);
+    } else if (this.direct) {
+      // 上来了但发不了(版本过旧 / 已不在互信列表):把排队项立刻判失败,
+      // 别让用户的东西在队列里躺满 24 小时才收到一句「设备未上线」。
+      const why = this.directAvailability(remoteDeviceId);
+      if (why === 'unsupported') this.direct.failQueued(remoteDeviceId, '对方版本不支持直发(请升级到支持 direct1 的版本)');
+      else if (why === 'blocked') this.direct.failQueued(remoteDeviceId, '对方已不在互信设备列表里,已取消排队发送');
+    }
     // 会话建立即改变了在线状态与各目录的同步通道(进度会随之从 0 变成非 0)
     this.notifyStatus();
     socket.on('error', (error) => this.logger.debug(`socket error for peer ${remoteDeviceId}: ${error.message}`));

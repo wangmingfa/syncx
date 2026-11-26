@@ -17,10 +17,12 @@ const props = defineProps<{
 const emit = defineEmits<{ close: [] }>();
 
 function stateLabel(state: string): string {
+  if (state === 'queued') return '等待设备上线';
   if (state === 'offering') return '等待确认';
   if (state === 'transferring') return '传输中';
   if (state === 'paused') return '等待重连';
   if (state === 'done') return '已完成';
+  if (state === 'canceled') return '已取消';
   return '失败';
 }
 function percent(done: number, total: number): number {
@@ -108,6 +110,10 @@ watch(
         </div>
         <div class="inbox-sub">{{ t.direction === 'send' ? '发往' : '来自' }} {{ t.deviceId }} · {{ direct.formatBytes(t.bytesDone) }} / {{ direct.formatBytes(t.size) }}</div>
         <div class="inbar"><span :style="{ width: `${percent(t.bytesDone, t.size)}%` }" /></div>
+        <!-- 排队项可以撤:内容还在本机暂存区,没发出去也不占对方任何东西。 -->
+        <div v-if="t.direction === 'send' && t.state === 'queued'" class="inbox-actions">
+          <n-button size="small" :disabled="busy" @click="direct.cancelSend(t.id)">取消排队</n-button>
+        </div>
         <div v-if="t.error" class="inbox-error">{{ t.error }}</div>
       </div>
     </div>

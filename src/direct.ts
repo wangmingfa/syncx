@@ -6,6 +6,8 @@
  *  - 落地全在 `<configDir>/inbox/`,**永不写共享目录**,因此不进索引、不产生版本向量、
  *    不会触发同步冲突或 .sync-conflict 副本;
  *  - 文本与文件都走「接收方确认」:文本直接入箱并回执,文件先提议 + 用户确认后再分片。
+ *  - 目标设备离线时不报错退场,而是先入队(`inbox/queue.json`),等它上线自动投递;
+ *    队列有 24 小时窗口与条数/字节上限,免得离线设备把本机磁盘当无限仓库。
  *
  * 归属身份一律用 ws 会话验签过的 hopDeviceId,不信消息体里的 fromDeviceId ——
  * 后者由 withSelfInfo 注入,只携带版本/主机名等展示信息。
@@ -68,8 +70,11 @@ export interface DirectTransfer {
   name?: string;
   size: number;
   bytesDone: number;
-  /** paused = 链路断了、半截字节还留着,等对方重连后续传(窗口见 DIRECT_RESUME_TTL_MS)。 */
-  state: 'offering' | 'transferring' | 'paused' | 'done' | 'failed';
+  /**
+   * queued = 目标设备离线,内容留在本机排队(入队时排,设备上线自动投递)。
+   * paused = 链路断了、半截字节还留着,等对方重连后续传(窗口见 DIRECT_RESUME_TTL_MS)。
+   */
+  state: 'queued' | 'offering' | 'transferring' | 'paused' | 'done' | 'canceled' | 'failed';
   error?: string;
 }
 
@@ -91,6 +96,15 @@ export interface DirectServiceDeps {
 }
 
 /**
+ * 一次投送的受理结果:queued=true 表示目标离线、内容进了本机队列,
+ * 前端据此提示「已排队」而不是「已发出」。
+ */
+export interface DirectSendAck {
+  id: string;
+  queued: boolean;
+}
+
+/**
  * 控制 API 看到的服务面:只暴露 HTTP 层需要的操作,不把 transport 注入细节漏出去。
  * transport 由 cli 接线处现取会话(离线 / 旧对端时抛错),服务本身只管协议与落盘。
  */
@@ -100,8 +114,10 @@ export interface DirectApi {
   remove(id: string): Promise<boolean>;
   /** saveDir 给出时,收齐后落到该目录而不是收件箱(调用方已完成提权与路径校验)。 */
   reply(id: string, accept: boolean, reason?: string, saveDir?: string): boolean;
-  sendText(deviceId: string, text: string): string;
-  sendFile(deviceId: string, file: { name: string; sourcePath: string; size: number; sha256: string }): string;
+  sendText(deviceId: string, text: string): DirectSendAck;
+  sendFile(deviceId: string, file: { name: string; sourcePath: string; size: number; sha256: string }): DirectSendAck;
+  /** 取消一条还在排队的投送(暂存文件一并回收);不是排队态返回 false。 */
+  cancelQueued(id: string): boolean;
 }
 
 /** 单片明文 256KB:与二进制信封的水位相称,重传代价可控。 */
@@ -134,6 +150,17 @@ const FINISHED_TTL_MS = 60_000;
 export const DIRECT_RESUME_TTL_MS = 10 * 60 * 1000;
 /** 续传期间重发提议的间隔(对方会话可能还在握手,早发会被丢弃)。 */
 const DIRECT_RESUME_RETRY_MS = 3_000;
+/**
+ * 离线排队窗口:设备这么久都没上线就放弃并把暂存文件清掉。
+ * 24 小时覆盖「白天发,对方晚上才开机」这类正常场景,又不让半截队列长期占盘。
+ */
+export const DIRECT_QUEUE_TTL_MS = 24 * 60 * 60 * 1000;
+/** 队列条数上限:防止误点「全选」把几十台离线设备的文件都拖进暂存区。 */
+export const DIRECT_MAX_QUEUED = 20;
+/** 队列文件总量上限(收件箱配额同量级),超出后拒绝新入队。 */
+export const DIRECT_QUEUE_MAX_BYTES = 512 * 1024 * 1024;
+/** 排队项探测通道的间隔:会话事件与入队可能擦肩而过,定时器兜一层。 */
+const DIRECT_QUEUE_PROBE_MS = 5_000;
 
 interface OutgoingTransfer {
   id: string;
@@ -151,6 +178,10 @@ interface OutgoingTransfer {
   /** 断点续传中(掉过线):定时器据此重发提议、跳过普通提议超时。 */
   resuming?: boolean;
   pausedAt?: number;
+  /** 离线排队:入队时间(按它算 24 小时窗口);发出后清空。 */
+  queuedAt?: number;
+  /** 排队文本的正文。文本没有本地暂存文件,不留在内存/磁盘上就没法补发。 */
+  text?: string;
   /** 文件专用:分期中的本地暂存文件、指纹、分片账本。 */
   sourcePath?: string;
   fd?: number;
@@ -206,14 +237,14 @@ export interface DirectService {
   content(id: string): Promise<{ item: DirectItem; data: Buffer } | undefined>;
   /** 删除一条收件箱记录(连同正文;不可逆)。 */
   remove(id: string): Promise<boolean>;
-  /** 发起文本直发,返回投送 id;实际结果经 state.transfers 确认。 */
-  sendText(deviceId: string, text: string, tx: DirectTransport): string;
-  /** 发起文件直发;sourcePath 是已落在**非共享暂存区**的完整文件。 */
+  /** 发起文本直发;没有 tx(目标离线)时进队列,等它上线自动投递。 */
+  sendText(deviceId: string, text: string, tx?: DirectTransport): DirectSendAck;
+  /** 发起文件直发;sourcePath 是已落在**非共享暂存区**的完整文件。没有 tx 时进队列。 */
   sendFile(
     deviceId: string,
     file: { name: string; sourcePath: string; size: number; sha256: string },
-    tx: DirectTransport,
-  ): string;
+    tx?: DirectTransport,
+  ): DirectSendAck;
   /** 处理经会话验签归属后的控制消息。 */
   handleControl(message: DirectControlMessage, from: string, tx: DirectTransport): void;
   /** 处理一个直发文件分片帧(会话已解密、已按连接归属)。 */
@@ -222,8 +253,15 @@ export interface DirectService {
   reply(id: string, accept: boolean, tx: DirectTransport, reason?: string, saveDir?: string): boolean;
   /** 连接掉线:在途传输转为暂停(半截字节保留),等重连续传;无续传能力时直接失败。 */
   onPeerOffline(deviceId: string): void;
-  /** 新会话建立:把暂停中的投送重新提议一次(没有暂停项时是空操作)。 */
+  /** 新会话建立:把暂停中的投送重新提议一次,并补发离线期间排队的内容(无对应项时是空操作)。 */
   onPeerOnline(deviceId: string, tx: DirectTransport): void;
+  /**
+   * 设备上来了却发不了(版本过旧 / 已不在互信列表):把为它排队的条目立刻判失败。
+   * 不这样做的话,用户要等满 24 小时窗口才收到一句「设备未上线」。
+   */
+  failQueued(deviceId: string, reason: string): void;
+  /** 用户主动取消排队:只对 `queued` 生效,回收暂存文件并从台账里划掉。 */
+  cancelQueued(id: string): boolean;
   /** daemon 关闭:停表并清理。 */
   close(): void;
 }
@@ -234,6 +272,8 @@ export function createDirectService(deps: DirectServiceDeps): DirectService {
   const filesDir = join(root, 'files');
   const tmpDir = join(root, '.tmp');
   const indexPath = join(root, 'index.json');
+  /** 离线排队台账:只存还在排队的内容,daemon 重启后照原样恢复。 */
+  const queuePath = join(root, 'queue.json');
   for (const dir of [root, messagesDir, filesDir, tmpDir]) {
     if (!existsSync(dir)) mkdirSync(dir, { recursive: true });
   }
@@ -244,7 +284,11 @@ export function createDirectService(deps: DirectServiceDeps): DirectService {
   const lastTx = new Map<string, DirectTransport>();
   /** 群发时多笔投送共用同一份暂存文件:按路径计数,最后一笔结束才删。 */
   const sourceRefs = new Map<string, number>();
+  /** 每台设备最近一次探测排队通道的时间(避免每秒都去问一次会话表)。 */
+  const queuedProbeAt = new Map<string, number>();
   let items: DirectItem[] = readIndex();
+  // 上次没来得及投出去的离线队列:恢复成 queued 状态,等会话建立后自动补发。
+  loadQueue();
   let timer: ReturnType<typeof setInterval> | undefined;
 
   function readIndex(): DirectItem[] {
@@ -271,6 +315,97 @@ export function createDirectService(deps: DirectServiceDeps): DirectService {
     const tmp = `${indexPath}.tmp`;
     writeFileSync(tmp, JSON.stringify(items, null, 2), 'utf8');
     renameSync(tmp, indexPath);
+  }
+
+  /** 排队台账的一条记录:只保留重启后还能原样重投的字段。 */
+  interface QueuedRecord {
+    id: string;
+    deviceId: string;
+    kind: 'text' | 'file';
+    name?: string;
+    size: number;
+    createdAt: number;
+    queuedAt: number;
+    text?: string;
+    sourcePath?: string;
+    sha256?: string;
+  }
+
+  function readQueue(): QueuedRecord[] {
+    try {
+      const parsed = JSON.parse(readFileSync(queuePath, 'utf8')) as unknown;
+      if (!Array.isArray(parsed)) return [];
+      return parsed.filter((v): v is QueuedRecord => {
+        if (typeof v !== 'object' || v === null) return false;
+        const q = v as Record<string, unknown>;
+        if (!isSafeId(q.id as string) || typeof q.deviceId !== 'string' || typeof q.size !== 'number') return false;
+        if (typeof q.createdAt !== 'number' || typeof q.queuedAt !== 'number') return false;
+        if (q.kind === 'text') return typeof q.text === 'string' && (q.text as string).length > 0;
+        if (q.kind !== 'file') return false;
+        return typeof q.sourcePath === 'string' && typeof q.sha256 === 'string';
+      });
+    } catch {
+      return [];
+    }
+  }
+
+  /**
+   * 只把仍在排队的投送写盘(在途/已结束的不需要恢复)。
+   * 队列清空时直接删文件,免得留下一个空数组让人误会还有东西在等。
+   */
+  function saveQueue(): void {
+    const queued = [...outgoing.values()].filter((o) => o.state === 'queued' && !o.finishedAt);
+    if (!queued.length) {
+      try { rmSync(queuePath, { force: true }); } catch { /* 没有就是没有 */ }
+      return;
+    }
+    const records: QueuedRecord[] = queued.map((o) => ({
+      id: o.id,
+      deviceId: o.deviceId,
+      kind: o.kind,
+      ...(o.name ? { name: o.name } : {}),
+      size: o.size,
+      createdAt: o.createdAt,
+      queuedAt: o.queuedAt ?? o.createdAt,
+      ...(o.kind === 'text' ? { text: o.text ?? '' } : {}),
+      ...(o.sourcePath ? { sourcePath: o.sourcePath } : {}),
+      ...(o.sha256 ? { sha256: o.sha256 } : {}),
+    }));
+    const tmp = `${queuePath}.tmp`;
+    writeFileSync(tmp, JSON.stringify(records, null, 2), 'utf8');
+    renameSync(tmp, queuePath);
+  }
+
+  /**
+   * 启动时恢复离线队列。暂存文件不见了的条目直接丢(比如被手工清了 .tmp),
+   * 不能留一条永远发不出去的记录。
+   */
+  function loadQueue(): void {
+    for (const q of readQueue()) {
+      if (q.kind === 'file' && (!q.sourcePath || !existsSync(q.sourcePath))) continue;
+      const out: OutgoingTransfer = {
+        id: q.id,
+        deviceId: q.deviceId,
+        kind: q.kind,
+        ...(q.name ? { name: q.name } : {}),
+        size: q.size,
+        bytesDone: 0,
+        state: 'queued',
+        createdAt: q.createdAt,
+        offerSentAt: q.queuedAt,
+        queuedAt: q.queuedAt,
+        ...(q.text ? { text: q.text } : {}),
+        ...(q.sourcePath ? { sourcePath: q.sourcePath } : {}),
+        ...(q.sha256 ? { sha256: q.sha256 } : {}),
+        ...(q.kind === 'file' ? { totalChunks: Math.ceil(q.size / DIRECT_CHUNK_BYTES) } : {}),
+        acked: 0,
+        nextSeq: 0,
+        inflight: new Map(),
+        lastProgressAt: Date.now(),
+      };
+      outgoing.set(out.id, out);
+      if (out.sourcePath) sourceRefs.set(out.sourcePath, (sourceRefs.get(out.sourcePath) ?? 0) + 1);
+    }
   }
 
   function notify(): void {
@@ -306,6 +441,8 @@ export function createDirectService(deps: DirectServiceDeps): DirectService {
     }
     out.finishedAt = Date.now();
     releaseSource(out);
+    // 排队项失败/超时也要从台账里划掉,否则重启后又把它捞回来。
+    saveQueue();
     if (tx && out.state === 'failed') {
       sendControl(tx, out.deviceId, { kind: 'direct-cancel', id: out.id, fromDeviceId: '', reason: error });
     }
@@ -321,6 +458,7 @@ export function createDirectService(deps: DirectServiceDeps): DirectService {
     out.error = ok ? undefined : (error ?? '传输失败');
     out.finishedAt = Date.now();
     releaseSource(out);
+    saveQueue();
     notify();
   }
 
@@ -455,6 +593,50 @@ export function createDirectService(deps: DirectServiceDeps): DirectService {
     notify();
   }
 
+  /**
+   * 设备上线:把为它排队的文本/文件按入队顺序补发。
+   * 控制帧发失败说明会话又断了,该条退回队列(不重置入队时间,24 小时窗口照算)。
+   */
+  function flushQueued(deviceId: string, tx: DirectTransport): void {
+    const now = Date.now();
+    const batch = [...outgoing.values()]
+      .filter((o) => o.deviceId === deviceId && o.state === 'queued')
+      .sort((a, b) => a.createdAt - b.createdAt);
+    if (!batch.length) return;
+    for (const out of batch) {
+      lastTx.set(out.id, tx);
+      // 先置状态再发:文本的 result 可能在同一调用栈里就回来(直接判 done),
+      // 发完再改状态会把已完成覆盖回 offering。
+      out.state = 'offering';
+      out.offerSentAt = now;
+      out.queuedAt = undefined;
+      const text = out.text;
+      if (out.kind === 'text') out.text = undefined;
+      const sent = out.kind === 'text'
+        ? tx.control(deviceId, { kind: 'direct-text', id: out.id, fromDeviceId: '', text: text ?? '', createdAt: out.createdAt })
+        : tx.control(deviceId, offerMessage(out));
+      if (!sent) {
+        // 控制帧没出去:退回队列,正文还回去(24 小时窗口照原样算)。
+        out.state = 'queued';
+        out.text = text;
+      }
+    }
+    saveQueue();
+    notify();
+  }
+
+  /** 新入队前的头寸检查:条数与总字节数都要留余量,别把暂存区当仓库用。 */
+  function checkQueueRoom(extraBytes: number): void {
+    const queued = [...outgoing.values()].filter((o) => o.state === 'queued');
+    if (queued.length >= DIRECT_MAX_QUEUED) {
+      throw new Error(`离线排队已满(${DIRECT_MAX_QUEUED} 条),请等设备上线或先取消一些`);
+    }
+    const bytes = queued.reduce((sum, o) => sum + (o.kind === 'file' ? o.size : 0), 0);
+    if (bytes + extraBytes > DIRECT_QUEUE_MAX_BYTES) {
+      throw new Error('离线排队的文件总量已满(512 MB),请等设备上线或先取消一些');
+    }
+  }
+
   function pump(out: OutgoingTransfer, tx: DirectTransport): void {
     if (out.state !== 'transferring' || out.fd === undefined || out.totalChunks === undefined) return;
     while (out.nextSeq < out.totalChunks && out.nextSeq - out.acked < DIRECT_WINDOW) {
@@ -566,30 +748,39 @@ export function createDirectService(deps: DirectServiceDeps): DirectService {
     saveIndex();
   }
 
-  function newOutgoing(partial: Omit<OutgoingTransfer, 'bytesDone' | 'state' | 'createdAt' | 'offerSentAt' | 'acked' | 'nextSeq' | 'inflight' | 'lastProgressAt'>): OutgoingTransfer {
+  function newOutgoing(
+    partial: Omit<OutgoingTransfer, 'bytesDone' | 'state' | 'createdAt' | 'offerSentAt' | 'acked' | 'nextSeq' | 'inflight' | 'lastProgressAt'>,
+    queued = false,
+  ): OutgoingTransfer {
+    const now = Date.now();
     const out: OutgoingTransfer = {
       ...partial,
       bytesDone: 0,
-      state: 'offering',
-      createdAt: Date.now(),
-      offerSentAt: Date.now(),
+      state: queued ? 'queued' : 'offering',
+      createdAt: now,
+      offerSentAt: now,
+      ...(queued ? { queuedAt: now } : {}),
       acked: 0,
       nextSeq: 0,
       inflight: new Map(),
-      lastProgressAt: Date.now(),
+      lastProgressAt: now,
     };
     outgoing.set(out.id, out);
     if (out.sourcePath) {
       sourceRefs.set(out.sourcePath, (sourceRefs.get(out.sourcePath) ?? 0) + 1);
     }
-    // 只保留最近若干条,免得状态快照无限增长
+    // 只保留最近若干条,免得状态快照无限增长。排队项不能被顺手挤掉 ——
+    // 那是用户明确交代要等设备上线的东西,只有它自己的超时/取消才算数。
     if (outgoing.size > 30) {
-      const oldest = [...outgoing.values()].sort((a, b) => a.createdAt - b.createdAt)[0];
-      if (oldest) {
-        releaseSource(oldest);
-        outgoing.delete(oldest.id);
+      const oldestEvictable = [...outgoing.values()]
+        .filter((o) => o.state !== 'queued')
+        .sort((a, b) => a.createdAt - b.createdAt)[0];
+      if (oldestEvictable) {
+        releaseSource(oldestEvictable);
+        outgoing.delete(oldestEvictable.id);
       }
     }
+    if (queued) saveQueue();
     notify();
     return out;
   }
@@ -670,6 +861,18 @@ export function createDirectService(deps: DirectServiceDeps): DirectService {
         lastTx.delete(id);
       }
     }
+    // 排队项:超窗口就放弃;否则定期探一次现取通道,兜住「会话建立早于入队」的竞态。
+    for (const out of [...outgoing.values()]) {
+      if (out.state !== 'queued') continue;
+      if (now - (out.queuedAt ?? out.createdAt) > DIRECT_QUEUE_TTL_MS) {
+        cancelOutgoing(out, '设备 24 小时内未上线,已取消发送');
+        continue;
+      }
+      if (now - (queuedProbeAt.get(out.deviceId) ?? 0) < DIRECT_QUEUE_PROBE_MS) continue;
+      queuedProbeAt.set(out.deviceId, now);
+      const tx = deps.getTransport?.(out.deviceId);
+      if (tx) flushQueued(out.deviceId, tx);
+    }
   }, 1000);
   timer.unref();
 
@@ -734,7 +937,10 @@ export function createDirectService(deps: DirectServiceDeps): DirectService {
       if (len === 0 || len > DIRECT_MAX_TEXT_BYTES) {
         throw new Error(`文本长度必须在 1 ~ ${DIRECT_MAX_TEXT_BYTES} 字节之间`);
       }
-      const out = newOutgoing({ id: directId('dt'), deviceId, kind: 'text', size: len });
+      // 没有会话 = 设备离线:存进队列,等它上线后由 flushQueued 补发。
+      if (!tx) checkQueueRoom(0);
+      const out = newOutgoing({ id: directId('dt'), deviceId, kind: 'text', size: len, ...(tx ? {} : { text }) }, !tx);
+      if (!tx) return { id: out.id, queued: true };
       lastTx.set(out.id, tx);
       sendControl(tx, deviceId, {
         kind: 'direct-text',
@@ -743,7 +949,7 @@ export function createDirectService(deps: DirectServiceDeps): DirectService {
         text,
         createdAt: out.createdAt,
       });
-      return out.id;
+      return { id: out.id, queued: false };
     },
 
     sendFile(deviceId, file, tx) {
@@ -751,6 +957,7 @@ export function createDirectService(deps: DirectServiceDeps): DirectService {
         throw new Error(`文件大小必须在 1 ~ ${DIRECT_MAX_FILE_BYTES} 字节之间`);
       }
       if (!/^[a-f0-9]{64}$/.test(file.sha256)) throw new Error('文件指纹格式不正确');
+      if (!tx) checkQueueRoom(file.size);
       const out = newOutgoing({
         id: directId('df'),
         deviceId,
@@ -760,7 +967,8 @@ export function createDirectService(deps: DirectServiceDeps): DirectService {
         sourcePath: file.sourcePath,
         sha256: file.sha256,
         totalChunks: Math.ceil(file.size / DIRECT_CHUNK_BYTES),
-      });
+      }, !tx);
+      if (!tx) return { id: out.id, queued: true };
       lastTx.set(out.id, tx);
       sendControl(tx, deviceId, {
         kind: 'direct-file-offer',
@@ -771,7 +979,7 @@ export function createDirectService(deps: DirectServiceDeps): DirectService {
         sha256: file.sha256,
         createdAt: out.createdAt,
       });
-      return out.id;
+      return { id: out.id, queued: false };
     },
 
     handleControl(message, from, tx) {
@@ -965,6 +1173,8 @@ export function createDirectService(deps: DirectServiceDeps): DirectService {
       for (const out of [...outgoing.values()]) {
         if (out.deviceId !== deviceId || out.state === 'done' || out.state === 'failed') continue;
         if (out.resuming) continue; // 已经在等重连,不重复处理
+        // 排队项本来就在等设备上线,链路断不断都与它无关,继续排着。
+        if (out.state === 'queued') continue;
         // 只有「真传过字节」且嵌入方提供了现取通道的能力才值得等重连;
         // 否则保持旧的快速失败,免得半截暂存挂着没人接手。
         if (out.state === 'transferring' && deps.getTransport) {
@@ -979,7 +1189,32 @@ export function createDirectService(deps: DirectServiceDeps): DirectService {
     },
 
     onPeerOnline(deviceId, tx) {
+      // 先补发离线期间排下的内容,再处理掉线续传 —— 两者的 id 不会重叠,顺序只为可读。
+      flushQueued(deviceId, tx);
       reofferPaused(deviceId, tx);
+    },
+
+    failQueued(deviceId, reason) {
+      for (const out of [...outgoing.values()]) {
+        if (out.deviceId === deviceId && out.state === 'queued') cancelOutgoing(out, reason);
+      }
+    },
+
+    cancelQueued(id) {
+      const out = outgoing.get(id);
+      if (!out || out.state !== 'queued') return false;
+      // 用户主动取消不是「失败」:单独一个终态,UI 才不会把它染成红色错误。
+      if (out.fd !== undefined) {
+        try { closeSync(out.fd); } catch { /* 已关闭 */ }
+        out.fd = undefined;
+      }
+      out.state = 'canceled';
+      out.error = undefined;
+      out.finishedAt = Date.now();
+      releaseSource(out);
+      saveQueue();
+      notify();
+      return true;
     },
 
     close() {
@@ -992,10 +1227,13 @@ export function createDirectService(deps: DirectServiceDeps): DirectService {
         if (out.fd !== undefined) {
           try { closeSync(out.fd); } catch { /* 已关闭 */ }
         }
+        // 排队项要跨重启:暂存文件与 queue.json 都得原样留着,下次启动接着等。
+        if (out.state === 'queued') continue;
         releaseSource(out);
       }
       sourceRefs.clear();
       lastTx.clear();
+      queuedProbeAt.clear();
     },
   };
 }
