@@ -1,5 +1,6 @@
 <script setup lang="ts">
 import { onMounted, onUnmounted, ref } from 'vue';
+import { getDirectDropTarget, setDirectDropTarget } from '../composables/directDropTarget';
 
 /**
  * 页面级拖入上传:把安装包拖到 syncx 页面任意处即出现遮罩,
@@ -67,8 +68,15 @@ function hide(): void {
   inside.value = false;
 }
 
+/** 设备卡正在接直发文件:整个上传遮罩让路,别抢 dropEffect/遮罩。 */
+function yieldingToDirectCard(): boolean {
+  if (!getDirectDropTarget()) return false;
+  hide();
+  return true;
+}
+
 function onDragEnter(e: DragEvent): void {
-  if (!isFileDrag(e)) return;
+  if (!isFileDrag(e) || yieldingToDirectCard()) return;
   e.preventDefault();
   syncInset();
   active.value = true;
@@ -77,6 +85,7 @@ function onDragEnter(e: DragEvent): void {
 
 function onDragOver(e: DragEvent): void {
   if (!isFileDrag(e)) return;
+  if (yieldingToDirectCard()) return;
   // 必须 preventDefault:否则浏览器判定这里不接受投放,后面根本不会派发 drop
   e.preventDefault();
   syncInset();
@@ -95,6 +104,13 @@ function onDragLeave(e: DragEvent): void {
 
 function onDrop(e: DragEvent): void {
   if (!isFileDrag(e)) return;
+  const directTarget = getDirectDropTarget();
+  setDirectDropTarget(null);
+  // 设备卡已经接管这一投:它自己 preventDefault + 打开弹窗,这里只清状态不拦。
+  if (directTarget) {
+    hide();
+    return;
+  }
   e.preventDefault(); // 即使不接收,也不让浏览器直接打开这个文件
   const hit = inZone(e);
   hide();

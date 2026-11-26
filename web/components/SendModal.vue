@@ -2,7 +2,7 @@
 import { computed, ref, watch } from 'vue';
 import { NButton, NCheckbox, NInput } from 'naive-ui';
 import type { DeviceInfo } from '../types';
-import type { DirectApi } from '../composables/useDirect';
+import type { DirectApi, SendFileItem } from '../composables/useDirect';
 import ModalShell from './ModalShell.vue';
 
 /** 给在线设备直发文本或文件:两页签共用底部动作区,避免两个弹窗反复开关。 */
@@ -21,17 +21,38 @@ const targetSummary = computed(() => {
   if (ids.length === 1) return ids[0] ?? props.device?.deviceId ?? '';
   return `已选 ${ids.length} 台设备`;
 });
+/** 同名文件在多个设备上有多笔传输:按文件名汇总发送进度,取最小值避免高估。 */
+function fileProgress(item: SendFileItem): number | null {
+  if (item.state === 'pending') return 0;
+  const rows = props.direct.transfers.value.filter(
+    (t) => t.direction === 'send' && t.kind === 'file' && t.name === item.file.name && t.size > 0,
+  );
+  if (!rows.length) return item.state === 'done' ? 100 : null;
+  return Math.min(...rows.map((t) => Math.round((t.bytesDone / t.size) * 100)));
+}
+function fileStateLabel(item: SendFileItem): string {
+  if (item.state === 'failed') return '失败';
+  if (item.state === 'done') return '已发出';
+  if (item.state === 'sending') {
+    const pct = fileProgress(item);
+    return pct === null ? '发送中' : `发送中 ${pct}%`;
+  }
+  return '待发送';
+}
 
 watch(
   () => props.open,
   (open) => {
-    if (open) tab.value = 'text';
+    // 拖文件到设备卡时会预填队列,此时直接落在文件页,省得用户再点一次。
+    if (open) tab.value = props.direct.fileDrafts.value.length ? 'file' : 'text';
   },
 );
 
 function pickFile(e: Event): void {
   const input = e.target as HTMLInputElement;
-  props.direct.fileDraft.value = input.files?.[0] ?? null;
+  props.direct.addFiles(Array.from(input.files ?? []));
+  // 清空 input,允许再次选同一批文件(否则 change 不触发)。
+  input.value = '';
 }
 
 function submit(): void {
@@ -108,20 +129,31 @@ function submit(): void {
     </div>
 
     <div v-else class="send-pane">
-      <span class="field__label">选择文件</span>
-      <input ref="fileInput" class="send-file-input" type="file" :disabled="direct.sending.value" @change="pickFile" />
+      <span class="field__label">选择文件（可多选，也可把文件拖到设备卡上）</span>
+      <input ref="fileInput" class="send-file-input" type="file" multiple :disabled="direct.sending.value" @change="pickFile" />
       <n-button quaternary :disabled="direct.sending.value" @click="fileInput?.click()">选择文件…</n-button>
-      <div v-if="direct.fileDraft.value" class="send-file-picked">
-        <span class="send-file-name">{{ direct.fileDraft.value.name }}</span>
-        <span class="send-file-size">{{ direct.formatBytes(direct.fileDraft.value.size) }}</span>
+      <div v-if="direct.fileDrafts.value.length" class="send-file-list">
+        <div v-for="item in direct.fileDrafts.value" :key="item.key" class="send-file-row" :class="`is-${item.state}`">
+          <span class="send-file-name" :title="item.file.name">{{ item.file.name }}</span>
+          <span class="send-file-size">{{ direct.formatBytes(item.file.size) }}</span>
+          <span class="send-file-state">{{ fileStateLabel(item) }}</span>
+          <button
+            type="button"
+            class="send-file-remove"
+            :disabled="direct.sending.value || item.state === 'done'"
+            title="从队列移除"
+            @click="direct.removeFile(item.key)"
+          >移除</button>
+        </div>
       </div>
-      <p class="form-hint">单文件最大 100 MB。对方需要点「接收」才会开始传输，文件落在其收件箱而非共享目录。</p>
+      <p v-else class="form-hint">还没有选择文件。</p>
+      <p class="form-hint">单文件最大 100 MB、一次最多 20 个。对方需要点「接收」才会开始传输，文件落在其收件箱而非共享目录。</p>
     </div>
 
     <template #footer>
       <n-button class="modal-cancel" :disabled="direct.sending.value" @click="emit('close')">取消</n-button>
-      <n-button type="primary" :loading="direct.sending.value" :disabled="busy || !direct.selectedDevices.value.length || (tab === 'file' && !direct.fileDraft.value)" @click="submit">
-        {{ direct.sending.value ? '发送中' : '发送' }}
+      <n-button type="primary" :loading="direct.sending.value" :disabled="busy || !direct.selectedDevices.value.length || (tab === 'file' && !direct.fileDrafts.value.length)" @click="submit">
+        {{ direct.sending.value ? '发送中' : tab === 'file' && direct.fileDrafts.value.length > 1 ? `发送 ${direct.fileDrafts.value.length} 个文件` : '发送' }}
       </n-button>
     </template>
   </ModalShell>
@@ -220,14 +252,27 @@ function submit(): void {
 .send-file-input {
   display: none;
 }
-.send-file-picked {
+.send-file-list {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  max-height: 168px;
+  overflow-y: auto;
+}
+.send-file-row {
   display: flex;
   align-items: center;
   gap: 8px;
   min-width: 0;
-  padding: 8px 10px;
+  padding: 6px 8px;
   border: 1px solid var(--border);
   border-radius: 8px;
+}
+.send-file-row.is-failed {
+  border-color: var(--error, #e88080);
+}
+.send-file-row.is-done {
+  opacity: 0.62;
 }
 .send-file-name {
   flex: 1 1 auto;
@@ -240,5 +285,28 @@ function submit(): void {
   flex: 0 0 auto;
   color: var(--muted-strong);
   font-size: 11px;
+}
+.send-file-state {
+  flex: 0 0 auto;
+  min-width: 58px;
+  color: var(--muted-strong);
+  font-size: 11px;
+  text-align: right;
+}
+.send-file-row.is-failed .send-file-state {
+  color: var(--error, #e88080);
+}
+.send-file-remove {
+  flex: 0 0 auto;
+  padding: 0;
+  border: 0;
+  background: transparent;
+  color: var(--accent, #4f7cff);
+  font-size: 11px;
+  cursor: pointer;
+}
+.send-file-remove:disabled {
+  color: var(--muted);
+  cursor: not-allowed;
 }
 </style>

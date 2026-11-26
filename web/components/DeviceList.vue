@@ -5,6 +5,7 @@ import OsIcon from './OsIcon.vue';
 import BackendIcon from './BackendIcon.vue';
 import PairQrModal from './PairQrModal.vue';
 import { useStatusContext } from '../composables/statusContext';
+import { getDirectDropTarget, setDirectDropTarget } from '../composables/directDropTarget';
 import { osIconLabel } from '../utils/os-icon';
 import { backendIconLabel } from '../utils/backend-icon';
 
@@ -36,6 +37,44 @@ const {
 const qrOpen = ref(false);
 // 待确认的入站文件数:收件箱入口上的徽标,提醒对方正在等你点「接收」
 const pendingDirect = computed(() => status.value.direct?.pending.length ?? 0);
+// 拖拽悬停的设备 ID:只给「在线且支持直发」的卡片高亮,避免拖到旧设备后松手没反应。
+const dragOverId = ref<string | null>(null);
+
+function isFileDrag(e: DragEvent): boolean {
+  return Array.from(e.dataTransfer?.types ?? []).includes('Files');
+}
+function onDragEnter(e: DragEvent, deviceId: string, canSend: boolean): void {
+  if (!canSend || !isFileDrag(e)) return;
+  e.preventDefault();
+  dragOverId.value = deviceId;
+  setDirectDropTarget(deviceId);
+}
+function onDragOver(e: DragEvent, canSend: boolean): void {
+  // 必须 preventDefault 才允许 drop;但只在可直发的卡片上接,旧设备照常显示「禁止」光标。
+  if (canSend && isFileDrag(e)) {
+    e.preventDefault();
+    if (e.dataTransfer) e.dataTransfer.dropEffect = 'copy';
+  }
+}
+function onDragLeave(e: DragEvent, deviceId: string): void {
+  // dragleave 会在跨子元素时反复触发,只有真正离开卡片(relatedTarget 不在其中)才清高亮。
+  const el = e.currentTarget as HTMLElement;
+  if (el.contains(e.relatedTarget as Node | null)) return;
+  if (dragOverId.value === deviceId) dragOverId.value = null;
+  if (getDirectDropTarget() === deviceId) setDirectDropTarget(null);
+}
+function onDrop(e: DragEvent, deviceId: string, canSend: boolean): void {
+  e.preventDefault();
+  // 别让这一投冒到 window 的 DropOverlay:否则 .tgz 会被同时当成安装包上传。
+  e.stopPropagation();
+  if (dragOverId.value === deviceId) dragOverId.value = null;
+  setDirectDropTarget(null);
+  if (!canSend) return;
+  const files = Array.from(e.dataTransfer?.files ?? []);
+  if (!files.length) return;
+  const device = status.value.devices.find((d) => d.deviceId === deviceId);
+  if (device) direct.openSend(device, files);
+}
 </script>
 
 <template>
@@ -114,9 +153,16 @@ const pendingDirect = computed(() => status.value.direct?.pending.length ?? 0);
       v-for="p in status.devices"
       :key="p.deviceId"
       class="item-card"
-      :class="{ 'is-linked': hoverDevices.includes(p.deviceId) || hoverDeviceId === p.deviceId }"
+      :class="{
+        'is-linked': hoverDevices.includes(p.deviceId) || hoverDeviceId === p.deviceId,
+        'is-drop-target': dragOverId === p.deviceId,
+      }"
       @mouseenter="onDeviceEnter(p.deviceId)"
       @mouseleave="onDeviceLeave()"
+      @dragenter="onDragEnter($event, p.deviceId, direct.canDirect(p))"
+      @dragover="onDragOver($event, direct.canDirect(p))"
+      @dragleave="onDragLeave($event, p.deviceId)"
+      @drop="onDrop($event, p.deviceId, direct.canDirect(p))"
     >
       <div class="item-top">
         <span class="avatar" :class="p.online ? 'online' : 'offline'">
@@ -146,7 +192,7 @@ const pendingDirect = computed(() => status.value.direct?.pending.length ?? 0);
             tertiary
             class="btn-inline"
             :disabled="busy"
-            title="发送文本或文件到对方收件箱"
+            title="发送文本或文件到对方收件箱；也可以把文件拖到这张卡片上"
             @click="direct.openSend(p)"
           >发送</n-button>
           <n-tooltip v-else-if="p.online" :show-arrow="false" trigger="hover">
@@ -210,6 +256,12 @@ const pendingDirect = computed(() => status.value.direct?.pending.length ?? 0);
 </template>
 
 <style scoped>
+/* 拖文件到在线设备卡:卡片描边点亮,松手直接打开发送弹窗并预填队列。 */
+.item-card.is-drop-target {
+  border-color: var(--accent);
+  box-shadow: 0 0 0 2px rgb(74 127 192 / 0.35), var(--shadow);
+}
+
 /* 收件箱与「＋ 添加」并成一组:窄屏时整组换行,而不是把标题挤出去。 */
 .col-head__actions {
   display: inline-flex;

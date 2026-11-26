@@ -3,7 +3,7 @@
  * 组件只负责渲染。数据本身走 status.direct(既有 WS 推送),这里不另起轮询。
  */
 import { computed, ref, type ComputedRef, type Ref } from 'vue';
-import type { DirectItem, DeviceInfo } from '../types';
+import type { DirectItem, DirectTransfer, DeviceInfo } from '../types';
 import type { CoreDeps } from './statusContext';
 import { useToast } from './useToast';
 import { apiJson, apiPost, errText } from '../utils/api';
@@ -20,6 +20,14 @@ interface DirectBatchResponse {
   results?: SendOutcome[];
 }
 
+/** 一个待发文件的队列项:拖入/选择后先入队,点发送再逐项投送。 */
+export interface SendFileItem {
+  key: string;
+  file: File;
+  state: 'pending' | 'sending' | 'done' | 'failed';
+  error?: string;
+}
+
 export interface DirectApi {
   sendTarget: Ref<DeviceInfo | null>;
   /** 弹窗里可勾选的目标(在线 + 支持 direct1),随 status 推送实时变化。 */
@@ -29,15 +37,22 @@ export interface DirectApi {
   toggleTarget: (deviceId: string) => void;
   selectAllTargets: () => void;
   clearTargets: () => void;
-  openSend: (p: DeviceInfo) => void;
+  /** 从卡片点「发送」或拖文件到卡片打开弹窗;files 给出时预填文件队列并切到文件页。 */
+  openSend: (p: DeviceInfo, files?: File[]) => void;
   closeSend: () => void;
   inboxOpen: Ref<boolean>;
   openInbox: () => void;
   textDraft: Ref<string>;
-  fileDraft: Ref<File | null>;
+  fileDrafts: Ref<SendFileItem[]>;
+  /** 把选择/拖入的文件加入队列;空文件与超限文件跳过并提示。 */
+  addFiles: (files: File[]) => void;
+  removeFile: (key: string) => void;
+  /** 正在发送的文件对应的实时传输状态,来自 status.direct.transfers。 */
+  transfers: ComputedRef<DirectTransfer[]>;
   sending: Ref<boolean>;
   canDirect: (p: DeviceInfo) => boolean;
   sendText: (deviceIds: string[]) => Promise<boolean>;
+  /** 逐文件投送队列:一个失败继续下一个,返回是否全部成功。 */
   sendFile: (deviceIds: string[]) => Promise<boolean>;
   reply: (id: string, accept: boolean) => Promise<void>;
   removeItem: (id: string) => Promise<void>;
@@ -48,6 +63,8 @@ export interface DirectApi {
 
 /** 与后端 DIRECT_MAX_FILE_BYTES 对齐;前端只做即时拦截,后端仍会复核。 */
 const MAX_FILE_BYTES = 100 * 1024 * 1024;
+/** 一次最多 20 个文件:与多设备上限一致,避免误拖整个目录把 daemon 打满。 */
+const MAX_FILES = 20;
 
 export function formatBytes(n: number): string {
   if (!Number.isFinite(n) || n <= 0) return '0 B';
@@ -67,19 +84,45 @@ export function useDirect(deps: CoreDeps & { copy: (text: string) => Promise<voi
   const selectedDevices = ref<string[]>([]);
   const inboxOpen = ref(false);
   const textDraft = ref('');
-  const fileDraft = ref<File | null>(null);
+  const fileDrafts = ref<SendFileItem[]>([]);
   const sending = ref(false);
+  const transfers = computed(() => deps.status.value.direct?.transfers ?? []);
+  let fileSeq = 0;
 
-  function openSend(p: DeviceInfo): void {
+  function openSend(p: DeviceInfo, files?: File[]): void {
     sendTarget.value = p;
     selectedDevices.value = [p.deviceId];
     textDraft.value = '';
-    fileDraft.value = null;
+    fileDrafts.value = [];
+    if (files?.length) addFiles(files);
   }
   function closeSend(): void {
     if (sending.value) return;
     sendTarget.value = null;
     selectedDevices.value = [];
+  }
+
+  function addFiles(files: File[]): void {
+    const before = fileDrafts.value.length;
+    let skipped = 0;
+    for (const file of files) {
+      if (!file || file.size === 0 || file.size > MAX_FILE_BYTES) {
+        skipped++;
+        continue;
+      }
+      if (fileDrafts.value.length >= MAX_FILES) {
+        skipped++;
+        continue;
+      }
+      fileDrafts.value.push({ key: `f${Date.now()}-${fileSeq++}`, file, state: 'pending' });
+    }
+    if (skipped) showToast(`已跳过 ${skipped} 个文件（空文件、超过 100 MB 或超过 ${MAX_FILES} 个）`, 'alert');
+    if (fileDrafts.value.length > before) showToast(`已加入 ${fileDrafts.value.length - before} 个文件`);
+  }
+
+  function removeFile(key: string): void {
+    if (sending.value) return;
+    fileDrafts.value = fileDrafts.value.filter((f) => f.key !== key);
   }
 
   function canDirect(p: DeviceInfo): boolean {
@@ -148,6 +191,21 @@ export function useDirect(deps: CoreDeps & { copy: (text: string) => Promise<voi
     }
   }
 
+  /** 发一个文件到所有选中设备(不改队列状态),返回每台的结果供逐项汇总。 */
+  async function uploadFile(file: File, ids: string[]): Promise<SendOutcome[]> {
+    // 指纹由 daemon 在暂存时计算:局域网 HTTP 下浏览器没有 crypto.subtle。
+    const query = new URLSearchParams();
+    for (const id of ids) query.append('deviceIds', id);
+    query.set('name', file.name);
+    query.set('size', String(file.size));
+    const res = await apiJson<DirectBatchResponse>(`/api/direct/file?${query.toString()}`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/octet-stream' },
+      body: file,
+    });
+    return outcomes(res, ids);
+  }
+
   async function sendFile(deviceIds: string[]): Promise<boolean> {
     if (sending.value) return false;
     const ids = [...new Set(deviceIds.filter(Boolean))];
@@ -155,35 +213,46 @@ export function useDirect(deps: CoreDeps & { copy: (text: string) => Promise<voi
       showToast('请至少选择一台设备', 'alert');
       return false;
     }
-    const file = fileDraft.value;
-    if (!file) {
+    const queue = fileDrafts.value.filter((f) => f.state !== 'done');
+    if (!queue.length) {
       showToast('请选择要发送的文件', 'alert');
       return false;
     }
-    if (file.size === 0 || file.size > MAX_FILE_BYTES) {
-      showToast('文件大小需在 1 B ~ 100 MB 之间', 'alert');
-      return false;
-    }
     sending.value = true;
+    let okFiles = 0;
+    const failures: string[] = [];
     try {
-      // 指纹由 daemon 在暂存时计算:局域网 HTTP 下浏览器没有 crypto.subtle。
-      const query = new URLSearchParams();
-      for (const id of ids) query.append('deviceIds', id);
-      query.set('name', file.name);
-      query.set('size', String(file.size));
-      const res = await apiJson<DirectBatchResponse>(`/api/direct/file?${query.toString()}`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/octet-stream' },
-        body: file,
-      });
-      reportBatch(outcomes(res, ids), '设备，等待对方确认');
+      for (const item of queue) {
+        item.state = 'sending';
+        item.error = undefined;
+        try {
+          const results = await uploadFile(item.file, ids);
+          const failed = results.filter((r) => r.error);
+          if (failed.length) {
+            item.state = 'failed';
+            item.error = failed.map((r) => `${r.deviceId}：${r.error}`).join('；');
+            failures.push(`${item.file.name} ${failed.length} 台失败`);
+          } else {
+            item.state = 'done';
+            okFiles++;
+          }
+        } catch (e) {
+          item.state = 'failed';
+          item.error = errText(e, '发送失败');
+          failures.push(`${item.file.name}：${item.error}`);
+        }
+      }
       await deps.refreshStatus();
-      sendTarget.value = null;
-      selectedDevices.value = [];
-      return true;
-    } catch (e) {
-      showToast(errText(e, '发送失败'), 'alert');
-      return false;
+      if (failures.length) {
+        showToast(`${okFiles} 个文件已发出，${failures.length} 个失败：${failures[0]}`, 'alert');
+      } else {
+        showToast(`${okFiles} 个文件已发出，等待对方确认`);
+        // 全部成功才关弹窗;有失败时留着队列让用户重试失败的项。
+        sendTarget.value = null;
+        selectedDevices.value = [];
+        fileDrafts.value = [];
+      }
+      return failures.length === 0;
     } finally {
       sending.value = false;
     }
@@ -249,7 +318,10 @@ export function useDirect(deps: CoreDeps & { copy: (text: string) => Promise<voi
     inboxOpen,
     openInbox: () => { inboxOpen.value = true; },
     textDraft,
-    fileDraft,
+    fileDrafts,
+    addFiles,
+    removeFile,
+    transfers,
     sending,
     canDirect,
     sendText,
