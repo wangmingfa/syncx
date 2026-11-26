@@ -59,7 +59,7 @@ import { relayToSiblings } from './relay.js';
 import { compareContentLimit, imageMimeOf, TEXT_COMPARE_MAX_BYTES } from './file-kind.js';
 import { readDriftKnobs, runLocalAudit, type DriftReport } from './drift.js';
 import { connectPeer } from './net/client.js';
-import { makePeerTransport, attachPeerMessages, sendControlMessage, type ControlMessage } from './net/wire.js';
+import { makePeerTransport, attachPeerMessages, sendControlMessage, sendBinaryFrame, type ControlMessage } from './net/wire.js';
 import { learnPeerUrl, learnPeerIp, getLanAddresses } from './net/addresses.js';
 import { e2eKeyForPeer, wrapTransportBlind } from './e2e.js';
 import { hostname as osHostname } from 'node:os';
@@ -74,7 +74,8 @@ import { compareVersions, stripPrerelease } from './upgrade.js';
 import { NETWORK_OFFLINE_BACKOFF_MS, offlineAwareReconnectDelay, reconnectDelayMs } from './args.js';
 import { hasRoutableInterface } from './net/offline-probe.js';
 import { isSelfPeerUrl, localInterfaceAddresses } from './net/peer-address.js';
-import { CAP_BINARY1, CAP_INDEX_CHUNK1 } from './handshake.js';
+import { CAP_BINARY1, CAP_DIRECT1, CAP_INDEX_CHUNK1 } from './handshake.js';
+import type { DirectControlMessage, DirectService, DirectTransport } from './direct.js';
 import { isGitRepo, getLastCommitHash, getCommitInfo, hasUncommittedChanges, autoCommit, workTreeContentAligned, getUncommittedChanges, readFileAtHead, readFileAt, listCommitFiles, getCommitParents, isCommitHash, listRecentCommits, countUnpushedCommits, listUnpushedCommits, GIT_UNPUSHED_LIMIT, gitPush, findGitIndexLock, removeGitIndexLock, getUpstreamCommitHash, listRawCommitMessages, rewriteCommitMessages, type CommitInfo, type GitChangeEntry, type GitCommitEntry, type GitCommitFileEntry, type GitPushResult, type HeadReadResult, type GitIndexLockInfo, type GitIndexLockRemoveResult } from './git-monitor.js';
 import { scanEmptyDirs, removeEmptyDirs, type EmptyDirScanResult, type EmptyDirDeleteResult } from './empty-dirs.js';
 
@@ -484,6 +485,8 @@ export interface DeviceLinkInfo {
   platform?: string;
   /** 对端后端形态(node/rust/moonbit);undefined=旧版本对端未发,UI 不展示后端标识。 */
   runtime?: PeerRuntime;
+  /** 对端在 kx 里宣告的能力标签(含 direct1);旧版本对端缺省,UI 禁用直发入口。 */
+  caps?: string[];
 }
 
 /** 内容对比时对端返回的目录索引快照(见 folder-index-request)。 */
@@ -681,6 +684,12 @@ export interface SessionManagerDeps {
    * 缺省不接(测试/最小 deps 静默);当前值也可随时经 fallbackScanIntervalMs() 查询。
    */
   onFallbackScanIntervalChanged?: (intervalMs: number) => void;
+  /**
+   * 设备间直发服务(ADR-0028)。由 cli 建好后传入:它持有 `<configDir>/inbox`,
+   * 协议消息经本管理器的会话收发,状态变更走 onStatusChanged 推给 Web UI。
+   * 测试里的最小 deps 可以不传 —— 直发消息在这种情况下按未知 kind 忽略。
+   */
+  direct?: DirectService;
 }
 
 export class SyncSessionManager {
@@ -704,6 +713,8 @@ export class SyncSessionManager {
   private readonly perfLog?: (line: string) => void;
   /** 兜底扫描间隔变化回调(见 SessionManagerDeps.onFallbackScanIntervalChanged);缺省不接。 */
   private readonly onFallbackScanIntervalChanged?: (intervalMs: number) => void;
+  /** 设备间直发服务(见 SessionManagerDeps.direct);缺省 = 不启用直发。 */
+  private readonly direct?: DirectService;
   /**
    * 当前是否在网(无非回环可用接口 = 离线)。驱动三件事:重连退避拉长、mDNS
    * 广播门控、恢复时立即补拨。**不影响**扫描与心跳 —— 扫描照跑才能把本地改动
@@ -988,6 +999,7 @@ export class SyncSessionManager {
     this.holidays = deps.holidays;
     this.perfLog = deps.perfLog;
     this.onFallbackScanIntervalChanged = deps.onFallbackScanIntervalChanged;
+    this.direct = deps.direct;
     // drift 哨兵本地巡检的旋钮:构造时读一次,与 peer 侧建管线时读的是同一对环境变量
     const driftKnobs = readDriftKnobs();
     this.driftSampleN = driftKnobs.sampleN;
@@ -3189,6 +3201,46 @@ export class SyncSessionManager {
   }
 
   /**
+   * 构造一台设备的直发通道。三道门:服务已启用、对端在 kx 里宣告 direct1 + binary1、
+   * 本机与该设备已建立互信(在 knownDevices 或某目录 devices 中)。
+   *
+   * 最后一道常被忽略:未配对设备也能连上来发邀请,若不给这道门,它就能绕过共享关系
+   * 直接往收件箱塞文件。其它功能走的是「目录 devices」闸门,直发不绑定目录,
+   * 所以用 isPeerAllowed 的同一口径兜住。
+   */
+  directTransport(deviceId: string): DirectTransport | undefined {
+    if (!this.direct) return undefined;
+    const session = this.peerSessions.get(deviceId);
+    if (!session || !this.sessionAlive(session)) return undefined;
+    const caps = session.peerCaps ?? [];
+    if (!caps.includes(CAP_DIRECT1) || !caps.includes(CAP_BINARY1)) return undefined;
+    const config = loadConfig(this.configPath);
+    if (!isPeerAllowed(deviceId, config.sharedFolders, config.knownDevices)) return undefined;
+    return {
+      control: (to, message) => this.sendControlTo(to, message as ControlMessage),
+      chunk: (to, id, seq, data) => {
+        const target = this.peerSessions.get(to);
+        if (!target || !this.sessionAlive(target)) return false;
+        try {
+          sendBinaryFrame(target.socket, target.key, 'direct-file-chunk', { id, seq }, data);
+          return true;
+        } catch (error) {
+          this.logger.warn(`failed to send direct chunk to ${to}: ${error instanceof Error ? error.message : String(error)}`);
+          return false;
+        }
+      },
+    };
+  }
+
+  /** 入站直发消息的总闸:与 directTransport 同一套判据(互信 + 对端能力 + 服务启用)。 */
+  private canReceiveDirect(deviceId: string): boolean {
+    if (!this.direct) return false;
+    const config = loadConfig(this.configPath);
+    if (!isPeerAllowed(deviceId, config.sharedFolders, config.knownDevices)) return false;
+    return this.peerSessions.get(deviceId)?.peerCaps?.includes(CAP_DIRECT1) === true;
+  }
+
+  /**
    * 给一条出站控制消息注入本机运行版本、主机名、平台与后端形态
    * (供对端设备卡展示来源 / 计算可否升级 / 画系统与后端图标)。
    *
@@ -3213,6 +3265,14 @@ export class SyncSessionManager {
 
   /** 收到对端 control 消息:把配对 / 目录共享邀请落成待确认项;确认回执触发会话对账。 */
   private onControl(message: ControlMessage, hopDeviceId: string): void {
+    // 直发消息不绑定目录,单独走 direct 服务;身份取这一跳的会话对端,不取消息体署名。
+    if (message.kind.startsWith('direct-')) {
+      if (this.canReceiveDirect(hopDeviceId)) {
+        const tx = this.directTransport(hopDeviceId);
+        if (tx) this.direct!.handleControl(message as DirectControlMessage, hopDeviceId, tx);
+      }
+      return;
+    }
     // 邀请来源的网络信息(主机名 + 入站源 IP),供 UI 在配对 / 共享邀请卡上展示来源。
     // 旧版本对端未发 hello → remoteHostname 为 undefined;非入站(本机主动出站连接)
     // 收到的邀请则 socket 取不到对端源 IP → fromIp 为 undefined。两者缺省都不展示。
@@ -4245,12 +4305,19 @@ export class SyncSessionManager {
       // hopDeviceId = 这条连接的实际对端(握手已验签):投递回执要回给它,而不是消息里
       // 署名的最初提交者(中继场景下那是两跳之外的设备,本机对它未必有会话)。
       this.onControl(message, remoteDeviceId);
-    }, takePendingFrames);
+    }, takePendingFrames, (frame) => {
+      // 直发分片同样按会话身份归属,不读帧头里的署名;未知 id / 未确认的文件会被服务静默丢弃。
+      if (this.closed || !this.canReceiveDirect(remoteDeviceId)) return;
+      const tx = this.directTransport(remoteDeviceId);
+      if (tx) this.direct!.handleChunk(frame, remoteDeviceId, tx);
+    });
     // 会话建立即改变了在线状态与各目录的同步通道(进度会随之从 0 变成非 0)
     this.notifyStatus();
     socket.on('error', (error) => this.logger.debug(`socket error for peer ${remoteDeviceId}: ${error.message}`));
     socket.on('close', (code, reason) => {
       this.logger.debug(`socket closed for peer ${remoteDeviceId}, code=${code}, reason=${reason?.toString('utf8') ?? '(empty)'}`);
+      // 直发没有重投队列:链路一断,在途投送立刻失败并清理临时文件,不留半截收件箱条目。
+      this.direct?.onPeerOffline(remoteDeviceId);
       this.peerSockets.delete(socket);
       this.peerLiveness.delete(socket);
       this.peerOutboundBytes.delete(socket);
@@ -4396,6 +4463,7 @@ export class SyncSessionManager {
       hostname: this.peerInfo.get(deviceId)?.hostname,
       platform: this.peerInfo.get(deviceId)?.platform,
       runtime: this.peerInfo.get(deviceId)?.runtime,
+      caps: session?.peerCaps ? [...session.peerCaps] : undefined,
     };
   }
 

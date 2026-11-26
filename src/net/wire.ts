@@ -134,7 +134,23 @@ export type ControlMessage =
    * (旧版本对端不回此帧);离线的设备不消耗次数、账一直记着,等它回来补投。
    * commitHash 是通知里那笔**原始提交**的哈希(中继不改写),发送方按它匹配台账。
    */
-  | { kind: 'git-commit-ack'; fromDeviceId: string; folderId: string; commitHash: string; version?: string; hostname?: string; platform?: string; runtime?: PeerRuntime };
+  | { kind: 'git-commit-ack'; fromDeviceId: string; folderId: string; commitHash: string; version?: string; hostname?: string; platform?: string; runtime?: PeerRuntime }
+  /* ===== 设备间直发(ADR-0028)=====
+   * 全部带 id 关联同一次投送。发送方以**会话身份**(hopDeviceId)署名,不信消息体里的
+   * fromDeviceId 作归属;后者仅供 withSelfInfo 注入版本等信息。
+   * 文件字节不走这些 JSON 帧,走下面的 direct-file-chunk 二进制帧。 */
+  /** 一段文本(≤64KB,UTF-8 字节数),接收方直接落收件箱并回 direct-result。 */
+  | { kind: 'direct-text'; id: string; fromDeviceId: string; text: string; createdAt: number; version?: string; hostname?: string; platform?: string; runtime?: PeerRuntime }
+  /** 文件投送提议;接收方用户确认前不会写入任何字节(仅预建临时文件路径)。 */
+  | { kind: 'direct-file-offer'; id: string; fromDeviceId: string; name: string; size: number; sha256: string; createdAt: number; version?: string; hostname?: string; platform?: string; runtime?: PeerRuntime }
+  /** 接收方对提议的表态;accept=false 时 reason 为用户可读原因。 */
+  | { kind: 'direct-reply'; id: string; fromDeviceId: string; accept: boolean; reason?: string; version?: string; hostname?: string; platform?: string; runtime?: PeerRuntime }
+  /** 累积确认:seq = 接收方**下一个期望的片号**,即 seq 之前全部已落盘。 */
+  | { kind: 'direct-ack'; id: string; fromDeviceId: string; seq: number; version?: string; hostname?: string; platform?: string; runtime?: PeerRuntime }
+  /** 任一方中止(离线 / 超时 / 校验失败);收到即清理临时文件。 */
+  | { kind: 'direct-cancel'; id: string; fromDeviceId: string; reason: string; version?: string; hostname?: string; platform?: string; runtime?: PeerRuntime }
+  /** 接收方最终回执(文本落箱 / 文件校验通过并重命名)。 */
+  | { kind: 'direct-result'; id: string; fromDeviceId: string; ok: boolean; error?: string; version?: string; hostname?: string; platform?: string; runtime?: PeerRuntime };
 
 export function encodeWireMessage(message: WireMessage): string {
   return JSON.stringify(message);
@@ -189,10 +205,10 @@ export function decryptMessage(key: Buffer, raw: string): WireMessage {
  * 同一批消息退回上面的文本函数,旧版本对端行为完全不变。
  */
 export const BINARY_FRAME_VERSION = 1;
-export type BinaryFrameKind = 'block-response' | 'index';
+export type BinaryFrameKind = 'block-response' | 'index' | 'direct-file-chunk';
 
-const BINARY_KIND_TO_BYTE: Record<BinaryFrameKind, number> = { 'block-response': 1, index: 2 };
-const BINARY_BYTE_TO_KIND: Record<number, BinaryFrameKind> = { 1: 'block-response', 2: 'index' };
+const BINARY_KIND_TO_BYTE: Record<BinaryFrameKind, number> = { 'block-response': 1, index: 2, 'direct-file-chunk': 3 };
+const BINARY_BYTE_TO_KIND: Record<number, BinaryFrameKind> = { 1: 'block-response', 2: 'index', 3: 'direct-file-chunk' };
 /** iv + tag + 版本/kind/头长前缀:一帧二进制消息固定多出的字节数(导出供测试钉体积)。 */
 export const BINARY_FRAME_OVERHEAD = 12 + 16 + 6;
 /** 头部 JSON 上限:元数据远小于此,超限即视为坏帧(不让畸形长度支配内存) */
@@ -577,6 +593,17 @@ export function sendControlMessage(socket: WebSocket, key: Buffer, message: Cont
   socket.send(encryptMessage(key, { type: 'control', payload: message }));
 }
 
+/** 发送一帧不绑定目录的二进制消息(当前用于直发文件分片)。 */
+export function sendBinaryFrame(
+  socket: WebSocket,
+  key: Buffer,
+  kind: BinaryFrameKind,
+  header: Record<string, unknown>,
+  body: Buffer,
+): void {
+  socket.send(encodeBinaryFrame(key, kind, header, body));
+}
+
 /**
  * Receive-side dispatcher: decrypts incoming wire messages and routes each
  * message to the SyncPeer registered for its folder. `control` 类型的消息
@@ -596,6 +623,11 @@ export function attachPeerMessages(
   key: Buffer,
   onControl?: (message: ControlMessage) => void,
   takePending?: () => Buffer[],
+  /**
+   * 不绑定目录的二进制帧(当前只有直发文件分片)。调用方负责校验帧头与来源身份 ——
+   * 这里按 ws 连接把 fromDeviceId 断言为握手验签过的那个对端,不读帧头里的署名。
+   */
+  onBinaryFrame?: (frame: BinaryFrame) => void,
 ): void {
   /**
    * 分片索引的拼装状态(见 ADR-0027)。每个目录一份:
@@ -679,6 +711,11 @@ export function attachPeerMessages(
     if (isBinary) {
       const frame = decodeBinaryFrame(key, raw);
       if (!frame) return;
+      // 直发分片不属于任何共享目录,不能按 folder 路由(会掉进 peers.get('') 的静默丢弃)。
+      if (frame.kind === 'direct-file-chunk') {
+        onBinaryFrame?.(frame);
+        return;
+      }
       const folder = typeof frame.header.folder === 'string' ? frame.header.folder : '';
       const peer = peers.get(folder);
       if (!peer) return;

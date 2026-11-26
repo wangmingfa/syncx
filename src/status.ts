@@ -3,6 +3,7 @@ import type { Config, SharedFolderConfig, PendingOffer } from './config.js';
 import type { Schedule } from './schedule.js';
 import type { CalendarOverrides } from './holidays.js';
 import { isGitRepo } from './git-monitor.js';
+import type { DirectSnapshot } from './direct.js';
 
 export interface IndexStats {
   entries: number;
@@ -46,6 +47,8 @@ export interface DeviceStatus {
   /** 本机(打包态)版本是否低于该对端:为 true 时 UI 提供「从对方升级」入口。
    *  dev↔build 混跑时恒为 false(dev 无产物,不做跨形态更新)。 */
   canUpgrade?: boolean;
+  /** 对端在 kx 里宣告的能力标签;含 direct1 且在线时 UI 才亮「发送」。 */
+  caps?: string[];
 }
 
 export interface TransferFile {
@@ -188,6 +191,8 @@ export interface StatusPayload {
   scheduleBanner?: ScheduleBanner;
   /** 节假日日历健康状况(设置页与横幅文案都用得上)。 */
   calendarStatus?: CalendarStatus;
+  /** 设备间直发:收件箱元数据 + 待确认 + 在途(ADR-0028;旧后端缺省)。 */
+  direct?: DirectSnapshot;
 }
 
 /** 一个采样窗口的流量增量(窗口内发/收的字节数)。 */
@@ -307,6 +312,8 @@ export interface StatusExtras {
   scheduleBanner?: ScheduleBanner;
   /** 节假日日历健康状况。 */
   calendarStatus?: CalendarStatus;
+  /** 设备间直发的状态快照(收件箱/待确认/在途)。 */
+  direct?: DirectSnapshot;
 }
 
 export function buildStatus(
@@ -361,5 +368,6 @@ export function buildStatus(
     scheduleStates: extras.scheduleStates,
     scheduleBanner: extras.scheduleBanner,
     calendarStatus: extras.calendarStatus,
+    direct: extras.direct,
   };
 }

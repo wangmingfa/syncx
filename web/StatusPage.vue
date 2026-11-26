@@ -12,6 +12,7 @@ import { useFolderDiff } from './composables/useFolderDiff';
 import { useSelfUpdate } from './composables/useSelfUpdate';
 import { useFormat } from './composables/useFormat';
 import { useNotifications } from './composables/useNotifications';
+import { useDirect } from './composables/useDirect';
 import {
   folderKey,
   monogram,
@@ -48,6 +49,8 @@ import OffersPanel from './components/OffersPanel.vue';
 import FolderList from './components/FolderList.vue';
 import DeviceList from './components/DeviceList.vue';
 import FolderDiffModal from './components/FolderDiffModal.vue';
+import SendModal from './components/SendModal.vue';
+import InboxModal from './components/InboxModal.vue';
 
 const props = defineProps<{ status: StatusData; message?: string }>();
 
@@ -71,6 +74,8 @@ const selfUpdate = useSelfUpdate(deps);
 const fmt = useFormat(status);
 // 桌面通知 + favicon 角标:内部 watch 注意力计数(邀请/冲突/目录错误),边沿触发通知
 const notifications = useNotifications(status);
+// 设备间直发:发送弹窗 / 收件箱挂在页面级,状态公用 status.direct(WS 推送)
+const direct = useDirect({ ...deps, copy });
 
 // 标签页标题:默认「SYNCX · 主机名 · IPv4」;有待确认邀请时改为该邀请的标题
 // (与 OffersPanel 卡片标题同语义),确认/忽略后 status 推送刷新、pending 清空即恢复默认。
@@ -159,6 +164,7 @@ provide(StatusContextKey, {
   askConfirm,
   copy,
   ...devices,
+  direct,
   ...folders,
   ...offers,
   ...folderDiff,
@@ -265,6 +271,22 @@ provide(StatusContextKey, {
       :busy="busy"
       @close="closeEditDevice"
       @save="saveDeviceAddress"
+    />
+
+    <!-- 设备间直发:文本/文件发送弹窗 + 收件箱(确认入站文件、查看已收内容) -->
+    <SendModal
+      :open="!!direct.sendTarget.value"
+      :device="direct.sendTarget.value"
+      :direct="direct"
+      :busy="busy"
+      @close="direct.closeSend()"
+    />
+    <InboxModal
+      :open="direct.inboxOpen.value"
+      :status="status"
+      :direct="direct"
+      :busy="busy"
+      @close="direct.inboxOpen.value = false"
     />
 
     <!-- 登录密码弹窗 -->

@@ -13,6 +13,7 @@ import type {
 } from '../types';
 import type { ToastKind } from './useToast';
 import type { FolderDiffApi } from './useFolderDiff';
+import type { DirectApi } from './useDirect';
 
 /** 目录卡设备标签的四态:同步中 / 待对方确认 / 对方已停止共享 / 设备离线。 */
 export type DeviceTagStatus = 'syncing' | 'pending' | 'stopped' | 'offline';
@@ -52,6 +53,8 @@ export interface StatusContext extends FolderDiffApi {
   editDeviceTarget: Ref<DeviceInfo | null>;
   openEditDevice: (p: DeviceInfo) => void;
   closeEditDevice: () => void;
+  /** 设备间直发:发送弹窗、收件箱、待确认与在途操作(ADR-0028)。 */
+  direct: DirectApi;
   /** 保存设备地址(设备 ID 不变,只换 IP/端口并触发重连)。 */
   saveDeviceAddress: (payload: { deviceId: string; host: string; port: string }) => Promise<void>;
   hoverDevices: Ref<string[]>;

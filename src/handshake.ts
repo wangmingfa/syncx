@@ -66,8 +66,15 @@ export const CAP_BINARY1 = 'binary1';
  */
 export const CAP_INDEX_CHUNK1 = 'index-chunk1';
 
+/**
+ * 设备间「直发」(文本 / 文件到对方收件箱)。不宣告的对端不会收到任何 direct-*
+ * 控制消息 —— 未知 kind 只是被静默忽略,「发送成功却什么都没发生」比明确禁用更难查。
+ * 旧版对端不认识该标签,UI 直接把发送入口灰掉并提示升级。
+ */
+export const CAP_DIRECT1 = 'direct1';
+
 /** 本机支持的全部能力(随版本追加;空数组 = 什么都不宣告)。 */
-export const PEER_CAPS: readonly string[] = [CAP_BINARY1, CAP_INDEX_CHUNK1];
+export const PEER_CAPS: readonly string[] = [CAP_BINARY1, CAP_INDEX_CHUNK1, CAP_DIRECT1];
 
 /** 握手第二阶段的密钥交换消息:携带 X25519 公钥及其 Ed25519 签名。 */
 export interface KxMessage {

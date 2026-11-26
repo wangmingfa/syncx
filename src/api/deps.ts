@@ -2,6 +2,7 @@ import type { IncomingMessage, ServerResponse } from 'node:http';
 import type { SyncHistoryFilter } from '../history.js';
 import type { IgnoreVerdict } from '../ignore.js';
 import type { Schedule } from '../schedule.js';
+import type { DirectApi } from '../direct.js';
 
 export interface ControlServerDeps {
   token: string;
@@ -148,6 +149,11 @@ export interface ControlServerDeps {
   reAdoptFolderIdentity?: (folderId: string) => void;
   /** 全局暂停/恢复同步(所有目录一起停;各目录自己的 paused 独立保留)。 */
   setGlobalPaused?: (paused: boolean) => void;
+  /**
+   * 设备间直发(ADR-0028):收件箱 / 待确认 / 在途与投送入口。
+   * 不传 = 路由返回 503;发送时的会话与能力检查在接线处完成。
+   */
+  direct?: DirectApi;
   /** 列出待确认项(对方推送的配对 / 目录共享邀请)。 */
   getOffers?: () => unknown;
   /**

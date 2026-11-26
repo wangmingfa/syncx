@@ -1,6 +1,6 @@
 <script setup lang="ts">
-import { ref } from 'vue';
-import { NButton, NInput } from 'naive-ui';
+import { ref, computed } from 'vue';
+import { NButton, NInput, NTooltip } from 'naive-ui';
 import OsIcon from './OsIcon.vue';
 import BackendIcon from './BackendIcon.vue';
 import PairQrModal from './PairQrModal.vue';
@@ -25,6 +25,7 @@ const {
   deviceFolderCount,
   monogram,
   deviceAddrLine,
+  direct,
   hoverDevices,
   hoverDeviceId,
   onDeviceEnter,
@@ -33,6 +34,8 @@ const {
 
 // 本机配对二维码:展示给「对方」扫的,与添加表单并列,方便两台设备面对面操作
 const qrOpen = ref(false);
+// 待确认的入站文件数:收件箱入口上的徽标,提醒对方正在等你点「接收」
+const pendingDirect = computed(() => status.value.direct?.pending.length ?? 0);
 </script>
 
 <template>
@@ -43,7 +46,10 @@ const qrOpen = ref(false);
         <span>设备</span>
         <span class="badge">{{ status.devices.length }}</span>
       </div>
-      <n-button v-if="status.devices.length > 0" class="add-toggle" :class="{ 'is-invisible': addDeviceOpen }" :disabled="busy" :tabindex="addDeviceOpen ? -1 : 0" @click="toggleAddDevice">＋ 添加</n-button>
+      <span class="col-head__actions">
+        <n-button size="small" quaternary class="inbox-toggle" :disabled="busy" title="查看收到的文本与文件" @click="direct.openInbox()">收件箱<span v-if="pendingDirect" class="inbox-badge">{{ pendingDirect }}</span></n-button>
+        <n-button v-if="status.devices.length > 0" class="add-toggle" :class="{ 'is-invisible': addDeviceOpen }" :disabled="busy" :tabindex="addDeviceOpen ? -1 : 0" @click="toggleAddDevice">＋ 添加</n-button>
+      </span>
     </div>
 
     <!-- 粘贴对方设备 ID 或 syncx:// 配对串即可配对(双方各加一次,mutual)。跨网段/无 mDNS 时填对方地址:ws://(前缀) + IP + :端口(默认 22000) -->
@@ -131,7 +137,25 @@ const qrOpen = ref(false);
         </span>
         <!-- 重连紧挨状态标签:动作跟着它要修的那种状态走,也省掉下方一整行 -->
         <span class="item-actions">
-          <!-- 编辑只改对端 IP/端口,设备 ID 不变;放在最前,与「移除」这类破坏性操作拉开 -->
+          <!-- 直发只发给在线且宣告 direct1 的对端;旧版本给禁用按钮 + 明确升级提示,
+               避免「点了没反应」被误判成功能坏了。 -->
+          <n-button
+            v-if="direct.canDirect(p)"
+            size="small"
+            type="primary"
+            tertiary
+            class="btn-inline"
+            :disabled="busy"
+            title="发送文本或文件到对方收件箱"
+            @click="direct.openSend(p)"
+          >发送</n-button>
+          <n-tooltip v-else-if="p.online" :show-arrow="false" trigger="hover">
+            <template #trigger>
+              <n-button size="small" tertiary class="btn-inline" disabled>发送</n-button>
+            </template>
+            对方版本不支持直发,请升级后再试
+          </n-tooltip>
+          <!-- 编辑只改对端 IP/端口,设备 ID 不变;与「移除」这类破坏性操作拉开 -->
           <n-button size="small" tertiary class="btn-inline" :disabled="busy" @click="openEditDevice(p)">编辑</n-button>
           <n-button
             v-if="!p.online"
@@ -186,6 +210,28 @@ const qrOpen = ref(false);
 </template>
 
 <style scoped>
+/* 收件箱与「＋ 添加」并成一组:窄屏时整组换行,而不是把标题挤出去。 */
+.col-head__actions {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+}
+.inbox-badge {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-width: 16px;
+  height: 16px;
+  margin-left: 5px;
+  padding: 0 4px;
+  border-radius: 8px;
+  background: var(--accent);
+  color: var(--accent-contrast, #fff);
+  font-size: 10px;
+  line-height: 1;
+}
+
 /* 设备卡把「共享 N 个目录」「版本」「后端」并成一行,省两档竖向空间。
    .item-sub / .item-addr / .addr-* 的视觉骨架来自 style.css(多组件共用),
    这里只管本卡的排布:左侧文字可收缩省略,版本 / 后端 chip 保持完整不换行。

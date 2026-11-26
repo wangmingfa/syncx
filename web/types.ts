@@ -90,6 +90,57 @@ export interface DeviceInfo {
   version?: string;
   /** 本机(打包态)版本低于该对端时为 true,UI 提供「从对方升级」入口。 */
   canUpgrade?: boolean;
+  /** 对端在 kx 里宣告的能力标签;含 direct1 且在线时才显示「发送」。 */
+  caps?: string[];
+}
+
+/** 设备间直发(ADR-0028):收件箱、待确认文件、在途投送。正文不在状态里。 */
+export interface DirectTextItem {
+  kind: 'text';
+  id: string;
+  from: string;
+  createdAt: number;
+  size: number;
+  preview: string;
+}
+
+export interface DirectFileItem {
+  kind: 'file';
+  id: string;
+  from: string;
+  createdAt: number;
+  name: string;
+  size: number;
+  sha256: string;
+}
+
+export type DirectItem = DirectTextItem | DirectFileItem;
+
+export interface DirectPending {
+  id: string;
+  from: string;
+  name: string;
+  size: number;
+  sha256: string;
+  createdAt: number;
+}
+
+export interface DirectTransfer {
+  id: string;
+  direction: 'send' | 'receive';
+  deviceId: string;
+  kind: 'text' | 'file';
+  name?: string;
+  size: number;
+  bytesDone: number;
+  state: 'offering' | 'transferring' | 'done' | 'failed';
+  error?: string;
+}
+
+export interface DirectData {
+  inbox: DirectItem[];
+  pending: DirectPending[];
+  transfers: DirectTransfer[];
 }
 
 export interface OfferInfo {
@@ -221,6 +272,8 @@ export interface StatusData {
   calendarStatus?: CalendarStatus;
   /** 局域网内 mDNS 发现、但尚未配对的设备(设备栏「附近发现的设备」;旧后端缺省)。 */
   discovered?: DiscoveredDevice[];
+  /** 设备间直发(ADR-0028;旧后端缺省)。 */
+  direct?: DirectData;
 }
 
 /** 局域网内发现、尚未配对的设备(一键添加后升格为设备卡)。 */

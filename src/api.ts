@@ -13,6 +13,7 @@ import { tryMetricsRoutes } from './api/routes/metrics.js';
 import { tryFolderRoutes } from './api/routes/folders.js';
 import { tryDeviceRoutes } from './api/routes/devices.js';
 import { tryOfferRoutes } from './api/routes/offers.js';
+import { tryDirectRoutes } from './api/routes/direct.js';
 import { tryFleetRoutes } from './api/routes/fleet.js';
 import { tryFileRoutes } from './api/routes/files.js';
 import { trySharePublicRoutes, tryShareAdminRoutes } from './api/routes/share.js';
@@ -88,6 +89,8 @@ export function createControlServer(deps: ControlServerDeps): Server {
         if (await tryFolderRoutes(req, res, deps)) return;
         if (await tryDeviceRoutes(req, res, deps)) return;
         if (await tryOfferRoutes(req, res, deps)) return;
+        // 设备间直发(ADR-0028):文本 / 文件投到在线对端收件箱,不进共享目录
+        if (await tryDirectRoutes(req, res, deps)) return;
         // fleet 代理:多实例集中管理页经本机 daemon 转发远端 daemon(白名单收紧,见 routes/fleet.ts)
         if (await tryFleetRoutes(req, res)) return;
         // 分享链接管理面(列出/创建/撤销):创建需提权,列出与撤销仅需登录门

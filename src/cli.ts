@@ -30,6 +30,7 @@ import { getLanAddresses, formatHost } from './net/addresses.js';
 import { isSelfPeerUrl, localInterfaceAddresses } from './net/peer-address.js';
 import { createControlServer, type ControlServerDeps } from './api.js';
 import { createStatusHub } from './status-hub.js';
+import { createDirectService } from './direct.js';
 import { createWebhookNotifier } from './webhook.js';
 import { createPowerGuard } from './powerguard.js';
 import { execFile } from 'node:child_process';
@@ -431,6 +432,12 @@ export async function run(args: ParsedArgs): Promise<void> {
     getStatus: () => controlDeps.getStatus(),
     log: (message) => logger.debug(message),
   });
+  // 设备间直发服务:状态变更走同一条 WS 推送通道。它只持有收发协议与落盘,
+  // 会话由 manager 注入(见下方 SessionManagerDeps.direct 与 controlDeps.direct)。
+  const direct = createDirectService({
+    configDir,
+    onChange: () => statusHub.notify(),
+  });
   // 浏览器内终端:每个 WS 连接 spawn 一个本机 shell;daemon 关闭时统一收割子进程。
   const terminalHub = createTerminalHub();
   // 数据面(对端 ws)端口:控制服务先启动,绑定完成后再回填实际端口(可能避开占用)。
@@ -491,6 +498,7 @@ export async function run(args: ParsedArgs): Promise<void> {
       perfLog: (line) => logger.info(line),
       // watcher 降级 / fs-watch 设置变更:重挂兜底定时器让新间隔即刻生效
       onFallbackScanIntervalChanged: () => armScanTimer(),
+      direct,
     },
     config.sharedFolders,
   );
@@ -667,6 +675,8 @@ export async function run(args: ParsedArgs): Promise<void> {
           platform: link.platform,
           // 对端宣告的后端形态:undefined=旧版本对端未发,UI 不展示后端标识
           runtime: link.runtime,
+          // 对端 kx 宣告的能力(含 direct1):旧版本对端缺省,UI 禁用「发送」入口
+          caps: link.caps,
           folders: folderDevices.get(deviceId) ?? [],
           // 对端宣告的目录清单:undefined=旧版本对端(无法判断「已停止共享」)
           remoteFolders: link.remoteFolders,
@@ -735,6 +745,8 @@ export async function run(args: ParsedArgs): Promise<void> {
           scheduleStates: manager.scheduleStates(),
           scheduleBanner: manager.scheduleBannerState(),
           calendarStatus: holidays.status(),
+          // 直发只下发元数据(正文按需拉),不把文本/文件字节塞进每次状态推送
+          direct: direct.snapshot(),
           // 电源守卫当前挂起原因(顶栏徽标;未挂起为 null)
           powerGuard: manager.getPowerGuardReason(),
           // 是否在网(无可用非回环接口 = 离线;无网时重连退避拉长、mDNS 暂停)
@@ -924,6 +936,28 @@ export async function run(args: ParsedArgs): Promise<void> {
     reAdoptFolderIdentity: (folderId) => {
       // 采集 + 写回 config + 清错误 + 补扫都在 manager 内完成;不可读时抛错由路由转 400
       manager.reAdoptFolderIdentity(folderId);
+    },
+    // 设备间直发:会话/能力检查在 manager 的 directTransport 里现取,离线或旧对端抛错给路由。
+    direct: {
+      snapshot: () => direct.snapshot(),
+      content: (id) => direct.content(id),
+      remove: (id) => direct.remove(id),
+      reply: (id, accept, reason) => {
+        const target = direct.snapshot().pending.find((p) => p.id === id);
+        const tx = target ? manager.directTransport(target.from) : undefined;
+        if (!tx) throw new Error('发送方已离线或不支持直发');
+        return direct.reply(id, accept, tx, reason);
+      },
+      sendText: (deviceId, text) => {
+        const tx = manager.directTransport(deviceId);
+        if (!tx) throw new Error('设备离线或对方版本不支持直发(请升级到支持 direct1 的版本)');
+        return direct.sendText(deviceId, text, tx);
+      },
+      sendFile: (deviceId, file) => {
+        const tx = manager.directTransport(deviceId);
+        if (!tx) throw new Error('设备离线或对方版本不支持直发(请升级到支持 direct1 的版本)');
+        return direct.sendFile(deviceId, file, tx);
+      },
     },
     // 待确认区下发 pending + declined:已忽略项灰显供「恢复」,兜住手误忽略
     getOffers: () => listOpenOffers(configPath),
@@ -1476,6 +1510,7 @@ const shutdown = (): void => {
     configWatcher?.close();
     // 重连定时器、peer socket、目录索引库的清理在 manager 内完成
     manager.close();
+    direct.close();
     // 浏览器内终端的 shell 子进程一并收割,不留孤儿进程
     terminalHub.close();
     // 状态推送连接先于控制端口关闭:否则浏览器会以为通道还活着,一直等推送而不重连

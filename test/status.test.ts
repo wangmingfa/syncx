@@ -40,9 +40,11 @@ describe('status aggregation', () => {
   });
 
   it('extras 透传顶栏 chip 字段:peerPort 有值上线,0/缺省不上线', () => {
-    const args = [IDENTITY, { sharedFolders: [], peers: [], knownDevices: [], pendingOffers: [] }, { entries: 0, tombstones: 0 }] as const;
-    expect(buildStatus(...args).peerPort).toBeUndefined();
-    const withPort = buildStatus(...args, [], [], [], [], 'test', undefined, [], { peerPort: 22000 });
+    // 不用 `as const`:它把空数组推成 readonly,与 Config 的可变数组字段不兼容
+    const config = { sharedFolders: [], peers: [], knownDevices: [], pendingOffers: [] };
+    const stats = { entries: 0, tombstones: 0 };
+    expect(buildStatus(IDENTITY, config, stats).peerPort).toBeUndefined();
+    const withPort = buildStatus(IDENTITY, config, stats, [], [], [], [], 'test', undefined, [], { peerPort: 22000 });
     expect(withPort.peerPort).toBe(22000);
   });
 
