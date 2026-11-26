@@ -8,7 +8,7 @@ import type { AddressInfo } from 'node:net';
 import { request } from 'node:http';
 import { CAP_DIRECT1, PEER_CAPS } from '../src/handshake.js';
 import { decodeBinaryFrame, encodeBinaryFrame } from '../src/net/wire.js';
-import { createDirectService, DIRECT_CHUNK_BYTES, DIRECT_MAX_QUEUED, type DirectService, type DirectTransport } from '../src/direct.js';
+import { createDirectService, DIRECT_CHUNK_BYTES, DIRECT_MAX_QUEUED, DIRECT_RESUME_TTL_MS, type DirectService, type DirectTransport } from '../src/direct.js';
 import { resolveDirectSaveDir } from '../src/direct-save-path.js';
 import { signSession, sessionSecret } from '../src/auth.js';
 import { ELEVATE_COOKIE } from '../src/api/helpers.js';
@@ -503,6 +503,246 @@ describe('device direct transfer', () => {
     expect(t?.state).toBe('failed');
     expect(t?.error).toContain('续传位置不合法');
     a.close();
+  });
+
+  /**
+   * 断开型链路:第一片送达后立刻断,链路 `up` 交回 true 即恢复。
+   * 跨重启的几条用例共用它 —— 断点续传的前提就是「传过一片再断」。
+   */
+  function cuttableLink(sent: number[]) {
+    const link = { up: true };
+    const mk = (from: DirectService, to: DirectService, fromId: string, toId: string): DirectTransport => ({
+      control: (_deviceId, message) => {
+        if (!link.up) return false;
+        to.handleControl({ ...message, fromDeviceId: fromId }, fromId, mk(to, from, toId, fromId));
+        return true;
+      },
+      chunk: (_deviceId, id, seq, data) => {
+        if (!link.up) return false;
+        if (fromId === 'A') sent.push(seq);
+        if (seq === 0) link.up = false;
+        to.handleChunk({ header: { id, seq }, body: data }, fromId, mk(to, from, toId, fromId));
+        return true;
+      },
+    });
+    return { link, mk };
+  }
+
+  it('跨重启续传:发送方重启后重新提议,从对端已落盘处继续', () => {
+    const sent: number[] = [];
+    const { link, mk } = cuttableLink(sent);
+    const aConfig = tmp();
+    const bConfig = tmp();
+    let txA: DirectTransport | undefined;
+    const a1 = createDirectService({ configDir: aConfig, getTransport: () => (link.up ? txA : undefined) });
+    const b = createDirectService({ configDir: bConfig });
+    txA = mk(a1, b, 'A', 'B');
+    const txB = mk(b, a1, 'B', 'A');
+
+    const source = join(tmp(), 'cross.bin');
+    const data = Buffer.alloc(DIRECT_CHUNK_BYTES * 2 + 77);
+    for (let i = 0; i < data.length; i++) data[i] = (i * 13) % 251;
+    writeFileSync(source, data);
+    const id = a1.sendFile('B', {
+      name: 'cross.bin',
+      sourcePath: source,
+      size: data.length,
+      sha256: createHash('sha256').update(data).digest('hex'),
+    }, txA).id;
+
+    expect(b.reply(id, true, txB)).toBe(true);
+    // 第一片送达即断:两端都转暂停
+    a1.onPeerOffline('B');
+    b.onPeerOffline('A');
+    expect(a1.snapshot().transfers.find((t) => t.id === id)?.state).toBe('paused');
+
+    // 发送方 daemon 重启:暂存文件与台账都要留着,否则这半截就白传了
+    a1.close();
+    expect(existsSync(source)).toBe(true);
+    const ledger = JSON.parse(readFileSync(join(aConfig, 'inbox', 'resume.json'), 'utf8')) as {
+      outgoing: Array<{ id: string; bytesDone: number; sourcePath: string }>;
+    };
+    // 发送侧只知道「对端确认过」的字节:第一片的 ack 跟着断链丢了,所以这里是 0 ——
+    // 真正落在盘上的进度由接收方在 direct-reply 里告诉我们。
+    expect(ledger.outgoing).toMatchObject([{ id, bytesDone: 0, sourcePath: source }]);
+
+    let txA2: DirectTransport | undefined;
+    const a2 = createDirectService({ configDir: aConfig, getTransport: () => (link.up ? txA2 : undefined) });
+    // 重启后的第一眼就该看到「等待重连」而不是一笔都不剩
+    expect(a2.snapshot().transfers.find((t) => t.id === id)).toMatchObject({
+      state: 'paused',
+      name: 'cross.bin',
+    });
+
+    // 重连:同一个 id 重新提议 → 接收方回 offset → 只补剩下两片
+    sent.length = 0;
+    link.up = true;
+    txA2 = mk(a2, b, 'A', 'B');
+    a2.onPeerOnline('B', txA2);
+    expect(sent).toEqual([1, 2]);
+
+    const item = b.snapshot().inbox[0];
+    expect(item?.kind).toBe('file');
+    expect(readFileSync(item!.path ?? '').equals(data)).toBe(true);
+    expect(a2.snapshot().transfers.find((t) => t.id === id)?.state).toBe('done');
+    // 传完了台账就该消失,不留一条「还能续」的死记录
+    expect(existsSync(join(aConfig, 'inbox', 'resume.json'))).toBe(false);
+    a2.close();
+    b.close();
+  });
+
+  it('跨重启续传:传输一开始就落账,进程被 kill 也接得上', () => {
+    const sent: number[] = [];
+    const { link, mk } = cuttableLink(sent);
+    const aConfig = tmp();
+    let txA: DirectTransport | undefined;
+    const a = createDirectService({ configDir: aConfig, getTransport: () => (link.up ? txA : undefined) });
+    const b = createDirectService({ configDir: tmp() });
+    txA = mk(a, b, 'A', 'B');
+    const txB = mk(b, a, 'B', 'A');
+
+    const source = join(tmp(), 'crash.bin');
+    const data = Buffer.alloc(DIRECT_CHUNK_BYTES + 7);
+    writeFileSync(source, data);
+    const id = a.sendFile('B', {
+      name: 'crash.bin',
+      sourcePath: source,
+      size: data.length,
+      sha256: createHash('sha256').update(data).digest('hex'),
+    }, txA).id;
+    expect(b.reply(id, true, txB)).toBe(true);
+
+    // 这一刻还在传(kill -9 不会给 close() 的机会),台账里就必须已经有这一笔 ——
+    // 否则进程被硬杀之后,暂存文件还在盘上却没人认领,只能等人工清理。
+    const ledgerPath = join(aConfig, 'inbox', 'resume.json');
+    expect(existsSync(ledgerPath)).toBe(true);
+    expect(JSON.parse(readFileSync(ledgerPath, 'utf8'))).toMatchObject({
+      outgoing: [{ id, sourcePath: source }],
+    });
+    a.close();
+    b.close();
+  });
+
+  it('跨重启续传:接收方重启后仍认得出同一条提议,按已落盘字节给偏移', () => {
+    const sent: number[] = [];
+    const { link, mk } = cuttableLink(sent);
+    const aConfig = tmp();
+    const bConfig = tmp();
+    let txA: DirectTransport | undefined;
+    const a = createDirectService({ configDir: aConfig, getTransport: () => (link.up ? txA : undefined) });
+    // 接收方也要 getTransport:只有具备续传能力的实例才会在退出时保留半截。
+    const b1 = createDirectService({ configDir: bConfig, getTransport: () => undefined });
+    txA = mk(a, b1, 'A', 'B');
+    const txB = mk(b1, a, 'B', 'A');
+
+    const source = join(tmp(), 'recv-cross.bin');
+    const data = Buffer.alloc(DIRECT_CHUNK_BYTES * 3 + 5);
+    for (let i = 0; i < data.length; i++) data[i] = (i * 31) % 253;
+    writeFileSync(source, data);
+    const id = a.sendFile('B', {
+      name: 'recv-cross.bin',
+      sourcePath: source,
+      size: data.length,
+      sha256: createHash('sha256').update(data).digest('hex'),
+    }, txA).id;
+
+    expect(b1.reply(id, true, txB)).toBe(true);
+    a.onPeerOffline('B');
+    b1.onPeerOffline('A');
+    const tmpPath = join(bConfig, 'inbox', '.tmp', `in-${id}`);
+    expect(existsSync(tmpPath)).toBe(true);
+
+    // 接收方 daemon 重启:半截与台账都要在,重启后照样认得这条提议
+    b1.close();
+    expect(existsSync(tmpPath)).toBe(true);
+    const b2 = createDirectService({ configDir: bConfig, getTransport: () => undefined });
+    expect(b2.snapshot().transfers.find((t) => t.direction === 'receive')).toMatchObject({
+      id,
+      state: 'paused',
+      bytesDone: DIRECT_CHUNK_BYTES,
+    });
+
+    // 发送方重连重新提议:接收方按磁盘上已有的那一片给 offset,不重传第一片。
+    // 新会话会把帧发到新实例上,transport 必须跟着重建 —— 拿着旧实例的通道等于发给了幽灵。
+    sent.length = 0;
+    link.up = true;
+    txA = mk(a, b2, 'A', 'B');
+    a.onPeerOnline('B', txA);
+    expect(sent).toEqual([1, 2, 3]);
+
+    const item = b2.snapshot().inbox[0];
+    expect(item?.kind).toBe('file');
+    expect(readFileSync(item!.path ?? '').equals(data)).toBe(true);
+    expect(existsSync(tmpPath)).toBe(false);
+    a.close();
+    b2.close();
+  });
+
+  it('跨重启续传:关闭时还在传的也要转暂停,暂存文件不删', () => {
+    const aConfig = tmp();
+    const source = join(tmp(), 'inflight.bin');
+    const data = Buffer.alloc(DIRECT_CHUNK_BYTES * 2);
+    writeFileSync(source, data);
+    // 黑洞通道:接受提议、吞掉分片但永不回 ack —— 发送方会一直停在 transferring。
+    const sink: DirectTransport = { control: () => true, chunk: () => true };
+    const a = createDirectService({ configDir: aConfig, getTransport: () => sink });
+    const id = a.sendFile('B', {
+      name: 'inflight.bin',
+      sourcePath: source,
+      size: data.length,
+      sha256: createHash('sha256').update(data).digest('hex'),
+    }, sink).id;
+    a.handleControl({ kind: 'direct-reply', id, fromDeviceId: '', accept: true }, 'B', sink);
+    expect(a.snapshot().transfers.find((t) => t.id === id)?.state).toBe('transferring');
+
+    a.close();
+    // 关闭不是「取消」:源文件与台账都留着,否则重启后这半截只能当垃圾清掉
+    expect(existsSync(source)).toBe(true);
+    const a2 = createDirectService({ configDir: aConfig, getTransport: () => undefined });
+    expect(a2.snapshot().transfers.find((t) => t.id === id)?.state).toBe('paused');
+    a2.close();
+  });
+
+  it('跨重启续传:过了窗口或暂存没了就丢弃半截,不留死条目', () => {
+    const sent: number[] = [];
+    const { link, mk } = cuttableLink(sent);
+    const aConfig = tmp();
+    let txA: DirectTransport | undefined;
+    const a1 = createDirectService({ configDir: aConfig, getTransport: () => (link.up ? txA : undefined) });
+    const b = createDirectService({ configDir: tmp() });
+    txA = mk(a1, b, 'A', 'B');
+    const txB = mk(b, a1, 'B', 'A');
+
+    const source = join(tmp(), 'stale.bin');
+    const data = Buffer.alloc(DIRECT_CHUNK_BYTES * 2);
+    writeFileSync(source, data);
+    const id = a1.sendFile('B', {
+      name: 'stale.bin',
+      sourcePath: source,
+      size: data.length,
+      sha256: createHash('sha256').update(data).digest('hex'),
+    }, txA).id;
+    expect(b.reply(id, true, txB)).toBe(true);
+    a1.onPeerOffline('B');
+    b.onPeerOffline('A');
+    a1.close();
+
+    // 把这一笔的暂停时间改成「早就过窗口了」,重启后应当整条丢弃
+    const ledgerPath = join(aConfig, 'inbox', 'resume.json');
+    const ledger = JSON.parse(readFileSync(ledgerPath, 'utf8')) as {
+      outgoing: Array<Record<string, unknown>>;
+      incoming: unknown[];
+    };
+    ledger.outgoing[0]!.pausedAt = Date.now() - DIRECT_RESUME_TTL_MS - 1_000;
+    writeFileSync(ledgerPath, JSON.stringify(ledger));
+
+    const a2 = createDirectService({ configDir: aConfig, getTransport: () => undefined });
+    expect(a2.snapshot().transfers.filter((t) => t.state === 'paused')).toHaveLength(0);
+    // 半截暂存跟着台账一起清掉,不留一个没人认领的几十 MB
+    expect(existsSync(source)).toBe(false);
+    expect(existsSync(ledgerPath)).toBe(false);
+    a2.close();
+    b.close();
   });
 
   it('离线排队:文本先进本机队列,设备上线后自动补发', () => {

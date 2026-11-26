@@ -8,12 +8,14 @@
  *  - 文本与文件都走「接收方确认」:文本直接入箱并回执,文件先提议 + 用户确认后再分片。
  *  - 目标设备离线时不报错退场,而是先入队(`inbox/queue.json`),等它上线自动投递;
  *    队列有 24 小时窗口与条数/字节上限,免得离线设备把本机磁盘当无限仓库。
+ *  - 传了一半的传输把半截留在盘上(`inbox/resume.json` 记台账),对端重连、甚至本机
+ *    daemon 重启过,都能从已落盘的字节接着传,不从头再来。
  *
  * 归属身份一律用 ws 会话验签过的 hopDeviceId,不信消息体里的 fromDeviceId ——
  * 后者由 withSelfInfo 注入,只携带版本/主机名等展示信息。
  */
 import { createHash, randomBytes } from 'node:crypto';
-import { closeSync, existsSync, mkdirSync, openSync, readFileSync, readSync, renameSync, rmSync, writeFileSync, writeSync } from 'node:fs';
+import { closeSync, existsSync, mkdirSync, openSync, readFileSync, readSync, renameSync, rmSync, statSync, writeFileSync, writeSync } from 'node:fs';
 import { promises as fs } from 'node:fs';
 import { join } from 'node:path';
 import type { ControlMessage } from './net/wire.js';
@@ -92,7 +94,8 @@ export interface DirectServiceDeps {
   onChange?: () => void;
   /**
    * 现取一台设备的直发通道(会话重连后由它拿到**新的** transport)。
-   * 缺省 = 不做断点续传:掉线即失败,与旧行为一致(测试与其它嵌入方不必提供)。
+   * 缺省 = 不做断点续传:掉线即失败、退出即清理半截,与旧行为一致
+   * (测试与其它嵌入方不必提供;提供了才落 `inbox/resume.json` 台账)。
    */
   getTransport?: (deviceId: string) => DirectTransport | undefined;
 }
@@ -274,7 +277,10 @@ export interface DirectService {
   failQueued(deviceId: string, reason: string): void;
   /** 用户主动取消排队:只对 `queued` 生效,回收暂存文件并从台账里划掉。 */
   cancelQueued(id: string): boolean;
-  /** daemon 关闭:停表并清理。 */
+  /**
+   * daemon 关闭:停表。具备续传能力时,传了一半的进出站传输转成暂停、半截与暂存
+   * 文件留在盘上(下次启动接着传);其余状态照旧清理。
+   */
   close(): void;
 }
 
@@ -286,6 +292,8 @@ export function createDirectService(deps: DirectServiceDeps): DirectService {
   const indexPath = join(root, 'index.json');
   /** 离线排队台账:只存还在排队的内容,daemon 重启后照原样恢复。 */
   const queuePath = join(root, 'queue.json');
+  /** 跨重启续传台账:只存「传了一半、还能接着传」的进出站条目。 */
+  const resumePath = join(root, 'resume.json');
   for (const dir of [root, messagesDir, filesDir, tmpDir]) {
     if (!existsSync(dir)) mkdirSync(dir, { recursive: true });
   }
@@ -298,9 +306,18 @@ export function createDirectService(deps: DirectServiceDeps): DirectService {
   const sourceRefs = new Map<string, number>();
   /** 每台设备最近一次探测排队通道的时间(避免每秒都去问一次会话表)。 */
   const queuedProbeAt = new Map<string, number>();
+  /**
+   * 具备「现取会话通道」的能力 = 这台 daemon 支持续传;续传台账因此才有意义。
+   * 嵌入方(测试)不提供时保持旧语义:掉线即失败、退出即清理,不额外落盘。
+   */
+  const canResume = !!deps.getTransport;
+  /** 关闭中:此时不再向状态推送广播(控制端口可能已经收了)。 */
+  let closing = false;
   let items: DirectItem[] = readIndex();
   // 上次没来得及投出去的离线队列:恢复成 queued 状态,等会话建立后自动补发。
   loadQueue();
+  // 上次退出时还没传完的进出站传输:恢复成 paused,等对方重连/重新提议接着传。
+  loadResume();
   let timer: ReturnType<typeof setInterval> | undefined;
 
   function readIndex(): DirectItem[] {
@@ -423,7 +440,224 @@ export function createDirectService(deps: DirectServiceDeps): DirectService {
     }
   }
 
+  /** 跨重启续传台账的一条出站记录:暂存文件与已确认字节都在盘上,重启后接着发。 */
+  interface ResumeOutRecord {
+    id: string;
+    deviceId: string;
+    name: string;
+    size: number;
+    sha256: string;
+    sourcePath: string;
+    createdAt: number;
+    bytesDone: number;
+    pausedAt: number;
+    batchId?: string;
+  }
+
+  /** 跨重启续传台账的一条入站记录:半截文件按 id 命名(`.tmp/in-<id>`),路径不必存。 */
+  interface ResumeInRecord {
+    id: string;
+    from: string;
+    name: string;
+    size: number;
+    sha256: string;
+    createdAt: number;
+    bytesDone: number;
+    pausedAt: number;
+    saveDir?: string;
+    batchId?: string;
+  }
+
+  function readResume(): { outgoing: ResumeOutRecord[]; incoming: ResumeInRecord[] } {
+    const empty = { outgoing: [], incoming: [] };
+    try {
+      const parsed = JSON.parse(readFileSync(resumePath, 'utf8')) as unknown;
+      if (typeof parsed !== 'object' || parsed === null) return empty;
+      const body = parsed as Record<string, unknown>;
+      const outs = Array.isArray(body.outgoing) ? body.outgoing : [];
+      const ins = Array.isArray(body.incoming) ? body.incoming : [];
+      return {
+        outgoing: outs.filter((v): v is ResumeOutRecord => {
+          if (typeof v !== 'object' || v === null) return false;
+          const r = v as Record<string, unknown>;
+          return isSafeId(r.id as string)
+            && typeof r.deviceId === 'string'
+            && typeof r.name === 'string'
+            && typeof r.size === 'number' && r.size > 0
+            && typeof r.sha256 === 'string' && /^[a-f0-9]{64}$/.test(r.sha256)
+            && typeof r.sourcePath === 'string'
+            && typeof r.createdAt === 'number'
+            && typeof r.bytesDone === 'number' && r.bytesDone >= 0
+            && typeof r.pausedAt === 'number';
+        }),
+        incoming: ins.filter((v): v is ResumeInRecord => {
+          if (typeof v !== 'object' || v === null) return false;
+          const r = v as Record<string, unknown>;
+          return isSafeId(r.id as string)
+            && typeof r.from === 'string'
+            && typeof r.name === 'string'
+            && typeof r.size === 'number' && r.size > 0
+            && typeof r.sha256 === 'string' && /^[a-f0-9]{64}$/.test(r.sha256)
+            && typeof r.createdAt === 'number'
+            && typeof r.bytesDone === 'number' && r.bytesDone >= 0
+            && typeof r.pausedAt === 'number';
+        }),
+      };
+    } catch {
+      return empty;
+    }
+  }
+
+  /**
+   * 台账只在「有半截东西能接着传」时存在:没内容就删文件,免得留下一份空账让人误会。
+   * 内容全部由内存状态推导 —— 每个改变状态的入口写完就调它,不必在别处维护镜像。
+   */
+  function saveResume(): void {
+    if (!canResume) return;
+    const outs: ResumeOutRecord[] = [];
+    for (const o of outgoing.values()) {
+      if (o.kind !== 'file' || !o.sourcePath || !o.sha256 || !o.name) continue;
+      // 传输中也要记:进程被 kill -9 时没有 close() 可走,只能靠这一笔。
+      // 发送侧存下的进度是「对端确认过的字节」,真正从哪儿续由接收方说了算。
+      if (o.state !== 'transferring' && o.state !== 'paused' && !o.resuming) continue;
+      // 排队项走 queue.json:它等的是设备上线,和「传了一半」是两回事。
+      if (o.queuedAt) continue;
+      outs.push({
+        id: o.id,
+        deviceId: o.deviceId,
+        name: o.name,
+        size: o.size,
+        sha256: o.sha256,
+        sourcePath: o.sourcePath,
+        createdAt: o.createdAt,
+        bytesDone: o.bytesDone,
+        // 传输中崩掉的没有 pausedAt:用「写下这一笔的时刻」当锚点,
+        // 续传窗口从「最后一次确认它还活着」算起,而不是从用户点发送算起。
+        pausedAt: o.pausedAt ?? Date.now(),
+        ...(o.batchId ? { batchId: o.batchId } : {}),
+      });
+    }
+    const ins: ResumeInRecord[] = [];
+    for (const inc of incoming.values()) {
+      // 待确认的提议不记:它还需要用户点头,重启后重新提议更干净。
+      if (inc.state === 'pending') continue;
+      ins.push({
+        id: inc.id,
+        from: inc.from,
+        name: inc.name,
+        size: inc.size,
+        sha256: inc.sha256,
+        createdAt: inc.createdAt,
+        bytesDone: inc.bytesDone,
+        pausedAt: inc.pausedAt ?? Date.now(),
+        ...(inc.saveDir ? { saveDir: inc.saveDir } : {}),
+        ...(inc.batchId ? { batchId: inc.batchId } : {}),
+      });
+    }
+    if (!outs.length && !ins.length) {
+      try { rmSync(resumePath, { force: true }); } catch { /* 没有就是没有 */ }
+      return;
+    }
+    const tmp = `${resumePath}.tmp`;
+    writeFileSync(tmp, JSON.stringify({ v: 1, outgoing: outs, incoming: ins }, null, 2), 'utf8');
+    renameSync(tmp, resumePath);
+  }
+
+  /**
+   * 启动时恢复跨重启续传。三种情况直接丢弃(连同它的半截文件):
+   *  - 过了续传窗口(10 分钟)—— 半截已经没有意义,还占着收件箱配额;
+   *  - 出站的暂存文件 / 入站的半截文件不见了(被手工清过 `.tmp`);
+   *  - 入站半截不是整片对齐(落盘永远顺序整片写,对不齐说明文件被别的东西动过)。
+   */
+  function loadResume(): void {
+    if (!canResume) return;
+    const now = Date.now();
+    const { outgoing: outs, incoming: ins } = readResume();
+
+    /** 出站:先登记存活条目,再统一清理过期条目的暂存文件(群发会共用同一份路径)。 */
+    const deadSources: string[] = [];
+    for (const r of outs) {
+      const fresh = now - r.pausedAt <= DIRECT_RESUME_TTL_MS;
+      const usable = fresh && r.bytesDone < r.size && existsSync(r.sourcePath);
+      if (!usable) {
+        deadSources.push(r.sourcePath);
+        continue;
+      }
+      const acked = Math.floor(r.bytesDone / DIRECT_CHUNK_BYTES);
+      const out: OutgoingTransfer = {
+        id: r.id,
+        deviceId: r.deviceId,
+        kind: 'file',
+        name: r.name,
+        size: r.size,
+        bytesDone: r.bytesDone,
+        state: 'paused',
+        createdAt: r.createdAt,
+        // 一启动就允许重发提议:重启本身就是「刚断过线」,没必要再等 3 秒。
+        offerSentAt: r.pausedAt,
+        resuming: true,
+        pausedAt: r.pausedAt,
+        sha256: r.sha256,
+        sourcePath: r.sourcePath,
+        totalChunks: Math.ceil(r.size / DIRECT_CHUNK_BYTES),
+        acked,
+        nextSeq: acked,
+        inflight: new Map(),
+        lastProgressAt: now,
+        ...(r.batchId ? { batchId: r.batchId } : {}),
+      };
+      outgoing.set(out.id, out);
+      if (out.sourcePath) sourceRefs.set(out.sourcePath, (sourceRefs.get(out.sourcePath) ?? 0) + 1);
+    }
+    for (const path of deadSources) {
+      if (sourceRefs.has(path)) continue; // 还有存活条目在用它(群发暂存共用)
+      try { rmSync(path, { force: true }); } catch { /* 已经不在了 */ }
+    }
+
+    for (const r of ins) {
+      const tmpPath = join(tmpDir, `in-${r.id}`);
+      let onDisk = 0;
+      let mtime = 0;
+      try {
+        const st = statSync(tmpPath);
+        onDisk = st.size;
+        mtime = st.mtimeMs;
+      } catch { continue; }
+      // 半截文件最后一次被写的时间才是「它还活着」的真实证据:台账里的 pausedAt
+      // 对「传到一半被硬杀」的那一笔只到开始时刻,长传输会因此被误判成过期。
+      const fresh = now - Math.max(r.pausedAt, mtime) <= DIRECT_RESUME_TTL_MS;
+      // 必须是「整片且没满」:满了却没落盘说明崩在校验/rename 之间,重来更省事。
+      const resumable = fresh && onDisk > 0 && onDisk % DIRECT_CHUNK_BYTES === 0 && onDisk < r.size;
+      if (!resumable) {
+        try { rmSync(tmpPath, { force: true }); } catch { /* 已经不在了 */ }
+        continue;
+      }
+      incoming.set(r.id, {
+        id: r.id,
+        from: r.from,
+        name: r.name,
+        size: r.size,
+        sha256: r.sha256,
+        createdAt: r.createdAt,
+        tmpPath,
+        ...(r.saveDir ? { saveDir: r.saveDir } : {}),
+        ...(r.batchId ? { batchId: r.batchId } : {}),
+        state: 'paused',
+        pausedAt: r.pausedAt,
+        nextSeq: onDisk / DIRECT_CHUNK_BYTES,
+        totalChunks: Math.ceil(r.size / DIRECT_CHUNK_BYTES),
+        bytesDone: onDisk,
+        received: new Set(),
+        buffered: new Map(),
+        lastProgressAt: now,
+      });
+    }
+    // 丢弃过的条目不要留在文件里,否则下次启动又把它们捞出来判一遍。
+    saveResume();
+  }
+
   function notify(): void {
+    if (closing) return;
     deps.onChange?.();
   }
 
@@ -458,6 +692,7 @@ export function createDirectService(deps: DirectServiceDeps): DirectService {
     releaseSource(out);
     // 排队项失败/超时也要从台账里划掉,否则重启后又把它捞回来。
     saveQueue();
+    saveResume();
     if (tx && out.state === 'failed') {
       sendControl(tx, out.deviceId, { kind: 'direct-cancel', id: out.id, fromDeviceId: '', reason: error });
     }
@@ -474,6 +709,7 @@ export function createDirectService(deps: DirectServiceDeps): DirectService {
     out.finishedAt = Date.now();
     releaseSource(out);
     saveQueue();
+    saveResume();
     notify();
   }
 
@@ -485,6 +721,7 @@ export function createDirectService(deps: DirectServiceDeps): DirectService {
     inc.buffered.clear();
     try { rmSync(inc.tmpPath, { force: true }); } catch { /* 清理失败不影响状态 */ }
     incoming.delete(inc.id);
+    saveResume();
   }
 
   /** 收件箱或用户指定目录里的不覆盖落点:同名一律加 (n) 后缀。 */
@@ -527,6 +764,7 @@ export function createDirectService(deps: DirectServiceDeps): DirectService {
     inc.hash = undefined;
     inc.state = 'paused';
     inc.pausedAt = Date.now();
+    saveResume();
     notify();
   }
 
@@ -574,6 +812,8 @@ export function createDirectService(deps: DirectServiceDeps): DirectService {
     inc.state = 'transferring';
     inc.pausedAt = undefined;
     inc.lastProgressAt = Date.now();
+    // 已经接上了:从台账里撤掉,别让重启后的自己以为它还停在那儿。
+    saveResume();
     tx.control(from, { kind: 'direct-reply', id: inc.id, fromDeviceId: '', accept: true, offset });
     notify();
     return true;
@@ -590,6 +830,7 @@ export function createDirectService(deps: DirectServiceDeps): DirectService {
     out.resuming = true;
     out.pausedAt = Date.now();
     out.error = undefined;
+    saveResume();
     notify();
   }
 
@@ -914,6 +1155,7 @@ export function createDirectService(deps: DirectServiceDeps): DirectService {
       notify();
       return true;
     }
+    saveResume();
     tx.control(inc.from, { kind: 'direct-reply', id: inc.id, fromDeviceId: '', accept: true });
     notify();
     return true;
@@ -1104,6 +1346,7 @@ export function createDirectService(deps: DirectServiceDeps): DirectService {
           out.resuming = false;
           out.pausedAt = undefined;
           out.lastProgressAt = Date.now();
+          saveResume();
           lastTx.set(out.id, tx);
           try {
             out.fd = openSync(out.sourcePath!, 'r');
@@ -1260,19 +1503,35 @@ export function createDirectService(deps: DirectServiceDeps): DirectService {
     },
 
     close() {
+      closing = true;
       if (timer) {
         clearInterval(timer);
         timer = undefined;
       }
-      for (const inc of [...incoming.values()]) cleanupIncoming(inc);
+      for (const inc of [...incoming.values()]) {
+        // 传了一半的入站传输:转暂停、把半截留在盘上,下次启动接着收 —— 重启一次
+        // 不该让几十 MB 白传。一个字节都还没写的提议没有续传价值,照旧清掉。
+        if (canResume && inc.bytesDone > 0 && (inc.state === 'transferring' || inc.state === 'paused')) {
+          pauseIncoming(inc);
+          continue;
+        }
+        cleanupIncoming(inc);
+      }
       for (const out of outgoing.values()) {
         if (out.fd !== undefined) {
           try { closeSync(out.fd); } catch { /* 已关闭 */ }
         }
         // 排队项要跨重启:暂存文件与 queue.json 都得原样留着,下次启动接着等。
         if (out.state === 'queued') continue;
+        // 出站同理:传了一半(或已经在等重连)的保留暂存文件,重启后重新提议,
+        // 从对方给的偏移继续。终态照旧回收。
+        if (canResume && out.kind === 'file' && !out.finishedAt && (out.state === 'transferring' || out.resuming)) {
+          pauseOutgoing(out);
+          continue;
+        }
         releaseSource(out);
       }
+      saveResume();
       sourceRefs.clear();
       lastTx.clear();
       queuedProbeAt.clear();
