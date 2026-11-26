@@ -115,9 +115,18 @@ MoonBit 三个 Release 资产永远同版本号,tag(`v*`)一次触发三条 work
 | cli | 主入口组装(参数面/ConfigStore/启动编排/update-swap 分发,冒烟通过)、GitHub Releases 自更新(资产名 syncx-mbt-v*,看门狗换入/回滚) |
 | 发布 | moonbit-release.yml(6 原生 runner,资产名带 mbt 标识)+ 前端 runtime 枚举 + pack:local --backend |
 
-**尚未落地(后续里程碑)**:
-- 中转(ADR-0014 relay)与磁盘空间守卫
-- 初始交换 2s 兜底全量定时器、认领台账、CDC 块请求/供应
-- BlockSent 回账改为 socket 写完后(当前帧入队即回账,缺网络背压)
-- syncx.pid 单实例互斥、信号优雅退出、gitignore/.syncxignore 规则载入、--log-file 落盘
+**尚未落地(2026-11-26 逐条复核)**:
+
+- **直发(ADR-0028)**:`direct-*` 控制消息、二进制帧 kind 3、`/api/direct` 路由、收件箱与续传台账。移植完成前,前端按本机 `runtime` 隐藏「发送 / 收件箱」入口。
+- **中转(ADR-0014 relay)**:`relayed` 字段已在 wire 里(未知字段照旧忽略),但没有「落地后再转发给同目录其它对端」那一层。
+- **磁盘空间守卫**:接收前预估本轮净需求、不够就整轮拦下并等空间恢复重放。
+- **认领台账**:同设备多连接的接收单飞去重(ADR「双落地静默分叉修复」的接收侧那半)。当前每目录每设备至多一条会话,所以碰不到,但这与 Node/Rust 的口径不一致(见 `daemon/actor.mbt` 文件头与 1758 行的 TODO)。
+- **`syncx.pid` 单实例互斥、信号优雅退出**:`cliapp/entry.mbt` 里仍是 TODO(信号依赖 `moonbitlang/async/signal`,尚未接线)。
+
+**2026-11-26 复核:原先列在「尚未落地」但已经做掉的** —— 留档以免后人按旧清单重复排查:
+
+- 初始交换的 2s 兜底全量定时器(`INITIAL_INDEX_FALLBACK_MS` / `poll_initial_fallback`)
+- CDC 块的请求与供应(`plan_cdc` + 供应侧按 clens 前缀和供块)
+- BlockSent 回账移到帧写出之后(`do_block_sent` + `pump_deferred`,对齐 Rust 口径)
+- `gitignore` / `.syncxignore` 规则载入、`--log-file` 落盘
 - folderIdentity 收养、gitSync 接入 actor、孤儿索引回收

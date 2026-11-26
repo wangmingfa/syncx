@@ -278,6 +278,110 @@ describe('device direct transfer', () => {
     server.close();
   });
 
+  it('HTTP:打包发送先逐个暂存,再打成一个 zip 只投送一次', async () => {
+    let captured: { name: string; size: number; sha256: string; sourcePath: string } | undefined;
+    let capturedBatch: string | undefined;
+    const sentTo: string[] = [];
+    const configDir = tmp();
+    const server = createControlServer({
+      token: 'secret',
+      configDir,
+      getStatus: () => ({}),
+      direct: {
+        snapshot: () => ({ inbox: [], pending: [], transfers: [] }),
+        content: async () => undefined,
+        remove: async () => true,
+        reply: () => true,
+        replyBatch: () => 0,
+        sendText: () => ({ id: 'dt-x', queued: false }),
+        sendFile: (deviceId, file, batchId) => {
+          captured = file;
+          capturedBatch = batchId;
+          sentTo.push(deviceId);
+          return { id: `df-${deviceId}`, queued: false };
+        },
+        cancelQueued: () => true,
+      },
+    });
+    server.listen(0, '127.0.0.1');
+    await once(server, 'listening');
+    const port = (server.address() as AddressInfo).port;
+    const post = (path: string, body: Buffer, json = false): Promise<{ status: number; text: string }> =>
+      new Promise((resolve, reject) => {
+        const req = request(
+          {
+            host: '127.0.0.1',
+            port,
+            path,
+            method: 'POST',
+            headers: {
+              Authorization: 'Bearer secret',
+              'Content-Type': json ? 'application/json' : 'application/octet-stream',
+              'Content-Length': String(body.length),
+            },
+          },
+          (res) => {
+            let text = '';
+            res.setEncoding('utf8');
+            res.on('data', (c) => { text += c; });
+            res.on('end', () => resolve({ status: res.statusCode ?? 0, text }));
+          },
+        );
+        req.on('error', reject);
+        req.end(body);
+      });
+
+    const one = Buffer.from('first file\n'.repeat(20));
+    const two = Buffer.alloc(1000, 3);
+    const nameOne = encodeURIComponent('说明 一.txt');
+    const s1 = await post(`/api/direct/file?zip=zb-1&name=${nameOne}&size=${one.length}`, one);
+    expect(s1.status, s1.text).toBe(200);
+    expect(JSON.parse(s1.text)).toMatchObject({ staged: true, count: 1 });
+    const s2 = await post(`/api/direct/file?zip=zb-1&name=${encodeURIComponent('b.bin')}&size=${two.length}`, two);
+    expect(s2.status, s2.text).toBe(200);
+    expect(JSON.parse(s2.text)).toMatchObject({ staged: true, count: 2 });
+    // 暂存阶段一个字节都不该投送出去。
+    expect(sentTo).toEqual([]);
+
+    const done = await post('/api/direct/zip', Buffer.from(JSON.stringify({ batch: 'zb-1', deviceIds: ['AAAA'] })), true);
+    expect(done.status, done.text).toBe(200);
+    expect(sentTo).toEqual(['AAAA']);
+    expect(captured?.name).toMatch(/\.zip$/);
+    expect(capturedBatch).toBe('zb-1');
+    expect(captured?.sha256).toMatch(/^[a-f0-9]{64}$/);
+
+    // 包内两条都在,内容与源一致(中央目录里的名字是 UTF-8)。
+    const raw = readFileSync(captured!.sourcePath);
+    expect(raw.length).toBe(captured?.size);
+    const eocd = raw.length - 22;
+    expect(raw.readUInt32LE(eocd)).toBe(0x06054b50);
+    const count = raw.readUInt16LE(eocd + 10);
+    let p = raw.readUInt32LE(eocd + 16);
+    const names: string[] = [];
+    const payload: Buffer[] = [];
+    for (let i = 0; i < count; i++) {
+      const size = raw.readUInt32LE(p + 24);
+      const nameLen = raw.readUInt16LE(p + 28);
+      const localOffset = raw.readUInt32LE(p + 42);
+      names.push(raw.subarray(p + 46, p + 46 + nameLen).toString('utf8'));
+      const localNameLen = raw.readUInt16LE(localOffset + 26);
+      const start = localOffset + 30 + localNameLen;
+      payload.push(raw.subarray(start, start + size));
+      p += 46 + nameLen;
+    }
+    expect(count).toBe(2);
+    expect(names).toEqual(['说明 一.txt', 'b.bin']);
+    expect(payload[0]!.equals(one)).toBe(true);
+    expect(payload[1]!.equals(two)).toBe(true);
+    // 暂存目录在打包后被清掉,不留一份重复内容。
+    expect(existsSync(join(configDir, 'inbox', '.tmp', 'zip-zb-1'))).toBe(false);
+
+    // 同一批次已经用过 → 暂存没了,明确报 404 而不是悄悄发个空包。
+    const again = await post('/api/direct/zip', Buffer.from(JSON.stringify({ batch: 'zb-1', deviceIds: ['AAAA'] })), true);
+    expect(again.status).toBe(404);
+    server.close();
+  });
+
   it('另存到指定目录:文件落到用户目录,删回执不动真实文件', async () => {
     const a = createDirectService({ configDir: tmp() });
     const bConfig = tmp();

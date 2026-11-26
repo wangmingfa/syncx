@@ -8,6 +8,7 @@ import { useStatusContext } from '../composables/statusContext';
 import { getDirectDropTarget, setDirectDropTarget } from '../composables/directDropTarget';
 import { osIconLabel } from '../utils/os-icon';
 import { backendIconLabel } from '../utils/backend-icon';
+import { isNodeRuntime } from '../utils/format';
 import type { DeviceInfo } from '../types';
 
 const {
@@ -38,12 +39,18 @@ const {
 const qrOpen = ref(false);
 // 待确认的入站文件数:收件箱入口上的徽标,提醒对方正在等你点「接收」
 const pendingDirect = computed(() => status.value.direct?.pending.length ?? 0);
+/**
+ * 本机后端是否提供直发。Rust / MoonBit 后端还没有 `/api/direct`(ADR-0026 清单),
+ * 在这种情况下入口整个不渲染 —— 留着按钮只会让用户点了拿到 404 再看到「发送失败」,
+ * 把「这个后端没这功能」误读成「发送坏了」。对端能不能收仍由 direct.canDirect 判。
+ */
+const directSupported = computed(() => isNodeRuntime(status.value));
 // 拖拽悬停的设备 ID:在线可直发、或离线可排队的卡片都能接,避免拖到旧设备后松手没反应。
 const dragOverId = ref<string | null>(null);
 
 /** 能接收拖入的文件:在线直发,或离线先排队。 */
 function canSendTo(p: DeviceInfo): boolean {
-  return direct.canDirect(p) || direct.canQueue(p);
+  return directSupported.value && (direct.canDirect(p) || direct.canQueue(p));
 }
 
 function isFileDrag(e: DragEvent): boolean {
@@ -92,7 +99,7 @@ function onDrop(e: DragEvent, deviceId: string, canSend: boolean): void {
         <span class="badge">{{ status.devices.length }}</span>
       </div>
       <span class="col-head__actions">
-        <n-button size="small" quaternary class="inbox-toggle" :disabled="busy" title="查看收到的文本与文件" @click="direct.openInbox()">收件箱<span v-if="pendingDirect" class="inbox-badge">{{ pendingDirect }}</span></n-button>
+        <n-button v-if="directSupported" size="small" quaternary class="inbox-toggle" :disabled="busy" title="查看收到的文本与文件" @click="direct.openInbox()">收件箱<span v-if="pendingDirect" class="inbox-badge">{{ pendingDirect }}</span></n-button>
         <n-button v-if="status.devices.length > 0" class="add-toggle" :class="{ 'is-invisible': addDeviceOpen }" :disabled="busy" :tabindex="addDeviceOpen ? -1 : 0" @click="toggleAddDevice">＋ 添加</n-button>
       </span>
     </div>
@@ -190,34 +197,36 @@ function onDrop(e: DragEvent, deviceId: string, canSend: boolean): void {
         <!-- 重连紧挨状态标签:动作跟着它要修的那种状态走,也省掉下方一整行 -->
         <span class="item-actions">
           <!-- 直发只发给在线且宣告 direct1 的对端;旧版本给禁用按钮 + 明确升级提示,
-               避免「点了没反应」被误判成功能坏了。 -->
-          <n-button
-            v-if="direct.canDirect(p)"
-            size="small"
-            type="primary"
-            tertiary
-            class="btn-inline"
-            :disabled="busy"
-            title="发送文本或文件到对方收件箱；也可以把文件拖到这张卡片上"
-            @click="direct.openSend(p)"
-          >发送</n-button>
-          <n-tooltip v-else-if="p.online" :show-arrow="false" trigger="hover">
-            <template #trigger>
-              <n-button size="small" tertiary class="btn-inline" disabled>发送</n-button>
-            </template>
-            对方版本不支持直发,请升级后再试
-          </n-tooltip>
-          <!-- 离线设备也能发:内容先在本机排队,等它上线自动投递(24 小时内有效)。 -->
-          <n-button
-            v-else
-            size="small"
-            type="primary"
-            tertiary
-            class="btn-inline"
-            :disabled="busy"
-            title="对方离线：内容会先在本机排队，等它上线自动投递（24 小时内有效）"
-            @click="direct.openSend(p)"
-          >发送</n-button>
+               避免「点了没反应」被误判成功能坏了。本机后端不提供直发时整组不渲染。 -->
+          <template v-if="directSupported">
+            <n-button
+              v-if="direct.canDirect(p)"
+              size="small"
+              type="primary"
+              tertiary
+              class="btn-inline"
+              :disabled="busy"
+              title="发送文本或文件到对方收件箱；也可以把文件拖到这张卡片上"
+              @click="direct.openSend(p)"
+            >发送</n-button>
+            <n-tooltip v-else-if="p.online" :show-arrow="false" trigger="hover">
+              <template #trigger>
+                <n-button size="small" tertiary class="btn-inline" disabled>发送</n-button>
+              </template>
+              对方版本不支持直发,请升级后再试
+            </n-tooltip>
+            <!-- 离线设备也能发:内容先在本机排队,等它上线自动投递(24 小时内有效)。 -->
+            <n-button
+              v-else
+              size="small"
+              type="primary"
+              tertiary
+              class="btn-inline"
+              :disabled="busy"
+              title="对方离线：内容会先在本机排队，等它上线自动投递（24 小时内有效）"
+              @click="direct.openSend(p)"
+            >发送</n-button>
+          </template>
           <!-- 编辑只改对端 IP/端口,设备 ID 不变;与「移除」这类破坏性操作拉开 -->
           <n-button size="small" tertiary class="btn-inline" :disabled="busy" @click="openEditDevice(p)">编辑</n-button>
           <n-button

@@ -56,6 +56,10 @@ const queuedOnly = computed(() => {
 const submitLabel = computed(() => {
   if (props.direct.sending.value) return '发送中';
   const many = tab.value === 'file' ? props.direct.fileDrafts.value.length : 0;
+  // 打包只有一个文件时忽略开关(后端也按单文件走),文案跟着实际行为走。
+  if (many > 1 && props.direct.zipMode.value) {
+    return queuedOnly.value ? `排队打包 ${many} 个文件` : `打包发送 ${many} 个文件`;
+  }
   if (many > 1) return queuedOnly.value ? `排队 ${many} 个文件` : `发送 ${many} 个文件`;
   return queuedOnly.value ? '排队发送' : '发送';
 });
@@ -215,6 +219,14 @@ function submit(): void {
         </div>
       </div>
       <p v-else class="form-hint">还没有选择文件。</p>
+      <!-- 打包是可选开关:默认逐个投送(接收方拿到原始文件),小文件多时打包更省事。 -->
+      <n-checkbox
+        v-if="direct.fileDrafts.value.length > 1"
+        v-model:checked="direct.zipMode.value"
+        class="send-zip"
+        :disabled="direct.sending.value"
+      >打包成一个压缩包发送</n-checkbox>
+      <p v-if="direct.zipMode.value && direct.fileDrafts.value.length > 1" class="form-hint">对方只收到一个 .zip；只打包不压缩，包体上限 100 MB。</p>
       <p class="form-hint">单文件最大 100 MB、一次最多 20 个；也可以直接粘贴截图。对方需要点「接收」才会开始传输，文件落在其收件箱而非共享目录。</p>
     </div>
 
@@ -336,6 +348,11 @@ function submit(): void {
   gap: 4px;
   max-height: 168px;
   overflow-y: auto;
+}
+/* 打包开关:紧跟在文件清单后面,和清单算一组,不额外撑开段落间距。 */
+.send-zip {
+  margin-top: 6px;
+  font-size: 12px;
 }
 .send-file-row {
   display: flex;

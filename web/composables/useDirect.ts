@@ -49,6 +49,11 @@ export interface DirectApi {
   openInbox: () => void;
   textDraft: Ref<string>;
   fileDrafts: Ref<SendFileItem[]>;
+  /**
+   * 打包模式:一次发送多个文件时把它们压成一个 .zip 再投送(只发一份,对方只收一个文件)。
+   * 默认关 —— 接收方通常要的是原始文件,打包只在「几十个小文件想一次性搬走」时更省事。
+   */
+  zipMode: Ref<boolean>;
   /** 把选择/拖入的文件加入队列;空文件与超限文件跳过并提示。 */
   addFiles: (files: File[]) => void;
   removeFile: (key: string) => void;
@@ -100,6 +105,7 @@ export function useDirect(deps: CoreDeps & { copy: (text: string) => Promise<voi
   const inboxOpen = ref(false);
   const textDraft = ref('');
   const fileDrafts = ref<SendFileItem[]>([]);
+  const zipMode = ref(false);
   const sending = ref(false);
   const transfers = computed(() => deps.status.value.direct?.transfers ?? []);
   let fileSeq = 0;
@@ -241,6 +247,73 @@ export function useDirect(deps: CoreDeps & { copy: (text: string) => Promise<voi
     return outcomes(res, ids);
   }
 
+  /** 打包模式:只暂存,不投送(daemon 收进 inbox/.tmp/zip-<batch>/,等打包接口统一处理)。 */
+  async function uploadZipEntry(file: File, batch: string): Promise<void> {
+    const query = new URLSearchParams();
+    query.set('zip', batch);
+    query.set('name', file.name);
+    query.set('size', String(file.size));
+    await apiJson(`/api/direct/file?${query.toString()}`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/octet-stream' },
+      body: file,
+    });
+  }
+
+  /**
+   * 打包发送:逐个暂存 → 让 daemon 打成 zip → 一次性投送。
+   * 包体超过单文件上限(100MB)由后端拒绝,这里只如实转述原因。
+   */
+  async function sendAsZip(queue: SendFileItem[], ids: string[], batch: string): Promise<boolean> {
+    let staged = 0;
+    let current: SendFileItem | undefined;
+    try {
+      for (const item of queue) {
+        current = item;
+        item.state = 'sending';
+        item.error = undefined;
+        await uploadZipEntry(item.file, batch);
+        staged++;
+      }
+      const res = await apiPost<DirectBatchResponse>('/api/direct/zip', { batch, deviceIds: ids });
+      const results = outcomes(res, ids);
+      const failed = results.filter((r) => r.error);
+      const queued = results.filter((r) => r.id && r.queued);
+      if (failed.length) {
+        const reason = failed.map((r) => `${r.deviceId}：${r.error}`).join('；');
+        for (const item of queue) {
+          item.state = 'failed';
+          item.error = reason;
+        }
+        showToast(`打包发送失败：${reason}`, 'alert');
+        await deps.refreshStatus();
+        return false;
+      }
+      if (queued.length === results.length) {
+        for (const item of queue) item.state = 'queued';
+        showToast(`压缩包已排队（${queue.length} 个文件），设备上线后自动发送`);
+      } else {
+        for (const item of queue) item.state = 'done';
+        showToast(`已打包发送 ${queue.length} 个文件${queued.length ? `，${queued.length} 台离线已排队` : ''}`);
+      }
+      sendTarget.value = null;
+      selectedDevices.value = [];
+      fileDrafts.value = [];
+      zipMode.value = false;
+      await deps.refreshStatus();
+      return true;
+    } catch (e) {
+      const msg = errText(e, '打包发送失败');
+      if (current) {
+        current.state = 'failed';
+        current.error = msg;
+      }
+      showToast(staged ? `打包失败（已暂存 ${staged}/${queue.length} 个文件）：${msg}` : msg, 'alert');
+      await deps.refreshStatus();
+      return false;
+    }
+  }
+
   async function sendFile(deviceIds: string[]): Promise<boolean> {
     if (sending.value) return false;
     const ids = [...new Set(deviceIds.filter(Boolean))];
@@ -260,6 +333,8 @@ export function useDirect(deps: CoreDeps & { copy: (text: string) => Promise<voi
     let queuedFiles = 0;
     const failures: string[] = [];
     try {
+      // 只有一个文件时打包没有意义(多一层壳),按单选忽略开关。
+      if (zipMode.value && queue.length > 1) return await sendAsZip(queue, ids, batch);
       for (const item of queue) {
         item.state = 'sending';
         item.error = undefined;
@@ -395,6 +470,7 @@ export function useDirect(deps: CoreDeps & { copy: (text: string) => Promise<voi
     openInbox: () => { inboxOpen.value = true; },
     textDraft,
     fileDrafts,
+    zipMode,
     addFiles,
     removeFile,
     transfers,
