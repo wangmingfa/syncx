@@ -11,6 +11,10 @@
  *  - **json 与 data 分成两类**:json 用花括号(通用 JSON 图标),yaml/toml/ini/.env 这些
  *    通用配置用滑杆。两者若同用花括号,一屏里全是同一个图形,反而认不出哪个是 JSON。
  *  - **markdown 与 doc 分开**:md 用官方 mark(方块 + M + 下箭头),txt/rst/log 才是折角页。
+ *
+ * 末尾另有 `text` / `files` 两枚**不由文件名推导**的:直发收件箱里「一段文本」和「一批文件」
+ * 没有扩展名可看,由调用方通过 FileIcon 的 `kind` 覆盖显式指定。它们放在这里是为了
+ * 与其它图标共用同一套画法(13px 视框 / 满格图形 12px、currentColor、配色表)。
  */
 export type FileIconKind =
   // —— 代码:按语言(后缀)细分
@@ -43,7 +47,12 @@ export type FileIconKind =
   | 'media'
   | 'sheet'
   | 'pdf'
-  | 'file';
+  | 'file'
+  // —— 直发收件箱专有(不来自扩展名,由调用方显式指定)
+  /** 一段文本消息:气泡 + 两行字 */
+  | 'text'
+  /** 一次投送的一批文件:两张折角页叠着 */
+  | 'files';
 
 const EXT_KIND: Record<string, FileIconKind> = {
   // —— 代码:有专属图形的语言

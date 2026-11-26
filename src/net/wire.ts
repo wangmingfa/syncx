@@ -141,8 +141,10 @@ export type ControlMessage =
    * 文件字节不走这些 JSON 帧,走下面的 direct-file-chunk 二进制帧。 */
   /** 一段文本(≤64KB,UTF-8 字节数),接收方直接落收件箱并回 direct-result。 */
   | { kind: 'direct-text'; id: string; fromDeviceId: string; text: string; createdAt: number; version?: string; hostname?: string; platform?: string; runtime?: PeerRuntime }
-  /** 文件投送提议;接收方用户确认前不会写入任何字节(仅预建临时文件路径)。 */
-  | { kind: 'direct-file-offer'; id: string; fromDeviceId: string; name: string; size: number; sha256: string; createdAt: number; version?: string; hostname?: string; platform?: string; runtime?: PeerRuntime }
+  /** 文件投送提议;接收方用户确认前不会写入任何字节(仅预建临时文件路径)。
+   *  `batchId` 把同一次「发送 N 个文件」的几条提议串起来:接收方据此只弹一张卡、
+   *  一次确认全部接收。旧对端忽略这个字段,退回逐条确认(与升级前一致)。 */
+  | { kind: 'direct-file-offer'; id: string; fromDeviceId: string; name: string; size: number; sha256: string; createdAt: number; batchId?: string; version?: string; hostname?: string; platform?: string; runtime?: PeerRuntime }
   /** 接收方对提议的表态;accept=false 时 reason 为用户可读原因。
    *  `offset` 只在断点续传时出现 = 本机已落盘的字节数(必然是整片的整数倍),
    *  发送方据此把起点挪到对应片号,而不是从 0 重传。旧对端会忽略这个字段。 */

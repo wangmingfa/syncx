@@ -169,6 +169,7 @@ describe('device direct transfer', () => {
         content: async () => undefined,
         remove: async () => true,
         reply: () => true,
+        replyBatch: () => 0,
         sendText: (deviceId, text) => { sent.push(`${deviceId}:${text}`); return { id: `dt-${deviceId}`, queued: false }; },
         sendFile: () => ({ id: 'df-2', queued: false }),
         cancelQueued: () => true,
@@ -212,6 +213,7 @@ describe('device direct transfer', () => {
 
   it('HTTP:文件上传按流暂存,daemon 侧计算指纹,大小不符直接拒绝', async () => {
     let captured: { name: string; size: number; sha256: string; sourcePath: string } | undefined;
+    let capturedBatch: string | undefined;
     const sentTo: string[] = [];
     const configDir = tmp();
     const server = createControlServer({
@@ -223,8 +225,14 @@ describe('device direct transfer', () => {
         content: async () => undefined,
         remove: async () => true,
         reply: () => true,
+        replyBatch: () => 0,
         sendText: () => ({ id: 'dt-x', queued: false }),
-        sendFile: (deviceId, file) => { captured = file; sentTo.push(deviceId); return { id: `df-${deviceId}`, queued: false }; },
+        sendFile: (deviceId, file, batchId) => {
+          captured = file;
+          capturedBatch = batchId;
+          sentTo.push(deviceId);
+          return { id: `df-${deviceId}`, queued: false };
+        },
         cancelQueued: () => true,
       },
     });
@@ -248,7 +256,7 @@ describe('device direct transfer', () => {
 
     const data = Buffer.alloc(700 * 1024, 0x5a);
     const expected = createHash('sha256').update(data).digest('hex');
-    const ok = await post(`/api/direct/file?deviceIds=AAAA&deviceIds=BBBB&name=${encodeURIComponent('包 名.bin')}&size=${data.length}`, data);
+    const ok = await post(`/api/direct/file?deviceIds=AAAA&deviceIds=BBBB&name=${encodeURIComponent('包 名.bin')}&size=${data.length}&batch=db-abc123`, data);
     expect(ok.status, ok.text).toBe(200);
     expect(sentTo).toEqual(['AAAA', 'BBBB']);
     expect(JSON.parse(ok.text).results).toMatchObject([
@@ -258,10 +266,15 @@ describe('device direct transfer', () => {
     expect(captured?.name).toBe('包 名.bin');
     expect(captured?.size).toBe(data.length);
     expect(captured?.sha256).toBe(expected);
+    // 同一次发送的多个文件共用一个批次号,接收方据此合并成一张卡。
+    expect(capturedBatch).toBe('db-abc123');
     expect(readFileSync(captured!.sourcePath).equals(data)).toBe(true);
 
     const bad = await post('/api/direct/file?deviceId=AAAA&name=x.bin&size=10', data);
     expect(bad.status).toBe(400);
+    const badBatch = await post(`/api/direct/file?deviceId=AAAA&name=x.bin&size=${data.length}&batch=${encodeURIComponent('坏 批次')}`, data);
+    expect(badBatch.status).toBe(400);
+    expect(JSON.parse(badBatch.text).error).toContain('批次号');
     server.close();
   });
 
@@ -318,6 +331,7 @@ describe('device direct transfer', () => {
 
   it('HTTP:另存必须提权,服务端校验失败回中文原因', async () => {
     let captured: string | undefined;
+    const batchCalls: boolean[] = [];
     const configDir = tmp();
     const server = createControlServer({
       token: 'secret',
@@ -332,6 +346,7 @@ describe('device direct transfer', () => {
         content: async () => undefined,
         remove: async () => true,
         reply: (_id, _accept, _reason, saveDir) => { captured = saveDir; return true; },
+        replyBatch: (_batchId, accept, _reason, saveDir) => { captured = saveDir; batchCalls.push(accept); return 2; },
         sendText: () => ({ id: 'dt-x', queued: false }),
         sendFile: () => ({ id: 'df-x', queued: false }),
         cancelQueued: () => true,
@@ -380,6 +395,15 @@ describe('device direct transfer', () => {
 
     const rejectWithDir = await post({ id: 'df-1', accept: false, saveTo: '/downloads' }, cookie);
     expect(rejectWithDir.status).toBe(400);
+
+    // 按组确认:batchId 走 replyBatch,回执带处理条数
+    const byBatch = await post({ batchId: 'db-1', accept: true }, cookie);
+    expect(byBatch.status, byBatch.text).toBe(200);
+    expect(JSON.parse(byBatch.text)).toMatchObject({ ok: true, count: 2 });
+    expect(batchCalls).toEqual([true]);
+    // id 与 batchId 同时给 = 含混请求,直接拒绝
+    const both = await post({ id: 'df-1', batchId: 'db-1', accept: true }, cookie);
+    expect(both.status).toBe(400);
     server.close();
   });
 
@@ -549,6 +573,107 @@ describe('device direct transfer', () => {
     }
     expect(() => a.sendText('B', '再来一条', undefined)).toThrow(/排队已满/);
     a.close();
+  });
+
+  it('多文件成组:同批待确认带同一个组号,一次确认全部接收', () => {
+    const a = createDirectService({ configDir: tmp() });
+    const b = createDirectService({ configDir: tmp() });
+    const { txA, txB } = pair(a, b);
+    const batchId = 'db-batch-1';
+    const files = ['一.txt', '二.txt', '三.txt'].map((name, i) => {
+      const data = Buffer.from(`第 ${i + 1} 份内容 ` + 'x'.repeat(300));
+      const source = join(tmp(), name);
+      writeFileSync(source, data);
+      return { name, data, source };
+    });
+    const ids = files.map((f) => a.sendFile('B', {
+      name: f.name,
+      sourcePath: f.source,
+      size: f.data.length,
+      sha256: createHash('sha256').update(f.data).digest('hex'),
+    }, txA, batchId).id);
+
+    const pending = b.snapshot().pending;
+    expect(pending).toHaveLength(3);
+    expect(pending.map((p) => p.batchId)).toEqual([batchId, batchId, batchId]);
+    // 没有组号时字段不出现(旧发送端 / 单条投送的快照形状不变)
+    expect(pending[0]).not.toHaveProperty('batchId', undefined);
+
+    expect(b.replyBatch(batchId, true, txB)).toBe(3);
+    expect(b.snapshot().pending).toHaveLength(0);
+    const received = b.snapshot().inbox.map((i) => (i.kind === 'file' ? i.name : '')).sort();
+    expect(received).toEqual(files.map((f) => f.name).sort());
+    for (const f of files) {
+      const item = b.snapshot().inbox.find((i) => i.kind === 'file' && i.name === f.name);
+      expect(readFileSync(item?.path ?? '').equals(f.data)).toBe(true);
+    }
+    expect(a.snapshot().transfers.filter((t) => ids.includes(t.id)).map((t) => t.state)).toEqual(['done', 'done', 'done']);
+    // 组已处理完:再确认一次是空操作,不会重复回执
+    expect(b.replyBatch(batchId, true, txB)).toBe(0);
+    a.close();
+    b.close();
+  });
+
+  it('整组拒绝:待确认清空,发送方几条都记为被拒', () => {
+    const a = createDirectService({ configDir: tmp() });
+    const b = createDirectService({ configDir: tmp() });
+    const { txA, txB } = pair(a, b);
+    const batchId = 'db-batch-2';
+    const ids = ['a.bin', 'b.bin'].map((name) => {
+      const data = Buffer.from(name);
+      const source = join(tmp(), name);
+      writeFileSync(source, data);
+      return a.sendFile('B', {
+        name,
+        sourcePath: source,
+        size: data.length,
+        sha256: createHash('sha256').update(data).digest('hex'),
+      }, txA, batchId).id;
+    });
+    expect(b.replyBatch(batchId, false, txB)).toBe(2);
+    expect(b.snapshot().pending).toHaveLength(0);
+    expect(b.snapshot().inbox).toHaveLength(0);
+    const out = a.snapshot().transfers.filter((t) => ids.includes(t.id));
+    expect(out.map((t) => t.state)).toEqual(['failed', 'failed']);
+    expect(out[0]?.error).toContain('拒绝');
+    a.close();
+    b.close();
+  });
+
+  it('整组另存:每个文件都落到指定目录,收件箱只留回执', () => {
+    const a = createDirectService({ configDir: tmp() });
+    const bConfig = tmp();
+    const b = createDirectService({ configDir: bConfig });
+    const { txA, txB } = pair(a, b);
+    const batchId = 'db-batch-3';
+    const target = tmp();
+    const files = ['r1.txt', 'r2.txt'].map((name) => {
+      const data = Buffer.from(`${name} 的内容`);
+      const source = join(tmp(), name);
+      writeFileSync(source, data);
+      return { name, data, source };
+    });
+    for (const f of files) {
+      a.sendFile('B', {
+        name: f.name,
+        sourcePath: f.source,
+        size: f.data.length,
+        sha256: createHash('sha256').update(f.data).digest('hex'),
+      }, txA, batchId);
+    }
+    expect(b.replyBatch(batchId, true, txB, undefined, target)).toBe(2);
+    const saved = b.snapshot().inbox;
+    expect(saved).toHaveLength(2);
+    for (const f of files) {
+      const item = saved.find((i) => i.kind === 'file' && i.name === f.name);
+      expect(item && 'external' in item ? item.external : false).toBe(true);
+      expect(item?.path?.startsWith(target)).toBe(true);
+      expect(readFileSync(item?.path ?? '').equals(f.data)).toBe(true);
+    }
+    // 收件箱目录里不该再留副本
+    expect(existsSync(join(bConfig, 'inbox', 'files', 'r1.txt'))).toBe(false);
+    a.close();
+    b.close();
   });
 
   it('取消排队:回收暂存文件并记为已取消(不是失败)', () => {

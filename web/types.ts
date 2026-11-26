@@ -127,6 +127,8 @@ export interface DirectPending {
   size: number;
   sha256: string;
   createdAt: number;
+  /** 同一次「发送 N 个文件」的组号:同组的待确认项合并成一张卡,一次确认全部。 */
+  batchId?: string;
 }
 
 export interface DirectTransfer {

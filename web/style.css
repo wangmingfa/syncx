@@ -3070,6 +3070,10 @@ html[data-theme='dark'] .conflict-state-diff {
 .cmp-icon--sheet { color: #2f9e6f; }
 .cmp-icon--pdf { color: #c0504d; }
 .cmp-icon--file { color: var(--muted); }
+/* 直发收件箱专用的两枚:文本消息取灰蓝(和 doc 同族但不撞 code/ts 的蓝),
+   一批文件沿用 doc 的灰蓝再压暗一档 —— 两者都不与具体语言色抢注意力。 */
+.cmp-icon--text { color: #5a6ea8; }
+.cmp-icon--files { color: #4d5f73; }
 
 .cmp-row.is-dir .cmp-icon .cmp-svg {
   transition: transform 0.12s ease;

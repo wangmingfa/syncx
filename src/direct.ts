@@ -60,6 +60,8 @@ export interface DirectPending {
   size: number;
   sha256: string;
   createdAt: number;
+  /** 同一次「发送 N 个文件」的组号:接收方按它合并成一张卡,一次确认全部。 */
+  batchId?: string;
 }
 
 export interface DirectTransfer {
@@ -115,7 +117,10 @@ export interface DirectApi {
   /** saveDir 给出时,收齐后落到该目录而不是收件箱(调用方已完成提权与路径校验)。 */
   reply(id: string, accept: boolean, reason?: string, saveDir?: string): boolean;
   sendText(deviceId: string, text: string): DirectSendAck;
-  sendFile(deviceId: string, file: { name: string; sourcePath: string; size: number; sha256: string }): DirectSendAck;
+  /** batchId 把同一次多文件投送的几条提议串起来(缺省 = 各算各的)。 */
+  sendFile(deviceId: string, file: { name: string; sourcePath: string; size: number; sha256: string }, batchId?: string): DirectSendAck;
+  /** 按组一次性确认/拒绝:返回处理的条数(0 = 该组已不存在)。 */
+  replyBatch(batchId: string, accept: boolean, reason?: string, saveDir?: string): number;
   /** 取消一条还在排队的投送(暂存文件一并回收);不是排队态返回 false。 */
   cancelQueued(id: string): boolean;
 }
@@ -182,6 +187,8 @@ interface OutgoingTransfer {
   queuedAt?: number;
   /** 排队文本的正文。文本没有本地暂存文件,不留在内存/磁盘上就没法补发。 */
   text?: string;
+  /** 多文件成组投送的组号;提议(含重发/排队补发)都带上,接收方据此合并展示。 */
+  batchId?: string;
   /** 文件专用:分期中的本地暂存文件、指纹、分片账本。 */
   sourcePath?: string;
   fd?: number;
@@ -203,6 +210,8 @@ interface IncomingTransfer {
   tmpPath: string;
   /** 接收方在确认时指定的另存目录;undefined = 落收件箱。 */
   saveDir?: string;
+  /** 发送方的多文件组号;同一组的待确认项在 UI 里合并成一张卡。 */
+  batchId?: string;
   state: 'pending' | 'transferring' | 'paused';
   pausedAt?: number;
   fd?: number;
@@ -244,6 +253,7 @@ export interface DirectService {
     deviceId: string,
     file: { name: string; sourcePath: string; size: number; sha256: string },
     tx?: DirectTransport,
+    batchId?: string,
   ): DirectSendAck;
   /** 处理经会话验签归属后的控制消息。 */
   handleControl(message: DirectControlMessage, from: string, tx: DirectTransport): void;
@@ -251,6 +261,8 @@ export interface DirectService {
   handleChunk(frame: { header: Record<string, unknown>; body: Buffer }, from: string, tx: DirectTransport): void;
   /** 接收方确认 / 拒绝一个待确认文件;saveDir 给出时落到用户目录而非收件箱。 */
   reply(id: string, accept: boolean, tx: DirectTransport, reason?: string, saveDir?: string): boolean;
+  /** 按 batchId 成组确认:同一次多文件投送的几条提议一起处理,返回条数。 */
+  replyBatch(batchId: string, accept: boolean, tx: DirectTransport, reason?: string, saveDir?: string): number;
   /** 连接掉线:在途传输转为暂停(半截字节保留),等重连续传;无续传能力时直接失败。 */
   onPeerOffline(deviceId: string): void;
   /** 新会话建立:把暂停中的投送重新提议一次,并补发离线期间排队的内容(无对应项时是空操作)。 */
@@ -329,6 +341,7 @@ export function createDirectService(deps: DirectServiceDeps): DirectService {
     text?: string;
     sourcePath?: string;
     sha256?: string;
+    batchId?: string;
   }
 
   function readQueue(): QueuedRecord[] {
@@ -370,6 +383,7 @@ export function createDirectService(deps: DirectServiceDeps): DirectService {
       ...(o.kind === 'text' ? { text: o.text ?? '' } : {}),
       ...(o.sourcePath ? { sourcePath: o.sourcePath } : {}),
       ...(o.sha256 ? { sha256: o.sha256 } : {}),
+      ...(o.batchId ? { batchId: o.batchId } : {}),
     }));
     const tmp = `${queuePath}.tmp`;
     writeFileSync(tmp, JSON.stringify(records, null, 2), 'utf8');
@@ -397,6 +411,7 @@ export function createDirectService(deps: DirectServiceDeps): DirectService {
         ...(q.text ? { text: q.text } : {}),
         ...(q.sourcePath ? { sourcePath: q.sourcePath } : {}),
         ...(q.sha256 ? { sha256: q.sha256 } : {}),
+        ...(q.batchId ? { batchId: q.batchId } : {}),
         ...(q.kind === 'file' ? { totalChunks: Math.ceil(q.size / DIRECT_CHUNK_BYTES) } : {}),
         acked: 0,
         nextSeq: 0,
@@ -496,6 +511,7 @@ export function createDirectService(deps: DirectServiceDeps): DirectService {
       size: out.size,
       sha256: out.sha256 ?? '',
       createdAt: out.createdAt,
+      ...(out.batchId ? { batchId: out.batchId } : {}),
     };
   }
 
@@ -876,6 +892,33 @@ export function createDirectService(deps: DirectServiceDeps): DirectService {
   }, 1000);
   timer.unref();
 
+  /** 单条待确认项的确认/拒绝。批量入口也走这里 —— 两条路径分叉过一次就很难对齐。 */
+  function replyOne(inc: IncomingTransfer, accept: boolean, tx: DirectTransport, reason?: string, saveDir?: string): boolean {
+    if (inc.state !== 'pending') return false;
+    if (!accept) {
+      tx.control(inc.from, { kind: 'direct-reply', id: inc.id, fromDeviceId: '', accept: false, reason: reason ?? '对方拒绝了接收' });
+      cleanupIncoming(inc);
+      notify();
+      return true;
+    }
+    // 只在真正开始接收时记下另存目录;拒绝路径完全不碰用户文件系统。
+    inc.saveDir = saveDir;
+    inc.state = 'transferring';
+    inc.lastProgressAt = Date.now();
+    try {
+      inc.fd = openSync(inc.tmpPath, 'w');
+      inc.hash = createHash('sha256');
+    } catch (err) {
+      tx.control(inc.from, { kind: 'direct-result', id: inc.id, fromDeviceId: '', ok: false, error: `创建临时文件失败:${err instanceof Error ? err.message : String(err)}` });
+      cleanupIncoming(inc);
+      notify();
+      return true;
+    }
+    tx.control(inc.from, { kind: 'direct-reply', id: inc.id, fromDeviceId: '', accept: true });
+    notify();
+    return true;
+  }
+
   return {
     snapshot() {
       const transfer = (o: OutgoingTransfer): DirectTransfer => ({
@@ -893,7 +936,15 @@ export function createDirectService(deps: DirectServiceDeps): DirectService {
         inbox: items.slice(0, 100).map((i) => ({ ...i })),
         pending: [...incoming.values()]
           .filter((i) => i.state === 'pending')
-          .map((i) => ({ id: i.id, from: i.from, name: i.name, size: i.size, sha256: i.sha256, createdAt: i.createdAt })),
+          .map((i) => ({
+            id: i.id,
+            from: i.from,
+            name: i.name,
+            size: i.size,
+            sha256: i.sha256,
+            createdAt: i.createdAt,
+            ...(i.batchId ? { batchId: i.batchId } : {}),
+          })),
         transfers: [
           ...[...outgoing.values()].filter((o) => !o.finishedAt || Date.now() - o.finishedAt < FINISHED_TTL_MS).map(transfer),
           ...[...incoming.values()].filter((i) => i.state !== 'pending').map((i): DirectTransfer => ({
@@ -952,7 +1003,7 @@ export function createDirectService(deps: DirectServiceDeps): DirectService {
       return { id: out.id, queued: false };
     },
 
-    sendFile(deviceId, file, tx) {
+    sendFile(deviceId, file, tx, batchId) {
       if (file.size <= 0 || file.size > DIRECT_MAX_FILE_BYTES) {
         throw new Error(`文件大小必须在 1 ~ ${DIRECT_MAX_FILE_BYTES} 字节之间`);
       }
@@ -967,18 +1018,11 @@ export function createDirectService(deps: DirectServiceDeps): DirectService {
         sourcePath: file.sourcePath,
         sha256: file.sha256,
         totalChunks: Math.ceil(file.size / DIRECT_CHUNK_BYTES),
+        ...(batchId && isSafeId(batchId) ? { batchId } : {}),
       }, !tx);
       if (!tx) return { id: out.id, queued: true };
       lastTx.set(out.id, tx);
-      sendControl(tx, deviceId, {
-        kind: 'direct-file-offer',
-        id: out.id,
-        fromDeviceId: '',
-        name: out.name!,
-        size: out.size,
-        sha256: file.sha256,
-        createdAt: out.createdAt,
-      });
+      sendControl(tx, deviceId, offerMessage(out));
       return { id: out.id, queued: false };
     },
 
@@ -1009,6 +1053,7 @@ export function createDirectService(deps: DirectServiceDeps): DirectService {
             tx.control(from, { kind: 'direct-result', id: message.id, fromDeviceId: '', ok: false, error: '本机收件箱空间不足' });
             return;
           }
+          const batchId = typeof message.batchId === 'string' && isSafeId(message.batchId) ? message.batchId : undefined;
           incoming.set(message.id, {
             id: message.id,
             from,
@@ -1016,6 +1061,7 @@ export function createDirectService(deps: DirectServiceDeps): DirectService {
             size: message.size,
             sha256: message.sha256,
             createdAt: message.createdAt || Date.now(),
+            ...(batchId ? { batchId } : {}),
             tmpPath: join(tmpDir, `in-${message.id}`),
             state: 'pending',
             nextSeq: 0,
@@ -1131,29 +1177,25 @@ export function createDirectService(deps: DirectServiceDeps): DirectService {
 
     reply(id, accept, tx, reason, saveDir) {
       const inc = incoming.get(id);
-      if (!inc || inc.state !== 'pending') return false;
-      if (!accept) {
-        tx.control(inc.from, { kind: 'direct-reply', id, fromDeviceId: '', accept: false, reason: reason ?? '对方拒绝了接收' });
-        cleanupIncoming(inc);
-        notify();
-        return true;
+      if (!inc) return false;
+      return replyOne(inc, accept, tx, reason, saveDir);
+    },
+
+    replyBatch(batchId, accept, tx, reason, saveDir) {
+      if (!isSafeId(batchId)) return 0;
+      // 一组只属于一个发送方(组号由发送端每次发送生成)。显式按 from 收紧:
+      // 万一两个对端撞了组号,也只处理当前会话这台设备的,不会把 accept 发给别人。
+      const first = [...incoming.values()].find((i) => i.batchId === batchId && i.state === 'pending');
+      if (!first) return 0;
+      // 按到达顺序处理:虽然传输会并行,拒绝/接受的先后仍与发送方的选择顺序一致。
+      const group = [...incoming.values()]
+        .filter((i) => i.batchId === batchId && i.state === 'pending' && i.from === first.from)
+        .sort((a, b) => a.createdAt - b.createdAt);
+      let handled = 0;
+      for (const inc of group) {
+        if (replyOne(inc, accept, tx, reason, saveDir)) handled++;
       }
-      // 只在真正开始接收时记下另存目录;拒绝路径完全不碰用户文件系统。
-      inc.saveDir = saveDir;
-      inc.state = 'transferring';
-      inc.lastProgressAt = Date.now();
-      try {
-        inc.fd = openSync(inc.tmpPath, 'w');
-        inc.hash = createHash('sha256');
-      } catch (err) {
-        tx.control(inc.from, { kind: 'direct-result', id, fromDeviceId: '', ok: false, error: `创建临时文件失败:${err instanceof Error ? err.message : String(err)}` });
-        cleanupIncoming(inc);
-        notify();
-        return true;
-      }
-      tx.control(inc.from, { kind: 'direct-reply', id, fromDeviceId: '', accept: true });
-      notify();
-      return true;
+      return handled;
     },
 
     onPeerOffline(deviceId) {

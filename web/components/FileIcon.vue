@@ -1,6 +1,6 @@
 <script setup lang="ts">
 /**
- * 对比表的行图标:目录 = 展开箭头;文件 = 按后缀区分的类型图标。
+ * 文件行图标(对比表、文件对比弹窗、直发收件箱):目录 = 展开箭头;文件 = 按后缀区分的类型图标。
  *
  * 内联 SVG(无第三方图标库),描边用 currentColor,颜色由 .cmp-icon--<kind> 指定(见 style.css)。
  *
@@ -11,7 +11,7 @@
  * 镂空一律不能叠白色图形:白色只在白底上碰巧对,行底色一变(悬停/差异行)就露白。
  */
 import { computed, useId } from 'vue';
-import { fileIconKind } from '../utils/file-icon';
+import { fileIconKind, type FileIconKind } from '../utils/file-icon';
 
 /**
  * MoonBit 图标的 mask id。mask 的 id 在整篇文档里必须唯一,而对比页会把同一个图标
@@ -24,13 +24,19 @@ import { fileIconKind } from '../utils/file-icon';
 const moonbitMaskId = `mbt-mask-${useId()}`;
 
 const props = defineProps<{
-  name: string;
+  /** 文件名:按后缀推导图标;仅在 kind 未显式给出时使用。 */
+  name?: string;
   isDir?: boolean;
   /** 仅目录有意义:折叠时箭头朝右,展开朝下。 */
   collapsed?: boolean;
+  /**
+   * 显式指定图标类别,跳过按文件名推导。用于没有扩展名的载体:
+   * 直发收件箱里的「文本」与「一批文件」。
+   */
+  kind?: FileIconKind;
 }>();
 
-const kind = computed(() => fileIconKind(props.name));
+const kind = computed(() => props.kind ?? fileIconKind(props.name ?? ''));
 </script>
 
 <template>
@@ -231,6 +237,23 @@ const kind = computed(() => fileIconKind(props.name));
       <path d="M4 2h5l3 3v9H4z" />
       <path d="M9 2v3h3" />
       <path d="M6 10.6h4" stroke-width="2.4" />
+    </svg>
+
+    <!-- 文本消息:对话气泡 + 两行字。用于直发收件箱里的「文本」条目 —— 那里没有文件名,
+         借用 doc 的折角页会和普通 .txt 混成一片,气泡才是「一句话」的通用隐喻。
+         与 file 系同用 12px 视框(气泡几乎占满 16 格,按 13px 画会比旁边的文件图标大一圈)。 -->
+    <svg v-else-if="kind === 'text'" class="cmp-svg cmp-svg--file" viewBox="0 0 16 16">
+      <path d="M3.8 3.2h8.4a1.6 1.6 0 0 1 1.6 1.6v4.8a1.6 1.6 0 0 1-1.6 1.6H6L4.2 13.8v-2.6h-.4a1.6 1.6 0 0 1-1.6-1.6V4.8a1.6 1.6 0 0 1 1.6-1.6Z" />
+      <path d="M5 6.3h6M5 9.1h3.6" />
+    </svg>
+
+    <!-- 一批文件:两张折角页叠着(后一张只露出上、右、下三边 —— 左边缘让前一张挡住,
+         不画;也不像叠白色矩形那样只在白底上成立)。用于「N 个文件」的合并卡片。 -->
+    <svg v-else-if="kind === 'files'" class="cmp-svg cmp-svg--file" viewBox="0 0 16 16">
+      <path d="M5.6 2.2h4.3l2.7 2.7v5.5h-2.4" />
+      <path d="M9.9 2.2v2.7h2.7" />
+      <path d="M3.2 5.6h4.3l2.7 2.7v5.5H3.2z" />
+      <path d="M7.5 5.6v2.7h2.7" />
     </svg>
 
     <!-- 通用文件:空白折角页 -->

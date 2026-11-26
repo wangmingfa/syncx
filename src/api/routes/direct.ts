@@ -147,12 +147,15 @@ export async function tryDirectRoutes(
     return true;
   }
 
-  // POST /api/direct/reply : 接收方确认/拒绝一个待确认文件
+  // POST /api/direct/reply : 接收方确认/拒绝待确认文件。id = 单条;batchId = 同一次多文件投送整组
   if (req.method === 'POST' && path === '/api/direct/reply') {
     try {
-      const body = JSON.parse(await readBody(req)) as { id?: unknown; accept?: unknown; reason?: unknown; saveTo?: unknown };
-      if (typeof body.id !== 'string' || typeof body.accept !== 'boolean') {
-        sendJson(res, 400, { error: '缺少 id 或 accept' });
+      const body = JSON.parse(await readBody(req)) as { id?: unknown; batchId?: unknown; accept?: unknown; reason?: unknown; saveTo?: unknown };
+      const id = typeof body.id === 'string' ? body.id.trim() : '';
+      const batchId = typeof body.batchId === 'string' ? body.batchId.trim() : '';
+      // 二者取其一:id 是单条, batchId 是整组。同时给会让「到底处理了几条」变得含混。
+      if (typeof body.accept !== 'boolean' || (!id && !batchId) || (id && batchId)) {
+        sendJson(res, 400, { error: '需要 id 或 batchId（二者取其一）以及 accept' });
         return true;
       }
       let saveDir: string | undefined;
@@ -176,8 +179,14 @@ export async function tryDirectRoutes(
         // 校验通过才续期:失败的请求不该靠错误输入延长提权窗口。
         reissueElevation(res);
       }
-      const ok = direct.reply(body.id, body.accept, typeof body.reason === 'string' ? body.reason : undefined, saveDir);
-      sendJson(res, ok ? 200 : 404, ok ? { ok: true } : { error: '待确认项不存在或已处理' });
+      const reason = typeof body.reason === 'string' ? body.reason : undefined;
+      if (batchId) {
+        const count = direct.replyBatch(batchId, body.accept, reason, saveDir);
+        sendJson(res, count > 0 ? 200 : 404, count > 0 ? { ok: true, count } : { error: '该组待确认文件不存在或已处理' });
+        return true;
+      }
+      const ok = direct.reply(id, body.accept, reason, saveDir);
+      sendJson(res, ok ? 200 : 404, ok ? { ok: true, count: 1 } : { error: '待确认项不存在或已处理' });
     } catch (e) {
       fail(res, e);
     }
@@ -216,18 +225,29 @@ export async function tryDirectRoutes(
     return true;
   }
 
-  // POST /api/direct/file?deviceIds=&name=&size= : 流式暂存一次 + 发起多设备文件直发
+  // POST /api/direct/file?deviceIds=&name=&size=&batch= : 流式暂存一次 + 发起多设备文件直发
   if (req.method === 'POST' && path === '/api/direct/file') {
     const url = new URL(req.url ?? '/', 'http://localhost');
     const ids = parseTargets(url.searchParams.get('deviceId'), url.searchParams.getAll('deviceIds'));
     const name = url.searchParams.get('name') ?? '';
     const size = Number(url.searchParams.get('size'));
+    // 批次号由前端每次「发送」生成:同一次投的多个文件共用,接收方据此合并成一张卡。
+    const batch = url.searchParams.get('batch') ?? '';
+    // 早退时把请求体读空再回:客户端还在写一个几十 MB 的文件,直接回包会让它收到
+    // ECONNRESET 而不是这条中文原因。
     if (!ids.length || ids.length > DIRECT_MAX_TARGETS || !name || !Number.isInteger(size) || size <= 0 || size > DIRECT_MAX_FILE_BYTES) {
       sendJson(res, 400, { error: '需要 1 ~ 20 台目标设备及合法的文件参数' });
+      req.resume();
+      return true;
+    }
+    if (batch && !/^[a-zA-Z0-9_-]{1,64}$/.test(batch)) {
+      sendJson(res, 400, { error: '批次号格式不正确' });
+      req.resume();
       return true;
     }
     if (!deps.configDir) {
       sendJson(res, 503, { error: '未配置数据目录,无法暂存待发文件' });
+      req.resume();
       return true;
     }
     // direct 服务正常会在构造时建好这个目录;路由仍自己兜一层,
@@ -240,7 +260,7 @@ export async function tryDirectRoutes(
       const file = { name, sourcePath: staging, size, sha256 };
       let started = false;
       const results = dispatch(ids, (deviceId) => {
-        const ack = direct.sendFile(deviceId, file);
+        const ack = direct.sendFile(deviceId, file, batch || undefined);
         started = true;
         return ack;
       });
@@ -249,6 +269,9 @@ export async function tryDirectRoutes(
       if (!started) rmSync(staging, { force: true });
       sendBatch(res, ids, results);
     } catch (e) {
+      // 请求体没读完就报错(超长 / 大小不符)时,这条连接不能留着复用:
+      // 残留的字节会被当成下一个请求的开头,客户端看到的是 ECONNRESET 而不是这条原因。
+      res.shouldKeepAlive = false;
       rmSync(staging, { force: true });
       fail(res, e);
     }

@@ -974,11 +974,18 @@ export async function run(args: ParsedArgs): Promise<void> {
         if (why === 'offline') return direct.sendText(deviceId, text);
         throw new Error(directUnavailableText(why));
       },
-      sendFile: (deviceId, file) => {
+      replyBatch: (batchId, accept, reason, saveDir) => {
+        // 一组的几条提议一定来自同一个发送方(组号由发送端每次发送生成),取第一条的会话即可。
+        const first = direct.snapshot().pending.find((p) => p.batchId === batchId);
+        const tx = first ? manager.directTransport(first.from) : undefined;
+        if (!tx) throw new Error('发送方已离线或不支持直发');
+        return direct.replyBatch(batchId, accept, tx, reason, saveDir);
+      },
+      sendFile: (deviceId, file, batchId) => {
         const tx = manager.directTransport(deviceId);
-        if (tx) return direct.sendFile(deviceId, file, tx);
+        if (tx) return direct.sendFile(deviceId, file, tx, batchId);
         const why = manager.directAvailability(deviceId);
-        if (why === 'offline') return direct.sendFile(deviceId, file);
+        if (why === 'offline') return direct.sendFile(deviceId, file, undefined, batchId);
         throw new Error(directUnavailableText(why));
       },
       cancelQueued: (id) => direct.cancelQueued(id),

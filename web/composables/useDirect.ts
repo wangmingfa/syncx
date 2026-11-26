@@ -66,6 +66,8 @@ export interface DirectApi {
   sendFile: (deviceIds: string[]) => Promise<boolean>;
   /** saveTo 给出时走提权门(由 UI 负责),文件另存到 daemon 机器的该目录。 */
   reply: (id: string, accept: boolean, saveTo?: string) => Promise<boolean>;
+  /** 一次投送的多文件成组确认:接收方只点一次,后端逐条 accept。 */
+  replyBatch: (batchId: string, accept: boolean, saveTo?: string) => Promise<boolean>;
   /** 取消一条还在排队的投送(设备离线时才有这个入口)。 */
   cancelSend: (id: string) => Promise<void>;
   removeItem: (id: string) => Promise<void>;
@@ -219,13 +221,18 @@ export function useDirect(deps: CoreDeps & { copy: (text: string) => Promise<voi
     }
   }
 
-  /** 发一个文件到所有选中设备(不改队列状态),返回每台的结果供逐项汇总。 */
-  async function uploadFile(file: File, ids: string[]): Promise<SendOutcome[]> {
+  /**
+   * 发一个文件到所有选中设备(不改队列状态),返回每台的结果供逐项汇总。
+   * batch 把同一次「发送 N 个文件」串起来:接收方只弹一张卡、一次确认,
+   * 而不是每来一个文件就打断一次。
+   */
+  async function uploadFile(file: File, ids: string[], batch: string): Promise<SendOutcome[]> {
     // 指纹由 daemon 在暂存时计算:局域网 HTTP 下浏览器没有 crypto.subtle。
     const query = new URLSearchParams();
     for (const id of ids) query.append('deviceIds', id);
     query.set('name', file.name);
     query.set('size', String(file.size));
+    query.set('batch', batch);
     const res = await apiJson<DirectBatchResponse>(`/api/direct/file?${query.toString()}`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/octet-stream' },
@@ -247,6 +254,8 @@ export function useDirect(deps: CoreDeps & { copy: (text: string) => Promise<voi
       return false;
     }
     sending.value = true;
+    // 一次「发送」= 一个批次:队列里的每个文件都带同一个组号,接收方那边只弹一张卡。
+    const batch = `db-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`;
     let okFiles = 0;
     let queuedFiles = 0;
     const failures: string[] = [];
@@ -255,7 +264,7 @@ export function useDirect(deps: CoreDeps & { copy: (text: string) => Promise<voi
         item.state = 'sending';
         item.error = undefined;
         try {
-          const results = await uploadFile(item.file, ids);
+          const results = await uploadFile(item.file, ids, batch);
           const failed = results.filter((r) => r.error);
           if (failed.length) {
             item.state = 'failed';
@@ -301,6 +310,22 @@ export function useDirect(deps: CoreDeps & { copy: (text: string) => Promise<voi
         ...(saveTo ? { saveTo } : {}),
       });
       showToast(accept ? (saveTo ? '已接收,文件将保存到指定目录' : '已接收,文件传输中') : '已拒绝');
+      await deps.refreshStatus();
+      return true;
+    } catch (e) {
+      showToast(errText(e, '操作失败'), 'alert');
+      return false;
+    }
+  }
+
+  async function replyBatch(batchId: string, accept: boolean, saveTo?: string): Promise<boolean> {
+    try {
+      await apiPost('/api/direct/reply', {
+        batchId,
+        accept,
+        ...(saveTo ? { saveTo } : {}),
+      });
+      showToast(accept ? (saveTo ? '已接收,文件将保存到指定目录' : '已接收,文件开始传输') : '已拒绝');
       await deps.refreshStatus();
       return true;
     } catch (e) {
@@ -380,6 +405,7 @@ export function useDirect(deps: CoreDeps & { copy: (text: string) => Promise<voi
     sendText,
     sendFile,
     reply,
+    replyBatch,
     cancelSend,
     removeItem,
     copyItem,
