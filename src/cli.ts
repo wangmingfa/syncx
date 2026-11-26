@@ -30,7 +30,7 @@ import { getLanAddresses, formatHost } from './net/addresses.js';
 import { isSelfPeerUrl, localInterfaceAddresses } from './net/peer-address.js';
 import { createControlServer, type ControlServerDeps } from './api.js';
 import { createStatusHub } from './status-hub.js';
-import { createDirectService } from './direct.js';
+import { createDirectService, type DirectTransport } from './direct.js';
 import { resolveDirectSaveDir } from './direct-save-path.js';
 import { createWebhookNotifier } from './webhook.js';
 import { createPowerGuard } from './powerguard.js';
@@ -435,9 +435,13 @@ export async function run(args: ParsedArgs): Promise<void> {
   });
   // 设备间直发服务:状态变更走同一条 WS 推送通道。它只持有收发协议与落盘,
   // 会话由 manager 注入(见下方 SessionManagerDeps.direct 与 controlDeps.direct)。
+  // 直发续传要「现取一台设备的会话通道」,而 manager 在下面才创建:先留一个可回填的
+  // 探针,启动阶段(还没有任何在途传输)取到 undefined 也无害。
+  let directTransportFor: ((deviceId: string) => DirectTransport | undefined) | undefined;
   const direct = createDirectService({
     configDir,
     onChange: () => statusHub.notify(),
+    getTransport: (deviceId) => directTransportFor?.(deviceId),
   });
   // 浏览器内终端:每个 WS 连接 spawn 一个本机 shell;daemon 关闭时统一收割子进程。
   const terminalHub = createTerminalHub();
@@ -503,6 +507,8 @@ export async function run(args: ParsedArgs): Promise<void> {
     },
     config.sharedFolders,
   );
+  // 回填直发续传用的通道探针(见上面 createDirectService 处的说明)
+  directTransportFor = (deviceId) => manager.directTransport(deviceId);
   // 文件系统监听与 git 心跳延迟到控制端口绑定成功之后启动(见下方 startFolderWatchers
   // 调用处):目录多/大时递归 fs.watch 的建立是秒级同步树遍历,不该挡在探活端口前面。
   // 无目录提示也延迟到端口绑定成功后输出(与其它启动日志同批)

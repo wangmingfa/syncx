@@ -379,4 +379,102 @@ describe('device direct transfer', () => {
     expect(rejectWithDir.status).toBe(400);
     server.close();
   });
+
+  it('断点续传:掉线保留半截,重连后从已落盘字节继续', () => {
+    // 一条可以「断」的链路:第一片送达后立刻断开,模拟传到一半 Wi-Fi 掉线。
+    const link = { up: true };
+    const sent: number[] = [];
+    const mk = (from: DirectService, to: DirectService, fromId: string, toId: string): DirectTransport => ({
+      control: (_deviceId, message) => {
+        if (!link.up) return false;
+        to.handleControl({ ...message, fromDeviceId: fromId }, fromId, mk(to, from, toId, fromId));
+        return true;
+      },
+      chunk: (_deviceId, id, seq, data) => {
+        if (!link.up) return false;
+        if (fromId === 'A') sent.push(seq);
+        // 第一片送达后链路立刻断:这一片的 ack 回不去,后续分片也发不出。
+        if (seq === 0) link.up = false;
+        to.handleChunk({ header: { id, seq }, body: data }, fromId, mk(to, from, toId, fromId));
+        return true;
+      },
+    });
+
+    let txA: DirectTransport;
+    const a = createDirectService({
+      configDir: tmp(),
+      // 有「现取通道」的能力才允许暂停等待重连;这里用它模拟会话重建。
+      getTransport: () => (link.up ? txA : undefined),
+    });
+    const bConfig = tmp();
+    const b = createDirectService({ configDir: bConfig });
+    txA = mk(a, b, 'A', 'B');
+    const txB = mk(b, a, 'B', 'A');
+
+    const source = join(tmp(), 'resume.bin');
+    const data = Buffer.alloc(DIRECT_CHUNK_BYTES * 2 + 123);
+    for (let i = 0; i < data.length; i++) data[i] = (i * 7) % 251;
+    writeFileSync(source, data);
+    const id = a.sendFile('B', {
+      name: 'resume.bin',
+      sourcePath: source,
+      size: data.length,
+      sha256: createHash('sha256').update(data).digest('hex'),
+    }, txA);
+    expect(b.snapshot().pending).toHaveLength(1);
+
+    // 接收方确认后开始传;第一片送达即断链,发送方转入暂停而不是直接失败。
+    expect(b.reply(id, true, txB)).toBe(true);
+    expect(a.snapshot().transfers.find((t) => t.id === id)?.state).toBe('paused');
+    // 收件箱里还没有成品,半截也不该出现在待确认里
+    expect(b.snapshot().inbox).toHaveLength(0);
+    expect(b.snapshot().pending).toHaveLength(0);
+
+    // 两端的 socket 随后都会关掉:接收方也转暂停,且已落盘的那一片不丢
+    a.onPeerOffline('B');
+    b.onPeerOffline('A');
+    expect(a.snapshot().transfers.find((t) => t.id === id)?.state).toBe('paused');
+    const recvPaused = b.snapshot().transfers.find((t) => t.direction === 'receive');
+    expect(recvPaused?.state).toBe('paused');
+    expect(recvPaused?.bytesDone).toBe(DIRECT_CHUNK_BYTES);
+    expect(sent).toEqual([0]);
+
+    // 重连:发送方重新提议,接收方按已落盘字节回 offset,双方从第二片接着传。
+    sent.length = 0;
+    link.up = true;
+    a.onPeerOnline('B', txA);
+    // 只补发剩下两片,而不是从 0 重来
+    expect(sent).toEqual([1, 2]);
+
+    const item = b.snapshot().inbox[0];
+    expect(item?.kind).toBe('file');
+    const received = readFileSync(item!.path ?? '');
+    expect(received.length).toBe(data.length);
+    expect(received.equals(data)).toBe(true);
+    expect(a.snapshot().transfers.find((t) => t.id === id)?.state).toBe('done');
+    // 续传完成后不留半截临时文件
+    expect(existsSync(join(bConfig, 'inbox', '.tmp', `in-${id}`))).toBe(false);
+    a.close();
+    b.close();
+  });
+
+  it('续传偏移只在本轮续传时生效:新投送带非 0 偏移直接失败', () => {
+    const a = createDirectService({ configDir: tmp() });
+    const source = join(tmp(), 'fresh.bin');
+    const data = Buffer.alloc(DIRECT_CHUNK_BYTES * 2);
+    writeFileSync(source, data);
+    const tx: DirectTransport = { control: () => true, chunk: () => true };
+    const id = a.sendFile('B', {
+      name: 'fresh.bin',
+      sourcePath: source,
+      size: data.length,
+      sha256: createHash('sha256').update(data).digest('hex'),
+    }, tx);
+    // 对方声称已经落盘一片,但本机这笔还没暂停过 → 不能信,直接失败(否则会静默丢一段)。
+    a.handleControl({ kind: 'direct-reply', id, fromDeviceId: '', accept: true, offset: DIRECT_CHUNK_BYTES }, 'B', tx);
+    const t = a.snapshot().transfers.find((x) => x.id === id);
+    expect(t?.state).toBe('failed');
+    expect(t?.error).toContain('续传位置不合法');
+    a.close();
+  });
 });

@@ -19,6 +19,7 @@ const emit = defineEmits<{ close: [] }>();
 function stateLabel(state: string): string {
   if (state === 'offering') return '等待确认';
   if (state === 'transferring') return '传输中';
+  if (state === 'paused') return '等待重连';
   if (state === 'done') return '已完成';
   return '失败';
 }

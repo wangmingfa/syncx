@@ -68,7 +68,8 @@ export interface DirectTransfer {
   name?: string;
   size: number;
   bytesDone: number;
-  state: 'offering' | 'transferring' | 'done' | 'failed';
+  /** paused = 链路断了、半截字节还留着,等对方重连后续传(窗口见 DIRECT_RESUME_TTL_MS)。 */
+  state: 'offering' | 'transferring' | 'paused' | 'done' | 'failed';
   error?: string;
 }
 
@@ -82,6 +83,11 @@ export interface DirectServiceDeps {
   configDir: string;
   /** 状态变更通知(接到 statusHub.notify,Web UI 走既有 WS 推送)。 */
   onChange?: () => void;
+  /**
+   * 现取一台设备的直发通道(会话重连后由它拿到**新的** transport)。
+   * 缺省 = 不做断点续传:掉线即失败,与旧行为一致(测试与其它嵌入方不必提供)。
+   */
+  getTransport?: (deviceId: string) => DirectTransport | undefined;
 }
 
 /**
@@ -120,6 +126,14 @@ const DIRECT_STALL_TIMEOUT_MS = 30_000;
 const MAX_BUFFERED_CHUNKS = 32;
 /** 已结束的传输记录在快照里保留多久(给 UI 足够时间看到结果)。 */
 const FINISHED_TTL_MS = 60_000;
+/**
+ * 断点续传窗口:链路断开后保留半截文件 / 发送侧暂存这么久,期间对方重连就从
+ * 已落盘字节接着传;超时才放弃并清理。10 分钟够覆盖 Wi-Fi 抖动、termux 被系统
+ * 挂起、对端重启这类常见中断,又不至于让半截文件长期占着收件箱配额。
+ */
+export const DIRECT_RESUME_TTL_MS = 10 * 60 * 1000;
+/** 续传期间重发提议的间隔(对方会话可能还在握手,早发会被丢弃)。 */
+const DIRECT_RESUME_RETRY_MS = 3_000;
 
 interface OutgoingTransfer {
   id: string;
@@ -132,6 +146,11 @@ interface OutgoingTransfer {
   error?: string;
   createdAt: number;
   finishedAt?: number;
+  /** 最近一次发出提议的时间:提议超时按它算,续传重发也不会被旧的 createdAt 拖死。 */
+  offerSentAt: number;
+  /** 断点续传中(掉过线):定时器据此重发提议、跳过普通提议超时。 */
+  resuming?: boolean;
+  pausedAt?: number;
   /** 文件专用:分期中的本地暂存文件、指纹、分片账本。 */
   sourcePath?: string;
   fd?: number;
@@ -153,7 +172,8 @@ interface IncomingTransfer {
   tmpPath: string;
   /** 接收方在确认时指定的另存目录;undefined = 落收件箱。 */
   saveDir?: string;
-  state: 'pending' | 'transferring';
+  state: 'pending' | 'transferring' | 'paused';
+  pausedAt?: number;
   fd?: number;
   hash?: ReturnType<typeof createHash>;
   nextSeq: number;
@@ -200,8 +220,10 @@ export interface DirectService {
   handleChunk(frame: { header: Record<string, unknown>; body: Buffer }, from: string, tx: DirectTransport): void;
   /** 接收方确认 / 拒绝一个待确认文件;saveDir 给出时落到用户目录而非收件箱。 */
   reply(id: string, accept: boolean, tx: DirectTransport, reason?: string, saveDir?: string): boolean;
-  /** 连接掉线:失败与之相关的传输、清理临时文件(不再尝试发 cancel)。 */
+  /** 连接掉线:在途传输转为暂停(半截字节保留),等重连续传;无续传能力时直接失败。 */
   onPeerOffline(deviceId: string): void;
+  /** 新会话建立:把暂停中的投送重新提议一次(没有暂停项时是空操作)。 */
+  onPeerOnline(deviceId: string, tx: DirectTransport): void;
   /** daemon 关闭:停表并清理。 */
   close(): void;
 }
@@ -326,6 +348,113 @@ export function createDirectService(deps: DirectServiceDeps): DirectService {
     return candidate;
   }
 
+  /** 文件提议(首发与续传重发共用同一条消息,id 不变)。 */
+  function offerMessage(out: OutgoingTransfer): DirectControlMessage {
+    return {
+      kind: 'direct-file-offer',
+      id: out.id,
+      fromDeviceId: '',
+      name: out.name ?? '未命名文件',
+      size: out.size,
+      sha256: out.sha256 ?? '',
+      createdAt: out.createdAt,
+    };
+  }
+
+  /** 暂停入站传输:关句柄、留半截文件,等对方重连后从已落盘字节继续。 */
+  function pauseIncoming(inc: IncomingTransfer): void {
+    if (inc.fd !== undefined) {
+      try { closeSync(inc.fd); } catch { /* 已关闭 */ }
+      inc.fd = undefined;
+    }
+    inc.buffered.clear();
+    inc.received.clear();
+    // Hash 对象既不能序列化也不能"接续";续传时按磁盘上已有的整片字节重建。
+    inc.hash = undefined;
+    inc.state = 'paused';
+    inc.pausedAt = Date.now();
+    notify();
+  }
+
+  /** 只重算前 bytes 个字节的指纹:续传不重读整份文件,但必须与一次性哈希等价。 */
+  function rebuildHash(fd: number, bytes: number): ReturnType<typeof createHash> {
+    const hash = createHash('sha256');
+    const buf = Buffer.allocUnsafe(1024 * 1024);
+    let pos = 0;
+    while (pos < bytes) {
+      const want = Math.min(buf.length, bytes - pos);
+      const n = readSync(fd, buf, 0, want, pos);
+      if (n <= 0) throw new Error('半截文件读取失败');
+      hash.update(buf.subarray(0, n));
+      pos += n;
+    }
+    return hash;
+  }
+
+  /**
+   * 对端重连后重新提议:若本机已有同 id 的半截文件且内容一致,直接从这里继续,
+   * **不再让用户确认一次**(他早就确认过这次接收)。返回 false 表示无法续传,
+   * 调用方按普通新提议处理。
+   */
+  function resumeIncoming(
+    inc: IncomingTransfer,
+    message: Extract<DirectControlMessage, { kind: 'direct-file-offer' }>,
+    from: string,
+    tx: DirectTransport,
+  ): boolean {
+    if (inc.from !== from || inc.sha256 !== message.sha256 || inc.size !== message.size) return false;
+    const offset = inc.bytesDone;
+    // 落盘永远是整片顺序写,所以可续传的位置必然对齐到片边界;对不齐就不再相信这份半截。
+    if (offset % DIRECT_CHUNK_BYTES !== 0 || offset >= inc.size) return false;
+    let fd: number | undefined;
+    try {
+      fd = openSync(inc.tmpPath, 'r+');
+      const hash = rebuildHash(fd, offset);
+      inc.fd = fd;
+      inc.hash = hash;
+    } catch {
+      if (fd !== undefined) { try { closeSync(fd); } catch { /* 已关闭 */ } }
+      return false;
+    }
+    inc.nextSeq = offset / DIRECT_CHUNK_BYTES;
+    inc.state = 'transferring';
+    inc.pausedAt = undefined;
+    inc.lastProgressAt = Date.now();
+    tx.control(from, { kind: 'direct-reply', id: inc.id, fromDeviceId: '', accept: true, offset });
+    notify();
+    return true;
+  }
+
+  /** 暂停出站传输:关句柄、留暂存文件与已确认片号,等重连后重新提议。 */
+  function pauseOutgoing(out: OutgoingTransfer): void {
+    if (out.fd !== undefined) {
+      try { closeSync(out.fd); } catch { /* 已关闭 */ }
+      out.fd = undefined;
+    }
+    out.inflight.clear();
+    out.state = 'paused';
+    out.resuming = true;
+    out.pausedAt = Date.now();
+    out.error = undefined;
+    notify();
+  }
+
+  /** 新会话就绪:对这台设备所有暂停中的投送重新提议一次。 */
+  function reofferPaused(deviceId: string, tx: DirectTransport | undefined): void {
+    if (!tx) return;
+    const now = Date.now();
+    for (const out of outgoing.values()) {
+      if (out.deviceId !== deviceId || !out.resuming) continue;
+      // 刚开始的这几秒内不抢跑:定时器与 onPeerOnline 可能同时到,别一轮发两次。
+      if (now - out.offerSentAt < 1_000 && out.state === 'offering') continue;
+      out.state = 'offering';
+      out.offerSentAt = now;
+      lastTx.set(out.id, tx);
+      sendControl(tx, out.deviceId, offerMessage(out));
+    }
+    notify();
+  }
+
   function pump(out: OutgoingTransfer, tx: DirectTransport): void {
     if (out.state !== 'transferring' || out.fd === undefined || out.totalChunks === undefined) return;
     while (out.nextSeq < out.totalChunks && out.nextSeq - out.acked < DIRECT_WINDOW) {
@@ -345,7 +474,9 @@ export function createDirectService(deps: DirectServiceDeps): DirectService {
       const data = n === body.length ? body : body.subarray(0, n);
       out.inflight.set(seq, { body: data, sentAt: Date.now(), attempts: 1 });
       if (!tx.chunk(out.deviceId, out.id, seq, data)) {
-        cancelOutgoing(out, '会话已断开', tx);
+        // 会话刚好断了:有续传能力就留半截等重连,否则按旧的快速失败。
+        if (deps.getTransport) pauseOutgoing(out);
+        else cancelOutgoing(out, '会话已断开', tx);
         return;
       }
     }
@@ -435,12 +566,13 @@ export function createDirectService(deps: DirectServiceDeps): DirectService {
     saveIndex();
   }
 
-  function newOutgoing(partial: Omit<OutgoingTransfer, 'bytesDone' | 'state' | 'createdAt' | 'acked' | 'nextSeq' | 'inflight' | 'lastProgressAt'>): OutgoingTransfer {
+  function newOutgoing(partial: Omit<OutgoingTransfer, 'bytesDone' | 'state' | 'createdAt' | 'offerSentAt' | 'acked' | 'nextSeq' | 'inflight' | 'lastProgressAt'>): OutgoingTransfer {
     const out: OutgoingTransfer = {
       ...partial,
       bytesDone: 0,
       state: 'offering',
       createdAt: Date.now(),
+      offerSentAt: Date.now(),
       acked: 0,
       nextSeq: 0,
       inflight: new Map(),
@@ -482,11 +614,25 @@ export function createDirectService(deps: DirectServiceDeps): DirectService {
     tx.chunk(out.deviceId, out.id, seq, slot.body);
   }
 
-  // 兜底表:超时探测 + 分片重发。unref,不拖住 daemon 退出。
+  // 兜底表:超时探测 + 分片重发 + 续传重提议。unref,不拖住 daemon 退出。
   timer = setInterval(() => {
     const now = Date.now();
+    const resumedDevices = new Set<string>();
     for (const out of [...outgoing.values()]) {
-      if (out.state === 'offering' && now - out.createdAt > DIRECT_OFFER_TIMEOUT_MS) {
+      if (out.resuming) {
+        // 续传窗口内一直重发提议:对方的会话可能还在握手,早发的会被丢弃。
+        if (now - (out.pausedAt ?? now) > DIRECT_RESUME_TTL_MS) {
+          cancelOutgoing(out, '设备离线时间过长,已中止发送');
+          continue;
+        }
+        if (out.state !== 'transferring' && !resumedDevices.has(out.deviceId)
+          && now - out.offerSentAt >= DIRECT_RESUME_RETRY_MS) {
+          resumedDevices.add(out.deviceId);
+          reofferPaused(out.deviceId, deps.getTransport?.(out.deviceId));
+        }
+        continue;
+      }
+      if (out.state === 'offering' && now - out.offerSentAt > DIRECT_OFFER_TIMEOUT_MS) {
         cancelOutgoing(out, '对方未在 2 分钟内确认');
         continue;
       }
@@ -507,7 +653,13 @@ export function createDirectService(deps: DirectServiceDeps): DirectService {
       }
     }
     for (const inc of [...incoming.values()]) {
+      if (inc.state === 'paused' && now - (inc.pausedAt ?? now) > DIRECT_RESUME_TTL_MS) {
+        cleanupIncoming(inc);
+        notify();
+        continue;
+      }
       if (inc.state === 'transferring' && now - inc.lastProgressAt > DIRECT_STALL_TIMEOUT_MS) {
+        // 会话还挂着却没进展(对端假死):丢弃半截,等它重连后重新提议。
         cleanupIncoming(inc);
         notify();
       }
@@ -541,7 +693,7 @@ export function createDirectService(deps: DirectServiceDeps): DirectService {
           .map((i) => ({ id: i.id, from: i.from, name: i.name, size: i.size, sha256: i.sha256, createdAt: i.createdAt })),
         transfers: [
           ...[...outgoing.values()].filter((o) => !o.finishedAt || Date.now() - o.finishedAt < FINISHED_TTL_MS).map(transfer),
-          ...[...incoming.values()].filter((i) => i.state === 'transferring').map((i): DirectTransfer => ({
+          ...[...incoming.values()].filter((i) => i.state !== 'pending').map((i): DirectTransfer => ({
             id: i.id,
             direction: 'receive',
             deviceId: i.from,
@@ -549,7 +701,7 @@ export function createDirectService(deps: DirectServiceDeps): DirectService {
             name: i.name,
             size: i.size,
             bytesDone: i.bytesDone,
-            state: 'transferring',
+            state: i.state === 'paused' ? 'paused' : 'transferring',
           })),
         ],
       };
@@ -633,7 +785,15 @@ export function createDirectService(deps: DirectServiceDeps): DirectService {
           break;
         }
         case 'direct-file-offer': {
-          if (!isSafeId(message.id) || incoming.has(message.id)) return;
+          if (!isSafeId(message.id)) return;
+          const paused = incoming.get(message.id);
+          if (paused) {
+            // 同一 id 又来一次 = 对端重连后重新提议:能接着传就静默继续;接不上就按新提议重来。
+            if (paused.state === 'paused' && resumeIncoming(paused, message, from, tx)) return;
+            if (paused.state !== 'paused') return;
+            cleanupIncoming(paused);
+            notify();
+          }
           if (!Number.isFinite(message.size) || message.size <= 0 || message.size > DIRECT_MAX_FILE_BYTES) return;
           if (!/^[a-f0-9]{64}$/.test(message.sha256 ?? '')) return;
           const used = items.reduce((sum, i) => sum + i.size, 0);
@@ -668,7 +828,27 @@ export function createDirectService(deps: DirectServiceDeps): DirectService {
             return;
           }
           if (out.fd !== undefined || out.totalChunks === undefined) return;
+          // 续传:接收方告诉我们它已经落盘多少字节,从对应片号接着发。
+          // 只认「本轮就是续传」的 offset —— 新投送若收到非 0 偏移,说明对方状态不干净,直接失败。
+          const offset = message.offset ?? 0;
+          if (offset !== 0) {
+            const usable = out.resuming === true
+              && Number.isInteger(offset)
+              && offset > 0
+              && offset % DIRECT_CHUNK_BYTES === 0
+              && offset < out.size;
+            if (!usable) {
+              finishOutgoing(out, false, '续传位置不合法');
+              return;
+            }
+            out.acked = offset / DIRECT_CHUNK_BYTES;
+            out.nextSeq = out.acked;
+            out.bytesDone = offset;
+            out.inflight.clear();
+          }
           out.state = 'transferring';
+          out.resuming = false;
+          out.pausedAt = undefined;
           out.lastProgressAt = Date.now();
           lastTx.set(out.id, tx);
           try {
@@ -769,20 +949,37 @@ export function createDirectService(deps: DirectServiceDeps): DirectService {
     },
 
     onPeerOffline(deviceId) {
+      // 同一设备可能有多条连接(主会话 + 备份):断掉的也许只是备份,在途传输仍活在
+      // 另一条上。此时什么都不该动 —— 否则一次无关的 close 就会把健康的传输打成暂停。
+      if (deps.getTransport?.(deviceId)) return;
       for (const inc of [...incoming.values()]) {
-        if (inc.from === deviceId) {
+        if (inc.from !== deviceId) continue;
+        // 已经收了一部分:留半截等重连续传;还没开始收的提议随会话一起作废。
+        if (inc.state === 'transferring') {
+          pauseIncoming(inc);
+        } else {
           cleanupIncoming(inc);
           notify();
         }
       }
       for (const out of [...outgoing.values()]) {
-        if (out.deviceId === deviceId && out.state !== 'done' && out.state !== 'failed') {
+        if (out.deviceId !== deviceId || out.state === 'done' || out.state === 'failed') continue;
+        if (out.resuming) continue; // 已经在等重连,不重复处理
+        // 只有「真传过字节」且嵌入方提供了现取通道的能力才值得等重连;
+        // 否则保持旧的快速失败,免得半截暂存挂着没人接手。
+        if (out.state === 'transferring' && deps.getTransport) {
+          pauseOutgoing(out);
+        } else {
           cancelOutgoing(out, '设备已离线');
         }
       }
       for (const [id, out] of outgoing) {
         if (out.deviceId === deviceId) lastTx.delete(id);
       }
+    },
+
+    onPeerOnline(deviceId, tx) {
+      reofferPaused(deviceId, tx);
     },
 
     close() {

@@ -4311,12 +4311,17 @@ export class SyncSessionManager {
       const tx = this.directTransport(remoteDeviceId);
       if (tx) this.direct!.handleChunk(frame, remoteDeviceId, tx);
     });
+    // 新会话就绪:此前因掉线暂停的直发在这里续上(没有暂停项时是空操作)。
+    // 放在 attachPeerMessages 之后 —— 对端的 accept 要能从这条连接回来。
+    const directTx = this.directTransport(remoteDeviceId);
+    if (directTx) this.direct?.onPeerOnline(remoteDeviceId, directTx);
     // 会话建立即改变了在线状态与各目录的同步通道(进度会随之从 0 变成非 0)
     this.notifyStatus();
     socket.on('error', (error) => this.logger.debug(`socket error for peer ${remoteDeviceId}: ${error.message}`));
     socket.on('close', (code, reason) => {
       this.logger.debug(`socket closed for peer ${remoteDeviceId}, code=${code}, reason=${reason?.toString('utf8') ?? '(empty)'}`);
-      // 直发没有重投队列:链路一断,在途投送立刻失败并清理临时文件,不留半截收件箱条目。
+      // 直发在途传输:链路一断就转入暂停(保留半截字节),重连后由 direct 服务重新提议续传;
+      // 10 分钟窗口内没有重连才放弃并清理(见 direct.ts 的 DIRECT_RESUME_TTL_MS)。
       this.direct?.onPeerOffline(remoteDeviceId);
       this.peerSockets.delete(socket);
       this.peerLiveness.delete(socket);

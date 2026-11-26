@@ -143,8 +143,10 @@ export type ControlMessage =
   | { kind: 'direct-text'; id: string; fromDeviceId: string; text: string; createdAt: number; version?: string; hostname?: string; platform?: string; runtime?: PeerRuntime }
   /** 文件投送提议;接收方用户确认前不会写入任何字节(仅预建临时文件路径)。 */
   | { kind: 'direct-file-offer'; id: string; fromDeviceId: string; name: string; size: number; sha256: string; createdAt: number; version?: string; hostname?: string; platform?: string; runtime?: PeerRuntime }
-  /** 接收方对提议的表态;accept=false 时 reason 为用户可读原因。 */
-  | { kind: 'direct-reply'; id: string; fromDeviceId: string; accept: boolean; reason?: string; version?: string; hostname?: string; platform?: string; runtime?: PeerRuntime }
+  /** 接收方对提议的表态;accept=false 时 reason 为用户可读原因。
+   *  `offset` 只在断点续传时出现 = 本机已落盘的字节数(必然是整片的整数倍),
+   *  发送方据此把起点挪到对应片号,而不是从 0 重传。旧对端会忽略这个字段。 */
+  | { kind: 'direct-reply'; id: string; fromDeviceId: string; accept: boolean; reason?: string; offset?: number; version?: string; hostname?: string; platform?: string; runtime?: PeerRuntime }
   /** 累积确认:seq = 接收方**下一个期望的片号**,即 seq 之前全部已落盘。 */
   | { kind: 'direct-ack'; id: string; fromDeviceId: string; seq: number; version?: string; hostname?: string; platform?: string; runtime?: PeerRuntime }
   /** 任一方中止(离线 / 超时 / 校验失败);收到即清理临时文件。 */

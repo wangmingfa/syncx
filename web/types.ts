@@ -137,7 +137,8 @@ export interface DirectTransfer {
   name?: string;
   size: number;
   bytesDone: number;
-  state: 'offering' | 'transferring' | 'done' | 'failed';
+  /** paused = 链路断了、半截字节保留着,等对端重连后续传(10 分钟内)。 */
+  state: 'offering' | 'transferring' | 'paused' | 'done' | 'failed';
   error?: string;
 }
 
