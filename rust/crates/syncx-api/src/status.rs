@@ -67,6 +67,10 @@ pub struct DeviceStatus {
     pub version: Option<String>,
     #[serde(rename = "canUpgrade", skip_serializing_if = "Option::is_none")]
     pub can_upgrade: Option<bool>,
+    /// 对端在握手时宣告的能力标签(如 `binary1` / `direct1`)。缺省 = 旧对端未宣告,
+    /// 前端据此把「发送」按钮判为不可用。
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub caps: Option<Vec<String>>,
 }
 
 /// 单个文件的传输进度。
@@ -241,6 +245,9 @@ pub struct StatusExtras {
     pub schedule_states: Option<std::collections::BTreeMap<String, ScheduleState>>,
     pub schedule_banner: Option<ScheduleBanner>,
     pub calendar_status: Option<CalendarStatus>,
+    /// 设备间直发的状态快照(收件箱/待确认/在途)。`None` = 本后端没有直发,
+    /// 前端据此隐藏「发送 / 收件箱」入口 —— 比「点了才 404」诚实。
+    pub direct: Option<Value>,
 }
 
 /// `/api/status` 的完整载荷。字段顺序刻意与 Node 一致,便于肉眼 diff。
@@ -306,6 +313,9 @@ pub struct StatusPayload {
     pub schedule_banner: Option<ScheduleBanner>,
     #[serde(rename = "calendarStatus", skip_serializing_if = "Option::is_none")]
     pub calendar_status: Option<CalendarStatus>,
+    /// 直发快照。缺省 = 该后端没有直发能力。
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub direct: Option<Value>,
 }
 
 /// 组装状态载荷。
@@ -414,6 +424,7 @@ pub fn build_status(
         schedule_states: extras.schedule_states,
         schedule_banner: extras.schedule_banner,
         calendar_status: extras.calendar_status,
+        direct: extras.direct,
     }
 }
 

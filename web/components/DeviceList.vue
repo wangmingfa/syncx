@@ -8,7 +8,6 @@ import { useStatusContext } from '../composables/statusContext';
 import { getDirectDropTarget, setDirectDropTarget } from '../composables/directDropTarget';
 import { osIconLabel } from '../utils/os-icon';
 import { backendIconLabel } from '../utils/backend-icon';
-import { isNodeRuntime } from '../utils/format';
 import type { DeviceInfo } from '../types';
 
 const {
@@ -40,11 +39,14 @@ const qrOpen = ref(false);
 // 待确认的入站文件数:收件箱入口上的徽标,提醒对方正在等你点「接收」
 const pendingDirect = computed(() => status.value.direct?.pending.length ?? 0);
 /**
- * 本机后端是否提供直发。Rust / MoonBit 后端还没有 `/api/direct`(ADR-0026 清单),
- * 在这种情况下入口整个不渲染 —— 留着按钮只会让用户点了拿到 404 再看到「发送失败」,
- * 把「这个后端没这功能」误读成「发送坏了」。对端能不能收仍由 direct.canDirect 判。
+ * 本机后端是否提供直发 —— **由后端自己声明**,不按后端形态猜。
+ *
+ * `/api/status` 里带 `direct` 快照才说明这套 daemon 有收件箱与 `/api/direct`;
+ * 没有就该把入口整个藏掉:留着按钮只会让用户点了拿到 404 再看到「发送失败」,
+ * 把「这个后端没这功能」误读成「发送坏了」。这样移植到哪个后端就在哪儿亮起来,
+ * 前端不必跟着改。对端能不能收仍由 direct.canDirect 判(它看对端宣告的 direct1)。
  */
-const directSupported = computed(() => isNodeRuntime(status.value));
+const directSupported = computed(() => status.value.direct !== undefined);
 // 拖拽悬停的设备 ID:在线可直发、或离线可排队的卡片都能接,避免拖到旧设备后松手没反应。
 const dragOverId = ref<string | null>(null);
 

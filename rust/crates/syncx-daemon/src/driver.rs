@@ -126,15 +126,35 @@ pub async fn serve_session_with_control(
 /// 收到的每条控制消息都附带一条**回到对端的出站通道** —— 控制面自己决定要不要
 /// 回、回什么。用回调而不是内置台账,是因为控制面同时要读写 config、要向别的
 /// 设备转发,这些都不该让连接驱动知道。
-#[derive(Clone)]
+#[derive(Debug, Clone)]
 pub struct ControlLink {
     /// 这条连接的远端设备 id(与握手一致,不可由消息体自带字段替代)。
     pub device_id: String,
     /// 沿这条连接回消息。连接已断时 `send` 返回 `Err`。
     pub outbound: tokio::sync::mpsc::UnboundedSender<syncx_net::wire::ControlMessage>,
+    /// 沿这条连接发直发分片。与 `outbound` 共用同一条连接、同一个写循环,
+    /// 所以「控制帧先说、分片后到」这类顺序不会被两条通道打乱。
+    pub chunk: tokio::sync::mpsc::UnboundedSender<DirectChunk>,
+    /// 对端在握手时宣告的能力标签。UI 据此决定「发送」按钮亮不亮 ——
+    /// 对端没宣告 `direct1` 时点了也只会超时,不如直接不给点。
+    pub caps: Vec<String>,
 }
 
 pub type ControlSink = std::sync::Arc<dyn Fn(ControlLink, syncx_net::wire::ControlMessage) + Send + Sync>;
+
+/// 一条直发文件分片:`id` 关联投送,`seq` 是片号(从 0 起),`data` 是裸字节。
+///
+/// 走二进制信封(kind 3)而不是 JSON —— 一片 256KB,base64 会白白多出三分之一。
+#[derive(Debug, Clone)]
+pub struct DirectChunk {
+    pub id: String,
+    pub seq: u64,
+    pub data: Vec<u8>,
+}
+
+/// 收到一帧直发分片。与 `message` 分开是因为它带裸字节:控制面的 JSON 回调
+/// 装不下 `Vec<u8>`,硬塞进去会让每条消息都多一次装箱。
+pub type ChunkSink = std::sync::Arc<dyn Fn(ControlLink, DirectChunk) + Send + Sync>;
 
 /// 连接生命周期钩子:`open` 在会话挂上之后、进入收发循环之前调用一次,
 /// 让控制面拿到**本连接的出站通道**(hello / 目录清单 / 邀请都靠它首发);
@@ -146,6 +166,8 @@ pub type ControlSink = std::sync::Arc<dyn Fn(ControlLink, syncx_net::wire::Contr
 pub struct ControlHooks {
     pub open: std::sync::Arc<dyn Fn(ControlLink) + Send + Sync>,
     pub message: ControlSink,
+    /// 直发文件分片。缺省 = 本机不接直发(分片静默丢弃,与旧版本一致)。
+    pub chunk: ChunkSink,
     pub close: std::sync::Arc<dyn Fn(&str) + Send + Sync>,
 }
 
@@ -206,9 +228,12 @@ pub async fn drive_session_with_control(
     let (control_tx, mut control_rx) = tokio::sync::mpsc::unbounded_channel::<
         syncx_net::wire::ControlMessage,
     >();
+    let (chunk_tx, mut chunk_rx) = tokio::sync::mpsc::unbounded_channel::<DirectChunk>();
     let link = ControlLink {
         device_id: connection.device_id.clone(),
         outbound: control_tx,
+        chunk: chunk_tx,
+        caps: connection.caps.clone().unwrap_or_default(),
     };
 
     // 会话已挂上、收发循环还没开始 —— 控制面在这里注册出站通道并发首帧
@@ -249,6 +274,28 @@ pub async fn drive_session_with_control(
                     break;
                 };
                 if connection.send_text(&encrypted).await.is_err() {
+                    break;
+                }
+            }
+            // 直发分片:二进制信封(kind 3)。对端没宣告 binary1 就发不出去 ——
+            // 那说明控制面把一个不懂二进制帧的老对端交给了直发,直接断链比
+            // 静默丢分片好:发送方会看到失败并给出中文原因。
+            chunk = chunk_rx.recv() => {
+                let Some(chunk) = chunk else { break };
+                if !binary {
+                    tracing::warn!("direct chunk for a peer without binary1; closing");
+                    break;
+                }
+                let header = serde_json::json!({ "id": chunk.id, "seq": chunk.seq });
+                let Ok(frame) = encode_binary_frame(
+                    &key,
+                    BinaryFrameKind::DirectFileChunk,
+                    &header,
+                    &chunk.data,
+                ) else {
+                    break;
+                };
+                if connection.send_binary(frame).await.is_err() {
                     break;
                 }
             }
@@ -295,6 +342,33 @@ fn handle_incoming(
                 tracing::debug!("binary frame failed to decode");
                 return true;
             };
+            // 直发分片不属于任何共享目录,必须在按 `folder` 路由**之前**分流:
+            // 它本来就没有 folder 字段,掉进下面的 `slots.get("")` 只会被静默丢弃。
+            if decoded.kind == BinaryFrameKind::DirectFileChunk {
+                let id = text_field(&decoded.header, "id");
+                let seq = decoded.header["seq"].as_u64();
+                // 形状不对就当坏帧:空 id / 缺片号 / 超长片一律不往上递,别让上层
+                // 拿到一片 8MB 的「分片」再自己判断。
+                if id.is_empty()
+                    || seq.is_none()
+                    || decoded.body.is_empty()
+                    || decoded.body.len() > syncx_net::wire::DIRECT_CHUNK_BYTES
+                {
+                    tracing::debug!("malformed direct chunk; dropped");
+                    return true;
+                }
+                if let Some(hooks) = control {
+                    (hooks.chunk)(
+                        link.clone(),
+                        DirectChunk {
+                            id,
+                            seq: seq.unwrap_or(0),
+                            data: decoded.body,
+                        },
+                    );
+                }
+                return true;
+            }
             let folder = text_field(&decoded.header, "folder");
             let Some(slot) = slots.get(&folder).copied() else {
                 tracing::debug!(%folder, "binary frame for an unwatched folder; dropped");

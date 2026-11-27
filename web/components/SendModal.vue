@@ -12,6 +12,8 @@ const props = defineProps<{
   device: DeviceInfo | null;
   direct: DirectApi;
   busy: boolean;
+  /** 本机后端能否把多个文件打成一个 zip(目前只有 Node 后端实现了打包)。 */
+  zipSupported: boolean;
 }>();
 const emit = defineEmits<{ close: [] }>();
 
@@ -219,14 +221,15 @@ function submit(): void {
         </div>
       </div>
       <p v-else class="form-hint">还没有选择文件。</p>
-      <!-- 打包是可选开关:默认逐个投送(接收方拿到原始文件),小文件多时打包更省事。 -->
+      <!-- 打包是可选开关:默认逐个投送(接收方拿到原始文件),小文件多时打包更省事。
+           开关按后端能力出现 —— 没实现 `/api/direct/zip` 的后端上留着它只会点了报错。 -->
       <n-checkbox
-        v-if="direct.fileDrafts.value.length > 1"
+        v-if="zipSupported && direct.fileDrafts.value.length > 1"
         v-model:checked="direct.zipMode.value"
         class="send-zip"
         :disabled="direct.sending.value"
       >打包成一个压缩包发送</n-checkbox>
-      <p v-if="direct.zipMode.value && direct.fileDrafts.value.length > 1" class="form-hint">对方只收到一个 .zip；只打包不压缩，包体上限 100 MB。</p>
+      <p v-if="zipSupported && direct.zipMode.value && direct.fileDrafts.value.length > 1" class="form-hint">对方只收到一个 .zip；只打包不压缩，包体上限 100 MB。</p>
       <p class="form-hint">单文件最大 100 MB、一次最多 20 个；也可以直接粘贴截图。对方需要点「接收」才会开始传输，文件落在其收件箱而非共享目录。</p>
     </div>
 

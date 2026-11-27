@@ -25,8 +25,19 @@ use crate::identity::{DeviceIdentity, IdentityError};
 /// 二进制信封能力标签。见 `wire.rs` 的二进制段。
 pub const CAP_BINARY1: &str = "binary1";
 
+/// 设备间直发能力标签(ADR-0028)。宣告它表示本机认 `direct-*` 控制消息与
+/// `direct-file-chunk` 二进制帧,**且**有一套完整的收件箱。
+///
+/// 只在功能真正可用时才写进 [`PEER_CAPS`]:对端据此决定要不要给我们发文件,
+/// 宣告了却收不下,对方的传输会卡在 `offering` 直到 2 分钟超时 —— 比不宣告更糟。
+pub const CAP_DIRECT1: &str = "direct1";
+
 /// 本机宣告的全部能力(随版本追加;空 = 什么都不宣告)。
-pub const PEER_CAPS: &[&str] = &[CAP_BINARY1];
+///
+/// ⚠️ 加 `CAP_DIRECT1` 之前,直发链路(收件箱 + `/api/direct` + 状态快照)必须齐全:
+/// 对端一旦看到它就会真的发文件,而收不下的一方只能让整条传输耗尽超时,用户看到
+/// 的是「发送失败」而不是「对方不支持」。
+pub const PEER_CAPS: &[&str] = &[CAP_BINARY1, CAP_DIRECT1];
 
 /// X25519 SubjectPublicKeyInfo 的 DER 前缀(12 字节)。
 ///

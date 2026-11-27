@@ -32,7 +32,8 @@
 
 - 直发不绑定目录，`attachPeerMessages` 原本按 `folder` 路由；`direct-file-chunk` 必须在 folder 查找**之前**分流，否则会被静默丢弃。
 - `DeviceStatus.caps` 缺省 = 旧后端/旧对端，前端必须按「不支持」处理，不能默认成支持。
-- `rust` / `moonbit` 后端当前未宣告 `direct1`，Node 端会正确禁用发送入口；它们对未知控制 kind 与二进制 kind 的静默丢弃行为保持不变。若将来三端都要支持，需同时补能力标签、消息解析与收件箱落盘，并逐字节互测。
+- `direct1` 现在 Node 与 Rust 都宣告；MoonBit 未宣告，Node/Rust 端会正确禁用发送入口，它自己对未知控制 kind 与二进制 kind 的静默丢弃行为保持不变。
+- 跨后端的线上格式靠**一份 Node 生成的 fixture** 三方钉住：`rust/scripts/gen-direct-wire-fixture.mjs` 用真实的 `JSON.stringify` 产出 `rust/crates/syncx-net/fixtures/direct-wire.json`，Rust 侧断言解码后重新编码逐字节还原（键序、大小写、可选字段的有无），Node 侧（`test/direct-wire.test.ts`）把同一批字节喂回当前状态机。只做其中一边不够：fixture 抄错（改了字段却没重跑脚本）时，Rust 那边照样全绿。改 `src/direct.ts` 或 `src/net/wire.ts` 的字段必须重跑生成脚本。
 - 发送方的 `directTransport()` 与接收侧总闸使用同一套判据；只靠对端宣告不够，未配对设备也能连上来发邀请，必须挡住它直接往收件箱塞文件。
 - 群发的多笔文件投送共用同一个暂存路径，**不能在各笔结束时各自 `rmSync`**；`sourceRefs` 降到 0 才删，否则第一台收完就把后面几台待读的文件删了。
 - 设备卡 drop 必须 `stopPropagation`，否则 `.tgz` 拖到卡片会同时冒到 window 的 `DropOverlay` 被当成安装包预检；拖拽悬停态由 `setDirectDropTarget()` 单向通知遮罩让路，两边的 `dropEffect` 不能各设各的。
@@ -65,4 +66,6 @@
 
 ## 后续（未做）
 
-- **移植到 Rust / MoonBit 后端**：协议（`direct-*` 控制消息 + 二进制帧 kind 3）、`/api/direct` 路由、收件箱与续传台账都要重写一遍。移植完成前，前端按本机 `runtime` 隐藏「发送 / 收件箱」入口（见 `web/components/DeviceList.vue` 的 `directSupported`），不会出现「点了 404」。
+- **Rust 后端已与 Node 对齐**（2026-11-27）：`resume.json` 跨重启续传与 `/api/direct/zip` 打包都已移植，两个缺口关闭。打包的暂存区与 zip 结构与 Node 同形（`inbox/.tmp/zip-<batch>/manifest.json`、store 模式 + 数据描述符），产物经系统 `unzip -t` 校验；能力由 `/api/status` 的 `direct.zip` 声明，前端不再按 runtime 猜。唯一有意的差异：空批次时 Node 回 404，Rust 回 400（`OpError` 只有「没这项能力 / 这次失败」两态，为一条罕见分支扩枚举不划算；前端只读 `message`，观感一致）。
+- **移植到 MoonBit 后端**：协议（`direct-*` 控制消息 + 二进制帧 kind 3）、`/api/direct` 路由、收件箱与续传台账都要重写一遍。移植完成前，`/api/status` 不带 `direct` 字段，前端据此隐藏「发送 / 收件箱」入口（见 `web/components/DeviceList.vue` 的 `directSupported`），不会出现「点了 404」。
+  2026-11-27 复核：这条**不是一次性移植**，它前面还压着两个更底层的前提（详见 ADR-0026「尚未落地」）：① MoonBit 的 WS 传输层目前是**明文帧**，没有 `{"kind":"enc"}` 信封，而 Node/Rust 对每一帧都无条件加解密 —— 两个后端连 hello 都握不上；② 二进制信封（`iv|tag|version|kind|header|body`）在 MoonBit 里只有 outbound 的 `BinaryFrame` 枚举，解码路径仍写着「二进制信封是后续里程碑」。顺带一提：`binary1` 目前是被**无条件宣告**的（`handshake.mbt` 的 `peer_caps`），而能力标签本身是个承诺 —— 这一处也该在补上二进制信封之前先摘掉。

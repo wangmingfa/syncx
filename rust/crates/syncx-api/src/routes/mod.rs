@@ -14,6 +14,7 @@
 
 pub mod auth;
 pub mod devices;
+pub mod direct;
 pub mod elevation;
 pub mod files;
 pub mod fleet;
@@ -39,9 +40,13 @@ use util::{Ctx, MAX_BINARY_BODY, MAX_TEXT_BODY};
 pub async fn dispatch(State(state): State<Arc<AppState>>, request: Request) -> Response {
     let (parts, body) = request.into_parts();
     let raw_path = parts.uri.path().to_string();
-    // 体上限按端点区分:上传安装包要 64MB,其余 1MB(Node 同款)
+    // 体上限按端点区分:上传安装包 64MB、直发文件 100MB,其余 1MB(Node 同款)。
+    // 直发文件走一次性收进内存(Rust 侧没有 Node 的流式暂存),所以上限必须显式
+    // 覆盖 100MB 的单文件额度,否则界面选一个大文件会是 413 而不是明确的业务错误。
     let limit = if raw_path.starts_with("/api/self-update/upload") {
         MAX_BINARY_BODY
+    } else if raw_path.starts_with("/api/direct/file") {
+        100 * 1024 * 1024 + 1024 * 1024
     } else {
         MAX_TEXT_BODY
     };
@@ -119,6 +124,9 @@ pub fn route(state: &AppState, ctx: Ctx) -> Response {
         return response;
     }
     if let Some(response) = offers::try_routes(state, &ctx) {
+        return response;
+    }
+    if let Some(response) = direct::try_routes(state, &ctx) {
         return response;
     }
     if let Some(response) = fleet::try_routes(&ctx) {

@@ -117,7 +117,9 @@ MoonBit 三个 Release 资产永远同版本号,tag(`v*`)一次触发三条 work
 
 **尚未落地(2026-11-26 逐条复核)**:
 
-- **直发(ADR-0028)**:`direct-*` 控制消息、二进制帧 kind 3、`/api/direct` 路由、收件箱与续传台账。移植完成前,前端按本机 `runtime` 隐藏「发送 / 收件箱」入口。
+- **帧加密信封(2026-11-27 复核发现)**:Node/Rust 的 WS 传输对**每一帧**无条件做 AES-256-GCM(`{"kind":"enc",iv,tag,data}`),而 MoonBit 的 `net/server.mbt` / `net/client.mbt` 收发两侧都是明文 JSON(`enqueue_text` → `TextFrame`、`recv_message` → `decode_wire_message`),全仓没有 `enc` 信封、没有 AES 调用。也就是说**当前 MoonBit 后端与 Node/Rust 连 hello 都握不上**;mooncry 已提供 `aes_gcm_encrypt`/`aes_gcm_decrypt`,这块是「还没接」而不是「做不了」。
+- **二进制信封**:`handshake.mbt` 的 `peer_caps()` 无条件宣告 `binary1`,但 `net/client.mbt` 的 `recv_message` 遇到 `PeerFrame::Binary` 直接抛「二进制信封是后续里程碑」,也没有 `iv|tag|version|kind|header|body` 的编解码。直发分片(kind 3)与块响应的二进制通道都压在这上面。**能力标签先于实现被宣告**,补实现之前应先把它摘掉,免得对端按承诺发包而本端丢弃。
+- **直发(ADR-0028)**:`direct-*` 控制消息、二进制帧 kind 3、`/api/direct` 路由、收件箱与续传台账。实现顺序上它排在上面两条之后 —— 没有加密信封就发不出控制帧,没有二进制信封就传不了分片。移植完成前,`/api/status` 不带 `direct` 字段,前端据此隐藏「发送 / 收件箱」入口。
 - **中转(ADR-0014 relay)**:`relayed` 字段已在 wire 里(未知字段照旧忽略),但没有「落地后再转发给同目录其它对端」那一层。
 - **磁盘空间守卫**:接收前预估本轮净需求、不够就整轮拦下并等空间恢复重放。
 - **认领台账**:同设备多连接的接收单飞去重(ADR「双落地静默分叉修复」的接收侧那半)。当前每目录每设备至多一条会话,所以碰不到,但这与 Node/Rust 的口径不一致(见 `daemon/actor.mbt` 文件头与 1758 行的 TODO)。

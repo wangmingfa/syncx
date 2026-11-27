@@ -279,6 +279,7 @@ provide(StatusContextKey, {
       :device="direct.sendTarget.value"
       :direct="direct"
       :busy="busy"
+      :zip-supported="status.direct?.zip === true"
       @close="direct.closeSend()"
     />
     <InboxModal

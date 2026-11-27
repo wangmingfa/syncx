@@ -573,6 +573,7 @@ pub fn get_status(runtime_ops: &RuntimeOps, extras: &Extras) -> Value {
                 .and_then(|map| map.get(device_id).cloned()),
             version: info.version,
             can_upgrade: Some(can_upgrade),
+            caps: runtime_ops.peer_caps_of(device_id),
         });
     }
 
@@ -623,6 +624,8 @@ pub fn get_status(runtime_ops: &RuntimeOps, extras: &Extras) -> Value {
         schedule_states: Some(schedule_states(&config, &workdays, now_ms)),
         schedule_banner: Some(schedule_banner(&config, &workdays, now_ms, None)),
         calendar_status: Some(calendar_status(&runtime_ops.config_dir, &config, None)),
+        // 直发快照随状态一起下发:收件箱角标、待确认卡片、在途进度都靠它。
+        direct: Some(runtime_ops.direct.snapshot()),
     };
 
     let payload = build_status(
@@ -687,6 +690,24 @@ pub fn build_runtime(
         Timings::default(),
     );
 
+    // 会话台账先建:直发服务要拿它的只读访问器当「现取通道」。
+    let sessions: Arc<std::sync::Mutex<HashMap<String, super::ControlLink>>> =
+        Arc::new(std::sync::Mutex::new(HashMap::new()));
+    let direct = {
+        let sessions = Arc::clone(&sessions);
+        let hub = hub.clone();
+        super::direct::DirectService::new(
+            &options.config_dir,
+            Arc::new(move |device_id: &str| {
+                sessions
+                    .lock()
+                    .ok()
+                    .and_then(|map| map.get(device_id).cloned())
+            }),
+            Arc::new(move || hub.notify()),
+        )
+    };
+
     let ops = Arc::new(RuntimeOps {
         identity: Arc::clone(&options.identity),
         store,
@@ -700,8 +721,9 @@ pub fn build_runtime(
         hub: Some(hub.clone()),
         terminal: TerminalHub::new(),
         started_at,
-        sessions: Mutex::new(HashMap::new()),
+        sessions,
         peer_info: Mutex::new(HashMap::new()),
+        peer_caps: Mutex::new(HashMap::new()),
         peer_urls: Mutex::new(HashMap::new()),
         remote_folders: Mutex::new(HashMap::new()),
         remote_pending: Mutex::new(HashMap::new()),
@@ -714,6 +736,7 @@ pub fn build_runtime(
         git_push_running: AtomicBool::new(false),
         git_rewrite_running: AtomicBool::new(false),
         git_state: Mutex::new(super::GitState::default()),
+        direct,
     });
     let _ = cell.set(Arc::clone(&ops));
 
@@ -745,21 +768,36 @@ pub fn build_actor(device_id: &str) -> ActorHandle {
 pub fn control_hooks(runtime: &Arc<Runtime>) -> ControlHooks {
     let opened = Arc::clone(runtime);
     let messaged = Arc::clone(runtime);
+    let chunked = Arc::clone(runtime);
     let closed = Arc::clone(runtime);
     ControlHooks {
         open: Arc::new(move |link| on_open(&opened, link)),
         message: Arc::new(move |link, message| on_control(&messaged, link, message)),
+        chunk: Arc::new(move |link, chunk| on_chunk(&chunked, link, chunk)),
         close: Arc::new(move |device_id| on_close(&closed, device_id)),
     }
+}
+
+/// 一帧直发分片:归给这条连接的设备,交给直发服务顺序落盘。
+fn on_chunk(runtime: &Runtime, link: driver::ControlLink, chunk: driver::DirectChunk) {
+    runtime
+        .ops
+        .direct
+        .handle_chunk(&link.device_id, &chunk.id, chunk.seq, &chunk.data);
 }
 
 /// 会话挂上、收发循环开始之前:登记通道,发 hello,推目录清单与共享意图。
 fn on_open(runtime: &Runtime, link: driver::ControlLink) {
     let ops = &runtime.ops;
-    ops.register_session(super::ControlLink {
+    let session = super::ControlLink {
         device_id: link.device_id.clone(),
         outbound: link.outbound.clone(),
-    });
+        chunk: link.chunk.clone(),
+        caps: link.caps.clone(),
+    };
+    ops.register_session(session.clone());
+    // 设备上线:补发离线期间排队的直发内容,并把暂停中的投送重新提议一次。
+    ops.direct.on_peer_online(&link.device_id, &session);
     let (version, hostname, platform) = ops.self_info();
     let _ = ops.send_to(
         &link.device_id,
@@ -787,6 +825,9 @@ fn on_close(runtime: &Runtime, device_id: &str) {
     if let Ok(mut map) = ops.remote_pending.lock() {
         map.remove(device_id);
     }
+    // 必须在摘掉会话台账**之后**:直发服务用「还能不能现取到通道」判断
+    // 断的是不是最后一条连接,顺序反了会把健康传输误判成暂停。
+    ops.direct.on_peer_offline(device_id);
     ops.notify_hub();
     tracing::info!("会话已断开:{device_id}");
 }
@@ -1058,6 +1099,27 @@ pub fn on_control(runtime: &Runtime, link: driver::ControlLink, message: Control
             tracing::debug!("git 提交通知已送达:{from_device_id} / {folder_id} / {commit_hash}");
             git_sync::on_git_commit_ack(ops, &folder_id, &commit_hash, &from_device_id);
         }
+        // 直发:状态机全在服务里,这里只把「这一跳的设备 + 回来的通道」递过去。
+        // 归属以会话身份为准 —— `link.device_id` 是握手验过的,消息体里的
+        // `fromDeviceId` 只用于注入版本,不能拿来判是谁发的。
+        ControlMessage::DirectText { .. }
+        | ControlMessage::DirectFileOffer { .. }
+        | ControlMessage::DirectReply { .. }
+        | ControlMessage::DirectAck { .. }
+        | ControlMessage::DirectCancel { .. }
+        | ControlMessage::DirectResult { .. } => {
+            ops.direct.handle_control(
+                &super::ControlLink {
+                    device_id: link.device_id.clone(),
+                    outbound: link.outbound.clone(),
+                    chunk: link.chunk.clone(),
+                    caps: link.caps.clone(),
+                },
+                message,
+            );
+        }
+        // 未知 kind:对端比我们新,静默忽略(与 Node 的「不认识的直接跳过」一致)。
+        ControlMessage::Unknown => {}
     }
     ops.notify_hub();
 }
@@ -1293,6 +1355,9 @@ fn spawn_drain_loop(ops: Arc<RuntimeOps>) {
                 }
             }
             ops.flush_git_notices();
+            // 直发的定时巡检:提议超时、分片重发、续传重提议、离线队列探测。
+            // 挂在这里而不是自己起一条循环,是为了与「上一轮之后、下一轮之前」同一节拍。
+            ops.direct.tick();
         }
         tracing::debug!("排空循环退出");
     });
@@ -1780,6 +1845,9 @@ pub async fn run(options: RunOptions) -> Result<(), String> {
         }
 
         // 8) 收尾。顺序与 Node 的 shutdown 链一致:先停产生方(循环),再关通道与文件。
+        // 直发要在停掉推送**之前**收尾:传了一半的传输要转成暂停、把半截留在盘上,
+        // 否则重启后这些文件没人认领(只能等人工清理)。
+        runtime.ops.direct.close();
         runtime.hub.close();
         runtime.ops.terminal.close();
         if let Some(discovery) = discovery {

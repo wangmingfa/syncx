@@ -41,10 +41,11 @@
 
 ## 直发(设备间发文本 / 文件,ADR-0028)
 
-主体已落地(Node 后端,见 README「设备间直发」),剩下两项:
+主体已落地(Node 后端,见 README「设备间直发」),剩下三项:
 
 - [x] **多文件打包成单个压缩包**:做成可选开关(默认仍是成组逐条投送),只打包不压缩、包体沿用 100MB 上限;实现见 ADR-0028 第 16 条。
-- [ ] **移植到 Rust / MoonBit 后端**:`direct-*` 控制消息 + 二进制帧 kind 3 + `/api/direct` 路由 + 收件箱与续传台账。移植完成前,前端已按本机 `runtime` 隐藏「发送 / 收件箱」入口(避免点了拿到 404)。
+- [x] **移植到 Rust 后端**:`direct-*` 控制消息 + 二进制帧 kind 3 + `/api/direct` 路由 + 收件箱落盘(`syncx-cli` 的 `DirectService`)。线上格式由 Node 生成的 fixture 双向对拍(`test/direct-wire.test.ts` + `rust/crates/syncx-net/tests/direct_wire.rs`)。2026-11-27 补完 `resume.json` 跨重启续传与 `/api/direct/zip` 打包,Rust 与 Node 已完全对齐。
+- [ ] **移植到 MoonBit 后端**:同上四块。**前置两项**(见 ADR-0026):① 帧加密信封 —— MoonBit 传输层目前是明文,与 Node/Rust 的 `{"kind":"enc"}` 不兼容,连 hello 都握不上;② 二进制信封 —— `binary1` 已被无条件宣告但解码路径未实现。两条补完才谈得上直发;补齐之前 `/api/status` 不带 `direct` 字段,前端据此隐藏「发送 / 收件箱」入口。
 
 ## 中期(特色差异化)
 

@@ -46,6 +46,14 @@ impl Ctx {
         self.param(name).unwrap_or_default()
     }
 
+    /// 取一个查询参数的**全部**出现(`getAll`),保持传入顺序。
+    pub fn params(&self, name: &str) -> Vec<String> {
+        form_urlencoded::parse(self.query.as_bytes())
+            .filter(|(k, _)| k == name)
+            .map(|(_, v)| v.to_string())
+            .collect()
+    }
+
     /// 请求体按 UTF-8 文本取(Node `readBody` 的口径)。
     pub fn text(&self) -> String {
         String::from_utf8_lossy(&self.body).to_string()

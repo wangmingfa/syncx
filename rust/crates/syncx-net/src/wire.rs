@@ -474,6 +474,127 @@ pub enum ControlMessage {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         runtime: Option<String>,
     },
+
+    /* ===== 设备间直发(ADR-0028)=====
+     * 全部带 `id` 关联同一次投送。归属一律以**这一跳的会话身份**为准,消息体里的
+     * `fromDeviceId` 只用于注入版本等信息(Node 侧同款),不能拿来判「是谁发的」。
+     * 文件字节不走这些 JSON 帧,走 [`BinaryFrameKind::DirectFileChunk`]。 */
+    /// 一段文本(≤64KB UTF-8 字节),接收方直接落收件箱并回 `direct-result`。
+    DirectText {
+        id: String,
+        #[serde(rename = "fromDeviceId", default)]
+        from_device_id: String,
+        text: String,
+        #[serde(rename = "createdAt", default)]
+        created_at: i64,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        version: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        hostname: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        platform: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        runtime: Option<String>,
+    },
+    /// 文件投送提议。用户确认前接收方不写入任何字节(只预建临时文件路径)。
+    /// `batchId` 把同一次「发送 N 个文件」串起来:接收方据此合并成一张卡、一次确认。
+    DirectFileOffer {
+        id: String,
+        #[serde(rename = "fromDeviceId", default)]
+        from_device_id: String,
+        name: String,
+        size: u64,
+        sha256: String,
+        #[serde(rename = "createdAt", default)]
+        created_at: i64,
+        #[serde(rename = "batchId", default, skip_serializing_if = "Option::is_none")]
+        batch_id: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        version: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        hostname: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        platform: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        runtime: Option<String>,
+    },
+    /// 接收方对提议的表态。`offset` 只在断点续传时出现 = 本机已落盘字节数
+    /// (必然是整片的整数倍),发送方据此把起点挪到对应片号。
+    DirectReply {
+        id: String,
+        #[serde(rename = "fromDeviceId", default)]
+        from_device_id: String,
+        accept: bool,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        reason: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        offset: Option<u64>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        version: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        hostname: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        platform: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        runtime: Option<String>,
+    },
+    /// 累积确认:`seq` = 接收方**下一个期望的片号**,即它之前全部已落盘。
+    DirectAck {
+        id: String,
+        #[serde(rename = "fromDeviceId", default)]
+        from_device_id: String,
+        seq: u64,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        version: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        hostname: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        platform: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        runtime: Option<String>,
+    },
+    /// 任一方中止(离线 / 超时 / 校验失败);收到即清理临时文件。
+    DirectCancel {
+        id: String,
+        #[serde(rename = "fromDeviceId", default)]
+        from_device_id: String,
+        #[serde(default)]
+        reason: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        version: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        hostname: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        platform: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        runtime: Option<String>,
+    },
+    /// 接收方最终回执(文本落箱 / 文件校验通过并重命名)。
+    DirectResult {
+        id: String,
+        #[serde(rename = "fromDeviceId", default)]
+        from_device_id: String,
+        ok: bool,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        error: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        version: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        hostname: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        platform: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        runtime: Option<String>,
+    },
+    /// 未知 kind:静默忽略。
+    ///
+    /// Node 侧的控制面是「读一段 JSON、按 kind 分支,不认识的直接跳过」,所以它天然
+    /// 向前兼容。这里是关闭枚举:没有这一支时,任何新版本发来的消息都会让**整帧**
+    /// 反序列化失败 —— 而 `decrypt_message` 的失败策略是丢弃整帧并打 debug 日志,
+    /// 于是「对端发来一条我不认识的通知」等于什么都没发生,却连原因都看不出来。
+    /// 降级成一条可忽略的消息,与 Node 的语义对齐。
+    #[serde(other)]
+    Unknown,
 }
 
 /// 顶层 wire 消息。
@@ -606,10 +727,14 @@ const BINARY_HEADER_MAX: usize = 1024 * 1024;
 ///
 /// 只有这两个是字节量大头 —— 块响应与索引。块请求与控制面消息只有几十字节,
 /// 继续走文本 JSON,少一处格式分支。
+///
+/// `DirectFileChunk` 是第三个:直发的文件分片(256KB)不属于任何共享目录,读循环
+/// 必须**先**按 kind 认它、再按 `folder` 路由,否则会掉进「目录不存在」的静默丢弃。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum BinaryFrameKind {
     BlockResponse = 1,
     Index = 2,
+    DirectFileChunk = 3,
 }
 
 impl BinaryFrameKind {
@@ -617,10 +742,17 @@ impl BinaryFrameKind {
         match byte {
             1 => Some(Self::BlockResponse),
             2 => Some(Self::Index),
+            3 => Some(Self::DirectFileChunk),
             _ => None,
         }
     }
 }
+
+/// 直发分片的裸字节上限:与 Node 的 `DIRECT_CHUNK_BYTES` 同值。
+///
+/// 放在 wire 层是因为接收侧要先按它拒掉畸形帧(**不信** header 声明的长度),
+/// 而不是让上层拿到一片 8MB 的「分片」再自己判断。
+pub const DIRECT_CHUNK_BYTES: usize = 256 * 1024;
 
 /// 解出的一帧二进制数据。
 #[derive(Debug, Clone)]

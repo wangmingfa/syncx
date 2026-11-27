@@ -161,6 +161,72 @@ pub trait ControlOps: Send + Sync {
         Err(OpError::Unavailable)
     }
 
+    // ---- 设备间直发(ADR-0028)----
+    //
+    // 收件箱与在途状态都在装配层的直发服务里;这里只做「转一手」,不判断业务。
+    fn direct_snapshot(&self) -> OpResult<Value> {
+        Err(OpError::Unavailable)
+    }
+    /// 取一条收件箱内容:元数据 + 原始字节(文本是 UTF-8 字节)。
+    fn direct_content(&self, _id: &str) -> OpResult<(Value, Vec<u8>)> {
+        Err(OpError::Unavailable)
+    }
+    fn direct_remove(&self, _id: &str) -> OpResult<bool> {
+        Err(OpError::Unavailable)
+    }
+    /// 确认/拒绝待确认文件。`id` 单条、`batch` 整组,二者取其一;返回处理条数。
+    fn direct_reply(
+        &self,
+        _id: Option<&str>,
+        _batch: Option<&str>,
+        _accept: bool,
+        _reason: Option<&str>,
+        _save_to: Option<&str>,
+    ) -> OpResult<usize> {
+        Err(OpError::Unavailable)
+    }
+    /// 另存目录规范化(含路径存在性与可写性校验)。不提供 = 本后端不支持另存。
+    fn direct_save_path(&self, _input: &str) -> OpResult<PathBuf> {
+        Err(OpError::Unavailable)
+    }
+    fn direct_cancel(&self, _id: &str) -> OpResult<bool> {
+        Err(OpError::Unavailable)
+    }
+    /// 逐台投送文本,返回 `{ ids, results:[{deviceId,id?,queued?,error?}] }`。
+    fn direct_send_text(&self, _device_ids: &[String], _text: &str) -> OpResult<Value> {
+        Err(OpError::Unavailable)
+    }
+    /// 逐台投送文件:先落暂存区,再发起提议。返回形状同上。
+    fn direct_send_file(
+        &self,
+        _device_ids: &[String],
+        _name: &str,
+        _size: u64,
+        _bytes: &[u8],
+        _batch: Option<&str>,
+    ) -> OpResult<Value> {
+        Err(OpError::Unavailable)
+    }
+    /// 打包模式的上传:只落批次暂存区,不投送(等 `/api/direct/zip` 统一打包)。
+    fn direct_stage_zip(
+        &self,
+        _batch: &str,
+        _name: &str,
+        _size: u64,
+        _bytes: &[u8],
+    ) -> OpResult<Value> {
+        Err(OpError::Unavailable)
+    }
+    /// 把批次暂存区打成一个 zip 再逐台投送。返回形状同 `direct_send_file`。
+    fn direct_send_zip(
+        &self,
+        _device_ids: &[String],
+        _batch: &str,
+        _name: Option<&str>,
+    ) -> OpResult<Value> {
+        Err(OpError::Unavailable)
+    }
+
     // ---- git ----
     fn git_changes(&self, _folder_id: &str) -> OpResult<Value> {
         Err(OpError::Unavailable)

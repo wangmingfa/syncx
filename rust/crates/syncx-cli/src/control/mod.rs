@@ -42,10 +42,12 @@ use crate::update;
 
 pub mod assembly;
 pub mod compare;
+pub mod direct;
 pub mod git;
 pub mod git_sync;
 pub mod offers;
 pub mod selfheal;
+pub mod zipstore;
 
 /// 单文件内容对比的请求超时(与 Node 的 `FILE_REQUEST_TIMEOUT_MS` 同值)。
 pub const FILE_REQUEST_TIMEOUT_MS: u64 = 20_000;
@@ -110,8 +112,13 @@ pub struct RuntimeOps {
     pub started_at: Instant,
 
     /// `deviceId → 这条连接的控制面出站通道`。
-    pub sessions: Mutex<HashMap<String, ControlLink>>,
+    ///
+    /// 用 `Arc` 而不是裸 `Mutex`:直发服务的「现取一台设备的通道」回调也要读这张表,
+    /// 而回调在 ops 之前构造(它得先于直发服务存在)。
+    pub sessions: Arc<Mutex<HashMap<String, ControlLink>>>,
     pub peer_info: Mutex<HashMap<String, PeerInfo>>,
+    /// `deviceId → 对端在握手时宣告的能力标签`。会话级,断开即丢。
+    pub peer_caps: Mutex<HashMap<String, Vec<String>>>,
     /// `deviceId → 本机记录的可达地址`(状态页展示用)。
     pub peer_urls: Mutex<HashMap<String, String>>,
     pub remote_folders: Mutex<HashMap<String, Vec<String>>>,
@@ -138,6 +145,84 @@ pub struct RuntimeOps {
     /// 四张表放同一个锁里:结算时它们必须同时前进或同时不动 ——
     /// 分开加锁会出现「通知还在、次数已清零」这种自相矛盾的中间态。
     pub git_state: Mutex<GitState>,
+
+    /// 设备间直发(ADR-0028)。收件箱、队列与在途状态都在它里面。
+    pub direct: Arc<direct::DirectService>,
+}
+
+/// 直发「保存到指定目录」的落点校验(与 Node 的 `src/direct-save-path.ts` 同口径)。
+///
+/// 浏览器给的是 daemon 所在机器的绝对路径,所以一律在 daemon 侧判定。只校验目录、
+/// 不创建目录 —— 写文件留给直发服务在校验 sha256 之后做。这里比「写之前再看一眼」
+/// 更严格:提权只发生一次,而传输可能要几分钟,期间该目录完全可能被改成共享目录;
+/// 直发文件永远不该落进会被同步的位置。
+fn direct_save_dir(ops: &RuntimeOps, input: &str) -> OpResult<PathBuf> {
+    let trimmed = input.trim();
+    if trimmed.is_empty() {
+        return Err(OpError::Failed("保存目录格式不正确".to_string()));
+    }
+    let raw = PathBuf::from(trimmed);
+    if !raw.is_absolute() {
+        return Err(OpError::Failed(format!(
+            "保存目录必须是本机的绝对路径(当前输入:{trimmed})"
+        )));
+    }
+    let canonical = std::fs::canonicalize(&raw)
+        .map_err(|e| OpError::Failed(format!("保存目录不可访问:{e}")))?;
+    let meta = std::fs::metadata(&canonical)
+        .map_err(|e| OpError::Failed(format!("保存目录不可访问:{e}")))?;
+    if !meta.is_dir() {
+        return Err(OpError::Failed("保存目录不是文件夹".to_string()));
+    }
+    // 符号链接指向共享目录时也必须被挡住,所以两边都取真实路径再比。
+    let canon_of = |path: &str| {
+        std::fs::canonicalize(path).unwrap_or_else(|_| PathBuf::from(path))
+    };
+    if canonical.starts_with(canon_of(&ops.config_dir.to_string_lossy())) {
+        return Err(OpError::Failed(
+            "不能存到 syncx 的数据目录里(那里放的是直发自己的状态)".to_string(),
+        ));
+    }
+    for folder in &ops.store.load().shared_folders {
+        if canonical.starts_with(canon_of(&folder.path)) {
+            return Err(OpError::Failed(format!(
+                "不能存进共享目录「{}」:直发文件不该被同步出去",
+                folder.path
+            )));
+        }
+    }
+    for system in system_dirs() {
+        if canonical.starts_with(&system) {
+            return Err(OpError::Failed(format!(
+                "不能存进系统目录 {}",
+                system.display()
+            )));
+        }
+    }
+    Ok(canonical)
+}
+
+/// 系统目录按平台给一小组明确名单;不试图枚举所有可能危险的位置。
+///
+/// 刻意不列 `/var` 与 `/private`:macOS 的 `/tmp`、`/var/folders` 都指向
+/// `/private/var`,列了会把系统临时目录一起挡掉。
+fn system_dirs() -> Vec<PathBuf> {
+    let home = std::env::var_os("HOME").map(PathBuf::from);
+    let mut dirs: Vec<PathBuf> = if cfg!(windows) {
+        ["SystemRoot", "ProgramFiles", "ProgramData"]
+            .iter()
+            .filter_map(|key| std::env::var_os(key).map(PathBuf::from))
+            .collect()
+    } else {
+        ["/etc", "/usr", "/bin", "/sbin", "/lib", "/lib64", "/opt", "/System", "/Library", "/proc", "/sys", "/dev", "/boot"]
+            .iter()
+            .map(PathBuf::from)
+            .collect()
+    };
+    if let Some(home) = home {
+        dirs.push(home.join(".ssh"));
+    }
+    dirs
 }
 
 /// 自动提交的运行期台账。
@@ -437,6 +522,10 @@ pub fn strip_co_authored_lines(message: &str) -> String {
 pub struct ControlLink {
     pub device_id: String,
     pub outbound: UnboundedSender<ControlMessage>,
+    /// 直发文件分片的出站通道。与 `outbound` 共用同一条连接,顺序由此保证。
+    pub chunk: UnboundedSender<syncx_daemon::driver::DirectChunk>,
+    /// 对端握手时宣告的能力标签(含 `direct1` 才能给它发文件)。
+    pub caps: Vec<String>,
 }
 
 /// 该目录此刻生效的忽略规则行(内置 + .gitignore + .syncxignore)。纯函数:只依赖
@@ -480,6 +569,14 @@ impl RuntimeOps {
         }
     }
 
+    /// 取某设备此刻的控制面通道(直发用它发控制帧与分片)。离线时 `None`。
+    pub fn session_of(&self, device_id: &str) -> Option<ControlLink> {
+        self.sessions
+            .lock()
+            .ok()
+            .and_then(|map| map.get(device_id).cloned())
+    }
+
     pub fn is_connected(&self, device_id: &str) -> bool {
         self.sessions
             .lock()
@@ -489,6 +586,9 @@ impl RuntimeOps {
 
     pub fn register_session(&self, link: ControlLink) {
         if let Ok(mut map) = self.sessions.lock() {
+            if let Ok(mut caps) = self.peer_caps.lock() {
+                caps.insert(link.device_id.clone(), link.caps.clone());
+            }
             map.insert(link.device_id.clone(), link);
         }
     }
@@ -499,6 +599,18 @@ impl RuntimeOps {
             // 无条件 remove 会把新连接也摘掉,表现为「刚连上就掉线」。
             map.remove(device_id);
         }
+        if let Ok(mut caps) = self.peer_caps.lock() {
+            caps.remove(device_id);
+        }
+    }
+
+    /// 对端宣告的能力标签。离线 / 未握手时为空表。
+    pub fn peer_caps_of(&self, device_id: &str) -> Option<Vec<String>> {
+        self.peer_caps
+            .lock()
+            .ok()
+            .and_then(|map| map.get(device_id).cloned())
+            .filter(|caps| !caps.is_empty())
     }
 
     /// 学习对端自报的信息。返回 `true` 表示**版本号发生了变化**
@@ -1343,6 +1455,258 @@ pub fn is_peer_allowed(config: &Config, device_id: &str) -> bool {
 }
 
 impl ControlOps for RuntimeOps {
+    // ---- 设备间直发(ADR-0028)----
+
+    fn direct_snapshot(&self) -> OpResult<Value> {
+        Ok(self.direct.snapshot())
+    }
+
+    fn direct_content(&self, id: &str) -> OpResult<(Value, Vec<u8>)> {
+        self.direct
+            .content(id)
+            .ok_or_else(|| OpError::Failed("收件箱条目不存在".to_string()))
+    }
+
+    fn direct_remove(&self, id: &str) -> OpResult<bool> {
+        Ok(self.direct.remove(id))
+    }
+
+    fn direct_reply(
+        &self,
+        id: Option<&str>,
+        batch: Option<&str>,
+        accept: bool,
+        reason: Option<&str>,
+        save_to: Option<&str>,
+    ) -> OpResult<usize> {
+        let save_dir = match save_to {
+            Some(input) => Some(direct_save_dir(self, input)?),
+            None => None,
+        };
+        if let Some(batch) = batch {
+            return Ok(self
+                .direct
+                .reply_batch(batch, accept, reason, save_dir.as_deref()));
+        }
+        let id = id.ok_or_else(|| OpError::Failed("缺少待确认项 id".to_string()))?;
+        Ok(usize::from(
+            self.direct.reply(id, accept, reason, save_dir.as_deref()),
+        ))
+    }
+
+    fn direct_save_path(&self, input: &str) -> OpResult<PathBuf> {
+        direct_save_dir(self, input)
+    }
+
+    fn direct_cancel(&self, id: &str) -> OpResult<bool> {
+        Ok(self.direct.cancel_queued(id))
+    }
+
+    fn direct_send_text(&self, device_ids: &[String], text: &str) -> OpResult<Value> {
+        let mut results: Vec<Value> = Vec::new();
+        for device in device_ids {
+            let link = self.session_of(device);
+            match self.direct.send_text(device, text, link) {
+                Ok((id, queued)) => {
+                    let mut value = json!({ "deviceId": device, "id": id });
+                    if queued {
+                        value["queued"] = json!(true);
+                    }
+                    results.push(value);
+                }
+                Err(error) => results.push(json!({ "deviceId": device, "error": error })),
+            }
+        }
+        let first_id = results
+            .iter()
+            .find_map(|r| r.get("id").and_then(|v| v.as_str()).map(str::to_string));
+        let mut body = json!({ "ids": device_ids, "results": results });
+        if let Some(id) = first_id {
+            // 保留单设备响应里的 `id`,老前端拿到它就能继续工作。
+            body["id"] = json!(id);
+        }
+        Ok(body)
+    }
+
+    fn direct_send_file(
+        &self,
+        device_ids: &[String],
+        name: &str,
+        size: u64,
+        bytes: &[u8],
+        batch: Option<&str>,
+    ) -> OpResult<Value> {
+        if bytes.len() as u64 != size {
+            return Err(OpError::Failed("上传内容与声明大小不一致".to_string()));
+        }
+        if size == 0 || size > direct::MAX_FILE_BYTES {
+            return Err(OpError::Failed(
+                "文件大小必须在 1 ~ 100 MB 之间".to_string(),
+            ));
+        }
+        let digest = {
+            let mut hasher = Sha256::new();
+            hasher.update(bytes);
+            hex::encode(hasher.finalize())
+        };
+        let staging_dir = self.config_dir.join("inbox").join(".tmp");
+        std::fs::create_dir_all(&staging_dir)
+            .map_err(|e| OpError::Failed(format!("创建暂存目录失败:{e}")))?;
+        let staging = staging_dir.join(format!("out-{}", hex::encode(rand::random::<[u8; 8]>())));
+        std::fs::write(&staging, bytes)
+            .map_err(|e| OpError::Failed(format!("暂存待发文件失败:{e}")))?;
+
+        let mut results: Vec<Value> = Vec::new();
+        let mut started = false;
+        for device in device_ids {
+            let link = self.session_of(device);
+            match self.direct.send_file(
+                device,
+                name,
+                &staging,
+                size,
+                &digest,
+                batch,
+                link,
+            ) {
+                Ok((id, queued)) => {
+                    started = true;
+                    let mut value = json!({ "deviceId": device, "id": id });
+                    if queued {
+                        value["queued"] = json!(true);
+                    }
+                    results.push(value);
+                }
+                Err(error) => results.push(json!({ "deviceId": device, "error": error })),
+            }
+        }
+        // 一笔都没发出去时没有服务接管暂存文件,这里自己清理;否则由直发服务
+        // 按引用计数在最后一笔结束时删。
+        if !started {
+            let _ = std::fs::remove_file(&staging);
+        }
+        let first_id = results
+            .iter()
+            .find_map(|r| r.get("id").and_then(|v| v.as_str()).map(str::to_string));
+        let mut body = json!({ "ids": device_ids, "results": results });
+        if let Some(id) = first_id {
+            body["id"] = json!(id);
+        }
+        Ok(body)
+    }
+
+    fn direct_stage_zip(
+        &self,
+        batch: &str,
+        name: &str,
+        size: u64,
+        bytes: &[u8],
+    ) -> OpResult<Value> {
+        if !zipstore::batch_ok(batch) {
+            return Err(OpError::Failed("批次号格式不正确".to_string()));
+        }
+        if size == 0 || size > direct::MAX_FILE_BYTES {
+            return Err(OpError::Failed(
+                "文件大小必须在 1 ~ 100 MB 之间".to_string(),
+            ));
+        }
+        if bytes.len() as u64 != size {
+            return Err(OpError::Failed("上传内容与声明大小不一致".to_string()));
+        }
+        let root = zipstore::staging_root(&self.config_dir);
+        let count = zipstore::stage_entry(&root, batch, name, size, bytes)
+            .map_err(|e| OpError::Failed(format!("暂存待发文件失败:{e}")))?;
+        Ok(json!({ "staged": true, "count": count, "name": name, "size": size }))
+    }
+
+    fn direct_send_zip(
+        &self,
+        device_ids: &[String],
+        batch: &str,
+        name: Option<&str>,
+    ) -> OpResult<Value> {
+        if !zipstore::batch_ok(batch) {
+            return Err(OpError::Failed("批次号格式不正确".to_string()));
+        }
+        let entries = zipstore::staged_entries(&self.config_dir, batch);
+        if entries.is_empty() {
+            // Node 这条回 404,这边回 400:`OpError` 有意只有「没这项能力 / 这次失败」
+            // 两态,为一条罕见分支加枚举变体要让六处 match 各多一臂,不划算。
+            // 前端只展示 message,两种状态码的观感一致。
+            return Err(OpError::Failed(
+                "这批文件还没有暂存内容（可能已发送或暂存已过期）".to_string(),
+            ));
+        }
+        // 上限按**源文件**总量判:store 模式包体会略大(每个条目 30+16+46 字节开销),
+        // 与 Node 同口径 —— 用户看到的「约 99MB」不该因为几十字节开销突然变红。
+        let total: u64 = entries.iter().map(|e| e.size).sum();
+        if total > zipstore::ZIP_MAX_BYTES {
+            return Err(OpError::Failed(format!(
+                "打包后约 {},超过单文件上限 {}",
+                zipstore::human_bytes(total),
+                zipstore::human_bytes(zipstore::ZIP_MAX_BYTES)
+            )));
+        }
+
+        let staging_root = zipstore::staging_root(&self.config_dir);
+        let dir = zipstore::batch_dir(&staging_root, batch);
+        let archive = staging_root.join(format!("out-{}.zip", hex::encode(rand::random::<[u8; 8]>())));
+        let zip_entries: Vec<zipstore::ZipEntry> = entries
+            .iter()
+            .map(|e| zipstore::ZipEntry {
+                name: e.name.clone(),
+                path: dir.join(&e.file),
+                size: e.size,
+            })
+            .collect();
+        let built = match zipstore::write_zip(&archive, &zip_entries) {
+            Ok(built) => built,
+            Err(error) => {
+                let _ = std::fs::remove_file(&archive);
+                return Err(OpError::Failed(format!("打包失败:{error}")));
+            }
+        };
+        // 源文件已经进包,暂存目录无论投送成败都不再需要。
+        zipstore::drop_batch(&self.config_dir, batch);
+
+        let archive_name = zipstore::archive_name(name);
+        let mut results: Vec<Value> = Vec::new();
+        let mut started = false;
+        for device in device_ids {
+            let link = self.session_of(device);
+            match self.direct.send_file(
+                device,
+                &archive_name,
+                &archive,
+                built.size,
+                &built.sha256,
+                Some(batch),
+                link,
+            ) {
+                Ok((id, queued)) => {
+                    started = true;
+                    let mut value = json!({ "deviceId": device, "id": id });
+                    if queued {
+                        value["queued"] = json!(true);
+                    }
+                    results.push(value);
+                }
+                Err(error) => results.push(json!({ "deviceId": device, "error": error })),
+            }
+        }
+        if !started {
+            let _ = std::fs::remove_file(&archive);
+        }
+        let first_id = results
+            .iter()
+            .find_map(|r| r.get("id").and_then(|v| v.as_str()).map(str::to_string));
+        let mut body = json!({ "ids": device_ids, "results": results });
+        if let Some(id) = first_id {
+            body["id"] = json!(id);
+        }
+        Ok(body)
+    }
+
     // ---- 状态与生命周期 ----
 
     fn paircode(&self) -> OpResult<Value> {
@@ -2110,6 +2474,21 @@ mod tests {
         let (shutdown_tx, _) = tokio::sync::mpsc::unbounded_channel();
         let (dial_tx, _) = tokio::sync::mpsc::unbounded_channel();
         let secret = [7u8; 32];
+        let sessions: Arc<Mutex<HashMap<String, ControlLink>>> =
+            Arc::new(Mutex::new(HashMap::new()));
+        let direct = {
+            let sessions = Arc::clone(&sessions);
+            direct::DirectService::new(
+                root,
+                Arc::new(move |device_id: &str| {
+                    sessions
+                        .lock()
+                        .ok()
+                        .and_then(|map| map.get(device_id).cloned())
+                }),
+                Arc::new(|| {}),
+            )
+        };
         Arc::new(RuntimeOps {
             identity: Arc::new(DeviceIdentity::from_secret_bytes(&secret)),
             store: ConfigStore::new(root.join("config.json")),
@@ -2123,8 +2502,9 @@ mod tests {
             hub: None,
             terminal: TerminalHub::new(),
             started_at: Instant::now(),
-            sessions: Mutex::new(HashMap::new()),
+            sessions,
             peer_info: Mutex::new(HashMap::new()),
+            peer_caps: Mutex::new(HashMap::new()),
             peer_urls: Mutex::new(HashMap::new()),
             remote_folders: Mutex::new(HashMap::new()),
             remote_pending: Mutex::new(HashMap::new()),
@@ -2137,6 +2517,7 @@ mod tests {
             git_push_running: AtomicBool::new(false),
             git_rewrite_running: AtomicBool::new(false),
             git_state: Mutex::new(GitState::default()),
+            direct,
         })
     }
 
@@ -2516,5 +2897,63 @@ mod tests {
             format!("{head}…")
         );
         assert_eq!(git_sync::truncate_git_subject("", 64), "");
+    }
+
+    /// 打包投送的装配层闭环:暂存两笔 → 打成一个 zip → 设备离线进队列 → 批目录清掉。
+    ///
+    /// 路由只验证参数,zip 的结构由 `zipstore` 单测钉住,这条补的是「三者接起来」
+    /// 的那一段:暂存目录、包名、队列台账、二次打包的拒绝。
+    #[test]
+    fn zip_batch_stages_then_queues_one_archive() {
+        let root = std::env::temp_dir().join(format!(
+            "syncx-zip-ops-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&root).unwrap();
+        let ops = build_ops(&root);
+
+        assert_eq!(
+            ops.direct_stage_zip("zb-1", "a.txt", 3, b"abc").unwrap()["count"],
+            1
+        );
+        assert_eq!(
+            ops.direct_stage_zip("zb-1", "b.txt", 2, b"de").unwrap()["count"],
+            2
+        );
+
+        // 设备不在线:内容照样落盘并排队,上线后补发(与单文件投送同一条路)。
+        let sent = ops
+            .direct_send_zip(&["DEV-B".to_string()], "zb-1", Some("报告"))
+            .unwrap();
+        assert_eq!(sent["results"][0]["queued"], true);
+        assert!(
+            !root.join("inbox/.tmp/zip-zb-1").exists(),
+            "源文件已经进包,批目录应清掉"
+        );
+
+        let queue: Value =
+            serde_json::from_str(&std::fs::read_to_string(root.join("inbox/queue.json")).unwrap())
+                .unwrap();
+        let record = &queue[0];
+        assert_eq!(record["name"], "报告.zip");
+        assert_eq!(record["kind"], "file");
+        let archive = record["sourcePath"].as_str().expect("队列要记住包在哪");
+        let bytes = std::fs::read(archive).expect("包应真的落盘");
+        assert!(bytes.starts_with(b"PK\x03\x04"), "本地文件头");
+        let tail = &bytes[bytes.len() - 22..];
+        assert_eq!(&tail[0..4], b"PK\x05\x06", "EOCD");
+        assert_eq!(u16::from_le_bytes([tail[10], tail[11]]), 2, "两个条目");
+
+        // 暂存已被消费:再打一次要给出可读原因,而不是产出一个空包。
+        let error = ops
+            .direct_send_zip(&["DEV-B".to_string()], "zb-1", None)
+            .unwrap_err();
+        assert!(error.message().contains("还没有暂存内容"), "{error}");
+
+        let _ = std::fs::remove_dir_all(&root);
     }
 }

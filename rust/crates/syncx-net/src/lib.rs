@@ -22,7 +22,7 @@ pub mod wire;
 
 pub use client::{connect_peer, ConnectedPeer};
 pub use discovery::{start_discovery, DiscoveredPeer, Discovery};
-pub use handshake::{CAP_BINARY1, PEER_CAPS};
+pub use handshake::{CAP_BINARY1, CAP_DIRECT1, PEER_CAPS};
 pub use identity::DeviceIdentity;
 pub use server::{start_peer_server, PeerConnection, PeerServer};
 pub use wire::{WireError, WireMessage, MAX_MESSAGE_BYTES};
