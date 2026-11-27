@@ -16,7 +16,7 @@ struct Collector {
   disconnected : Array[String]
   errors : Array[String]
   messages : Array[(String, @net.WireMessage)]
-  binaries : Array[(String, Bytes)]
+  binaries : Array[(String, @net.BinaryFrame)]
 }
 
 ///|
@@ -56,15 +56,10 @@ fn echo_handlers(
         }
       }
     },
-    on_binary: (id, data) => {
-      collector.binaries.push((id, data))
-      if server_box.length() > 0 {
-        try {
-          let _ = server_box[0].send_binary(id, data)
-        } catch {
-          _ => ()
-        }
-      }
+    on_binary: (id, frame) => {
+      // 数据面(索引/块响应)已由传输层翻译成 wire 消息走 on_message,
+      // 这里只会收到直发分片一类的「无 folder 帧」。
+      collector.binaries.push((id, frame))
     },
     on_disconnect: id => collector.disconnected.push(id),
     on_error: reason => collector.errors.push(reason),
@@ -110,18 +105,6 @@ async fn recv_message_timeout(client : @net.PeerClient) -> @net.WireMessage? {
   }
   match message {
     Some(m) => Some(m)
-    None => None
-  }
-}
-
-///|
-/// 收一帧(文本/二进制),10s 超时。
-async fn recv_frame_timeout(client : @net.PeerClient) -> @net.PeerFrame? {
-  let frame = @async.with_timeout_opt(10_000, () => client.recv_frame()) catch {
-    _ => return None
-  }
-  match frame {
-    Some(f) => Some(f)
     None => None
   }
 }
@@ -252,32 +235,53 @@ async test "回环:1MB 文本信封往返(WS 分片与帧边界)" {
 }
 
 ///|
-async test "回环:1MB 二进制帧往返" {
+/// 1MB 块响应在 Secure 连接上**走二进制信封**往返:body 是裸字节,经
+/// 「加密 → 解密 → 翻译成 wire 消息 → 再编码 → 再翻译」回来。
+///
+/// 这条同时钉三件事:大帧能过 ws 与 64MB 闸门、数据面确实选了二进制信封
+/// (Plain 模式没有密钥,天然走文本)、两条信封路径的翻译彼此对称。
+async test "回环:1MB 块响应走二进制信封往返" {
   @async.with_task_group() <| group => {
+    let identity_a = @net.DeviceIdentity::generate() catch { _ => panic() }
+    let identity_b = @net.DeviceIdentity::generate() catch { _ => panic() }
     let collector = new_collector()
     let server_box : Array[@net.PeerServer] = []
     let _ = start_test_server(
-      @net.PeerHandshakeMode::Plain,
+      @net.PeerHandshakeMode::Secure(identity_a),
       echo_handlers(collector, server_box),
       server_box,
     )
     let server = server_box[0]
     group.spawn_bg(no_wait=true) <| () => { server.listen() }
     let client = connect_with_retry(
-      @net.PeerHandshakeMode::Plain,
+      @net.PeerHandshakeMode::Secure(identity_b),
       "ws://127.0.0.1:\{server.bound_port()}\{@net.PEER_WS_PATH}",
     )
-    client.send_message(
-      @net.Control(payload=@net.make_hello("BINDEV", None, None)),
+    assert_true(
+      wait_until(() => collector.connected.contains(identity_b.device_id)),
     )
     let data = pattern_bytes(1024 * 1024)
-    client.send_binary(data)
-    let frame = recv_frame_timeout(client) catch { _ => panic() }
-    match frame {
-      Some(@net.PeerFrame::Binary(echoed)) => assert_eq(echoed, data)
+    let response : @net.WireBlockResponse = {
+      device_id: identity_b.device_id,
+      path: "big.bin",
+      block_index: 7L,
+      hash: "deadbeef",
+      data: @base64.encode(data),
+      cdc: None,
+    }
+    client.send_message(@net.BlockResponse(folder="/f1", payload=response))
+    let echoed = recv_message_timeout(client) catch { _ => panic() }
+    match echoed {
+      Some(@net.BlockResponse(folder~, payload~)) => {
+        assert_eq(folder, "/f1")
+        // 服务端原样回:路径/块号/哈希不变,body 逐字节相同
+        assert_eq(payload.path, "big.bin")
+        assert_eq(payload.block_index, 7L)
+        assert_eq(payload.data, @base64.encode(data))
+      }
       _ => panic()
     }
-    close_and_wait(client, collector, "BINDEV")
+    close_and_wait(client, collector, identity_b.device_id)
   }
 }
 
@@ -428,10 +432,14 @@ async test "Secure 端到端:握手 + 会话密钥 + 消息往返" {
       Some({ listen_port: Some(port), .. }) => assert_eq(port, 39451)
       _ => panic()
     }
-    // 2026-11-27 起 peer_caps() 撤回 binary1(数据面还没切到二进制信封),
-    // 空能力数组在 kx 里是缺省 —— 两端都不认二进制帧。
-    assert_true(info is Some({ caps: None, .. }))
-    assert_true(!client.supports_binary())
+    // 数据面已切到二进制信封(见 net/dataframe.mbt),两端都宣告 binary1 ——
+    // 索引与块响应走裸 body,不再为块字节付两次 base64。
+    match info {
+      Some({ caps: Some(caps), .. }) =>
+        assert_true(caps.contains(@net.CAP_BINARY1))
+      _ => panic()
+    }
+    assert_true(client.supports_binary())
     // 数据面:客户端发 Hello,服务端按注册 deviceId 分发
     client.send_message(
       @net.Control(payload=@net.make_hello(identity_b.device_id, None, None)),

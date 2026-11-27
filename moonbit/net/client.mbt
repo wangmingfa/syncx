@@ -184,16 +184,24 @@ pub async fn PeerClient::recv_frame(
 
 ///|
 /// 收一条 wire 消息。Secure 连接上入站帧是加密信封,先解密再解码。
+///
+/// 数据面的二进制帧(索引/块响应)在这里被翻译成等价消息;直发分片没有
+/// folder 维度,不能翻译成 wire 消息 —— 本函数是「要一条数据面消息」的
+/// 调用方契约,遇到它只能报错,别静默当成空消息。
 pub async fn PeerClient::recv_message(
   self : PeerClient,
 ) -> WireMessage raise PeerError {
   let frame = self.recv_frame()
   match frame {
     PeerFrame::Text(text) => decode_incoming_text(self.session_key, text)
-    PeerFrame::Binary(_) =>
-      raise PeerError::Transport(
-        "二进制帧不是文本信封(数据面尚未切到二进制信封)",
-      )
+    PeerFrame::Binary(data) =>
+      match decode_inbound_binary(self.session_key, data) {
+        Data(message) => message
+        DirectChunk(_) =>
+          raise PeerError::Transport("收到直发分片,期望数据面消息")
+        Dropped =>
+          raise PeerError::Transport("二进制帧无法解开(密钥不符或格式不认识)")
+      }
   }
 }
 
@@ -223,10 +231,26 @@ fn decode_incoming_text(
 
 ///|
 /// 发一条 wire 消息。Secure 连接上先加密 —— 对端收到明文会静默丢弃。
+///
+/// 对端宣告 `binary1` 时索引与块响应改走二进制信封(与 `PeerServer` 同一策略,
+/// 见 `net/dataframe.mbt`)。
 pub async fn PeerClient::send_message(
   self : PeerClient,
   message : WireMessage,
 ) -> Unit raise PeerError {
+  if self.supports_binary() {
+    match self.session_key {
+      Some(key) =>
+        match encode_data_frame(key, message) {
+          Some(bytes) => {
+            self.send_binary(bytes)
+            return
+          }
+          None => ()
+        }
+      None => ()
+    }
+  }
   let encoded = encode_wire_message(message)
   let text = match self.session_key {
     Some(key) =>
@@ -286,7 +310,9 @@ pub fn PeerClient::close(self : PeerClient) -> Unit {
 /// 客户端事件回调(驱动 `PeerClient::run` 的分发循环)。
 pub(all) struct PeerClientHandlers {
   on_message : (WireMessage) -> Unit
-  on_binary : (Bytes) -> Unit
+  /// 不属于任何共享目录的二进制帧(目前只有直发文件分片);数据面的索引与
+  /// 块响应在传输层就翻译成 `WireMessage` 走 `on_message`。
+  on_binary : (BinaryFrame) -> Unit
   on_error : (String) -> Unit
   on_close : () -> Unit
 }
@@ -323,7 +349,12 @@ pub async fn PeerClient::run(
             None => ()
           }
         }
-        PeerFrame::Binary(data) => (handlers.on_binary)(data)
+        PeerFrame::Binary(data) =>
+          match decode_inbound_binary(self.session_key, data) {
+            Data(message) => (handlers.on_message)(message)
+            DirectChunk(frame) => (handlers.on_binary)(frame)
+            Dropped => (handlers.on_error)("丢弃无法解开的二进制帧")
+          }
       }
     }
   } catch {

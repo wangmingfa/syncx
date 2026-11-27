@@ -85,8 +85,11 @@ pub(all) struct PeerServerHandlers {
   /// 入站文本消息(已解码为 wire 消息)。畸形消息不会走到这里,只会进
   /// `on_error` 并被整条丢弃。
   on_message : (String, WireMessage) -> Unit
-  /// 入站二进制帧(透传字节;二进制信封语义是后续里程碑)。
-  on_binary : (String, Bytes) -> Unit
+  /// 入站二进制帧里**不属于任何共享目录**的那些(目前只有直发文件分片)。
+  ///
+  /// 索引与块响应在传输层就已经翻译成等价的 `WireMessage` 走 `on_message` ——
+  /// 上层不必知道对端用的是哪种信封。这里只留没有 folder 维度的帧。
+  on_binary : (String, BinaryFrame) -> Unit
   /// 已注册连接断开。同一连接在注册前的断开不上报(上层不认识它)。
   on_disconnect : (String) -> Unit
   /// 错误(畸形消息 / 握手失败 / 超限),只用于日志。
@@ -431,7 +434,11 @@ fn PeerServer::handle_text(
 }
 
 ///|
-/// 入站二进制:握手阶段按文本宽进,数据面透传字节。
+/// 入站二进制:握手阶段按文本宽进,数据面按帧种类分流。
+///
+/// 数据面(索引 / 块响应)在这里就翻译成等价的 wire 消息 —— 同一份
+/// `on_message` 处理两种信封,上层没有「文本路径」与「二进制路径」两套逻辑。
+/// 直发分片没有 folder 维度,原样交给 `on_binary`。
 fn PeerServer::handle_binary(
   self : PeerServer,
   cid : String,
@@ -444,7 +451,12 @@ fn PeerServer::handle_binary(
   match state.stage {
     Registered =>
       match state.device_id {
-        Some(device_id) => (self.handlers.on_binary)(device_id, data)
+        Some(device_id) =>
+          match decode_inbound_binary(state.session_key, data) {
+            Data(message) => (self.handlers.on_message)(device_id, message)
+            DirectChunk(frame) => (self.handlers.on_binary)(device_id, frame)
+            Dropped => (self.handlers.on_error)("丢弃无法解开的二进制帧")
+          }
         None => ()
       }
     AwaitPeerKey | AwaitKx | AwaitHello =>
@@ -611,6 +623,18 @@ fn enqueue_text(state : ConnState, text : String) -> Unit {
 }
 
 ///|
+/// 这条连接的对端是否宣告了二进制信封能力。
+///
+/// 只看**对端**的 caps:本端宣告什么在 `peer_caps()`,对端能不能收由对端说了算。
+/// 旧对端(None)一律按文本处理 —— 猜「新版本应该有」会把它的数据面打死。
+fn ConnState::supports_binary(self : ConnState) -> Bool {
+  match self.caps {
+    Some(caps) => caps.contains(CAP_BINARY1)
+    None => false
+  }
+}
+
+///|
 /// 取已注册连接;未注册抛 NotConnected。
 fn PeerServer::state_of(
   self : PeerServer,
@@ -638,12 +662,30 @@ fn check_frame_size(len : Int32, what : String) -> Unit raise PeerError {
 /// 发一条 wire 消息。Secure 连接上**必须先加密**再发 —— 对端收到明文 JSON
 /// 会把它当成解密失败静默丢弃,没有任何报错,表现只是「对端收不到」。
 /// 明文模式(回环测试)没有会话密钥,继续发明文。
+///
+/// 对端宣告 `binary1` 时,索引与块响应改走二进制信封(裸 body,省两次 base64);
+/// 其余消息本来就没多少字节,文本信封更省事。两条路径对端都能收 —— 这一点
+/// 由 `decode_inbound_binary` 与本函数的对称翻译保证。
 pub fn PeerServer::send_message(
   self : PeerServer,
   device_id : String,
   message : WireMessage,
 ) -> Unit raise PeerError {
   let state = self.state_of(device_id)
+  if state.supports_binary() {
+    match state.session_key {
+      Some(key) =>
+        match encode_data_frame(key, message) {
+          Some(bytes) => {
+            self.send_binary(device_id, bytes)
+            return
+          }
+          // 不是数据面消息(或 body 的 base64 坏了):回落文本信封
+          None => ()
+        }
+      None => ()
+    }
+  }
   let encoded = encode_wire_message(message)
   let text = match state.session_key {
     Some(key) =>

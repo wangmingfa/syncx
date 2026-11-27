@@ -252,8 +252,8 @@ test "handshake: kx 签名绑定 X25519 公钥" {
   }
   assert_eq(kx.kind, "kx")
   assert_eq(kx.listen_port, Some(12345))
-  // peer_caps() 当前不宣告任何能力(见 handshake.mbt),kx 里 caps 缺省。
-  assert_true(!kx.supports_binary())
+  // peer_caps() 宣告 binary1,本机 kx 里如实带上。
+  assert_true(kx.supports_binary())
   // 验签通过,且协商出来的公钥就是发送方那一把
   let peer_key = @net.verify_kx_message(kx, alice.public_key_pem) catch {
     _ => panic()
@@ -360,9 +360,8 @@ test "handshake: 两阶段握手端到端" {
   let wire_client = @net.encode_kx_message(client_kx)
   let got_server_kx = @net.decode_kx_message(wire_server) catch { _ => panic() }
   let got_client_kx = @net.decode_kx_message(wire_client) catch { _ => panic() }
-  // 本机当前不宣告 binary1(见 handshake.mbt 的 peer_caps 注释),caps 缺省
-  // → 不认二进制帧;这条同时钉住「空 caps 不写进线上 JSON」。
-  assert_true(!got_server_kx.supports_binary())
+  // caps 走一遍线上 JSON 往返后仍认得出 binary1(钉住 caps 字段的编解码)。
+  assert_true(got_server_kx.supports_binary())
   assert_eq(got_client_kx.listen_port, Some(1234))
   let server_peer_key = @net.verify_kx_message(
     got_client_kx,

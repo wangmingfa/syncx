@@ -15,6 +15,12 @@ pub const BINARY_FRAME_VERSION : Int32 = 1
 
 pub const BINARY_HEADER_MAX : Int32 = 1048576
 
+pub const BINARY_KIND_BLOCK_RESPONSE : Int32 = 1
+
+pub const BINARY_KIND_DIRECT_CHUNK : Int32 = 3
+
+pub const BINARY_KIND_INDEX : Int32 = 2
+
 pub const CAP_BINARY1 : String = "binary1"
 
 pub const ENVELOPE_IV_LEN : Int32 = 12
@@ -41,6 +47,8 @@ pub async fn connect_peer(PeerHandshakeMode, String, listen_port? : Int32?) -> P
 
 pub fn decode_binary_frame(Bytes, Bytes) -> BinaryFrame?
 
+pub fn decode_inbound_binary(Bytes?, Bytes) -> BinaryInbound
+
 pub fn decode_index(String) -> Array[WireEntry] raise WireError
 
 pub fn decode_kx_message(String) -> KxMessage raise HandshakeError
@@ -54,6 +62,8 @@ pub fn derive_device_id(String) -> String
 pub fn derive_session_key(X25519KeyPair, Bytes) -> Bytes raise HandshakeError
 
 pub fn encode_binary_frame(Bytes, Int32, Map[String, @json.Json], Bytes) -> Bytes raise EnvelopeError
+
+pub fn encode_data_frame(Bytes, WireMessage) -> Bytes?
 
 pub fn encode_index(Array[WireEntry]) -> String
 
@@ -70,6 +80,22 @@ pub fn envelope_fixture_binary_header_json() -> String
 pub fn envelope_fixture_binary_hex() -> String
 
 pub fn envelope_fixture_binary_kind() -> Int32
+
+pub fn envelope_fixture_block_body_hex() -> String
+
+pub fn envelope_fixture_block_frame_hex() -> String
+
+pub fn envelope_fixture_block_header_json() -> String
+
+pub fn envelope_fixture_block_iv_hex() -> String
+
+pub fn envelope_fixture_index_body_hex() -> String
+
+pub fn envelope_fixture_index_frame_hex() -> String
+
+pub fn envelope_fixture_index_header_json() -> String
+
+pub fn envelope_fixture_index_iv_hex() -> String
 
 pub fn envelope_fixture_iv_hex() -> String
 
@@ -96,6 +122,8 @@ pub fn peer_caps() -> Array[String]
 pub fn pem_encode_public_key(Bytes) -> String raise IdentityError
 
 pub fn seal_binary_frame(Bytes, Int32, Map[String, @json.Json], Bytes, Bytes) -> Bytes raise EnvelopeError
+
+pub fn seal_data_frame(Bytes, WireMessage, Bytes) -> Bytes?
 
 pub fn seal_text_envelope(Bytes, Bytes, Bytes) -> String raise EnvelopeError
 
@@ -156,6 +184,12 @@ pub(all) struct BinaryFrame {
   kind : Int32
   header : Map[String, @json.Json]
   body : Bytes
+}
+
+pub(all) enum BinaryInbound {
+  Data(WireMessage)
+  DirectChunk(BinaryFrame)
+  Dropped
 }
 
 type ConnState
@@ -258,7 +292,7 @@ pub fn PeerClient::supports_binary(Self) -> Bool
 
 pub(all) struct PeerClientHandlers {
   on_message : (WireMessage) -> Unit
-  on_binary : (Bytes) -> Unit
+  on_binary : (BinaryFrame) -> Unit
   on_error : (String) -> Unit
   on_close : () -> Unit
 }
@@ -305,7 +339,7 @@ pub fn PeerServer::send_text(Self, String, String) -> Unit raise PeerError
 pub(all) struct PeerServerHandlers {
   on_connect : (String) -> Unit
   on_message : (String, WireMessage) -> Unit
-  on_binary : (String, Bytes) -> Unit
+  on_binary : (String, BinaryFrame) -> Unit
   on_disconnect : (String) -> Unit
   on_error : (String) -> Unit
 }

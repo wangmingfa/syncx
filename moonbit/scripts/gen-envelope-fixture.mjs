@@ -28,6 +28,7 @@ import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 import { encodeBinaryFrameWithIv, encryptMessageWithIv } from '../../src/net/wire.js';
+import { encodeIndex } from '../../src/messages.js';
 
 const here = dirname(fileURLToPath(import.meta.url));
 const outPath = join(here, '../net/envelope_fixture.mbt');
@@ -72,6 +73,55 @@ for (let i = 0; i < binaryBody.length; i += 1) {
 const binaryFrame = encodeBinaryFrameWithIv(key, 'direct-file-chunk', binaryHeader, binaryBody, iv);
 const binaryHeaderJson = JSON.stringify(binaryHeader);
 
+/**
+ * 数据面 fixture:一帧索引(kind 2)与一帧块响应(kind 1)。
+ *
+ * 这两条钉的是 `net/dataframe.mbt` 的**翻译**是否与 Node 一致:帧头带哪些字段、
+ * 键序如何、body 是裸字节(不是 base64)。头里少一个 `folder`,Node 的路由会拿到
+ * 空串把帧静默丢掉 —— 所以这里用一个显式的中文目录名,让「字段丢了」比「值错了」
+ * 更容易看出来。
+ *
+ * 各帧用自己的 iv:GCM 下同 (key, iv) 复用会让两条密文的异或等于明文的异或。
+ * 夹具不是真密钥,但没有理由给后面的实现示范一个错误用法。
+ */
+const dataIvIndex = Buffer.from('b0b1b2b3b4b5b6b7b8b9babb', 'hex');
+const dataIvBlock = Buffer.from('c0c1c2c3c4c5c6c7c8c9cacb', 'hex');
+
+const indexEntries = [
+  {
+    path: 'docs/报告.md',
+    version: new Map([['FIXTUREDEVICE1', 3]]),
+    size: 128,
+    deleted: false,
+    blocks: ['9f86d081884c7d659a2feaa0c55ad015a3bf4f1b2b0b822cd15d6c15b0f00a08'],
+    mtime: 1_700_000_000_000,
+  },
+  {
+    path: 'docs/a.txt',
+    version: new Map([['FIXTUREDEVICE1', 1]]),
+    size: 0,
+    deleted: true,
+    blocks: [],
+  },
+];
+const indexBody = encodeIndex(indexEntries);
+const indexHeader = { folder: '/shared/docs', full: true, relayed: false };
+const indexFrame = encodeBinaryFrameWithIv(key, 'index', indexHeader, indexBody, dataIvIndex);
+
+const blockBody = Buffer.alloc(1024);
+for (let i = 0; i < blockBody.length; i += 1) {
+  blockBody[i] = (i * 31 + 7) & 0xff;
+}
+const blockHeader = {
+  folder: '/shared/docs',
+  deviceId: 'FIXTUREDEVICE1',
+  path: 'docs/报告.md',
+  blockIndex: 2,
+  hash: 'e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855',
+  cdc: false,
+};
+const blockFrame = encodeBinaryFrameWithIv(key, 'block-response', blockHeader, blockBody, dataIvBlock);
+
 /** MoonBit 字符串字面量:JSON 的转义规则与 MoonBit 在这批字符上一致。 */
 const mbtString = (value) => JSON.stringify(value);
 
@@ -96,6 +146,16 @@ const lines = [
   `pub fn envelope_fixture_binary_kind() -> Int { 3 }`,
   `pub fn envelope_fixture_binary_header_json() -> String { ${mbtString(binaryHeaderJson)} }`,
   `pub fn envelope_fixture_binary_body_hex() -> String { ${mbtString(binaryBody.toString('hex'))} }`,
+  '',
+  // 数据面(索引 / 块响应):由 `net/dataframe.mbt` 的翻译层消费。
+  `pub fn envelope_fixture_index_iv_hex() -> String { ${mbtString(dataIvIndex.toString('hex'))} }`,
+  `pub fn envelope_fixture_index_frame_hex() -> String { ${mbtString(indexFrame.toString('hex'))} }`,
+  `pub fn envelope_fixture_index_header_json() -> String { ${mbtString(JSON.stringify(indexHeader))} }`,
+  `pub fn envelope_fixture_index_body_hex() -> String { ${mbtString(indexBody.toString('hex'))} }`,
+  `pub fn envelope_fixture_block_iv_hex() -> String { ${mbtString(dataIvBlock.toString('hex'))} }`,
+  `pub fn envelope_fixture_block_frame_hex() -> String { ${mbtString(blockFrame.toString('hex'))} }`,
+  `pub fn envelope_fixture_block_header_json() -> String { ${mbtString(JSON.stringify(blockHeader))} }`,
+  `pub fn envelope_fixture_block_body_hex() -> String { ${mbtString(blockBody.toString('hex'))} }`,
   '',
 ];
 

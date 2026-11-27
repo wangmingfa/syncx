@@ -604,7 +604,7 @@ async fn actor_loop_start(
         _ => ()
       }
     },
-    on_binary: (_device, _data) => (),
+    on_binary: (_device, _frame) => (),
     on_disconnect: device => {
       let _ = handle_b.send(
         @daemon.Cmd::PeerClose(folder="f1", remote_device_id=device),

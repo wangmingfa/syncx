@@ -445,7 +445,9 @@ async fn outbound_peer_loop(
                 let _ = ack_outbox.try_put(msg) catch { _ => false }
               },
             ),
-          on_binary: _ => (),
+          // 数据面已由传输层翻译成 WireMessage;无 folder 的帧(直发分片)
+          // MoonBit 尚未实现,丢弃。
+          on_binary: _frame => (),
           on_error: reason =>
             @log.warn("peer {DeviceId} message error {Reason}", [
               Json::string(device_id), Json::string(reason),

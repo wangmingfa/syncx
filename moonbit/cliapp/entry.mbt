@@ -257,7 +257,9 @@ pub async fn run_start(args : StartArgs) -> Unit {
           },
         )
       },
-      on_binary: (_device, _data) => (), // 二进制信封:后续里程碑
+      // 数据面(索引/块响应)在传输层就翻译成了 WireMessage 走 on_message,
+      // 这里只剩直发分片一类的无 folder 帧 —— MoonBit 尚未实现直发,丢弃。
+      on_binary: (_device, _frame) => (),
       on_disconnect: device => {
         // 先关出站队列叫停泵(每目录补发 PeerClose),再摘会话(元数据随之失效)
         match session_sinks.get(device) {
