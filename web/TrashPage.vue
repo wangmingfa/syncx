@@ -417,6 +417,70 @@ onMounted(async () => {
 .tp-col-meta { text-align: left; }
 .tp-col-ops { display: flex; justify-content: flex-end; gap: 6px; }
 
+/* ---------- 手机:四列表格与一行式顶栏都放不下 ----------
+   列表原先固定 90/150/160 三列 + 路径列,光固定列就 400px(加间距 430),
+   375 的屏幕里路径列被压成 0(表头「原路径」竖着排),操作列被 .tp-rows 的
+   overflow:hidden 整列裁掉 —— 还原/彻底删除根本点不到。这里把每行改成
+   「路径独占一行 + 大小/时间/操作一行」,表头列名随之收起。 */
+@media (max-width: 640px) {
+  /* 顶栏拆两排:返回 + 标题一排,目录选择与两个按钮铺满第二排。
+     .tp-folder-pick 原来的 min-width:320 叠加返回/标题后横向溢出,
+     「清空回收站」被切在屏幕外。 */
+  .tp-top {
+    flex-wrap: wrap;
+    gap: 8px 10px;
+    padding: 8px 12px;
+  }
+
+  .tp-folder-pick {
+    flex: 1 1 100%;
+    min-width: 0;
+    max-width: none;
+    margin-left: 0;
+  }
+
+  /* 下拉吃掉按钮之外的全部宽度:naive 的 n-select 是 width:100%,不放开
+     min-width 的话长目录名会把按钮挤出屏幕 */
+  .tp-folder-pick .n-select {
+    flex: 1 1 auto;
+    min-width: 0;
+  }
+
+  .tp-main {
+    padding: 12px 12px 32px;
+  }
+
+  /* 列名行在卡片式条目里没有落点(路径已独占一行、大小/时间在数值行) */
+  .tp-head {
+    display: none;
+  }
+
+  .tp-row {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: 3px 10px;
+    padding: 9px 12px;
+  }
+
+  /* 路径整行、允许折行:原样保留省略号会把路径截到只剩开头几个字符 */
+  .tp-col-path {
+    flex: 1 1 100%;
+    white-space: normal;
+    word-break: break-all;
+  }
+
+  .tp-col-ops {
+    margin-left: auto;
+  }
+
+  /* 操作按钮从 tiny(22px)提到 28px:卡片形态下它们是这一行唯一的入口,
+     22px 在触屏上按不准 */
+  .tp-col-ops .n-button {
+    --n-height: 28px !important;
+  }
+}
+
 .tp-confirm-scrim {
   position: fixed;
   inset: 0;

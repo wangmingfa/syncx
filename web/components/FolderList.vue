@@ -673,7 +673,7 @@ function visibleFiles(f: FolderInfo): TransferFile[] {
           <n-tooltip trigger="hover" :style="{ maxWidth: '280px' }">
             <template #trigger>
               <span class="icon-btn">
-                <n-button size="small" quaternary circle @click="copy(f.id ?? f.path)">
+                <n-button size="tiny" quaternary circle @click="copy(f.id ?? f.path)">
                   <template #icon>
                     <svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
                       <rect x="9" y="9" width="11" height="11" rx="2" />
@@ -690,7 +690,7 @@ function visibleFiles(f: FolderInfo): TransferFile[] {
           <n-tooltip trigger="hover" :style="{ maxWidth: '280px' }">
             <template #trigger>
               <span class="icon-btn">
-                <n-button size="small" quaternary circle @click="copy(f.path)">
+                <n-button size="tiny" quaternary circle @click="copy(f.path)">
                   <template #icon>
                     <svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
                       <path d="M3 7a2 2 0 0 1 2-2h4l2 2h8a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z" />
@@ -773,7 +773,7 @@ function visibleFiles(f: FolderInfo): TransferFile[] {
           <n-tooltip trigger="hover" :style="{ maxWidth: '280px' }">
             <template #trigger>
               <span class="icon-btn">
-                <n-button size="small" quaternary circle :disabled="busy" @click="openEditDevices(f)">
+                <n-button size="tiny" quaternary circle :disabled="busy" @click="openEditDevices(f)">
                   <template #icon>
                     <svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
                       <line x1="4" y1="8" x2="20" y2="8" />
@@ -846,3 +846,104 @@ function visibleFiles(f: FolderInfo): TransferFile[] {
   <GitPushModal :scope="gitPushScope" @close="gitPushScope = null" />
   <EmptyDirsModal :folder="emptyDirsFolder" @close="emptyDirsFolder = null" />
 </template>
+
+<style scoped>
+/* 目录卡高度压缩:只收留白与行内控件,字号/行高不动。
+   `.item-card` 是两栏共用的骨架(写在 style.css),设备卡已按「四连按钮不换行」收过一档,
+   这里不能回改骨架 —— 那会把右栏设备卡一起压。scoped 给选择器多挂一个 [data-v],
+   稳定压过 style.css 的单类,胜负不依赖样式注入顺序(AGENTS.md 的覆盖约定)。
+   逐项:卡片上下内衬 14→10、卡内行距 8→6、标题行图标 30→28(行高由它与
+   ActionRail 的 28px「更多」钮决定),目录 ID / 设备指派两行的圆钮已在模板里收成
+   tiny(22px;原先 small 28px 的按钮把这两行各自顶到 28),设备行多余的 2px 顶距归零。 */
+.item-card {
+  gap: 6px;
+  padding: 10px 16px;
+}
+
+/* `.item-card .item-top` 而不是裸 `.item-top`:style.css 里有 (0,2,0) 的
+   `.col--folders .item-top { row-gap: 8px }`,scoped 的单类是 (0,2,0),与它打平后
+   会输给「后注入的 style.css」—— 多挂一层类抬到 (0,3,0),靠特异度稳赢。 */
+.item-card .item-top {
+  row-gap: 6px;
+}
+
+.avatar {
+  width: 28px;
+  height: 28px;
+}
+
+.fid-devices {
+  margin-top: 0;
+}
+
+/* 手机再把目录卡与栏头按钮各收一档:卡内衬 10/16 → 8/12、行距 6 → 5,
+   「＋ 添加」34 → 28(与栏头「更多」钮同高,标题行不再被它顶高一截)。 */
+@media (max-width: 600px) {
+  .item-card {
+    gap: 5px;
+    padding: 8px 12px;
+  }
+
+  /* 行内横向间距同步收窄:卡片窄了,10/8 的缝看起来比桌面宽。
+     只动 column-gap,换行时的 row-gap 仍是上面那条 6px。 */
+  .item-top {
+    column-gap: 8px;
+  }
+
+  .fid-row {
+    gap: 6px;
+  }
+
+  .fid-devices {
+    gap: 8px;
+  }
+
+  .col-head .add-toggle {
+    --n-height: 28px !important;
+    font-size: 13px !important;
+  }
+
+  /* ---- 添加目录表单:让整张表单落在一屏内 ----
+     五台设备的两行勾选项曾把「接收模式」和操作行顶出屏幕。 */
+  .add-form {
+    padding: 12px;
+    gap: 6px;
+  }
+
+  /* 设备多选限高滚动:设备再多也只在这块内部滚,不再撑长表单 */
+  .add-form .device-checks {
+    max-height: 140px;
+    overflow-y: auto;
+    overscroll-behavior: contain;
+    padding: 6px 8px;
+    gap: 2px;
+  }
+
+  .add-form .device-checks .n-checkbox {
+    padding: 2px 0;
+  }
+
+  .add-form .device-check-text {
+    line-height: 1.3;
+  }
+
+  .add-form .device-check-meta {
+    font-size: 11px;
+  }
+
+  /* 兜底:小屏 + 软键盘/错误行仍比可视区高时,操作行钉在滚动区底部,
+     「添加 / 取消」始终可点;不溢出时 sticky 不生效,与普通行外观一致。
+     负边距让底色与上边线铺满表单内衬,半透明卡面下用磨砂兜底玻璃档。 */
+  .add-form .add-form-actions {
+    position: sticky;
+    bottom: 0;
+    z-index: 1;
+    margin: 2px -12px -12px;
+    padding: 8px 12px;
+    background: var(--card);
+    backdrop-filter: var(--glass-blur, none);
+    border-top: 1px solid var(--border);
+    border-radius: 0 0 var(--radius) var(--radius);
+  }
+}
+</style>

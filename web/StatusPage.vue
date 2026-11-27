@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { provide, ref, computed, watchEffect, onMounted, onUnmounted } from 'vue';
+import { provide, ref, computed, watch, watchEffect, onMounted, onUnmounted } from 'vue';
 import type { OfferInfo, StatusData } from './types';
 import { useToast } from './composables/useToast';
 import { StatusContextKey, type CoreDeps } from './composables/statusContext';
@@ -60,6 +60,59 @@ const { status, busy, isDev, controlPort, refreshStatus, post, copy } = core;
 
 /** 小屏两栏改 tab 后的当前栏;宽屏无 tab,该值不参与渲染(见模板 .layout--* 类)。 */
 const mobileCol = ref<'folders' | 'devices'>('folders');
+
+/**
+ * 小屏 tab 的选中滑块:两颗 tab 的宽度不相等 —— 计数从 9 变 10、目录栏亮起「挂起」、
+ * 设备栏亮起「收件 N」都会改变轨迹。所以滑块的位置和宽度跟着**选中那颗 tab 的实测盒**
+ * 走,而不是写死 50%;测量挂在 ResizeObserver 上,旗标出现、字号加载完成都能跟上。
+ */
+const tabsEl = ref<HTMLElement | null>(null);
+const folderTabEl = ref<HTMLButtonElement | null>(null);
+const deviceTabEl = ref<HTMLButtonElement | null>(null);
+const tabThumb = ref({ left: 0, top: 0, width: 0, height: 0 });
+/** 首帧先摆位、下一帧才允许过渡:否则挂载时滑块会从 0 宽「长」到标签宽度。 */
+const thumbReady = ref(false);
+let thumbFrame = 0;
+
+function measureTabThumb(): void {
+  const box = tabsEl.value;
+  const btn = (mobileCol.value === 'folders' ? folderTabEl : deviceTabEl).value;
+  if (!box || !btn) return;
+  const b = btn.getBoundingClientRect();
+  // 宽屏下整条 display:none,量出来是 0;不写进滑块,等 ResizeObserver 在显示后重算
+  if (!b.width) return;
+  const c = box.getBoundingClientRect();
+  // 滑块是 .mobile-tabs 的绝对定位子元素,坐标系原点是 padding box,减掉边框宽度对齐
+  tabThumb.value = {
+    left: b.left - c.left - box.clientLeft,
+    top: b.top - c.top - box.clientTop,
+    width: b.width,
+    height: b.height,
+  };
+  if (!thumbReady.value && !thumbFrame) {
+    thumbFrame = requestAnimationFrame(() => {
+      thumbReady.value = true;
+    });
+  }
+}
+
+let tabRo: ResizeObserver | undefined;
+onMounted(() => {
+  if (tabsEl.value) {
+    tabRo = new ResizeObserver(() => measureTabThumb());
+    tabRo.observe(tabsEl.value);
+    if (folderTabEl.value) tabRo.observe(folderTabEl.value);
+    if (deviceTabEl.value) tabRo.observe(deviceTabEl.value);
+  }
+  measureTabThumb();
+});
+onUnmounted(() => {
+  tabRo?.disconnect();
+  if (thumbFrame) cancelAnimationFrame(thumbFrame);
+});
+
+// 切换 tab 不改变按钮几何,但滑块的「目标盒」变了:立刻按新选中那颗重测
+watch(mobileCol, () => measureTabThumb());
 
 /** 收件箱待处理条数:设备栏在小屏被 tab 藏起来时,数量提示跟着「设备」tab 走。
     与设备列表角标同口径:待确认文件 + 未读内容;只有未读才脉冲。 */
@@ -230,8 +283,22 @@ provide(StatusContextKey, {
     <OffersPanel />
 
     <!-- 小屏:两栏改为左右切换(宽屏隐藏). 宽屏仍是并排两栏 -->
-    <div class="mobile-tabs" role="group" aria-label="共享目录与设备">
+    <div ref="tabsEl" class="mobile-tabs" role="group" aria-label="共享目录与设备">
+      <!-- 选中滑块:装饰层,位置/宽度跟着选中那颗 tab 的实测盒走(见 measureTabThumb)。
+           选中的底色由它承载,切换时从一颗 tab 滑到另一颗;按钮自己不再画底色。 -->
+      <span
+        class="mobile-tab__thumb"
+        :class="[mobileCol === 'folders' ? 'is-folders' : 'is-devices', { 'is-ready': thumbReady }]"
+        :style="{
+          transform: `translateX(${tabThumb.left}px)`,
+          top: `${tabThumb.top}px`,
+          width: `${tabThumb.width}px`,
+          height: `${tabThumb.height}px`,
+        }"
+        aria-hidden="true"
+      />
       <button
+        ref="folderTabEl"
         type="button"
         class="mobile-tab mobile-tab--folders"
         :class="{ 'is-active': mobileCol === 'folders' }"
@@ -241,6 +308,7 @@ provide(StatusContextKey, {
         共享目录<span v-if="status.powerGuard || status.paused" class="float-badge paused-badge mobile-tab__flag" :title="status.powerGuard ? `${status.powerGuard}:电源守卫已自动挂起所有目录同步` : '全局已暂停:所有目录不扫描、不广播、不接收'">{{ status.powerGuard ? '挂起' : '暂停' }}</span><span class="badge">{{ status.folders.length }}</span>
       </button>
       <button
+        ref="deviceTabEl"
         type="button"
         class="mobile-tab mobile-tab--devices"
         :class="{ 'is-active': mobileCol === 'devices' }"
@@ -347,18 +415,50 @@ provide(StatusContextKey, {
 
 <style scoped>
 /* 小屏 tab 条:宽屏两栏并排时整条隐藏(display:none),不占位。
-   颜色跟随两栏各自的强调色(左蓝 / 右青),一眼对上要切去哪一栏。 */
+   颜色跟随两栏各自的强调色(左蓝 / 右青),一眼对上要切去哪一栏。
+   position: relative 是给选中滑块(.mobile-tab__thumb)做定位容器 —— 滑块是绝对定位的
+   装饰层,坐标由脚本按当前 tab 的实测盒写进 transform/width。 */
 .mobile-tabs {
+  position: relative;
+  /* 自成层叠上下文:按钮的 z-index:1 只在 tab 条内部生效,不会漏到页面上压住别的东西 */
+  isolation: isolate;
   display: none;
   gap: 6px;
   padding: 4px;
-  margin-bottom: 12px;
+  margin-bottom: 8px;
   border: 1px solid var(--border);
   border-radius: 999px;
   background: var(--card);
   box-shadow: var(--shadow);
   align-self: flex-start;
   flex: none;
+}
+
+/* 选中滑块:整块选中底色从此只由**一个**元素承载,切换时它平移/伸缩到另一颗 tab 上,
+   而不是两块底色各自瞬闪。位置/尺寸全走内联样式(实测盒),这里只管外观与动画;
+   颜色按栏区分,背景色跟着 class 渐变过去。
+   transition 只挂在 .is-ready 上:首帧先无动画地摆到位,下一帧再开过渡。 */
+.mobile-tab__thumb {
+  position: absolute;
+  left: 0;
+  top: 0;
+  border-radius: 999px;
+  background: var(--accent-soft);
+  pointer-events: none;
+}
+.mobile-tab__thumb.is-devices {
+  background: rgb(43 182 172 / 0.12);
+}
+.mobile-tab__thumb.is-ready {
+  transition:
+    transform 0.28s cubic-bezier(0.3, 0.8, 0.3, 1),
+    width 0.28s cubic-bezier(0.3, 0.8, 0.3, 1),
+    background-color 0.2s ease;
+}
+@media (prefers-reduced-motion: reduce) {
+  .mobile-tab__thumb.is-ready {
+    transition: none;
+  }
 }
 
 @media (max-width: 860px) {
@@ -371,7 +471,10 @@ provide(StatusContextKey, {
   display: inline-flex;
   align-items: center;
   gap: 6px;
-  padding: 6px 14px;
+  /* 定位 + z-index 压过滑块:滑块在树里排在两颗按钮之前,不做这一步它会把文字盖住 */
+  position: relative;
+  z-index: 1;
+  padding: 5px 12px;
   border: 0;
   border-radius: 999px;
   background: transparent;
@@ -391,14 +494,14 @@ provide(StatusContextKey, {
   background: color-mix(in srgb, currentColor 12%, transparent);
 }
 
+/* 选中态只剩文字色:底色已由滑块承担(见 .mobile-tab__thumb),这里再画一层会和
+   滑块叠成两块、切换时半路「重影」。 */
 .mobile-tab--folders.is-active {
   color: var(--accent);
-  background: var(--accent-soft);
 }
 
 .mobile-tab--devices.is-active {
   color: var(--accent-2);
-  background: rgb(43 182 172 / 0.12);
 }
 
 /* 栏内徽标搬上 tab:全局暂停(橙,复用 .paused-badge 配色)与收件箱待处理(红)。
@@ -417,6 +520,14 @@ provide(StatusContextKey, {
   .mobile-tab__flag--inbox.is-unread {
     animation: none;
     box-shadow: 0 0 0 2px color-mix(in srgb, var(--offline) 45%, transparent);
+  }
+}
+
+/* 手机页容器的上内衬收一档(18 → 12):顶栏之上剩下的全是纯留白。
+   只挂本页的 .container,船队 / 文件管理器那些靠文档滚动的页面不受影响。 */
+@media (max-width: 600px) {
+  .container {
+    padding: 12px 14px 10px;
   }
 }
 </style>

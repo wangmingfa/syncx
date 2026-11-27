@@ -387,12 +387,16 @@ function menuDesc(a: RailAction): string {
   font-size: 12px;
   color: var(--muted);
   padding: 2px 0 8px;
+  /* 标题与动作列表之间也压一条线:否则标题读起来像第一项的说明 */
+  border-bottom: 1px solid var(--border);
 }
 
 .rail-menu {
   display: flex;
   flex-direction: column;
-  gap: 2px;
+  /* 行与行改由发丝线分隔(见 .rail-menu__item + 的伪元素),不再靠 2px 空隙 ——
+     面板里全是一长串「标题 + 说明」,留白分不开,整块会连成一段文字 */
+  gap: 0;
   flex: 1 1 auto;
   min-height: 0;
   overflow-y: auto;
@@ -430,7 +434,8 @@ function menuDesc(a: RailAction): string {
   gap: 10px;
   width: 100%;
   margin: 0 -8px;
-  padding: 7px 8px;
+  /* 上下各多 1px:gap 收掉后,行间高度靠内衬撑,和分隔线一起才有呼吸感 */
+  padding: 8px;
   border: 0;
   border-radius: 8px;
   background: none;
@@ -438,6 +443,25 @@ function menuDesc(a: RailAction): string {
   text-align: left;
   color: var(--text);
   cursor: pointer;
+}
+
+/* 行间分隔线:细到一笔(var(--border) 随主题/皮肤走),宽度与标题下那条对齐 ——
+   行自身左右各外探 8px,线再收 8px 就正好落在 .modal 的内容边上,两条线端点齐平。
+   画在伪元素上而不是按钮的 border-top:按钮有 8px 圆角,描边会跟着圆角弯,而且
+   hover 底色会贴着线起头。用 + 选择器只画「下一行」的顶线,首行不再多一条。 */
+.rail-menu__item + .rail-menu__item {
+  position: relative;
+}
+
+.rail-menu__item + .rail-menu__item::before {
+  content: '';
+  position: absolute;
+  top: 0;
+  left: 8px;
+  right: 8px;
+  height: 1px;
+  background: var(--border);
+  pointer-events: none;
 }
 
 .rail-menu__item:hover:not(:disabled) {

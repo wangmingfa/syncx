@@ -164,7 +164,7 @@ function runChipRow(row: ChipRow): void {
       </div>
     </div>
 
-    <n-button tertiary @click="openTraffic" title="传输统计:累计收发与最近 24 小时曲线(daemon 重启清零)">
+    <n-button class="traffic-btn" tertiary @click="openTraffic" title="传输统计:累计收发与最近 24 小时曲线(daemon 重启清零)">
       <template #icon>
         <svg viewBox="0 0 24 24" width="15" height="15" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
           <path d="M4 17 9 11l3.5 3.5L20 6" />
@@ -231,7 +231,7 @@ function runChipRow(row: ChipRow): void {
       :render-label="renderSkinLabel"
       @select="onSkinSelect"
     >
-      <n-button tertiary :title="`界面材质:${SKIN_LABELS[skinMode]} —— 悬停切换 板岩(实心) / 液态玻璃(半透磨砂)`">
+      <n-button class="skin-btn" tertiary :title="`界面材质:${SKIN_LABELS[skinMode]} —— 悬停切换 板岩(实心) / 液态玻璃(半透磨砂)`">
         <template #icon>
           <svg class="topbar-icon" viewBox="0 0 24 24" width="20" height="20" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
             <rect x="3.5" y="4.5" width="17" height="15" rx="4.5" :fill="skinMode === 'glass' ? 'none' : 'currentColor'" :opacity="skinMode === 'glass' ? 1 : 0.22" />
@@ -323,3 +323,40 @@ function runChipRow(row: ChipRow): void {
     </n-popover>
   </div>
 </template>
+
+<style scoped>
+/* 手机顶栏收成两行:品牌 + 四颗图标钮一行、本机 chip 一行。
+   流量与材质按钮只留图标 —— 文字让第二颗按钮被挤到第三行,顶栏从两行涨到三行
+   (实测截图:品牌/流量/主题一行,「液态玻璃」与静音一行,chip 再一行);
+   数字点开流量弹窗即见、材质档名在下拉菜单里勾着,信息不丢。
+   `--n-padding` 走 !important:naive 把尺寸变量写在按钮元素的内联样式上,
+   普通声明压不过(同 DeviceList 的 .btn-inline 收窄)。 */
+@media (max-width: 600px) {
+  .topbar {
+    gap: 10px;
+    margin-bottom: 12px;
+  }
+
+  .topbar .traffic-btn,
+  .topbar .skin-btn {
+    --n-padding: 0 8px !important;
+  }
+
+  .topbar .traffic-btn :deep(.n-button__content),
+  .topbar .skin-btn :deep(.n-button__content) {
+    display: none;
+  }
+
+  /* 只留图标时把图标自带的 6px 右间距也收掉,否则文字位空着、图标偏左 */
+  .topbar .traffic-btn :deep(.n-button__icon),
+  .topbar .skin-btn :deep(.n-button__icon) {
+    margin-right: 0;
+  }
+
+  /* chip 矮一档(约 34 → 30):它是第二行唯一的内容,高出来的都是纯留白 */
+  .topbar .device-chip {
+    padding: 5px 10px;
+    font-size: 11px;
+  }
+}
+</style>

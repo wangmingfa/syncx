@@ -606,6 +606,66 @@ onMounted(async () => {
 .fm-col-meta { text-align: left; }
 .fm-col-ops { display: flex; justify-content: flex-end; gap: 6px; }
 
+/* ---------- 手机:与回收站同一套改法 ----------
+   列表原先固定 84/140/264 三列 + 名称列,固定列合计 488(加间距 518),
+   375 的屏幕里名称列被压成 0,操作列整列落在 .fm-rows 的 overflow:hidden 外
+   —— 下载/暂停同步/分享/删除都点不到。这里把每行改成「名称一行 +
+   大小/时间/操作一行」,列名行收起;文件行四颗按钮放不下时整组落到第三行右缘。 */
+@media (max-width: 640px) {
+  /* 顶栏拆两排:返回 + 标题一排,目录选择与刷新铺满第二排(.fm-folder-pick 的
+     min-width:320 叠加返回/标题后会把刷新挤出屏幕) */
+  .fm-top {
+    flex-wrap: wrap;
+    gap: 8px 10px;
+    padding: 8px 12px;
+  }
+
+  .fm-folder-pick {
+    flex: 1 1 100%;
+    min-width: 0;
+    max-width: none;
+    margin-left: 0;
+  }
+
+  /* n-select 是 width:100%,不放开 min-width 的话长目录名会把「刷新」挤出屏幕 */
+  .fm-folder-pick .n-select {
+    flex: 1 1 auto;
+    min-width: 0;
+  }
+
+  .fm-main {
+    padding: 12px 12px 32px;
+  }
+
+  /* 列名行在卡片式条目里没有落点(名称已独占一行、大小/时间在数值行) */
+  .fm-head {
+    display: none;
+  }
+
+  .fm-row {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: 3px 10px;
+    padding: 9px 12px;
+  }
+
+  /* 名称整行:点它的任意位置都能打开/下载,触屏上比只点文字好按;名称太长
+     仍按原规则省略(这里不去动 .fm-name span 的 ellipsis) */
+  .fm-col-name {
+    flex: 1 1 100%;
+  }
+
+  .fm-col-ops {
+    margin-left: auto;
+  }
+
+  /* 操作按钮从 tiny(22px)提到 28px:卡片形态下它们是唯一入口,22px 在触屏上按不准 */
+  .fm-col-ops .n-button {
+    --n-height: 28px !important;
+  }
+}
+
 .fm-confirm-scrim {
   position: fixed;
   inset: 0;

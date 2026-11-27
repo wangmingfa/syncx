@@ -346,6 +346,43 @@ function onDrop(e: DragEvent, deviceId: string, canSend: boolean): void {
   gap: 6px;
   min-width: 0;
 }
+
+/* 手机栏头收成一行(style.css 的 ≤600 规则已放开「标题独占一行」):
+   动作组自己贴右缘,与目录栏那颗「＋ 添加」的落点对齐;「＋ 添加」收成 28px,
+   与旁边的「收件箱」(small)同高。 */
+@media (max-width: 600px) {
+  .col-head__actions {
+    margin-left: auto;
+  }
+
+  .col-head .add-toggle {
+    --n-height: 28px !important;
+    font-size: 13px !important;
+  }
+
+  /* 标题行在手机上再挤一档,把「离线四连按钮」(发送/编辑/重连/移除)排回一行:
+     375 下卡内容宽 291,只有 28(头像)+ 16(两个 8px 间距)+ 84(ID 保底)撑住,
+     留给操作组 163;四颗 12px 两字按钮原本 0 8 内衬 + 6px 间距要 178,超出 15px
+     于是整组换行。内衬收到 5、间距收到 3 → 34×4 + 9 = 145,360 宽(卡内 276)也放得下
+     (标题还剩 87 ≥ 84 保底);再窄就仍是整组换行,ID 不会再被拆成竖排。
+     头像跟目录卡手机端同款 28,顺带省 2px。 */
+  .item-top {
+    column-gap: 8px;
+  }
+
+  .item-top .avatar {
+    width: 28px;
+    height: 28px;
+  }
+
+  .item-top .item-actions {
+    gap: 3px;
+  }
+
+  .item-top .btn-inline.n-button {
+    --n-padding: 0 5px !important;
+  }
+}
 .inbox-badge {
   display: inline-flex;
   align-items: center;
