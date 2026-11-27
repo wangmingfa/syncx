@@ -959,6 +959,7 @@ export async function run(args: ParsedArgs): Promise<void> {
       snapshot: () => direct.snapshot(),
       content: (id) => direct.content(id),
       remove: (id) => direct.remove(id),
+      markInboxRead: () => direct.markInboxRead(),
       reply: (id, accept, reason, saveDir) => {
         const target = direct.snapshot().pending.find((p) => p.id === id);
         const tx = target ? manager.directTransport(target.from) : undefined;

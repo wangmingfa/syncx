@@ -37,6 +37,8 @@ export interface DirectTextItem {
   /** 状态快照里的短预览;正文按需从 /api/direct/inbox/:id/content 取。 */
   preview: string;
   path: string;
+  /** true = 还没被用户看过:收件箱角标与提醒动画据此点亮。缺省(旧条目)= 已读。 */
+  unread?: boolean;
 }
 
 export interface DirectFileItem {
@@ -50,6 +52,8 @@ export interface DirectFileItem {
   path: string;
   /** true = 接收时选择了「另存到指定目录」:path 指向用户目录,删回执不能删文件。 */
   external?: boolean;
+  /** 用户亲手点过「接收」的文件直接算已读;缺省不带 = 已读。 */
+  unread?: boolean;
 }
 
 export type DirectItem = DirectTextItem | DirectFileItem;
@@ -84,6 +88,11 @@ export interface DirectTransfer {
 
 export interface DirectSnapshot {
   inbox: DirectItem[];
+  /**
+   * 收件箱里未读条数(全部条目,不受 inbox 100 条截断影响)。
+   * 旧后端不发这个字段 → 前端按 0 处理,只是没有未读提醒。
+   */
+  unread: number;
   pending: DirectPending[];
   transfers: DirectTransfer[];
   /**
@@ -123,6 +132,8 @@ export interface DirectApi {
   snapshot(): DirectSnapshot;
   content(id: string): Promise<{ item: DirectItem; data: Buffer } | undefined>;
   remove(id: string): Promise<boolean>;
+  /** 把所有未读条目标成已读;返回改动的条数。 */
+  markInboxRead(): number;
   /** saveDir 给出时,收齐后落到该目录而不是收件箱(调用方已完成提权与路径校验)。 */
   reply(id: string, accept: boolean, reason?: string, saveDir?: string): boolean;
   sendText(deviceId: string, text: string): DirectSendAck;
@@ -175,6 +186,12 @@ export const DIRECT_MAX_QUEUED = 20;
 export const DIRECT_QUEUE_MAX_BYTES = 512 * 1024 * 1024;
 /** 排队项探测通道的间隔:会话事件与入队可能擦肩而过,定时器兜一层。 */
 const DIRECT_QUEUE_PROBE_MS = 5_000;
+/**
+ * 在线直发文本的重发节奏:控制帧写进 socket 不等于对方收到(半开连接下会静默丢),
+ * 5 秒没等到回执就重发,最多 2 次。接收端按消息 id 去重,重发不会落成两条。
+ */
+const DIRECT_TEXT_RETRY_MS = 5_000;
+const DIRECT_TEXT_MAX_RETRIES = 2;
 
 interface OutgoingTransfer {
   id: string;
@@ -196,6 +213,8 @@ interface OutgoingTransfer {
   queuedAt?: number;
   /** 排队文本的正文。文本没有本地暂存文件,不留在内存/磁盘上就没法补发。 */
   text?: string;
+  /** 在线文本已重发次数(等回执期间的兜底重发);排队补发不计入。 */
+  textRetries?: number;
   /** 多文件成组投送的组号;提议(含重发/排队补发)都带上,接收方据此合并展示。 */
   batchId?: string;
   /** 文件专用:分期中的本地暂存文件、指纹、分片账本。 */
@@ -255,6 +274,8 @@ export interface DirectService {
   content(id: string): Promise<{ item: DirectItem; data: Buffer } | undefined>;
   /** 删除一条收件箱记录(连同正文;不可逆)。 */
   remove(id: string): Promise<boolean>;
+  /** 把所有未读条目标成已读(打开收件箱即视为看过);返回改动的条数。 */
+  markInboxRead(): number;
   /** 发起文本直发;没有 tx(目标离线)时进队列,等它上线自动投递。 */
   sendText(deviceId: string, text: string, tx?: DirectTransport): DirectSendAck;
   /** 发起文件直发;sourcePath 是已落在**非共享暂存区**的完整文件。没有 tx 时进队列。 */
@@ -667,8 +688,23 @@ export function createDirectService(deps: DirectServiceDeps): DirectService {
     deps.onChange?.();
   }
 
-  function sendControl(tx: DirectTransport, to: string, message: DirectControlMessage): void {
-    tx.control(to, message);
+  function sendControl(tx: DirectTransport, to: string, message: DirectControlMessage): boolean {
+    return tx.control(to, message);
+  }
+
+  /** 一条 direct-text 控制帧:首发/重发/排队补发共用同一形状与同一 id,接收端据此去重。 */
+  function textControl(out: OutgoingTransfer): DirectControlMessage {
+    return { kind: 'direct-text', id: out.id, fromDeviceId: '', text: out.text ?? '', createdAt: out.createdAt };
+  }
+
+  /** 在线发送没写出去(会话刚断):转为离线排队,等上线由 flushQueued 补发,不静默丢内容。 */
+  function requeueText(out: OutgoingTransfer): void {
+    out.state = 'queued';
+    out.queuedAt = Date.now();
+    out.offerSentAt = out.queuedAt;
+    out.textRetries = 0;
+    saveQueue();
+    notify();
   }
 
   /** 释放一笔投送对暂存文件的引用;只有群发的最后一笔才真正删文件。 */
@@ -695,6 +731,7 @@ export function createDirectService(deps: DirectServiceDeps): DirectService {
       out.error = error;
     }
     out.finishedAt = Date.now();
+    out.text = undefined;
     releaseSource(out);
     // 排队项失败/超时也要从台账里划掉,否则重启后又把它捞回来。
     saveQueue();
@@ -713,6 +750,7 @@ export function createDirectService(deps: DirectServiceDeps): DirectService {
     out.state = ok ? 'done' : 'failed';
     out.error = ok ? undefined : (error ?? '传输失败');
     out.finishedAt = Date.now();
+    out.text = undefined;
     releaseSource(out);
     saveQueue();
     saveResume();
@@ -872,16 +910,13 @@ export function createDirectService(deps: DirectServiceDeps): DirectService {
       // 发完再改状态会把已完成覆盖回 offering。
       out.state = 'offering';
       out.offerSentAt = now;
-      out.queuedAt = undefined;
-      const text = out.text;
-      if (out.kind === 'text') out.text = undefined;
+      // 正文留在 out 上直到回执:等回执的超时重发要靠它,不然补发只能发一条空文本。
       const sent = out.kind === 'text'
-        ? tx.control(deviceId, { kind: 'direct-text', id: out.id, fromDeviceId: '', text: text ?? '', createdAt: out.createdAt })
-        : tx.control(deviceId, offerMessage(out));
+        ? sendControl(tx, deviceId, textControl(out))
+        : sendControl(tx, deviceId, offerMessage(out));
       if (!sent) {
-        // 控制帧没出去:退回队列,正文还回去(24 小时窗口照原样算)。
+        // 控制帧没出去:退回队列(queuedAt 原样保留,24 小时窗口照算)。
         out.state = 'queued';
-        out.text = text;
       }
     }
     saveQueue();
@@ -993,8 +1028,8 @@ export function createDirectService(deps: DirectServiceDeps): DirectService {
     notify();
   }
 
-  function addTextItem(from: string, text: string): void {
-    const id = directId('dt');
+  /** id 取发送方的消息 id:重发是同一个 id,落盘前按它去重,才不会存成两条。 */
+  function addTextItem(from: string, text: string, id = directId('dt')): void {
     const data = Buffer.from(text, 'utf8');
     const path = join(messagesDir, `${id}.txt`);
     writeFileSync(path, data);
@@ -1006,6 +1041,7 @@ export function createDirectService(deps: DirectServiceDeps): DirectService {
       size: data.length,
       preview: [...text].slice(0, 120).join(''),
       path,
+      unread: true,
     };
     items.unshift(item);
     saveIndex();
@@ -1084,6 +1120,23 @@ export function createDirectService(deps: DirectServiceDeps): DirectService {
           resumedDevices.add(out.deviceId);
           reofferPaused(out.deviceId, deps.getTransport?.(out.deviceId));
         }
+        continue;
+      }
+      if (out.kind === 'text' && !out.resuming && out.state === 'offering'
+        && now - out.offerSentAt >= DIRECT_TEXT_RETRY_MS
+        && (out.textRetries ?? 0) < DIRECT_TEXT_MAX_RETRIES) {
+        // 帧写进 socket 不等于对方收到(半开连接会静默丢):没回执就重发同一 id。
+        const tx = deps.getTransport?.(out.deviceId) ?? lastTx.get(out.id);
+        if (!tx) {
+          // 对端已经掉线:转成离线排队,上线后由 flushQueued 补发。
+          requeueText(out);
+          continue;
+        }
+        out.textRetries = (out.textRetries ?? 0) + 1;
+        out.offerSentAt = now;
+        lastTx.set(out.id, tx);
+        // 重发也写不出去 = 会话肯定是死的,别再等 120 秒判超时,直接转排队等重连。
+        if (!sendControl(tx, out.deviceId, textControl(out))) requeueText(out);
         continue;
       }
       if (out.state === 'offering' && now - out.offerSentAt > DIRECT_OFFER_TIMEOUT_MS) {
@@ -1182,6 +1235,7 @@ export function createDirectService(deps: DirectServiceDeps): DirectService {
       });
       return {
         inbox: items.slice(0, 100).map((i) => ({ ...i })),
+        unread: items.reduce((n, i) => n + (i.unread ? 1 : 0), 0),
         pending: [...incoming.values()]
           .filter((i) => i.state === 'pending')
           .map((i) => ({
@@ -1233,6 +1287,20 @@ export function createDirectService(deps: DirectServiceDeps): DirectService {
       return true;
     },
 
+    markInboxRead() {
+      let changed = 0;
+      for (const item of items) {
+        if (!item.unread) continue;
+        delete item.unread;
+        changed++;
+      }
+      if (changed) {
+        saveIndex();
+        notify();
+      }
+      return changed;
+    },
+
     sendText(deviceId, text, tx) {
       const len = Buffer.byteLength(text, 'utf8');
       if (len === 0 || len > DIRECT_MAX_TEXT_BYTES) {
@@ -1240,16 +1308,14 @@ export function createDirectService(deps: DirectServiceDeps): DirectService {
       }
       // 没有会话 = 设备离线:存进队列,等它上线后由 flushQueued 补发。
       if (!tx) checkQueueRoom(0);
-      const out = newOutgoing({ id: directId('dt'), deviceId, kind: 'text', size: len, ...(tx ? {} : { text }) }, !tx);
+      const out = newOutgoing({ id: directId('dt'), deviceId, kind: 'text', size: len, text }, !tx);
       if (!tx) return { id: out.id, queued: true };
       lastTx.set(out.id, tx);
-      sendControl(tx, deviceId, {
-        kind: 'direct-text',
-        id: out.id,
-        fromDeviceId: '',
-        text,
-        createdAt: out.createdAt,
-      });
+      if (!sendControl(tx, deviceId, textControl(out))) {
+        // 帧没写出去:不报「已发出」,转成排队让设备上线后自动补发。
+        requeueText(out);
+        return { id: out.id, queued: true };
+      }
       return { id: out.id, queued: false };
     },
 
@@ -1281,9 +1347,16 @@ export function createDirectService(deps: DirectServiceDeps): DirectService {
         case 'direct-text': {
           const len = Buffer.byteLength(message.text ?? '', 'utf8');
           if (!isSafeId(message.id) || len === 0 || len > DIRECT_MAX_TEXT_BYTES) return;
+          // 发送方等不到回执会重发同一条:已经落过盘就只补回执,不能存成两份。
+          if (items.some((i) => i.id === message.id)) {
+            tx.control(from, { kind: 'direct-result', id: message.id, fromDeviceId: '', ok: true });
+            return;
+          }
           if (outgoing.has(message.id) || incoming.has(message.id)) return;
-          addTextItem(from, message.text);
+          addTextItem(from, message.text, message.id);
           tx.control(from, { kind: 'direct-result', id: message.id, fromDeviceId: '', ok: true });
+          // 文本没有后续帧:不在这里推一次状态,对端 UI 的未读角标与到件提示只能等下一轮别的推送。
+          notify();
           break;
         }
         case 'direct-file-offer': {

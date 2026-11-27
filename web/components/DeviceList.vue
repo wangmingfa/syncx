@@ -45,8 +45,18 @@ function openAddDevice(): void {
   if (addDeviceOpen.value) void nextTick(() => scrollEl.value?.scrollTo({ top: 0 }));
 }
 
-// 待确认的入站文件数:收件箱入口上的徽标,提醒对方正在等你点「接收」
+// 收件箱入口上的数字 = 待确认文件 + 未读内容。只有未读才脉冲:待确认的文件一直挂着,
+// 长闪反而练出用户对动画的免疫力;未读是「还不知道有它」,才需要定期提醒。
 const pendingDirect = computed(() => status.value.direct?.pending.length ?? 0);
+const unreadDirect = computed(() => status.value.direct?.unread ?? 0);
+const inboxCount = computed(() => pendingDirect.value + unreadDirect.value);
+const inboxTitle = computed(() => {
+  const parts = [
+    unreadDirect.value ? `${unreadDirect.value} 条未读` : '',
+    pendingDirect.value ? `${pendingDirect.value} 条待确认` : '',
+  ].filter(Boolean);
+  return parts.length ? `收件箱有 ${parts.join('、')}` : '查看收到的文本与文件';
+});
 /**
  * 本机后端是否提供直发 —— **由后端自己声明**,不按后端形态猜。
  *
@@ -110,7 +120,7 @@ function onDrop(e: DragEvent, deviceId: string, canSend: boolean): void {
         <span class="badge">{{ status.devices.length }}</span>
       </div>
       <span class="col-head__actions">
-        <n-button v-if="directSupported" size="small" quaternary class="inbox-toggle" :disabled="busy" title="查看收到的文本与文件" @click="direct.openInbox()">收件箱<span v-if="pendingDirect" class="inbox-badge">{{ pendingDirect }}</span></n-button>
+        <n-button v-if="directSupported" size="small" quaternary class="inbox-toggle" :class="{ 'has-unread': unreadDirect > 0 }" :disabled="busy" :title="inboxTitle" @click="direct.openInbox()">收件箱<span v-if="inboxCount" class="inbox-badge" :class="{ 'is-unread': unreadDirect > 0 }">{{ inboxCount }}</span></n-button>
         <n-button v-if="status.devices.length > 0" class="add-toggle" :class="{ 'is-invisible': addDeviceOpen }" :disabled="busy" :tabindex="addDeviceOpen ? -1 : 0" @click="openAddDevice">＋ 添加</n-button>
       </span>
     </div>
@@ -349,6 +359,24 @@ function onDrop(e: DragEvent, deviceId: string, canSend: boolean): void {
   color: var(--accent-contrast, #fff);
   font-size: 10px;
   line-height: 1;
+}
+
+/* 未读 = 用户还不知道它到了:红底 + 周期脉冲把入口推到眼前。脉冲节奏定义在
+   style.css 的 @keyframes inbox-unread-pulse(与手机端 tab 标记共用),这里只挂。
+   按钮文字一并转红,提醒不只落在 16px 的角标上。 */
+.inbox-toggle.has-unread {
+  color: var(--offline);
+}
+.inbox-badge.is-unread {
+  /* 往黑里压一档:10px 白字直接落在 --offline 上对比度不够。 */
+  background: color-mix(in srgb, var(--offline) 75%, #000);
+  animation: inbox-unread-pulse 4s ease-in-out infinite;
+}
+@media (prefers-reduced-motion: reduce) {
+  .inbox-badge.is-unread {
+    animation: none;
+    box-shadow: 0 0 0 2px color-mix(in srgb, var(--offline) 45%, transparent);
+  }
 }
 
 /* 设备卡把「共享 N 个目录」「版本」「后端」并成一行,省两档竖向空间。

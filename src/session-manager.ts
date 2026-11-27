@@ -4258,7 +4258,9 @@ export class SyncSessionManager {
       // 即便一次性 hello 在双连接 / 重连抖动中丢失,只要任意一条控制消息到达,
       // 对端版本即可被学到 —— 设备卡不再偶发「版本未知」。用消息里的 fromDeviceId
       // 而非会话 remoteDeviceId,确保严格按照对端身份缓存(与书签会话解耦)。
-      if (message.version || message.hostname || message.platform || message.runtime) {
+      // 直发消息的署名恒为空串(身份取 ws 一跳的 hopDeviceId,不信消息体),不能拿它
+      // 当 peerInfo 的键 —— 否则缓存里冒出 `peerInfo.get('')`,日志还会打出「peer  runs …」。
+      if (!message.kind.startsWith('direct-') && (message.version || message.hostname || message.platform || message.runtime)) {
         const prev = this.peerInfo.get(message.fromDeviceId);
         this.peerInfo.set(message.fromDeviceId, {
           version: message.version ?? prev?.version,

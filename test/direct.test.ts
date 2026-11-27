@@ -8,7 +8,7 @@ import type { AddressInfo } from 'node:net';
 import { request } from 'node:http';
 import { CAP_DIRECT1, PEER_CAPS } from '../src/handshake.js';
 import { decodeBinaryFrame, encodeBinaryFrame } from '../src/net/wire.js';
-import { createDirectService, DIRECT_CHUNK_BYTES, DIRECT_MAX_QUEUED, DIRECT_RESUME_TTL_MS, type DirectService, type DirectTransport } from '../src/direct.js';
+import { createDirectService, DIRECT_CHUNK_BYTES, DIRECT_MAX_QUEUED, DIRECT_RESUME_TTL_MS, type DirectControlMessage, type DirectService, type DirectTransport } from '../src/direct.js';
 import { resolveDirectSaveDir } from '../src/direct-save-path.js';
 import { signSession, sessionSecret } from '../src/auth.js';
 import { ELEVATE_COOKIE } from '../src/api/helpers.js';
@@ -165,9 +165,10 @@ describe('device direct transfer', () => {
       configDir: tmp(),
       getStatus: () => ({}),
       direct: {
-        snapshot: () => ({ inbox: [{ kind: 'text', id: 'dt-1', from: 'AAAA', createdAt: 1, size: 2, preview: '你好', path: '/tmp/dt-1.txt' }], pending: [], transfers: [], zip: false }),
+        snapshot: () => ({ inbox: [{ kind: 'text', id: 'dt-1', from: 'AAAA', createdAt: 1, size: 2, preview: '你好', path: '/tmp/dt-1.txt' }], pending: [], transfers: [], unread: 0, zip: false }),
         content: async () => undefined,
         remove: async () => true,
+        markInboxRead: () => 0,
         reply: () => true,
         replyBatch: () => 0,
         sendText: (deviceId, text) => { sent.push(`${deviceId}:${text}`); return { id: `dt-${deviceId}`, queued: false }; },
@@ -199,6 +200,9 @@ describe('device direct transfer', () => {
     const inbox = await get('/api/direct/inbox');
     expect(inbox.status).toBe(200);
     expect(JSON.parse(inbox.text)).toMatchObject({ inbox: [{ preview: '你好' }] });
+    const readRes = await get('/api/direct/inbox/read', {}, 'POST');
+    expect(readRes.status).toBe(200);
+    expect(JSON.parse(readRes.text)).toMatchObject({ ok: true, count: 0 });
     const sentRes = await get('/api/direct/text', { deviceId: 'AAAA', text: 'hi' }, 'POST');
     expect(sentRes.status).toBe(200);
     const batchRes = await get('/api/direct/text', { deviceIds: ['AAAA', 'BBBB'], text: 'batch' }, 'POST');
@@ -221,9 +225,10 @@ describe('device direct transfer', () => {
       configDir,
       getStatus: () => ({}),
       direct: {
-        snapshot: () => ({ inbox: [], pending: [], transfers: [], zip: false }),
+        snapshot: () => ({ inbox: [], pending: [], transfers: [], unread: 0, zip: false }),
         content: async () => undefined,
         remove: async () => true,
+        markInboxRead: () => 0,
         reply: () => true,
         replyBatch: () => 0,
         sendText: () => ({ id: 'dt-x', queued: false }),
@@ -288,9 +293,10 @@ describe('device direct transfer', () => {
       configDir,
       getStatus: () => ({}),
       direct: {
-        snapshot: () => ({ inbox: [], pending: [], transfers: [], zip: false }),
+        snapshot: () => ({ inbox: [], pending: [], transfers: [], unread: 0, zip: false }),
         content: async () => undefined,
         remove: async () => true,
+        markInboxRead: () => 0,
         reply: () => true,
         replyBatch: () => 0,
         sendText: () => ({ id: 'dt-x', queued: false }),
@@ -446,9 +452,10 @@ describe('device direct transfer', () => {
         return `/validated:${input}`;
       },
       direct: {
-        snapshot: () => ({ inbox: [], pending: [], transfers: [], zip: false }),
+        snapshot: () => ({ inbox: [], pending: [], transfers: [], unread: 0, zip: false }),
         content: async () => undefined,
         remove: async () => true,
+        markInboxRead: () => 0,
         reply: (_id, _accept, _reason, saveDir) => { captured = saveDir; return true; },
         replyBatch: (_batchId, accept, _reason, saveDir) => { captured = saveDir; batchCalls.push(accept); return 2; },
         sendText: () => ({ id: 'dt-x', queued: false }),
@@ -874,6 +881,33 @@ describe('device direct transfer', () => {
     // 队列台账随之清空
     expect(existsSync(queueFile)).toBe(false);
     a.close();
+    b.close();
+  });
+
+  it('文本发送断线:帧写不出去时不报「已发出」,转成排队等重连补发', () => {
+    const configDir = tmp();
+    const a = createDirectService({ configDir });
+    const dead: DirectTransport = { control: () => false, chunk: () => false };
+    const ack = a.sendText('B', '半路断线的文本', dead);
+    expect(ack.queued).toBe(true);
+    expect(a.snapshot().transfers.find((t) => t.id === ack.id)).toMatchObject({ state: 'queued', kind: 'text' });
+    const queueFile = join(configDir, 'inbox', 'queue.json');
+    expect(JSON.parse(readFileSync(queueFile, 'utf8'))).toMatchObject([{ id: ack.id, text: '半路断线的文本' }]);
+    a.close();
+  });
+
+  it('文本去重:同一 id 的重复帧只落一条,每次都补回执;未读随「已读」清零', () => {
+    const b = createDirectService({ configDir: tmp() });
+    const kinds: string[] = [];
+    const tx: DirectTransport = { control: (_id, m) => { kinds.push(m.kind); return true; }, chunk: () => true };
+    const message: DirectControlMessage = { kind: 'direct-text', id: 'dt-dup-1', fromDeviceId: '', text: '只该出现一次', createdAt: 1 };
+    b.handleControl(message, 'A', tx);
+    b.handleControl(message, 'A', tx);
+    expect(b.snapshot().inbox).toHaveLength(1);
+    expect(b.snapshot().unread).toBe(1);
+    expect(kinds.filter((k) => k === 'direct-result')).toHaveLength(2);
+    expect(b.markInboxRead()).toBe(1);
+    expect(b.snapshot().unread).toBe(0);
     b.close();
   });
 

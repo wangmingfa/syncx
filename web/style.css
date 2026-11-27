@@ -546,6 +546,29 @@ html[data-theme='dark'] .chip-menu__item--danger {
   50% { box-shadow: 0 0 0 7px rgba(240, 160, 32, 0); }
 }
 
+/* 收件箱未读的定期提醒:安静一阵后连跳两下再归位,4 秒一轮 —— 比持续闪烁克制,
+   又比静态角标醒目。设备列表的 .inbox-badge 与手机端 tab 的 .mobile-tab__flag--inbox
+   共用这一个节奏(两处组件各自的 scoped 样式只负责挂上去并给 reduced-motion 兜底),
+   调节奏只改这里。 */
+@keyframes inbox-unread-pulse {
+  0%, 70%, 100% {
+    transform: scale(1);
+    box-shadow: 0 0 0 0 color-mix(in srgb, var(--offline) 55%, transparent);
+  }
+  78% {
+    transform: scale(1.25);
+    box-shadow: 0 0 0 6px transparent;
+  }
+  86% {
+    transform: scale(1.05);
+    box-shadow: 0 0 0 0 color-mix(in srgb, var(--offline) 40%, transparent);
+  }
+  94% {
+    transform: scale(1.15);
+    box-shadow: 0 0 0 5px transparent;
+  }
+}
+
 .stat-pills {
   display: flex;
   gap: 10px;

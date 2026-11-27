@@ -185,7 +185,10 @@ watch(
     </div>
 
     <div class="inbox-section">
-      <div class="inbox-section-title">已收到<span class="badge">{{ status.direct?.inbox.length ?? 0 }}</span></div>
+      <div class="inbox-section-title">
+        已收到<span class="badge">{{ status.direct?.inbox.length ?? 0 }}</span>
+        <n-button v-if="status.direct?.inbox.length" size="tiny" type="error" tertiary class="inbox-clear" :disabled="busy" @click="direct.clearInbox()">清空</n-button>
+      </div>
       <div v-if="!status.direct?.inbox.length" class="inbox-empty">还没有收到内容。在设备卡上点「发送」可从另一台设备投过来。</div>
       <div v-for="item in status.direct?.inbox ?? []" :key="item.id" class="inbox-card">
         <div class="inbox-row">
@@ -228,6 +231,10 @@ watch(
   font-size: 12px;
   font-weight: 600;
   color: var(--muted-strong);
+}
+/* 「清空」压在标题行右端:它只作用于本栏(已收到),不该跑到弹窗 footer 去。 */
+.inbox-clear {
+  margin-left: auto;
 }
 .inbox-card {
   padding: 10px 12px;

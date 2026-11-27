@@ -102,6 +102,8 @@ export interface DirectTextItem {
   createdAt: number;
   size: number;
   preview: string;
+  /** true = 用户还没打开收件箱看过;旧后端不发 = 已读。 */
+  unread?: boolean;
 }
 
 export interface DirectFileItem {
@@ -116,6 +118,8 @@ export interface DirectFileItem {
   path?: string;
   /** true = 接收时另存到了用户目录;删这条回执不会删真实文件。 */
   external?: boolean;
+  /** 未读标记(文本才有;文件是用户亲手接收的,直接算已读)。 */
+  unread?: boolean;
 }
 
 export type DirectItem = DirectTextItem | DirectFileItem;
@@ -152,6 +156,8 @@ export interface DirectData {
   inbox: DirectItem[];
   pending: DirectPending[];
   transfers: DirectTransfer[];
+  /** 收件箱里未读条数(不受 inbox 100 条截断影响;旧后端不发 → 按 0)。 */
+  unread?: number;
   /** 本后端是否支持把多个文件打包成一个 zip(缺省 = 不支持,前端不显示勾选)。 */
   zip?: boolean;
 }

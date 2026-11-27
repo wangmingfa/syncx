@@ -212,6 +212,17 @@ export async function tryDirectRoutes(
     return true;
   }
 
+  // POST /api/direct/inbox/read : 收件箱标记全部已读(用户打开收件箱时调用)
+  if (req.method === 'POST' && path === '/api/direct/inbox/read') {
+    try {
+      await readBody(req); // 无参数,但请求体要读掉,keep-alive 连接上不留没消费的字节
+      sendJson(res, 200, { ok: true, count: direct.markInboxRead() });
+    } catch (e) {
+      fail(res, e);
+    }
+    return true;
+  }
+
   // DELETE /api/direct/inbox/:id
   const deleteMatch = /^\/api\/direct\/inbox\/([^/]+)$/.exec(path);
   if (req.method === 'DELETE' && deleteMatch) {

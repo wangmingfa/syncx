@@ -61,8 +61,10 @@ const { status, busy, isDev, controlPort, refreshStatus, post, copy } = core;
 /** 小屏两栏改 tab 后的当前栏;宽屏无 tab,该值不参与渲染(见模板 .layout--* 类)。 */
 const mobileCol = ref<'folders' | 'devices'>('folders');
 
-/** 收件箱待处理条数:设备栏在小屏被 tab 藏起来时,数量提示跟着「设备」tab 走。 */
-const inboxPending = computed(() => status.value.direct?.pending.length ?? 0);
+/** 收件箱待处理条数:设备栏在小屏被 tab 藏起来时,数量提示跟着「设备」tab 走。
+    与设备列表角标同口径:待确认文件 + 未读内容;只有未读才脉冲。 */
+const inboxPending = computed(() => (status.value.direct?.pending.length ?? 0) + (status.value.direct?.unread ?? 0));
+const inboxUnread = computed(() => status.value.direct?.unread ?? 0);
 
 // 通用二次确认弹窗(移除目录 / 移除设备 / 升级 / 自更新共用)
 const { confirmState, askConfirm } = useConfirm(busy);
@@ -245,7 +247,7 @@ provide(StatusContextKey, {
         :aria-pressed="mobileCol === 'devices'"
         @click="mobileCol = 'devices'"
       >
-        设备<span v-if="inboxPending > 0" class="float-badge mobile-tab__flag mobile-tab__flag--inbox" :title="`收件箱有 ${inboxPending} 条待处理的直发内容`">收件 {{ inboxPending }}</span><span class="badge">{{ status.devices.length }}</span>
+        设备<span v-if="inboxPending > 0" class="float-badge mobile-tab__flag mobile-tab__flag--inbox" :class="{ 'is-unread': inboxUnread > 0 }" :title="`收件箱有 ${inboxPending} 条待确认或未读的直发内容`">收件 {{ inboxPending }}</span><span class="badge">{{ status.devices.length }}</span>
       </button>
     </div>
 
@@ -278,9 +280,6 @@ provide(StatusContextKey, {
 
     <!-- 目录级差异弹窗(状态全部走 context,无 props) -->
     <FolderDiffModal />
-
-    <!-- 通用二次确认弹窗 -->
-    <ConfirmModal :state="confirmState" :notify="showToast" @closed="confirmState = null" />
 
     <!-- 目录编辑弹窗 -->
     <EditFolderModal
@@ -335,6 +334,11 @@ provide(StatusContextKey, {
 
     <!-- 上传本地安装包升级(入口在顶栏「上传升级」，或把文件拖到页面中间) -->
     <UploadUpdateModal :open="uploadOpen" @close="uploadOpen = false" />
+
+    <!-- 通用二次确认弹窗:排在所有弹窗之后 —— 遮罩同 z-index,画在最上层的是挂到 body
+         最晚的那个(见 ModalShell 的 Teleport 注释),所以它必须最后一个挂,才能从任何
+         弹窗里(收件箱清空 / 同步记录清理 / 冲突处理)弹在对方上面。 -->
+    <ConfirmModal :state="confirmState" :notify="showToast" @closed="confirmState = null" />
 
     <!-- 页面级拖入安装包:遮罩常驻挂在这里,只有拖文件进页面时才显示 -->
     <DropOverlay @package="onPackageDrop" />
@@ -402,5 +406,17 @@ provide(StatusContextKey, {
 .mobile-tab__flag--inbox {
   color: var(--offline);
   border-color: color-mix(in srgb, var(--offline) 55%, transparent);
+}
+
+/* 未读时周期脉冲:节奏在 style.css 的 @keyframes inbox-unread-pulse,
+   与设备列表收件箱角标同一个提醒,这里只挂并做 reduced-motion 兜底。 */
+.mobile-tab__flag--inbox.is-unread {
+  animation: inbox-unread-pulse 4s ease-in-out infinite;
+}
+@media (prefers-reduced-motion: reduce) {
+  .mobile-tab__flag--inbox.is-unread {
+    animation: none;
+    box-shadow: 0 0 0 2px color-mix(in srgb, var(--offline) 45%, transparent);
+  }
 }
 </style>

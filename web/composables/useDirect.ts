@@ -2,7 +2,7 @@
  * 设备间直发的页面状态(ADR-0028):发送弹窗、待确认与收件箱操作都在这里,
  * 组件只负责渲染。数据本身走 status.direct(既有 WS 推送),这里不另起轮询。
  */
-import { computed, ref, type ComputedRef, type Ref } from 'vue';
+import { computed, ref, watch, type ComputedRef, type Ref } from 'vue';
 import type { DirectItem, DirectTransfer, DeviceInfo } from '../types';
 import type { CoreDeps } from './statusContext';
 import { useToast } from './useToast';
@@ -76,6 +76,8 @@ export interface DirectApi {
   /** 取消一条还在排队的投送(设备离线时才有这个入口)。 */
   cancelSend: (id: string) => Promise<void>;
   removeItem: (id: string) => Promise<void>;
+  /** 清空收件箱(逐条删;二次确认在弹窗里)。 */
+  clearInbox: () => void;
   copyItem: (item: DirectItem) => Promise<void>;
   downloadItem: (item: DirectItem) => Promise<void>;
   formatBytes: (n: number) => string;
@@ -108,7 +110,56 @@ export function useDirect(deps: CoreDeps & { copy: (text: string) => Promise<voi
   const zipMode = ref(false);
   const sending = ref(false);
   const transfers = computed(() => deps.status.value.direct?.transfers ?? []);
+  const unread = computed(() => deps.status.value.direct?.unread ?? 0);
   let fileSeq = 0;
+
+  /**
+   * 打开过收件箱即视为看过:标记落盘在后端,刷新/重启后角标不会诈尸。
+   * 旧后端既没有 unread 字段也没有这个接口,unread 恒为 0,不会误调。
+   */
+  async function markInboxRead(): Promise<void> {
+    if (unread.value <= 0) return;
+    try {
+      await apiPost('/api/direct/inbox/read', {});
+      await deps.refreshStatus();
+    } catch {
+      // 失败不打扰用户:角标下次推送仍在,再打开一次收件箱会重试。
+    }
+  }
+
+  function openInbox(): void {
+    inboxOpen.value = true;
+    void markInboxRead();
+  }
+
+  /**
+   * 到件提示:inbox 里冒出没见过的文本才弹 toast(首屏已有的旧条目不算)。
+   * 只认文本 —— 文件要用户先点「接收」才进收件箱,再弹一次反而像没收到确认。
+   * 收件箱开着时不弹:用户正看着它,底下还会立刻被标成已读。
+   */
+  let seenInbox: string[] = [];
+  let inboxSeeded = false;
+  watch(
+    () => deps.status.value.direct?.inbox,
+    (list) => {
+      const items = list ?? [];
+      const fresh = inboxSeeded ? items.filter((i) => i.kind === 'text' && !seenInbox.includes(i.id)) : [];
+      seenInbox = items.map((i) => i.id);
+      if (!inboxSeeded) {
+        inboxSeeded = true;
+        return;
+      }
+      if (!fresh.length || inboxOpen.value) return;
+      const devices = deps.status.value.devices;
+      const from = [...new Set(fresh.map((i) => devices.find((d) => d.deviceId === i.from)?.hostname ?? '未知设备'))];
+      showToast(`收到 ${from.join('、')} 的 ${fresh.length} 条直发消息，点「收件箱」查看`, 'alert');
+    },
+  );
+
+  // 收件箱开着时新到的内容立刻算已读(正在被看),关着才留给角标与脉冲提醒。
+  watch(unread, (n) => {
+    if (n > 0 && inboxOpen.value) void markInboxRead();
+  });
 
   function openSend(p: DeviceInfo, files?: File[]): void {
     sendTarget.value = p;
@@ -187,7 +238,7 @@ export function useDirect(deps: CoreDeps & { copy: (text: string) => Promise<voi
     const failed = results.filter((r) => r.error);
     if (!failed.length) {
       if (queued && sent) showToast(`已发给 ${sent} 台${noun}，${queued} 台离线已排队`);
-      else if (queued) showToast(`已排队 ${queued} 台${noun}，设备上线后自动发送`);
+      else if (queued) showToast(`已排队 ${queued} 台${noun}，设备恢复连接后自动发送`);
       else showToast(`已发给 ${sent} 台${noun}`);
       return;
     }
@@ -429,6 +480,45 @@ export function useDirect(deps: CoreDeps & { copy: (text: string) => Promise<voi
     }
   }
 
+  /**
+   * 清空收件箱。逐条复用 DELETE /api/direct/inbox/:id 而不是新开一个「清空」路由:
+   * 这套前端同时喂 Node / Rust / MoonBit 三个 daemon,逐条删除是三者唯一的公共契约。
+   * 快照里的 inbox 截断在 100 条,所以删完一轮要刷新再看,直到真的空了。
+   */
+  function clearInbox(): void {
+    const total = deps.status.value.direct?.inbox.length ?? 0;
+    if (!total) return;
+    deps.askConfirm({
+      title: '清空收件箱?',
+      message: `将删除收件箱里的 ${total} 条记录,以及本机保存的正文与文件副本;另存到其它目录的文件只删记录。不可撤销。`,
+      confirmText: '清空收件箱',
+      action: async () => {
+        let removed = 0;
+        for (;;) {
+          const before = deps.status.value.direct?.inbox ?? [];
+          if (!before.length) break;
+          let ok = 0;
+          for (const id of before.map((i) => i.id)) {
+            try {
+              await apiJson(`/api/direct/inbox/${encodeURIComponent(id)}`, { method: 'DELETE' });
+              ok++;
+            } catch {
+              // 单条失败(比如刚好被另一处删掉)不打断整体,由下一轮的收敛判断收手。
+            }
+          }
+          removed += ok;
+          await deps.refreshStatus();
+          const after = deps.status.value.direct?.inbox.length ?? 0;
+          // 有失败,或刷完一条没少(后端没真删),就收手 —— 否则这里会无限重试。
+          if (ok < before.length || after >= before.length) break;
+        }
+        const left = deps.status.value.direct?.inbox.length ?? 0;
+        if (left) showToast(`已清空 ${removed} 条,还有 ${left} 条没删掉`, 'alert');
+        else showToast(`已清空 ${removed} 条`);
+      },
+    });
+  }
+
   async function copyItem(item: DirectItem): Promise<void> {
     try {
       const res = await fetch(`/api/direct/inbox/${encodeURIComponent(item.id)}/content`);
@@ -467,7 +557,7 @@ export function useDirect(deps: CoreDeps & { copy: (text: string) => Promise<voi
     openSend,
     closeSend,
     inboxOpen,
-    openInbox: () => { inboxOpen.value = true; },
+    openInbox,
     textDraft,
     fileDrafts,
     zipMode,
@@ -484,6 +574,7 @@ export function useDirect(deps: CoreDeps & { copy: (text: string) => Promise<voi
     replyBatch,
     cancelSend,
     removeItem,
+    clearInbox,
     copyItem,
     downloadItem,
     formatBytes,
