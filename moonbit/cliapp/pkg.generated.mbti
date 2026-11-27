@@ -2,10 +2,13 @@
 package "wangmingfa/syncx/cliapp"
 
 import {
+  "moonbitlang/async",
+  "moonbitlang/async/aqueue",
   "moonbitlang/core/json",
   "wangmingfa/syncx/api",
   "wangmingfa/syncx/core",
   "wangmingfa/syncx/daemon",
+  "wangmingfa/syncx/direct",
   "wangmingfa/syncx/net",
 }
 
@@ -140,6 +143,8 @@ pub fn sibling_with_suffix(String, String) -> String
 
 pub async fn spawn_upload_swap(String, String, String, UpdateRestart, health_url? : String?) -> Unit raise UpdateError
 
+pub fn start_direct_pump(@direct.DirectService, DirectChannels, String, @aqueue.Queue[DirectInbound], @async.TaskGroup[Unit]) -> Unit
+
 pub fn target_triple(String, String) -> String?
 
 pub fn valid_semver(String) -> Bool
@@ -165,6 +170,27 @@ pub(all) enum CliMode {
   UpdateSwap(String)
   Start(StartArgs)
   Version
+}
+
+pub struct DirectBoxes {
+  // private fields
+}
+pub fn DirectBoxes::close(Self, String) -> Unit
+pub fn DirectBoxes::new() -> Self
+pub fn DirectBoxes::open(Self, String) -> @aqueue.Queue[DirectInbound]
+pub fn DirectBoxes::put(Self, String, DirectInbound) -> Unit
+
+pub struct DirectChannels {
+  // private fields
+}
+pub fn DirectChannels::lookup(Self, String) -> @direct.DirectTransport?
+pub fn DirectChannels::new() -> Self
+pub fn DirectChannels::register(Self, String, @direct.DirectTransport) -> Unit
+pub fn DirectChannels::unregister(Self, String) -> Unit
+
+pub(all) enum DirectInbound {
+  DCtl(@net.ControlMessage)
+  DChunk(@net.BinaryFrame)
 }
 
 pub(all) struct DrainGate {

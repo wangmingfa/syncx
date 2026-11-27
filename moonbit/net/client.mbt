@@ -55,6 +55,23 @@ pub fn PeerClient::supports_binary(self : PeerClient) -> Bool {
 }
 
 ///|
+/// 对端是否宣告直发能力(收 `direct-*` 控制消息 + kind 3 分片)。
+pub fn PeerClient::supports_direct1(self : PeerClient) -> Bool {
+  match self.caps {
+    Some(caps) => {
+      let mut found = false
+      for c in caps {
+        if c == CAP_DIRECT1 {
+          found = true
+        }
+      }
+      found
+    }
+    None => false
+  }
+}
+
+///|
 /// 连接一个对端并完成握手。
 ///
 /// `listen_port` 写进本机 kx,让接收方结合源 IP 反向重连本机。
@@ -289,6 +306,39 @@ pub async fn PeerClient::send_binary(
   self.conn.send_binary(data) catch {
     e => raise PeerError::Transport("发送失败:\{e}")
   }
+}
+
+///|
+/// 发一个直发文件分片(kind 3 二进制信封,头 `{id, seq}`)。语义与
+/// `PeerServer::send_direct_chunk` 完全一致:false = 会话断了或对端收不了。
+pub async fn PeerClient::send_direct_chunk(
+  self : PeerClient,
+  id : String,
+  seq : Int64,
+  data : Bytes,
+) -> Bool {
+  if !self.supports_direct1() || !self.supports_binary() {
+    return false
+  }
+  let key = match self.session_key {
+    Some(key) => key
+    None => return false
+  }
+  let header : Map[String, Json] = Map([])
+  header.set("id", Json::string(id))
+  header.set("seq", Json::number(seq.to_double()))
+  let frame = encode_binary_frame(
+    key,
+    BINARY_KIND_DIRECT_CHUNK,
+    header,
+    data,
+  ) catch {
+    _ => return false
+  }
+  self.send_binary(frame) catch {
+    _ => return false
+  }
+  true
 }
 
 ///|

@@ -188,6 +188,20 @@ pub async fn run_start(args : StartArgs) -> Unit {
     group.spawn_bg(allow_failure=true, no_wait=true) <| () => {
       mirror_flush_loop(mirror)
     }
+    // 直发(ADR-0028):服务状态机(收件箱/在途台账/离线排队,台账落
+    // 配置目录)+ 通道登记表 + 入站串行箱。get_transport 走登记表现取
+    // —— 断线续传与离线排队都按「有没有现取通道」判定,与 Node 的
+    // sessionManager.getTransport 同口径。1s 定时器负责提议超时/重发。
+    let direct_channels : DirectChannels = DirectChannels::new()
+    let direct_boxes : DirectBoxes = DirectBoxes::new()
+    let direct = @direct.DirectService::new(config_dir, get_transport=device_id => {
+      direct_channels.lookup(device_id)
+    }) catch {
+      e => fatal("直发收件箱初始化失败:\{e}")
+    }
+    group.spawn_bg(allow_failure=true, no_wait=true) <| () => {
+      direct.run_timer()
+    }
     let handlers : @net.PeerServerHandlers = {
       on_connect: device => {
         match server_ref {
@@ -199,6 +213,30 @@ pub async fn run_start(args : StartArgs) -> Unit {
               }
               true
             })
+            // 直发通道登记(control 走 Control 帧、chunk 走 kind 3 二进制
+            // 信封帧)+ 入站箱 + 串行泵 + 上线补发(排队内容 / 暂停续传)
+            let transport : @direct.DirectTransport = {
+              control: msg => {
+                server.send_message(
+                  device,
+                  @net.WireMessage::Control(payload=msg),
+                ) catch {
+                  _ => return false
+                }
+                true
+              },
+              chunk: (id, seq, data) =>
+                server.send_direct_chunk(device, id, seq, data) catch {
+                  _ => false
+                },
+            }
+            direct_channels.register(device, transport)
+            let direct_box = direct_boxes.open(device)
+            start_direct_pump(direct, direct_channels, device, direct_box, group)
+            // on_connect 是同步回调:上线补发(排队内容 / 暂停续传)挂后台任务
+            group.spawn_bg(allow_failure=true, no_wait=true) <| () => {
+              direct.on_peer_online(device, transport) catch { _ => () }
+            }
             // 该设备被指派的每个目录各挂一条会话 + 一个出站泵(投递走本条
             // 入站连接;目录清单现读配置单元格 —— 热重载后新连接自动带上新目录)
             spawn_session_pumps(
@@ -255,11 +293,11 @@ pub async fn run_start(args : StartArgs) -> Unit {
               None => ()
             }
           },
+          msg => direct_boxes.put(device, DCtl(msg)),
         )
       },
-      // 数据面(索引/块响应)在传输层就翻译成了 WireMessage 走 on_message,
-      // 这里只剩直发分片一类的无 folder 帧 —— MoonBit 尚未实现直发,丢弃。
-      on_binary: (_device, _frame) => (),
+      // 直发分片(kind 3 二进制信封帧):与控制消息同队串行,顺序即到达序
+      on_binary: (device, frame) => direct_boxes.put(device, DChunk(frame)),
       on_disconnect: device => {
         // 先关出站队列叫停泵(每目录补发 PeerClose),再摘会话(元数据随之失效)
         match session_sinks.get(device) {
@@ -276,6 +314,14 @@ pub async fn run_start(args : StartArgs) -> Unit {
         }
         senders.unregister(device)
         registry.unregister(device)
+        // 直发会话撤销:关箱收泵、摘通道、离线处理(半截转暂停、未发转
+        // 排队)。先摘通道再触发离线 —— 离线判定按「已无现取通道」;泵里
+        // 可能还压着断线前的尾巴,通道已摘即静默丢弃(与 Node 行为一致)。
+        direct_boxes.close(device)
+        direct_channels.unregister(device)
+        group.spawn_bg(allow_failure=true, no_wait=true) <| () => {
+          direct.on_peer_offline(device) catch { _ => () }
+        }
       },
       on_error: reason => {
         @log.error("peer 连接错误 {Reason}", [Json::string(reason)])
@@ -314,6 +360,9 @@ pub async fn run_start(args : StartArgs) -> Unit {
                 senders,
                 closers,
                 mirror,
+                Some(direct),
+                direct_channels,
+                direct_boxes,
                 url,
                 peer_port,
                 url2 => config_cell.val.peers.contains(url2),
@@ -471,6 +520,11 @@ pub async fn run_start(args : StartArgs) -> Unit {
       mirror.retry_folder(folder_id)
     })
     api_options.traffic = Some(() => traffic_cell.val)
+    // 直发 HTTP 面(ADR-0028):服务实例 + 现取通道寻址(均已在上面装配)
+    api_options.direct = Some(direct)
+    api_options.direct_transport = Some(device_id => {
+      direct_channels.lookup(device_id)
+    })
     // 节假日日历仓库(actor 判定与日历面板共读;None = 路由 503)
     api_options.holidays = Some(holiday_store)
     // 配置热重载回调:任何写路由成功落盘后触发(Node 的 configWatcher +

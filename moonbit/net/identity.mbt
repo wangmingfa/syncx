@@ -241,6 +241,17 @@ fn identity_req_str(
 extern "C" fn c_random_bytes(len : Int32) -> Bytes = "syncx_random_bytes"
 
 ///|
+/// 系统熵源取 n 个随机字节(跨包共用的公开窄口;net 内部已有多处用)。
+/// 失败统一表现为 0 长度 Bytes —— 调用方按「熵源不可用」自行降级。
+pub fn random_bytes(len : Int32) -> Bytes {
+  let raw = c_random_bytes(len)
+  if raw.length() != len {
+    return b""
+  }
+  raw
+}
+
+///|
 /// Ed25519 私钥 PKCS#8 DER 前缀(16 字节):
 /// `SEQUENCE { INTEGER 0, SEQUENCE { OID 1.3.101.112 }, OCTET STRING(种子) }`。
 /// 32 字节种子套上它就是 48 字节 DER —— 与 Node/Rust 的 PKCS#8 导出逐字节一致。

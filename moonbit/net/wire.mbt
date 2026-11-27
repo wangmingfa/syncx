@@ -285,9 +285,19 @@ fn set_opt_bool(map : Map[String, Json], key : String, v : Bool?) -> Unit {
 ///|
 fn set_opt_u64(map : Map[String, Json], key : String, v : Int64?) -> Unit {
   match v {
-    Some(n) => map.set(key, Json::number(n.to_double()))
+    // repr 显式给十进制整数字符串:repr=None 时 stringify 走 Double 编码,
+    // 大数值(毫秒时间戳/字节数)可能变科学计数法,与 Node 的整数字面量
+    // 对不上 —— 对拍要求逐字节还原,这里必须钉死十进制整数形式。
+    Some(n) => map.set(key, Json::number(n.to_double(), repr=n.to_string()))
     None => ()
   }
+}
+
+///|
+/// 必填的数值字段(毫秒时间戳 / 字节数 / 片号)。键必须出现 —— 与
+/// Node 侧对象字面量恒带这些字段对齐。
+fn set_u64(map : Map[String, Json], key : String, v : Int64) -> Unit {
+  map.set(key, Json::number(v.to_double(), repr=v.to_string()))
 }
 
 ///|
@@ -325,7 +335,7 @@ fn set_opt_u64_array(
     Some(items) => {
       let arr : Array[Json] = []
       for item in items {
-        arr.push(Json::number(item.to_double()))
+        arr.push(Json::number(item.to_double(), repr=item.to_string()))
       }
       map.set(key, Json::array(arr))
     }
@@ -904,6 +914,95 @@ pub(all) enum ControlMessage {
     platform~ : String?,
     runtime~ : String?
   )
+  /// 直发文本(ADR-0028):接收方直接落收件箱并回 direct-result。
+  /// text ≤ 64KB UTF-8 字节;身份归属一律用会话验签的对端,不信消息体署名。
+  /// id
+  DirectText(
+    id~ : String,
+    /// fromDeviceId
+    from_device_id~ : String,
+    text~ : String,
+    /// createdAt(毫秒)
+    created_at~ : Int64,
+    version~ : String?,
+    hostname~ : String?,
+    platform~ : String?,
+    runtime~ : String?
+  )
+  /// 直发文件提议:接收方确认后才分片传输。size/sha256 是**整份文件**的口径,
+  /// 分片本身没有独立指纹,靠落盘后的整体验收。
+  /// id
+  DirectFileOffer(
+    id~ : String,
+    /// fromDeviceId
+    from_device_id~ : String,
+    name~ : String,
+    size~ : Int64,
+    /// sha256(十六进制小写)
+    sha256~ : String,
+    /// createdAt(毫秒)
+    created_at~ : Int64,
+    /// batchId:同一次「发送 N 个文件」的组号;缺省 = 各算各的。
+    batch_id~ : String?,
+    version~ : String?,
+    hostname~ : String?,
+    platform~ : String?,
+    runtime~ : String?
+  )
+  /// 接收方对提议的确认/拒绝。accept=true 时 offset 是接收方已落盘的字节数
+  /// (续传;必须整片对齐,发送方只在自身处于续传态时接受非 0 值)。
+  /// id
+  DirectReply(
+    id~ : String,
+    /// fromDeviceId
+    from_device_id~ : String,
+    accept~ : Bool,
+    reason~ : String?,
+    /// offset(接收方已有字节数;缺省 = 从头收)
+    offset~ : Int64?,
+    version~ : String?,
+    hostname~ : String?,
+    platform~ : String?,
+    runtime~ : String?
+  )
+  /// 分片确认:**累积水位** —— seq = 已按序收齐的片数(收完第 0 片发 seq=1)。
+  /// 发送方据此推进窗口,别当成「第 seq 片的回执」。
+  /// id
+  DirectAck(
+    id~ : String,
+    /// fromDeviceId
+    from_device_id~ : String,
+    seq~ : Int64,
+    version~ : String?,
+    hostname~ : String?,
+    platform~ : String?,
+    runtime~ : String?
+  )
+  /// 单方面取消一次投送(发送方放弃 / 接收方清理半截),对端按 id 对账清理。
+  /// id
+  DirectCancel(
+    id~ : String,
+    /// fromDeviceId
+    from_device_id~ : String,
+    reason~ : String,
+    version~ : String?,
+    hostname~ : String?,
+    platform~ : String?,
+    runtime~ : String?
+  )
+  /// 文本投送结果 / 文件传输终态回执。ok=false 时 error 是中文原因。
+  /// id
+  DirectResult(
+    id~ : String,
+    /// fromDeviceId
+    from_device_id~ : String,
+    ok~ : Bool,
+    error~ : String?,
+    version~ : String?,
+    hostname~ : String?,
+    platform~ : String?,
+    runtime~ : String?
+  )
 }
 
 ///|
@@ -1245,6 +1344,92 @@ pub fn ControlMessage::to_json(self : ControlMessage) -> Json {
       set_self_info(map, version, hostname, platform, runtime)
       Json::object(map)
     }
+    // 键序照抄 Node 的对象字面量插入序(direct.ts / session-manager.ts),
+    // 自述四元组恒在尾巴上(与全部其它 kind 一致)。
+    DirectText(id~, from_device_id~, text~, created_at~, version~, hostname~, platform~, runtime~) => {
+      let map : Map[String, Json] = Map([])
+      set_str(map, "kind", "direct-text")
+      set_str(map, "id", id)
+      set_str(map, "fromDeviceId", from_device_id)
+      set_str(map, "text", text)
+      set_u64(map, "createdAt", created_at)
+      set_self_info(map, version, hostname, platform, runtime)
+      Json::object(map)
+    }
+    DirectFileOffer(
+      id~,
+      from_device_id~,
+      name~,
+      size~,
+      sha256~,
+      created_at~,
+      batch_id~,
+      version~,
+      hostname~,
+      platform~,
+      runtime~
+    ) => {
+      let map : Map[String, Json] = Map([])
+      set_str(map, "kind", "direct-file-offer")
+      set_str(map, "id", id)
+      set_str(map, "fromDeviceId", from_device_id)
+      set_str(map, "name", name)
+      set_u64(map, "size", size)
+      set_str(map, "sha256", sha256)
+      set_u64(map, "createdAt", created_at)
+      set_opt_str(map, "batchId", batch_id)
+      set_self_info(map, version, hostname, platform, runtime)
+      Json::object(map)
+    }
+    DirectReply(
+      id~,
+      from_device_id~,
+      accept~,
+      reason~,
+      offset~,
+      version~,
+      hostname~,
+      platform~,
+      runtime~
+    ) => {
+      let map : Map[String, Json] = Map([])
+      set_str(map, "kind", "direct-reply")
+      set_str(map, "id", id)
+      set_str(map, "fromDeviceId", from_device_id)
+      set_opt_bool(map, "accept", Some(accept))
+      set_opt_str(map, "reason", reason)
+      set_opt_u64(map, "offset", offset)
+      set_self_info(map, version, hostname, platform, runtime)
+      Json::object(map)
+    }
+    DirectAck(id~, from_device_id~, seq~, version~, hostname~, platform~, runtime~) => {
+      let map : Map[String, Json] = Map([])
+      set_str(map, "kind", "direct-ack")
+      set_str(map, "id", id)
+      set_str(map, "fromDeviceId", from_device_id)
+      set_u64(map, "seq", seq)
+      set_self_info(map, version, hostname, platform, runtime)
+      Json::object(map)
+    }
+    DirectCancel(id~, from_device_id~, reason~, version~, hostname~, platform~, runtime~) => {
+      let map : Map[String, Json] = Map([])
+      set_str(map, "kind", "direct-cancel")
+      set_str(map, "id", id)
+      set_str(map, "fromDeviceId", from_device_id)
+      set_str(map, "reason", reason)
+      set_self_info(map, version, hostname, platform, runtime)
+      Json::object(map)
+    }
+    DirectResult(id~, from_device_id~, ok~, error~, version~, hostname~, platform~, runtime~) => {
+      let map : Map[String, Json] = Map([])
+      set_str(map, "kind", "direct-result")
+      set_str(map, "id", id)
+      set_str(map, "fromDeviceId", from_device_id)
+      set_opt_bool(map, "ok", Some(ok))
+      set_opt_str(map, "error", error)
+      set_self_info(map, version, hostname, platform, runtime)
+      Json::object(map)
+    }
   }
 }
 
@@ -1479,6 +1664,86 @@ fn ControlMessage::from_map(
         from_device_id=req_str(obj, "fromDeviceId"),
         folder_id=req_str(obj, "folderId"),
         commit_hash=req_str(obj, "commitHash"),
+        version~,
+        hostname~,
+        platform~,
+        runtime~,
+      )
+    }
+    "direct-text" => {
+      let (version, hostname, platform, runtime) = opt_self_info(obj)
+      DirectText(
+        id=req_str(obj, "id"),
+        from_device_id=req_str(obj, "fromDeviceId"),
+        text=req_str(obj, "text"),
+        created_at=req_u64(obj, "createdAt"),
+        version~,
+        hostname~,
+        platform~,
+        runtime~,
+      )
+    }
+    "direct-file-offer" => {
+      let (version, hostname, platform, runtime) = opt_self_info(obj)
+      DirectFileOffer(
+        id=req_str(obj, "id"),
+        from_device_id=req_str(obj, "fromDeviceId"),
+        name=req_str(obj, "name"),
+        size=req_u64(obj, "size"),
+        sha256=req_str(obj, "sha256"),
+        created_at=req_u64(obj, "createdAt"),
+        batch_id=opt_str(obj, "batchId"),
+        version~,
+        hostname~,
+        platform~,
+        runtime~,
+      )
+    }
+    "direct-reply" => {
+      let (version, hostname, platform, runtime) = opt_self_info(obj)
+      DirectReply(
+        id=req_str(obj, "id"),
+        from_device_id=req_str(obj, "fromDeviceId"),
+        accept=req_bool(obj, "accept"),
+        reason=opt_str(obj, "reason"),
+        offset=opt_u64(obj, "offset"),
+        version~,
+        hostname~,
+        platform~,
+        runtime~,
+      )
+    }
+    "direct-ack" => {
+      let (version, hostname, platform, runtime) = opt_self_info(obj)
+      DirectAck(
+        id=req_str(obj, "id"),
+        from_device_id=req_str(obj, "fromDeviceId"),
+        seq=req_u64(obj, "seq"),
+        version~,
+        hostname~,
+        platform~,
+        runtime~,
+      )
+    }
+    "direct-cancel" => {
+      let (version, hostname, platform, runtime) = opt_self_info(obj)
+      DirectCancel(
+        id=req_str(obj, "id"),
+        from_device_id=req_str(obj, "fromDeviceId"),
+        reason=req_str(obj, "reason"),
+        version~,
+        hostname~,
+        platform~,
+        runtime~,
+      )
+    }
+    "direct-result" => {
+      let (version, hostname, platform, runtime) = opt_self_info(obj)
+      DirectResult(
+        id=req_str(obj, "id"),
+        from_device_id=req_str(obj, "fromDeviceId"),
+        ok=req_bool(obj, "ok"),
+        error=opt_str(obj, "error"),
         version~,
         hostname~,
         platform~,

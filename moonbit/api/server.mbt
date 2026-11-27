@@ -74,6 +74,13 @@ pub(all) struct ApiOptions {
   /// 设备清单快照 / fs-watch 对账 / 出站拨号对账)。回调在单线程事件循环里
   /// 执行,必须轻(读配置 + 发命令,不做 git/网络动作)。
   mut on_config_changed : ConfigChangedFn?
+  /// 设备间直发服务(ADR-0028;None = 未装配,/api/direct/* 回 503、
+  /// status 不上线 `direct` 段 —— 「缺字段 = 旧后端」口径,前端据此禁用
+  /// 直发入口)。实例在 cli 装配层创建并注入;api 只调它的方法。
+  mut direct : @direct.DirectService?
+  /// 按设备现取直发通道(None = 该设备离线,sendText/sendFile 自动进排队;
+  /// 会话通道在 cli 装配层,api 只见闭包不见类型)。
+  mut direct_transport : ((String) -> @direct.DirectTransport?)?
 }
 
 ///|
@@ -135,6 +142,8 @@ pub fn ApiOptions::new(
     git_commit_status: None,
     git_commit_retry: None,
     holidays: None,
+    direct: None,
+    direct_transport: None,
     on_config_changed,
   }
 }
@@ -341,6 +350,12 @@ pub fn status_json(options : ApiOptions) -> Json {
   // 全局设置当前值(装配层注入;未注入 = 旧装配形态,整段不上线)
   match options.settings {
     Some(settings) => map.set("settings", settings)
+    None => ()
+  }
+  // 直发(收件箱/待确认/在途):实例存在就上线 —— 快照是纯内存读取,
+  // WS 的周期差异推送会自动把变化带给前端,无需事件回调
+  match options.direct {
+    Some(direct) => map.set("direct", direct.snapshot_json())
     None => ()
   }
   match options.actor {
@@ -714,7 +729,9 @@ pub async fn handle_token_login(
 /// 组装路由。分发顺序即安全边界(对齐 Rust routes/mod.rs 的门次序):
 /// 免认证探活/登录/页面壳在前,`/api` 子树统一过认证门。
 pub fn build_app(options : ApiOptions) -> @mocket.App {
-  let app = @mocket.App()
+  // max_body_size 默认 1MB:直发文件(≤100MB,ADR-0028)与自更新上传都过
+  // 这条 app,整读进内存 —— 上限一并放到 128MiB。
+  let app = @mocket.App(max_body_size=134217728)
   app.use_middleware(auth_middleware(options), base_path="/api")
   // 免认证面
   app.get("/health", _event => health_json())
@@ -825,6 +842,24 @@ pub fn build_app(options : ApiOptions) -> @mocket.App {
     )
   })
   app.get("/favicon.ico", _event => @mocket.HttpResponse(@mocket.NoContent))
+  // 设备间直发(ADR-0028):浏览器 → 本机 daemon → 已握手 P2P 会话。
+  // 全部指向同一分发器,由它按 url 细分(与 Node src/api/routes/direct.ts
+  // 逐条对齐,见 direct.mbt;zip 是 POST 打包入口,MoonBit 未实现也注册 ——
+  // 路由在,回 503,前端按 status.direct.zip === false 根本不会发)。
+  app.get("/api/direct/inbox", event => dispatch_direct_routes(options, event))
+  app.get("/api/direct/inbox/:id/content", event => {
+    dispatch_direct_routes(options, event)
+  })
+  app.delete("/api/direct/inbox/:id", event => {
+    dispatch_direct_routes(options, event)
+  })
+  app.post("/api/direct/reply", event => dispatch_direct_routes(options, event))
+  app.post("/api/direct/cancel", event => {
+    dispatch_direct_routes(options, event)
+  })
+  app.post("/api/direct/text", event => dispatch_direct_routes(options, event))
+  app.post("/api/direct/file", event => dispatch_direct_routes(options, event))
+  app.post("/api/direct/zip", event => dispatch_direct_routes(options, event))
   // 静态资源 / 占位页(最后兜底)
   match options.web_dist {
     Some(dist) => mount_static(app, dist)

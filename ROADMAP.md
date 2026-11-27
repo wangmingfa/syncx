@@ -41,14 +41,14 @@
 
 ## 直发(设备间发文本 / 文件,ADR-0028)
 
-主体已落地(Node 后端,见 README「设备间直发」),剩下三项:
+主体已落地(Node 后端,见 README「设备间直发」),三项全部完成:
 
 - [x] **多文件打包成单个压缩包**:做成可选开关(默认仍是成组逐条投送),只打包不压缩、包体沿用 100MB 上限;实现见 ADR-0028 第 16 条。
 - [x] **移植到 Rust 后端**:`direct-*` 控制消息 + 二进制帧 kind 3 + `/api/direct` 路由 + 收件箱落盘(`syncx-cli` 的 `DirectService`)。线上格式由 Node 生成的 fixture 双向对拍(`test/direct-wire.test.ts` + `rust/crates/syncx-net/tests/direct_wire.rs`)。2026-11-27 补完 `resume.json` 跨重启续传与 `/api/direct/zip` 打包,Rust 与 Node 已完全对齐。
-- [ ] **移植到 MoonBit 后端**:分三步(见 ADR-0026),前两步是硬前置 ——
+- [x] **移植到 MoonBit 后端**(2026-11-27 全部完成,三后端功能对齐):
   - [x] **帧加密信封**:Node/Rust 对每一帧无条件 AES-256-GCM,MoonBit 原本是明文,连 hello 都握不上。`net/envelope.mbt` 的文本信封已接进 `send_message` / `handle_text` / `recv_message` / `run` 两侧,解密失败按 Node 口径丢帧不断链;跨语言契约由固定 key/iv 的 fixture 逐字节对拍。
   - [x] **二进制信封接数据面**:新增 `net/dataframe.mbt` 做翻译 —— 对端宣告 `binary1` 时索引/块响应改发二进制帧(裸 body,线体积从 ≈1.78 倍降到 ≈1.0 倍),接收侧翻译回等价 `WireMessage`,actor 层无感知。`peer_caps()` 已把 `binary1` 加回。索引 payload 目前仍在 actor 层 base64 一次,要彻底省掉需让 `WireBlockResponse` 直吃 `Bytes`(后续)。
-  - [ ] **直发**:`direct-*` 控制消息、二进制帧 kind 3、`/api/direct` 路由、收件箱与续传台账。分片帧已有落点(`BinaryInbound::DirectChunk` → `on_binary`),剩状态机与路由。补齐之前 `/api/status` 不带 `direct` 字段,前端据此隐藏「发送 / 收件箱」入口。
+  - [x] **直发**:`moonbit/direct/` 状态机(分片账本/累积 ack/断点续传/离线排队/收件箱)+ `moonbit/api/direct.mbt` 的 8 条 `/api/direct` 路由 + cliapp 装配(现取通道表 + 入站串行泵,`direct1` 随之宣告)。线上格式 fixture 三方对拍:六类控制消息解码 → 重编码逐字节还原。刻意缺口:zip 打包与另存 saveTo 回 503,`status.direct.zip=false`,前端按能力声明门控。**真机双后端(Node/Rust ↔ MoonBit)互通联调待做**。
 
 ## 中期(特色差异化)
 

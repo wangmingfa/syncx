@@ -1,0 +1,21 @@
+import {
+  "wangmingfa/syncx/core",
+  "wangmingfa/syncx/net",
+  "cc06b/mooncry/lib",
+  "moonbitlang/async",
+  "moonbitlang/async/fs",
+  "moonbitlang/core/encoding/utf8",
+  "moonbitlang/core/json",
+}
+
+import {
+  "wangmingfa/syncx/core",
+  "wangmingfa/syncx/net",
+  "cc06b/mooncry/lib",
+  "moonbitlang/async",
+  "moonbitlang/async/fs",
+  "moonbitlang/core/encoding/utf8",
+  "moonbitlang/core/json",
+} for "test"
+
+supported_targets = "native"

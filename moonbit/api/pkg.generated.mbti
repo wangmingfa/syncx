@@ -7,6 +7,7 @@ import {
   "oboard/mocket",
   "wangmingfa/syncx/core",
   "wangmingfa/syncx/daemon",
+  "wangmingfa/syncx/direct",
 }
 
 // Values
@@ -184,6 +185,8 @@ pub fn sync_progress_json(Array[@daemon.SyncProgress]) -> Array[@json.Json]
 
 pub fn traffic_json(@daemon.TrafficStats) -> @json.Json
 
+pub async fn try_direct_routes(ApiOptions, @mocket.MocketEvent) -> &@mocket.Responder?
+
 pub fn verify_password(AccountRecord, String, String) -> Bool
 
 pub fn verify_session(String, String) -> SessionPayload?
@@ -219,6 +222,8 @@ pub(all) struct ApiOptions {
   mut holidays : @daemon.HolidayStore?
   mut git_commit_retry : (async (String) -> @json.Json)?
   mut on_config_changed : (async () -> Unit)?
+  mut direct : @direct.DirectService?
+  mut direct_transport : ((String) -> @direct.DirectTransport?)?
 }
 pub fn ApiOptions::new(device_id~ : String, control_token? : String, auth_file? : String?, config_file? : String?, actor? : @daemon.ActorHandle?, web_dist? : String?, on_shutdown? : (() -> Unit)?, dev_mode? : Bool, upload_inspect? : (async (Bytes) -> Result[InspectedPackage, String])?, upload_swap? : (async (Bytes) -> Result[String, String])?, settings? : @json.Json?, peer_port? : Int32?, device_infos? : Array[@json.Json], on_config_changed? : (async () -> Unit)?) -> Self
 

@@ -179,19 +179,22 @@ fn sha256_rotr(x : UInt32, n : Int32) -> UInt32 {
 
 ///|
 /// 流式 SHA-256。逐段喂字节,`hex()` 收尾取十六进制摘要(小写)。
-struct Sha256 {
-  h : FixedArray[UInt32]
+///
+/// 对包外公开是为了直发的流式指纹(mooncry 只有一口式入口,100MB 级文件
+/// 必须边写边算)。字段刻意 priv:外部只能走 new / update / hex 三个口。
+pub struct Sha256 {
+  priv h : FixedArray[UInt32]
   /// 轮常量表:new 时建一次。原先在 process_block 里每块重建,
   /// 64KB 就是 1024 次表分配 + 初始化(实测占掉约三成耗时)。
-  k : FixedArray[UInt32]
-  buf : FixedArray[Byte]
-  mut buf_len : Int32
+  priv k : FixedArray[UInt32]
+  priv buf : FixedArray[Byte]
+  priv mut buf_len : Int32
   /// 已处理字节数
-  mut total : Int64
+  priv mut total : Int64
 }
 
 ///|
-fn Sha256::new() -> Sha256 {
+pub fn Sha256::new() -> Sha256 {
   let h : FixedArray[UInt32] = FixedArray::make(8, 0)
   let init : Array[UInt32] = [
     0x6a09e667, 0xbb67ae85, 0x3c6ef372, 0xa54ff53a, 0x510e527f, 0x9b05688c,
@@ -267,7 +270,7 @@ fn Sha256::process_block(self : Sha256, block : FixedArray[Byte]) -> Unit {
 
 ///|
 /// 喂入一段字节(区间 `[start, start + len)`)。
-fn Sha256::update(
+pub fn Sha256::update(
   self : Sha256,
   data : Bytes,
   start : Int32,
@@ -300,7 +303,7 @@ fn Sha256::update(
 
 ///|
 /// 收尾(padding + 末块),返回十六进制小写摘要。
-fn Sha256::hex(self : Sha256) -> String {
+pub fn Sha256::hex(self : Sha256) -> String {
   // 消息长度(位)大端 8 字节
   let bits = self.total * 8L
   // padding:0x80 + 若干 0x00,直到长度 ≡ 56 (mod 64)

@@ -1,6 +1,6 @@
 # 0028 设备间直发（文本 / 文件到收件箱）
 
-状态：已实现（P0 + P1 群发 / 拖拽多文件 / 另存到指定目录 / 断点续传 + P2 离线排队 / 粘贴图片 / 多文件成组 / 可选打包成 zip + P3 跨重启续传，Node 后端；Rust / MoonBit 尚未移植）
+状态：已实现（P0 + P1 群发 / 拖拽多文件 / 另存到指定目录 / 断点续传 + P2 离线排队 / 粘贴图片 / 多文件成组 / 可选打包成 zip + P3 跨重启续传，Node 后端；Rust 已移植，2026-11-27 功能对齐；MoonBit 已移植，2026-11-27 —— 除 zip 打包与「另存到指定目录」，对应入口按能力声明回 503，前端按 `status.direct.zip === false` 根本不会触发）
 
 ## 背景
 
@@ -32,8 +32,8 @@
 
 - 直发不绑定目录，`attachPeerMessages` 原本按 `folder` 路由；`direct-file-chunk` 必须在 folder 查找**之前**分流，否则会被静默丢弃。
 - `DeviceStatus.caps` 缺省 = 旧后端/旧对端，前端必须按「不支持」处理，不能默认成支持。
-- `direct1` 现在 Node 与 Rust 都宣告；MoonBit 未宣告，Node/Rust 端会正确禁用发送入口，它自己对未知控制 kind 与二进制 kind 的静默丢弃行为保持不变。
-- 跨后端的线上格式靠**一份 Node 生成的 fixture** 三方钉住：`rust/scripts/gen-direct-wire-fixture.mjs` 用真实的 `JSON.stringify` 产出 `rust/crates/syncx-net/fixtures/direct-wire.json`，Rust 侧断言解码后重新编码逐字节还原（键序、大小写、可选字段的有无），Node 侧（`test/direct-wire.test.ts`）把同一批字节喂回当前状态机。只做其中一边不够：fixture 抄错（改了字段却没重跑脚本）时，Rust 那边照样全绿。改 `src/direct.ts` 或 `src/net/wire.ts` 的字段必须重跑生成脚本。
+- `direct1` 三端（Node / Rust / MoonBit）都宣告：能力是承诺，MoonBit 是在直发状态机落地、`on_binary` 真正接上 `handle_chunk` 之后才宣告的。旧后端/未移植端不宣告，对端 UI 正确禁用发送入口；各后端自己对未知控制 kind 与二进制 kind 的静默丢弃行为保持不变。
+- 跨后端的线上格式靠**一份 Node 生成的 fixture** 三方钉住：`rust/scripts/gen-direct-wire-fixture.mjs` 用真实的 `JSON.stringify` 产出 `rust/crates/syncx-net/fixtures/direct-wire.json`，Rust 侧断言解码后重新编码逐字节还原（键序、大小写、可选字段的有无），Node 侧（`test/direct-wire.test.ts`）把同一批字节喂回当前状态机；MoonBit 侧的 `moonbit/scripts/gen-direct-fixture.mjs` 直接吃同一份 JSON 产出 `moonbit/net/direct_fixture.mbt`，`direct_fixture_test.mbt` 做同样的逐字节还原断言。只做其中一边不够：fixture 抄错（改了字段却没重跑脚本）时，另外两边照样全绿。改 `src/direct.ts` 或 `src/net/wire.ts` 的字段必须重跑生成脚本（Rust 与 MoonBit 两个都要）。
 - 发送方的 `directTransport()` 与接收侧总闸使用同一套判据；只靠对端宣告不够，未配对设备也能连上来发邀请，必须挡住它直接往收件箱塞文件。
 - 群发的多笔文件投送共用同一个暂存路径，**不能在各笔结束时各自 `rmSync`**；`sourceRefs` 降到 0 才删，否则第一台收完就把后面几台待读的文件删了。
 - 设备卡 drop 必须 `stopPropagation`，否则 `.tgz` 拖到卡片会同时冒到 window 的 `DropOverlay` 被当成安装包预检；拖拽悬停态由 `setDirectDropTarget()` 单向通知遮罩让路，两边的 `dropEffect` 不能各设各的。
@@ -67,6 +67,9 @@
 ## 后续（未做）
 
 - **Rust 后端已与 Node 对齐**（2026-11-27）：`resume.json` 跨重启续传与 `/api/direct/zip` 打包都已移植，两个缺口关闭。打包的暂存区与 zip 结构与 Node 同形（`inbox/.tmp/zip-<batch>/manifest.json`、store 模式 + 数据描述符），产物经系统 `unzip -t` 校验；能力由 `/api/status` 的 `direct.zip` 声明，前端不再按 runtime 猜。唯一有意的差异：空批次时 Node 回 404，Rust 回 400（`OpError` 只有「没这项能力 / 这次失败」两态，为一条罕见分支扩枚举不划算；前端只读 `message`，观感一致）。
-- **移植到 MoonBit 后端**：协议（`direct-*` 控制消息 + 二进制帧 kind 3）、`/api/direct` 路由、收件箱与续传台账都要重写一遍。移植完成前，`/api/status` 不带 `direct` 字段，前端据此隐藏「发送 / 收件箱」入口（见 `web/components/DeviceList.vue` 的 `directSupported`），不会出现「点了 404」。
-  2026-11-27 复核：这条**不是一次性移植**，它前面还压着两个更底层的前提（详见 ADR-0026「尚未落地」）：① MoonBit 的 WS 传输层目前是**明文帧**，没有 `{"kind":"enc"}` 信封，而 Node/Rust 对每一帧都无条件加解密 —— 两个后端连 hello 都握不上；② 二进制信封（`iv|tag|version|kind|header|body`）在 MoonBit 里只有 outbound 的 `BinaryFrame` 枚举，解码路径仍写着「二进制信封是后续里程碑」。顺带一提：`binary1` 目前是被**无条件宣告**的（`handshake.mbt` 的 `peer_caps`），而能力标签本身是个承诺 —— 这一处也该在补上二进制信封之前先摘掉。
-  同日进展：①已关闭 —— `net/envelope.mbt` 的文本信封接进了收发两侧；②也已关闭 —— `net/dataframe.mbt` 把索引/块响应的二进制信封接进了收发两侧（发送按对端 caps 选信封，接收翻译回等价 `WireMessage`），`binary1` 随之**加回** `peer_caps()`。直发分片现在有落点了：`decode_inbound_binary` 判成 `BinaryInbound::DirectChunk` 就原样交给 `on_binary`，不参与 folder 路由（否则会掉进空 folder 的静默丢弃）。MoonBit 直发剩下的就是状态机（分片账本/续传/收件箱）与 `/api/direct` 路由，传输前提已全部就绪。
+- **移植到 MoonBit 后端（已落地，2026-11-27）**：前置的帧加密与二进制信封先一步关闭（见 ADR-0026），本日把状态机与 HTTP 面全部补齐，三后端功能对齐（除下述刻意缺口）：
+  - `moonbit/direct/`（types/service/persist/ops/api）：分片账本（窗口 4 / 乱序缓存 32 片 / 累积 ack）、`resume.json` + `queue.json` + `index.json` 三件套（键序与 Node 逐字对齐）、断点续传（offset 只认 resuming 态、整片对齐、fresh 按 `max(pausedAt, mtime)`）、离线排队（24h / ≤20 条 / ≤512MB / 上线补发 + 定时探测）、收件箱（引用计数删暂存、rename 前验 sha256）。
+  - `moonbit/api/direct.mbt`：8 条 `/api/direct` 路由全部注册（zip 也注册，回 503）；查询串手动解析（mocket 的 `query()` 会折叠重复键，多设备投送靠重复 `deviceIds`）；body 与查询串双兼容取目标设备；上传体整读（mocket 上限调到 128MiB）、指纹一次算完 —— 与自更新上传同口径。
+  - cliapp 装配（`cliapp/directwire.mbt` + entry/peers 接线）：`DirectChannels` 现取通道表 + `DirectBoxes` 入站串行箱（单队列单泵，处理顺序与 Node 单线程事件循环一致）+ `on_peer_online` 补发 / `on_peer_offline` 半截转暂停；`direct1` 随之宣告。MoonBit 的 `close()` 未接优雅关闭（shutdown 直接退出），半截文件留给下次启动的 `loadResume` 按「盘上长度」口径收 —— 台账本来就提前落盘，语义不丢。
+  - **刻意缺口**：zip 打包与「另存到指定目录」（saveTo）未实现，对应入口回 503；`status.direct.zip = false`，前端按能力声明门控，不会触发。前端零改动。
+  - 对拍：`moonbit/scripts/gen-direct-fixture.mjs` 直接吃 Rust 侧那份 `direct-wire.json`（三后端共用同一份事实源），产出 `moonbit/net/direct_fixture.mbt`；`direct_fixture_test.mbt` 断言六类控制消息**解码 → 重编码逐字节还原**、分片帧同 key 解码头体一致。此前踩过一处：MoonBit 的 `Json::number` 缺省走 Double 编码，大整数（时间戳/字节数）可能变科学计数法，`set_u64` 一律显式给十进制 repr 钉死。

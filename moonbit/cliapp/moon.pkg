@@ -13,6 +13,7 @@ import {
   "wangmingfa/syncx/api",
   "wangmingfa/syncx/core",
   "wangmingfa/syncx/daemon",
+  "wangmingfa/syncx/direct",
   "wangmingfa/syncx/log",
   "wangmingfa/syncx/net",
   "moonbitlang/x/time",

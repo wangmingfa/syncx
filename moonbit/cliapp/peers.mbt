@@ -257,6 +257,8 @@ fn close_session_sinks(
 ///     随后通知交给镜像循环只入队不立即提交;
 ///   - GitCommitAck:投递层回执,按 (folderId, commitHash) 在台账上摘除
 ///     该目标并落盘(同步回调入队,flush 每拍结算);
+///   - direct-* 六种:直发控制面(ADR-0028),经 direct_intake 入串行泵
+///     (回调只入队,状态机在泵里逐条消化);未装配直发时丢弃;
 ///   - 其余 Control 维持丢弃(TODO:notify 扫描触发 / 中继等后续包);
 ///   - 数据面消息路由进 actor。
 fn handle_peer_message(
@@ -267,6 +269,7 @@ fn handle_peer_message(
   device_id : String,
   message : @net.WireMessage,
   send_control : (@net.ControlMessage) -> Unit,
+  direct_intake : (@net.ControlMessage) -> Unit,
 ) -> Unit {
   match message {
     Control(payload=Hello(from_device_id=_, version~, hostname~, platform~, ..)) =>
@@ -297,6 +300,10 @@ fn handle_peer_message(
             Some(m) => m.on_git_ack(sender, folder_id, commit_hash)
             None => log_git_commit_ack(sender, folder_id, commit_hash)
           }
+        // 直发控制面(六种;ADR-0028):入串行泵,处理语义都在 direct 服务
+        DirectText(..) | DirectFileOffer(..) | DirectReply(..) |
+        DirectAck(..) | DirectCancel(..) | DirectResult(..) =>
+          direct_intake(notify)
         // 其余 Control 维持丢弃(TODO:notify 扫描触发 / 中继等后续包)
         _ => ()
       }
@@ -336,6 +343,9 @@ async fn outbound_peer_loop(
   senders : PeerSenders,
   closers : Map[String, () -> Unit],
   mirror : GitMirror,
+  direct : @direct.DirectService?,
+  direct_channels : DirectChannels,
+  direct_boxes : DirectBoxes,
   url : String,
   peer_port : Int32,
   still_configured : (String) -> Bool,
@@ -413,6 +423,27 @@ async fn outbound_peer_loop(
           true
         })
         closers.set(device_id, () => { client.close() })
+        // 直发通道登记 + 入站箱 + 串行泵 + 上线补发(排队内容 / 暂停续传;
+        // 未装配直发时整段跳过,通道表里没有该设备 = api 侧按离线排队)
+        match direct {
+          Some(service) => {
+            let transport : @direct.DirectTransport = {
+              control: msg => {
+                client.send_message(@net.WireMessage::Control(payload=msg)) catch {
+                  _ => return false
+                }
+                true
+              },
+              chunk: (id, seq, data) =>
+                client.send_direct_chunk(id, seq, data) catch { _ => false },
+            }
+            direct_channels.register(device_id, transport)
+            let direct_box = direct_boxes.open(device_id)
+            start_direct_pump(service, direct_channels, device_id, direct_box, group)
+            service.on_peer_online(device_id, transport) catch { _ => () }
+          }
+          None => ()
+        }
         // git 回执泵:handle_peer_message 是同步回调,而 client 发送是 async ——
         // 回执先入无界箱,由本任务异步投递(单线程 async,箱即同步转发)
         let ack_outbox : @async.Queue[@net.ControlMessage] = @async.Queue(
@@ -444,10 +475,10 @@ async fn outbound_peer_loop(
               msg => {
                 let _ = ack_outbox.try_put(msg) catch { _ => false }
               },
+              msg => direct_boxes.put(device_id, DCtl(msg)),
             ),
-          // 数据面已由传输层翻译成 WireMessage;无 folder 的帧(直发分片)
-          // MoonBit 尚未实现,丢弃。
-          on_binary: _frame => (),
+          // 直发分片(kind 3 二进制信封帧):与控制消息同队串行,顺序即到达序
+          on_binary: frame => direct_boxes.put(device_id, DChunk(frame)),
           on_error: reason =>
             @log.warn("peer {DeviceId} message error {Reason}", [
               Json::string(device_id), Json::string(reason),
@@ -455,12 +486,19 @@ async fn outbound_peer_loop(
           on_close: () => (),
         })
         // 会话撤销:元数据失效 + sinks 关闭 + 发送闭包/closer 摘除 + 回执箱
-        // 关停(与 server 侧 on_disconnect 对称)
+        // 关停(与 server 侧 on_disconnect 对称);直发再做离线处理
+        // (半截转暂停、未发送转排队 —— 先摘通道,离线判定才看得到「已无会话」)
         registry.unregister(device_id)
         senders.unregister(device_id)
         closers.remove(device_id)
         close_session_sinks(session_sinks, device_id)
         ack_outbox.close(clear=true)
+        direct_boxes.close(device_id)
+        direct_channels.unregister(device_id)
+        match direct {
+          Some(service) => service.on_peer_offline(device_id) catch { _ => () }
+          None => ()
+        }
         @log.warn(
           "peer {DeviceId} session closed ({Url}); reconnecting",
           [Json::string(device_id), Json::string(url)],

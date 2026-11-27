@@ -27,6 +27,12 @@
 pub const CAP_BINARY1 : String = "binary1"
 
 ///|
+/// 设备间直发能力标签(ADR-0028)。宣告它的前提是本端能收:控制面
+/// (`direct-*` 六条消息)与数据面(kind 3 直发分片)都已接上 —— 与
+/// `binary1` 教训同一口径:**能力标签是承诺**。
+pub const CAP_DIRECT1 : String = "direct1"
+
+///|
 /// 本机宣告的全部能力(随版本追加;空 = 什么都不宣告)。
 /// 调用方据此构建 kx 的 `caps` 字段,空数组在线上是缺省、与旧对端同形。
 ///
@@ -36,9 +42,13 @@ pub const CAP_BINARY1 : String = "binary1"
 /// 现在 `net/dataframe.mbt` 把收发两侧都接上了(发送按对端 caps 选信封,接收
 /// 翻译回等价消息),能力与实现对齐,可以宣告了。
 ///
+/// `direct1` = 直发(文本 + 文件)接收链路已通(见 moonbit/direct 包)。
+/// 注意**不**宣告 `index-chunk1`:本端对分片索引的入站处理是整帧丢弃
+/// (见 dataframe.mbt),宣告了会让对端真把索引切片发来。
+///
 /// 能力标签是**承诺**:只在对端用到它的那条路真的通了之后才写进来。
 pub fn peer_caps() -> Array[String] {
-  [CAP_BINARY1]
+  [CAP_BINARY1, CAP_DIRECT1]
 }
 
 ///|
@@ -119,6 +129,23 @@ pub fn KxMessage::supports_binary(self : KxMessage) -> Bool {
       let mut found = false
       for c in caps {
         if c == CAP_BINARY1 {
+          found = true
+        }
+      }
+      found
+    }
+    None => false
+  }
+}
+
+///|
+/// 对端是否宣告了直发能力。
+pub fn KxMessage::supports_direct1(self : KxMessage) -> Bool {
+  match self.caps {
+    Some(caps) => {
+      let mut found = false
+      for c in caps {
+        if c == CAP_DIRECT1 {
           found = true
         }
       }

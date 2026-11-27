@@ -635,6 +635,15 @@ fn ConnState::supports_binary(self : ConnState) -> Bool {
 }
 
 ///|
+/// 这条连接的对端是否宣告了直发能力(收 `direct-*` 控制消息 + kind 3 分片)。
+fn ConnState::supports_direct1(self : ConnState) -> Bool {
+  match self.caps {
+    Some(caps) => caps.contains(CAP_DIRECT1)
+    None => false
+  }
+}
+
+///|
 /// 取已注册连接;未注册抛 NotConnected。
 fn PeerServer::state_of(
   self : PeerServer,
@@ -725,6 +734,48 @@ pub fn PeerServer::send_binary(
   if !(state.outbound.try_put(BinaryFrame(data)) catch { _ => false }) {
     raise PeerError::NotConnected(device_id)
   }
+}
+
+///|
+/// 发一个直发文件分片(kind 3 二进制信封,头 `{id, seq}`)。对端离线、
+/// 未宣告 direct1/binary1 或写失败一律回 false —— 直发服务按「会话断了」
+/// 处理(续传或失败),不该在这里抛错打断状态机。
+pub fn PeerServer::send_direct_chunk(
+  self : PeerServer,
+  device_id : String,
+  id : String,
+  seq : Int64,
+  data : Bytes,
+) -> Bool {
+  let state = match self.conns.get(match self.registry.get(device_id) {
+      Some(cid) => cid
+      None => return false
+    }) {
+    Some(state) => state
+    None => return false
+  }
+  if !state.supports_direct1() || !state.supports_binary() {
+    return false
+  }
+  let key = match state.session_key {
+    Some(key) => key
+    None => return false
+  }
+  let header : Map[String, Json] = Map([])
+  header.set("id", Json::string(id))
+  header.set("seq", Json::number(seq.to_double()))
+  let frame = encode_binary_frame(
+    key,
+    BINARY_KIND_DIRECT_CHUNK,
+    header,
+    data,
+  ) catch {
+    _ => return false
+  }
+  if !(state.outbound.try_put(BinaryFrame(frame)) catch { _ => false }) {
+    return false
+  }
+  true
 }
 
 ///|

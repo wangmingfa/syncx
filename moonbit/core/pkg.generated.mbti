@@ -282,7 +282,12 @@ pub(all) struct ScheduleWindow {
 pub fn ScheduleWindow::equal(Self, Self) -> Bool
 pub fn ScheduleWindow::not_equal(Self, Self) -> Bool
 
-type Sha256
+pub struct Sha256 {
+  // private fields
+}
+pub fn Sha256::hex(Self) -> String
+pub fn Sha256::new() -> Self
+pub fn Sha256::update(Self, Bytes, Int32, Int32) -> Unit
 
 pub(all) struct ShareRecord {
   id : String

@@ -1,0 +1,118 @@
+// Generated using `moon info`, DON'T EDIT IT
+package "wangmingfa/syncx/direct"
+
+import {
+  "moonbitlang/core/json",
+  "wangmingfa/syncx/net",
+}
+
+// Values
+pub const DIRECT_CHUNK_BYTES : Int64 = 262144
+
+pub const DIRECT_MAX_FILE_BYTES : Int64 = 104857600
+
+pub const DIRECT_MAX_QUEUED : Int32 = 20
+
+pub const DIRECT_MAX_TEXT_BYTES : Int64 = 65536
+
+pub const DIRECT_QUEUE_MAX_BYTES : Int64 = 536870912
+
+pub const DIRECT_QUEUE_TTL_MS : Int64 = 86400000
+
+pub const DIRECT_RESUME_TTL_MS : Int64 = 600000
+
+pub fn is_safe_id(String) -> Bool
+
+// Errors
+
+// Types and methods
+pub(all) struct DirectFileItem {
+  id : String
+  from : String
+  created_at : Int64
+  name : String
+  size : Int64
+  sha256 : String
+  path : String
+  external : Bool
+}
+
+pub(all) enum DirectItem {
+  TextItem(DirectTextItem)
+  FileItem(DirectFileItem)
+}
+pub fn DirectItem::created_at(Self) -> Int64
+pub fn DirectItem::id(Self) -> String
+pub fn DirectItem::size(Self) -> Int64
+
+pub(all) struct DirectPending {
+  id : String
+  from : String
+  name : String
+  size : Int64
+  sha256 : String
+  created_at : Int64
+  batch_id : String?
+}
+
+pub(all) struct DirectSendAck {
+  id : String
+  queued : Bool
+}
+
+pub struct DirectService {
+  // private fields
+}
+pub async fn DirectService::cancel_queued(Self, String) -> Bool
+pub async fn DirectService::close(Self) -> Unit
+pub async fn DirectService::content(Self, String) -> (DirectItem, Bytes)?
+pub async fn DirectService::fail_queued(Self, String, String) -> Unit
+pub async fn DirectService::handle_chunk(Self, Map[String, @json.Json], Bytes, String, DirectTransport) -> Unit
+pub async fn DirectService::handle_control(Self, @net.ControlMessage, String, DirectTransport) -> Unit
+pub async fn DirectService::new(String, get_transport? : (String) -> DirectTransport?) -> Self
+pub fn DirectService::new_staging_path(Self) -> String?
+pub async fn DirectService::on_peer_offline(Self, String) -> Unit
+pub async fn DirectService::on_peer_online(Self, String, DirectTransport) -> Unit
+pub fn DirectService::pending_from(Self, String, String) -> String?
+pub async fn DirectService::remove(Self, String) -> Bool
+pub async fn DirectService::reply(Self, String, Bool, DirectTransport, reason? : String?) -> Bool
+pub async fn DirectService::reply_batch(Self, String, Bool, DirectTransport, reason? : String?) -> Int32
+pub async fn DirectService::run_timer(Self) -> Unit
+pub async fn DirectService::send_file(Self, String, String, String, Int64, String, DirectTransport?, batch_id? : String?) -> Result[DirectSendAck, String]
+pub async fn DirectService::send_text(Self, String, String, DirectTransport?) -> Result[DirectSendAck, String]
+pub fn DirectService::snapshot_json(Self) -> @json.Json
+pub fn DirectService::tmp_dir(Self) -> String
+
+pub(all) struct DirectTextItem {
+  id : String
+  from : String
+  created_at : Int64
+  size : Int64
+  preview : String
+  path : String
+}
+
+pub(all) struct DirectTransfer {
+  id : String
+  direction : String
+  device_id : String
+  kind : String
+  name : String?
+  size : Int64
+  bytes_done : Int64
+  state : String
+  error : String?
+}
+
+pub(all) struct DirectTransport {
+  control : async (@net.ControlMessage) -> Bool
+  chunk : async (String, Int64, Bytes) -> Bool
+}
+
+type Incoming
+
+type Outgoing
+
+// Type aliases
+
+// Traits
