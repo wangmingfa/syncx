@@ -183,6 +183,7 @@ function onDrop(e: DragEvent, deviceId: string, canSend: boolean): void {
         :class="{
           'is-linked': hoverDevices.includes(p.deviceId) || hoverDeviceId === p.deviceId,
           'is-drop-target': dragOverId === p.deviceId,
+          'is-offline': !p.online,
         }"
         @mouseenter="onDeviceEnter(p.deviceId)"
         @mouseleave="onDeviceLeave()"
@@ -191,6 +192,11 @@ function onDrop(e: DragEvent, deviceId: string, canSend: boolean): void {
         @dragleave="onDragLeave($event, p.deviceId)"
         @drop="onDrop($event, p.deviceId, canSendTo(p))"
       >
+        <!-- 状态改用目录卡同款悬浮徽标:只有在线才挂,离线卡的「离线」由整卡灰显表达,
+             不再占标题行一个胶囊的位置(那一行本来就挤着发送/编辑/重连/移除) -->
+        <div v-if="p.online" class="card-floats">
+          <span class="float-badge online-float" title="在线:已建立连接,可直接发送文本与文件">在线</span>
+        </div>
         <div class="item-top">
           <span class="avatar" :class="p.online ? 'online' : 'offline'">
             <!-- 对端宣告了平台就画系统图标;旧版本对端不发该字段(undefined)则保持字母头像,
@@ -205,10 +211,7 @@ function onDrop(e: DragEvent, deviceId: string, canSend: boolean): void {
             <template v-else>{{ monogram(p.deviceId) }}</template>
           </span>
           <span class="item-title mono">{{ p.deviceId }}</span>
-          <span class="status-pill" :class="p.online ? 'pill-online' : 'pill-offline'">
-            {{ p.online ? '在线' : '离线' }}
-          </span>
-          <!-- 重连紧挨状态标签:动作跟着它要修的那种状态走,也省掉下方一整行 -->
+          <!-- 动作紧跟标题右侧(整组贴右缘),不再让状态胶囊占位 -->
           <span class="item-actions">
             <!-- 直发只发给在线且宣告 direct1 的对端;旧版本给禁用按钮 + 明确升级提示,
                  避免「点了没反应」被误判成功能坏了。本机后端不提供直发时整组不渲染。 -->
@@ -297,6 +300,29 @@ function onDrop(e: DragEvent, deviceId: string, canSend: boolean): void {
 </template>
 
 <style scoped>
+/* 在线徽标:复用目录卡的悬浮徽标骨架(.card-floats 定位 + .float-badge 外形),
+   只给颜色。描边与淡底都从 var(--online) 推,深色主题把该 token 提亮后徽标自动跟随,
+   不必另写 html[data-theme='dark'] 覆盖。类名全仓只有本组件用,故 scoped 成立。 */
+.online-float {
+  color: var(--online);
+  border-color: color-mix(in srgb, var(--online) 55%, transparent);
+  background: color-mix(in srgb, var(--online) 12%, transparent);
+}
+
+/* 离线设备整卡灰显:不再用红色「离线」胶囊喊状态 —— 灰底 + 没有在线徽标就是离线。
+   只动底色与文字色,不碰 border-color / box-shadow:拓扑联动(.is-linked)与拖放高亮
+   (.is-drop-target)仍要在离线卡上正常点亮。动作按钮保持原色 —— 离线仍能发送
+   (先排队)、重连、编辑、移除,不该跟着一起灰掉。 */
+.item-card.is-offline {
+  background: var(--bg-soft);
+  color: var(--muted-strong);
+}
+
+/* 版本/地址是底比卡片还亮的 chip,整卡变灰后它会跳出来,跟着降一档 */
+.item-card.is-offline .item-addr .addr-value {
+  color: var(--muted-strong);
+}
+
 /* 拖文件到在线设备卡:卡片描边点亮,松手直接打开发送弹窗并预填队列。 */
 .item-card.is-drop-target {
   border-color: var(--accent);

@@ -883,8 +883,10 @@ html[data-theme='dark'] .chip-menu__item--danger {
 }
 
 .avatar.offline {
-  background: rgb(217 107 107 / 0.1);
-  color: var(--offline);
+  /* 离线不是错误态:跟着离线卡一起退灰(见 DeviceList 的 .item-card.is-offline),
+     不再用告警红 —— 红留给真正要人处理的东西(移除/冲突) */
+  background: color-mix(in srgb, var(--muted) 16%, transparent);
+  color: var(--muted-strong);
 }
 
 .item-title {
@@ -1160,27 +1162,6 @@ html[data-theme='dark'] .chip-menu__item--danger {
   border: 1px dashed var(--border);
   border-radius: var(--radius);
   background: rgb(255 255 255 / 0.5);
-}
-
-.status-pill {
-  margin-left: auto;
-  font-size: 11px;
-  padding: 3px 10px;
-  border-radius: 999px;
-  border: 1px solid transparent;
-  white-space: nowrap;
-}
-
-.pill-online {
-  color: var(--online);
-  background: rgb(47 165 111 / 0.1);
-  border-color: rgb(47 165 111 / 0.28);
-}
-
-.pill-offline {
-  color: var(--offline);
-  background: rgb(217 107 107 / 0.1);
-  border-color: rgb(217 107 107 / 0.28);
 }
 
 .mono {
