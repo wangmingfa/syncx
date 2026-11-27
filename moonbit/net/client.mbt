@@ -166,6 +166,9 @@ async fn read_message_capped(msg : @websocket.Message) -> Bytes raise PeerError 
 
 ///|
 /// 收下一帧(文本或二进制),阻塞到对端发来为止。连接关闭/出错抛 Transport。
+///
+/// **返回的是原始帧**:Secure 连接上文本帧的内容是密文,要读 wire 消息请用
+/// `recv_message`(它会解密)。这个函数留给需要自己看帧边界的调用方。
 pub async fn PeerClient::recv_frame(
   self : PeerClient,
 ) -> PeerFrame raise PeerError {
@@ -180,34 +183,64 @@ pub async fn PeerClient::recv_frame(
 }
 
 ///|
-/// 收一条 wire 消息(文本信封解码)。
+/// 收一条 wire 消息。Secure 连接上入站帧是加密信封,先解密再解码。
 pub async fn PeerClient::recv_message(
   self : PeerClient,
 ) -> WireMessage raise PeerError {
   let frame = self.recv_frame()
   match frame {
-    PeerFrame::Text(text) =>
-      decode_wire_message(text) catch {
-        e => raise PeerError::Transport(e.to_text())
-      }
+    PeerFrame::Text(text) => decode_incoming_text(self.session_key, text)
     PeerFrame::Binary(_) =>
       raise PeerError::Transport(
-        "二进制帧不是文本信封(二进制信封是后续里程碑)",
+        "二进制帧不是文本信封(数据面尚未切到二进制信封)",
       )
   }
 }
 
 ///|
-/// 发一条 wire 消息(文本信封编码)。
+/// 文本帧 → wire 消息:有会话密钥就解密,没有就按明文读(回环测试)。
+///
+/// 解密失败向上抛 —— 与 `run` 里「只记 on_error」不同:本函数是调用方主动
+/// 要一条消息,拿不到就该知道为什么,而不是静默等下一个。
+fn decode_incoming_text(
+  session_key : Bytes?,
+  text : String,
+) -> WireMessage raise PeerError {
+  let mut content = text
+  match session_key {
+    Some(key) =>
+      content = @utf8.decode_lossy(
+        decrypt_text_envelope(key, text) catch {
+          e => raise PeerError::Transport(e.to_text())
+        },
+      )
+    None => ()
+  }
+  decode_wire_message(content) catch {
+    e => raise PeerError::Transport(e.to_text())
+  }
+}
+
+///|
+/// 发一条 wire 消息。Secure 连接上先加密 —— 对端收到明文会静默丢弃。
 pub async fn PeerClient::send_message(
   self : PeerClient,
   message : WireMessage,
 ) -> Unit raise PeerError {
-  self.send_text(encode_wire_message(message))
+  let encoded = encode_wire_message(message)
+  let text = match self.session_key {
+    Some(key) =>
+      encrypt_text_envelope(key, @utf8.encode(encoded)) catch {
+        e => raise PeerError::Transport(e.to_text())
+      }
+    None => encoded
+  }
+  self.send_text(text)
 }
 
 ///|
-/// 发一条文本帧(超 64MB 拒发,不进 socket)。
+/// 发一条**已编码好**的文本帧:握手阶段是明文公钥 / kx,数据面是
+/// `encrypt_text_envelope` 的产物。数据面请走 `send_message`。
 pub async fn PeerClient::send_text(
   self : PeerClient,
   text : String,
@@ -275,9 +308,13 @@ pub async fn PeerClient::run(
       let frame = self.recv_frame()
       match frame {
         PeerFrame::Text(text) => {
-          let decoded : WireMessage? = Some(decode_wire_message(text)) catch {
+          // 解密 + 解码合并在一处(见 decode_incoming_text):任何一步失败都
+          // 只丢这一帧,不掀翻连接。
+          let decoded : WireMessage? = Some(
+            decode_incoming_text(self.session_key, text),
+          ) catch {
             e => {
-              (handlers.on_error)("丢弃畸形消息:\{e.to_text()}")
+              (handlers.on_error)("丢弃消息:\{e.to_text()}")
               None
             }
           }

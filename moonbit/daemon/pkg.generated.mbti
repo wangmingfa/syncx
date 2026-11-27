@@ -304,6 +304,7 @@ pub(all) struct FolderSpec {
   versions_dir : String?
   versions_per_path : Int32?
   rules : @core.IgnoreRuleset
+  rules_lines : Array[String]
   receive_only : Bool
   conflict_policy : ConflictPolicy
   paused : Bool

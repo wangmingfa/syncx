@@ -96,7 +96,9 @@ test "handshake: 能力标签判定" {
         caps: None,
       } : @net.KxMessage).supports_binary(),
   )
-  assert_true(@net.peer_caps().contains(@net.CAP_BINARY1))
+  // 本机不宣告 binary1:数据面还没切到二进制信封,宣告了会让对端发来
+  // 这边只会丢弃的帧(症状是「握手成功但同步不动」)。
+  assert_eq(@net.peer_caps().length(), 0)
 }
 
 ///|

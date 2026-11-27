@@ -152,6 +152,8 @@ export interface DirectData {
   inbox: DirectItem[];
   pending: DirectPending[];
   transfers: DirectTransfer[];
+  /** 本后端是否支持把多个文件打包成一个 zip(缺省 = 不支持,前端不显示勾选)。 */
+  zip?: boolean;
 }
 
 export interface OfferInfo {

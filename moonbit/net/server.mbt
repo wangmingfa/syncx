@@ -398,7 +398,23 @@ fn PeerServer::handle_text(
     AwaitKx => self.stage_kx(state, text)
     AwaitHello => self.stage_hello(state, text)
     Registered => {
-      let message = decode_wire_message(text) catch {
+      // 数据面一律是加密信封(Node/Rust 无条件加密,没有明文回退)。解不开
+      // 就丢弃该帧 —— 与 Node `catch { return }` 同口径,不断链。
+      // 明文模式(回环测试)session_key 为空,继续按明文读。
+      let mut content = text
+      match state.session_key {
+        Some(key) =>
+          content = @utf8.decode_lossy(
+            decrypt_text_envelope(key, text) catch {
+              e => {
+                (self.handlers.on_error)("丢弃无法解密的消息:\{e.to_text()}")
+                return
+              }
+            },
+          )
+        None => ()
+      }
+      let message = decode_wire_message(content) catch {
         e => {
           // 线上数据不可信:丢整条,不掀翻连接
           (self.handlers.on_error)("丢弃畸形消息:\{e.to_text()}")
@@ -619,17 +635,30 @@ fn check_frame_size(len : Int32, what : String) -> Unit raise PeerError {
 }
 
 ///|
-/// 发一条 wire 消息(文本信封)。
+/// 发一条 wire 消息。Secure 连接上**必须先加密**再发 —— 对端收到明文 JSON
+/// 会把它当成解密失败静默丢弃,没有任何报错,表现只是「对端收不到」。
+/// 明文模式(回环测试)没有会话密钥,继续发明文。
 pub fn PeerServer::send_message(
   self : PeerServer,
   device_id : String,
   message : WireMessage,
 ) -> Unit raise PeerError {
-  self.send_text(device_id, encode_wire_message(message))
+  let state = self.state_of(device_id)
+  let encoded = encode_wire_message(message)
+  let text = match state.session_key {
+    Some(key) =>
+      encrypt_text_envelope(key, @utf8.encode(encoded)) catch {
+        e => raise PeerError::Transport(e.to_text())
+      }
+    None => encoded
+  }
+  self.send_text(device_id, text)
 }
 
 ///|
-/// 发一条文本帧(已编码的文本信封)。
+/// 发一条**已经编码好**的文本帧:握手阶段是明文公钥 / kx,数据面是
+/// `encrypt_text_envelope` 的产物。上层不要拿它发未加密的 wire JSON ——
+/// 数据面一律走 `send_message`。
 pub fn PeerServer::send_text(
   self : PeerServer,
   device_id : String,

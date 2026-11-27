@@ -164,9 +164,16 @@ export function decodeWireMessage(raw: string): WireMessage {
   return JSON.parse(raw) as WireMessage;
 }
 
-/** AES-256-GCM 加密一条消息,输出携带 iv/tag 的 JSON 字符串。 */
-export function encryptMessage(key: Buffer, message: WireMessage): string {
-  const iv = randomBytes(12);
+/**
+ * 用调用方给的 iv 加密 —— **只给跨语言对拍用**。
+ *
+ * 生产路径必须走 `encryptMessage` 的随机 iv:GCM 下同一个 (key, iv) 重复使用
+ * 会让两条密文的异或等于明文的异或,密钥流就此泄露。这里把 iv 开放出来,
+ * 是为了让别的语言实现(目前是 MoonBit)能用同一组 (key, iv) 重新封包,
+ * 与这里产出的字节逐字节比对 —— 没有固定 iv 就只能验证「能解开」,
+ * 验不了键序、可选字段、字段名大小写这些真正的坑。
+ */
+export function encryptMessageWithIv(key: Buffer, message: WireMessage, iv: Buffer): string {
   const cipher = createCipheriv('aes-256-gcm', key, iv);
   const enc = Buffer.concat([cipher.update(encodeWireMessage(message), 'utf8'), cipher.final()]);
   const tag = cipher.getAuthTag();
@@ -176,6 +183,11 @@ export function encryptMessage(key: Buffer, message: WireMessage): string {
     tag: tag.toString('base64'),
     data: enc.toString('base64'),
   });
+}
+
+/** AES-256-GCM 加密一条消息,输出携带 iv/tag 的 JSON 字符串。 */
+export function encryptMessage(key: Buffer, message: WireMessage): string {
+  return encryptMessageWithIv(key, message, randomBytes(12));
 }
 
 export function decryptMessage(key: Buffer, raw: string): WireMessage {
@@ -226,6 +238,30 @@ export interface BinaryFrame {
   body: Buffer;
 }
 
+/**
+ * 用给定 iv 封一帧二进制 —— 同样只为跨语言对拍(理由见 `encryptMessageWithIv`)。
+ * 生产路径一律走 `encodeBinaryFrame` 的随机 iv。
+ */
+export function encodeBinaryFrameWithIv(
+  key: Buffer,
+  kind: BinaryFrameKind,
+  header: Record<string, unknown>,
+  body: Buffer,
+  iv: Buffer,
+): Buffer {
+  const headerBuf = Buffer.from(JSON.stringify(header), 'utf8');
+  const prefix = Buffer.alloc(6);
+  prefix[0] = BINARY_FRAME_VERSION;
+  prefix[1] = BINARY_KIND_TO_BYTE[kind];
+  prefix.writeUInt32BE(headerBuf.length, 2);
+  const cipher = createCipheriv('aes-256-gcm', key, iv);
+  const enc = Buffer.concat([
+    cipher.update(Buffer.concat([prefix, headerBuf, body])),
+    cipher.final(),
+  ]);
+  return Buffer.concat([iv, cipher.getAuthTag(), enc]);
+}
+
 /** 加密并封成一帧二进制数据(直接交给 ws 以二进制帧发出)。 */
 export function encodeBinaryFrame(
   key: Buffer,
@@ -233,18 +269,7 @@ export function encodeBinaryFrame(
   header: Record<string, unknown>,
   body: Buffer,
 ): Buffer {
-  const headerBuf = Buffer.from(JSON.stringify(header), 'utf8');
-  const prefix = Buffer.alloc(6);
-  prefix[0] = BINARY_FRAME_VERSION;
-  prefix[1] = BINARY_KIND_TO_BYTE[kind];
-  prefix.writeUInt32BE(headerBuf.length, 2);
-  const iv = randomBytes(12);
-  const cipher = createCipheriv('aes-256-gcm', key, iv);
-  const enc = Buffer.concat([
-    cipher.update(Buffer.concat([prefix, headerBuf, body])),
-    cipher.final(),
-  ]);
-  return Buffer.concat([iv, cipher.getAuthTag(), enc]);
+  return encodeBinaryFrameWithIv(key, kind, header, body, randomBytes(12));
 }
 
 /**

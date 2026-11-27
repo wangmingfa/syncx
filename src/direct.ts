@@ -86,6 +86,12 @@ export interface DirectSnapshot {
   inbox: DirectItem[];
   pending: DirectPending[];
   transfers: DirectTransfer[];
+  /**
+   * 本后端是否支持「把多个文件打包成一个 zip 再投送」。
+   * 前端据此决定要不要显示那个勾选 —— 与 `direct` 字段本身一样,按后端声明而不是
+   * 按 runtime 猜(Rust 与 MoonBit 各自报自己的)。
+   */
+  zip: boolean;
 }
 
 export interface DirectServiceDeps {
@@ -1200,6 +1206,8 @@ export function createDirectService(deps: DirectServiceDeps): DirectService {
             state: i.state === 'paused' ? 'paused' : 'transferring',
           })),
         ],
+        // 能力声明:Node 后端有 zip 打包(ADR-0028 第 16 条)。
+        zip: true,
       };
     },
 

@@ -45,7 +45,10 @@
 
 - [x] **多文件打包成单个压缩包**:做成可选开关(默认仍是成组逐条投送),只打包不压缩、包体沿用 100MB 上限;实现见 ADR-0028 第 16 条。
 - [x] **移植到 Rust 后端**:`direct-*` 控制消息 + 二进制帧 kind 3 + `/api/direct` 路由 + 收件箱落盘(`syncx-cli` 的 `DirectService`)。线上格式由 Node 生成的 fixture 双向对拍(`test/direct-wire.test.ts` + `rust/crates/syncx-net/tests/direct_wire.rs`)。2026-11-27 补完 `resume.json` 跨重启续传与 `/api/direct/zip` 打包,Rust 与 Node 已完全对齐。
-- [ ] **移植到 MoonBit 后端**:同上四块。**前置两项**(见 ADR-0026):① 帧加密信封 —— MoonBit 传输层目前是明文,与 Node/Rust 的 `{"kind":"enc"}` 不兼容,连 hello 都握不上;② 二进制信封 —— `binary1` 已被无条件宣告但解码路径未实现。两条补完才谈得上直发;补齐之前 `/api/status` 不带 `direct` 字段,前端据此隐藏「发送 / 收件箱」入口。
+- [ ] **移植到 MoonBit 后端**:分三步(见 ADR-0026),前两步是硬前置 ——
+  - [x] **帧加密信封**:Node/Rust 对每一帧无条件 AES-256-GCM,MoonBit 原本是明文,连 hello 都握不上。`net/envelope.mbt` 的文本信封已接进 `send_message` / `handle_text` / `recv_message` / `run` 两侧,解密失败按 Node 口径丢帧不断链;跨语言契约由固定 key/iv 的 fixture 逐字节对拍。同时**撤回 `binary1`** —— 它此前先于实现被宣告,对端会因此发来本端只会静默丢弃的二进制帧。
+  - [ ] **二进制信封接数据面**:编解码(`iv(12)|tag(16)|版本|kind|头长 u32 BE|头 JSON|body`,kind 1/2/3)已与 Node 逐字节对拍,但索引/块响应仍发文本帧、`on_binary` 仍是 `_ => ()`。切过去之后再把 `binary1` 加回 `peer_caps()`。
+  - [ ] **直发**:`direct-*` 控制消息、二进制帧 kind 3、`/api/direct` 路由、收件箱与续传台账。补齐之前 `/api/status` 不带 `direct` 字段,前端据此隐藏「发送 / 收件箱」入口。
 
 ## 中期(特色差异化)
 

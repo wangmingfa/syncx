@@ -428,13 +428,10 @@ async test "Secure 端到端:握手 + 会话密钥 + 消息往返" {
       Some({ listen_port: Some(port), .. }) => assert_eq(port, 39451)
       _ => panic()
     }
-    let caps = match info {
-      Some({ caps: Some(caps), .. }) => caps
-      _ => panic()
-    }
-    assert_eq(caps, ["binary1"])
-    // caps 双端互认
-    assert_true(client.supports_binary())
+    // 2026-11-27 起 peer_caps() 撤回 binary1(数据面还没切到二进制信封),
+    // 空能力数组在 kx 里是缺省 —— 两端都不认二进制帧。
+    assert_true(info is Some({ caps: None, .. }))
+    assert_true(!client.supports_binary())
     // 数据面:客户端发 Hello,服务端按注册 deviceId 分发
     client.send_message(
       @net.Control(payload=@net.make_hello(identity_b.device_id, None, None)),

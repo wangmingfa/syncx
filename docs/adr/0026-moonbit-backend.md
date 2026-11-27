@@ -109,7 +109,7 @@ MoonBit 三个 Release 资产永远同版本号,tag(`v*`)一次触发三条 work
 |---|---|
 | sqlite | C FFI 绑定 + vendored amalgamation |
 | core | formatVersion 闸门、config 逐字段清洗、schedule、版本向量、传输规划、忽略规则、CDC 分块、冲突命名、file_kind;fixtures 读盘对拍(与 Rust 共享同一批 golden) |
-| net | wire 协议、设备身份 + 握手(mooncry 加密,官方向量对拍)、mDNS 发现、peer WS 传输层(两阶段握手、64MB 闸门) |
+| net | wire 协议、设备身份 + 握手(mooncry 加密,官方向量对拍)、帧信封(AES-256-GCM 文本/二进制,与 Node 逐字节对拍)、mDNS 发现、peer WS 传输层(两阶段握手、64MB 闸门) |
 | daemon | 索引存储、扫描/执行引擎、索引指纹、git 集成、actor 会话循环、断点续传(PartialStore)、块重试/发送窗口/限速 |
 | api | /health、/api/status、auth 会话票据(scrypt + HMAC)、folders/pause/devices/shutdown、dist/web 静态服务、/api/events WS 状态推送(差异驱动 + 30s ping) |
 | cli | 主入口组装(参数面/ConfigStore/启动编排/update-swap 分发,冒烟通过)、GitHub Releases 自更新(资产名 syncx-mbt-v*,看门狗换入/回滚) |
@@ -117,9 +117,9 @@ MoonBit 三个 Release 资产永远同版本号,tag(`v*`)一次触发三条 work
 
 **尚未落地(2026-11-26 逐条复核)**:
 
-- **帧加密信封(2026-11-27 复核发现)**:Node/Rust 的 WS 传输对**每一帧**无条件做 AES-256-GCM(`{"kind":"enc",iv,tag,data}`),而 MoonBit 的 `net/server.mbt` / `net/client.mbt` 收发两侧都是明文 JSON(`enqueue_text` → `TextFrame`、`recv_message` → `decode_wire_message`),全仓没有 `enc` 信封、没有 AES 调用。也就是说**当前 MoonBit 后端与 Node/Rust 连 hello 都握不上**;mooncry 已提供 `aes_gcm_encrypt`/`aes_gcm_decrypt`,这块是「还没接」而不是「做不了」。
-- **二进制信封**:`handshake.mbt` 的 `peer_caps()` 无条件宣告 `binary1`,但 `net/client.mbt` 的 `recv_message` 遇到 `PeerFrame::Binary` 直接抛「二进制信封是后续里程碑」,也没有 `iv|tag|version|kind|header|body` 的编解码。直发分片(kind 3)与块响应的二进制通道都压在这上面。**能力标签先于实现被宣告**,补实现之前应先把它摘掉,免得对端按承诺发包而本端丢弃。
-- **直发(ADR-0028)**:`direct-*` 控制消息、二进制帧 kind 3、`/api/direct` 路由、收件箱与续传台账。实现顺序上它排在上面两条之后 —— 没有加密信封就发不出控制帧,没有二进制信封就传不了分片。移植完成前,`/api/status` 不带 `direct` 字段,前端据此隐藏「发送 / 收件箱」入口。
+- ~~**帧加密信封**~~ **2026-11-27 已落地**:`net/envelope.mbt` 实现了与 `src/net/wire.ts` 同形的 AES-256-GCM 文本信封(`{"type":"enc",iv,tag,data}`,标准 base64),`PeerServer::send_message` / `PeerClient::send_message` 出站加密、`handle_text` / `recv_message` / `run` 入站解密;解密失败按 Node 口径**丢弃该帧、不断链**(`on_error` 记一行)。密钥来自握手产物(`session_key`,32 字节),`Plain` 回环模式无密钥时继续明文。跨语言契约由固定 key/iv 的 fixture 钉住:MoonBit 既解开 Node 的密文,又能用同一组 key/iv 重新封出**逐字节相同**的字节(`moonbit/net/envelope_fixture.mbt` + `moonbit/scripts/gen-envelope-fixture.mjs`)。
+- **二进制信封(编解码已就绪,数据面未接线)**:`net/envelope.mbt` 的 `encode_binary_frame` / `decode_binary_frame` 已按 `iv(12)|tag(16)|[版本][kind][头长 u32 BE][头 JSON][body]` 实现并与 Node 逐字节对拍,但 **daemon 的索引/块响应仍走文本帧**,`on_binary` 也没有消费方(两处都是 `_ => ()`)。因此 `peer_caps()` 已**撤回 `binary1`**:此前无条件宣告它,对端会把块响应与索引改成二进制帧发来,这边收下后静默丢弃,症状是「握手成功但一个目录都同步不动」。数据面切过去(发送改 `encode_binary_frame`、`on_binary` 接 actor)之后再把标签加回。
+- **直发(ADR-0028)**:`direct-*` 控制消息、二进制帧 kind 3、`/api/direct` 路由、收件箱与续传台账。实现顺序上它排在二进制信封接线之后 —— 控制帧现在有加密通道可走了,但分片要落进 `on_binary` 才有人收。移植完成前,`/api/status` 不带 `direct` 字段,前端据此隐藏「发送 / 收件箱」入口。
 - **中转(ADR-0014 relay)**:`relayed` 字段已在 wire 里(未知字段照旧忽略),但没有「落地后再转发给同目录其它对端」那一层。
 - **磁盘空间守卫**:接收前预估本轮净需求、不够就整轮拦下并等空间恢复重放。
 - **认领台账**:同设备多连接的接收单飞去重(ADR「双落地静默分叉修复」的接收侧那半)。当前每目录每设备至多一条会话,所以碰不到,但这与 Node/Rust 的口径不一致(见 `daemon/actor.mbt` 文件头与 1758 行的 TODO)。

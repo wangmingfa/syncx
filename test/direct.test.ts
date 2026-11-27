@@ -165,7 +165,7 @@ describe('device direct transfer', () => {
       configDir: tmp(),
       getStatus: () => ({}),
       direct: {
-        snapshot: () => ({ inbox: [{ kind: 'text', id: 'dt-1', from: 'AAAA', createdAt: 1, size: 2, preview: '你好', path: '/tmp/dt-1.txt' }], pending: [], transfers: [] }),
+        snapshot: () => ({ inbox: [{ kind: 'text', id: 'dt-1', from: 'AAAA', createdAt: 1, size: 2, preview: '你好', path: '/tmp/dt-1.txt' }], pending: [], transfers: [], zip: false }),
         content: async () => undefined,
         remove: async () => true,
         reply: () => true,
@@ -221,7 +221,7 @@ describe('device direct transfer', () => {
       configDir,
       getStatus: () => ({}),
       direct: {
-        snapshot: () => ({ inbox: [], pending: [], transfers: [] }),
+        snapshot: () => ({ inbox: [], pending: [], transfers: [], zip: false }),
         content: async () => undefined,
         remove: async () => true,
         reply: () => true,
@@ -288,7 +288,7 @@ describe('device direct transfer', () => {
       configDir,
       getStatus: () => ({}),
       direct: {
-        snapshot: () => ({ inbox: [], pending: [], transfers: [] }),
+        snapshot: () => ({ inbox: [], pending: [], transfers: [], zip: false }),
         content: async () => undefined,
         remove: async () => true,
         reply: () => true,
@@ -446,7 +446,7 @@ describe('device direct transfer', () => {
         return `/validated:${input}`;
       },
       direct: {
-        snapshot: () => ({ inbox: [], pending: [], transfers: [] }),
+        snapshot: () => ({ inbox: [], pending: [], transfers: [], zip: false }),
         content: async () => undefined,
         remove: async () => true,
         reply: (_id, _accept, _reason, saveDir) => { captured = saveDir; return true; },
