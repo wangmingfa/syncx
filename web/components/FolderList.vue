@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, ref } from 'vue';
+import { computed, nextTick, ref } from 'vue';
 import { NButton, NInput, NCheckbox, NCheckboxGroup, NTooltip } from 'naive-ui';
 import { useStatusContext } from '../composables/statusContext';
 import ActionRail from './ActionRail.vue';
@@ -241,6 +241,14 @@ const {
 
 /** 路径示例按 daemon 平台给(Windows 显示 F:\shared\docs),避免在 Windows 上提示 POSIX 路径。 */
 const pathPlaceholder = computed(() => folderPathPlaceholder(status.value.platform));
+
+/** 列表滚动层:栏头现在常驻,列表可能停在深处,此时点「＋ 添加」要把新建表单滚回视野。 */
+const scrollEl = ref<HTMLElement | null>(null);
+
+function openAddFolder(): void {
+  toggleAddFolder();
+  if (addFolderOpen.value) void nextTick(() => scrollEl.value?.scrollTo({ top: 0 }));
+}
 
 /**
  * 栏头动作(扫描全部 / 全局记录 / 全局暂停)收成数据交给 ActionRail,与目录卡同款
@@ -521,307 +529,311 @@ function visibleFiles(f: FolderInfo): TransferFile[] {
           @update:expanded="headPinned = $event"
         />
       </div>
-      <n-button v-if="status.folders.length > 0" class="add-toggle" :class="{ 'is-invisible': addFolderOpen }" :disabled="busy" :tabindex="addFolderOpen ? -1 : 0" @click="toggleAddFolder">＋ 添加</n-button>
+      <n-button v-if="status.folders.length > 0" class="add-toggle" :class="{ 'is-invisible': addFolderOpen }" :disabled="busy" :tabindex="addFolderOpen ? -1 : 0" @click="openAddFolder">＋ 添加</n-button>
     </div>
 
-    <!-- 添加共享目录:头部按钮触发展开;列表为空时表单常显 -->
-    <form v-if="addFolderOpen || status.folders.length === 0" class="add-form" @submit.prevent="addFolder">
-      <!-- 输入框与它的提示包成一组:.add-form 的 flex gap 会插进两者之间(8px gap + 4px margin
-           叠成 12px),而到下一个字段只有 8px —— 提示反而离自己的字段更远,被读成下方字段的 label -->
-      <div class="add-field">
-        <n-input v-model:value="newPath" :placeholder="pathPlaceholder" />
-        <p class="form-hint">目录不存在时会自动创建</p>
-      </div>
-      <n-input v-model:value="newFolderId" placeholder="目录 ID(留空自动生成;跨机同步需与对方一致)" />
-      <n-checkbox-group v-model:value="newFolderDevices">
-        <div v-if="status.devices.length > 0" class="device-checks">
-          <n-checkbox v-for="d in status.devices" :key="d.deviceId" :value="d.deviceId">
-            <span class="device-check-text">
-              <span class="mono device-check-id">{{ d.deviceId }}</span>
-              <span v-if="deviceAddrLine(d)" class="device-check-meta mono">{{ deviceAddrLine(d) }}</span>
-            </span>
-          </n-checkbox>
-        </div>
-        <p v-else class="confirm-note-extra confirm-note-extra--flush">还没有已配对的设备,可先添加目录,稍后在卡片上指派。</p>
-      </n-checkbox-group>
-      <n-checkbox v-model:checked="newFolderReceiveOnly" class="ro-check">
-        接收模式(只拉不推):只从对端拉取变更,不把本地改动同步出去
-      </n-checkbox>
-      <div class="add-form-actions">
-        <!-- 「取消」只在**用户自己点开**的形态下渲染。表单显隐是 `addFolderOpen || 列表为空`
-             (空列表强制展开,首屏不用先点一次「添加」),而取消走的是 toggle —— 空列表时点它
-             会把 false 翻成 true,画面被后半句撑着毫无变化(点取消=点展开),残留的 true 还会
-             让第一个目录加完后表单赖着不走、并把右上角「＋ 添加」藏进 is-invisible。
-             按钮只在这个分支出现时,toggle 才等价于「关闭」。 -->
-        <n-button v-if="addFolderOpen" quaternary :disabled="busy" @click="toggleAddFolder">取消</n-button>
-        <n-button type="primary" attr-type="submit" :disabled="busy">添加</n-button>
-      </div>
-    </form>
+    <!-- 列表滚动区:栏头固定,滚动条收在这一层里(页面本身不再出外层滚动条) -->
+    <div ref="scrollEl" class="col-scroll">
 
-    <div v-if="status.folders.length === 0" class="empty">还没有共享目录 · 在上方添加第一个</div>
-    <div
-      v-for="f in status.folders"
-      :key="folderKey(f)"
-      class="item-card"
-      :class="{ 'is-linked': hoverFolderKey === folderKey(f) || (hoverDeviceId !== '' && f.devices.includes(hoverDeviceId)) }"
-      @mouseenter="onFolderEnter(f)"
-      @mouseleave="onCardLeave"
-    >
-      <!-- 状态悬浮标签:贴在卡片顶缘外侧,不占标题行空间(内联徽标会让标题与按钮
-           整行横移,切换时卡片内容左右跳)。多个共用一个容器 → 同时命中时并排而不打架;
-           容器 pointer-events:none 让空隙鼠标穿透到下方按钮,单个徽标可命中以显示
-           title 说明(「接收」没有专属操作按钮,只能靠徽标自身的 tooltip 解释)。
-           「冲突 N」做成按钮:徽标本身就是收件箱入口,点它直接处理。
-           「Git 仅发送/仅接收/双向」同理只靠 title 解释 —— 它没有专属按钮,开关在「编辑目录」里。 -->
-      <div v-if="f.receiveOnly || (f.gitSync && f.gitSync !== 'off') || f.paused || outsideNow(f) || conflictCountOf(f) > 0 || gitChangeCountOf(f) > 0 || gitUnpushedCountOf(f) > 0 || hasGitCommitFailure(f)" class="card-floats">
-        <span v-if="f.receiveOnly" class="float-badge receive-badge" title="接收模式:只拉不推,本机改动不会同步出去">接收</span>
-        <!-- Git 提交同步:模式文案与编辑弹窗的下拉框逐字一致,方向由文字给出;
-             双向额外铺一层淡底,一眼能从「只做一边」的两条里分出来;
-             目录不是 git 仓库(daemon 实时探测)时转警告态:淡底让位、尾挂警示三角 -->
-        <span
-          v-if="gitBadgeOf(f)"
-          class="float-badge git-badge"
-          :class="{ 'git-badge--full': f.gitSync === 'full' && f.gitRepo !== false, 'git-badge--warn': gitBadgeOf(f)!.warn }"
-          :title="gitBadgeOf(f)!.tip"
-        >
-          <svg viewBox="0 0 24 24" width="9" height="9" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
-            <line x1="6" y1="3" x2="6" y2="15" />
-            <circle cx="18" cy="6" r="3" />
-            <circle cx="6" cy="18" r="3" />
-            <path d="M18 9a9 9 0 0 1-9 9" />
-          </svg>
-          {{ gitBadgeOf(f)!.label }}
-          <svg v-if="gitBadgeOf(f)!.warn" viewBox="0 0 24 24" width="9" height="9" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+      <!-- 添加共享目录:头部按钮触发展开;列表为空时表单常显 -->
+      <form v-if="addFolderOpen || status.folders.length === 0" class="add-form" @submit.prevent="addFolder">
+        <!-- 输入框与它的提示包成一组:.add-form 的 flex gap 会插进两者之间(8px gap + 4px margin
+             叠成 12px),而到下一个字段只有 8px —— 提示反而离自己的字段更远,被读成下方字段的 label -->
+        <div class="add-field">
+          <n-input v-model:value="newPath" :placeholder="pathPlaceholder" />
+          <p class="form-hint">目录不存在时会自动创建</p>
+        </div>
+        <n-input v-model:value="newFolderId" placeholder="目录 ID(留空自动生成;跨机同步需与对方一致)" />
+        <n-checkbox-group v-model:value="newFolderDevices">
+          <div v-if="status.devices.length > 0" class="device-checks">
+            <n-checkbox v-for="d in status.devices" :key="d.deviceId" :value="d.deviceId">
+              <span class="device-check-text">
+                <span class="mono device-check-id">{{ d.deviceId }}</span>
+                <span v-if="deviceAddrLine(d)" class="device-check-meta mono">{{ deviceAddrLine(d) }}</span>
+              </span>
+            </n-checkbox>
+          </div>
+          <p v-else class="confirm-note-extra confirm-note-extra--flush">还没有已配对的设备,可先添加目录,稍后在卡片上指派。</p>
+        </n-checkbox-group>
+        <n-checkbox v-model:checked="newFolderReceiveOnly" class="ro-check">
+          接收模式(只拉不推):只从对端拉取变更,不把本地改动同步出去
+        </n-checkbox>
+        <div class="add-form-actions">
+          <!-- 「取消」只在**用户自己点开**的形态下渲染。表单显隐是 `addFolderOpen || 列表为空`
+               (空列表强制展开,首屏不用先点一次「添加」),而取消走的是 toggle —— 空列表时点它
+               会把 false 翻成 true,画面被后半句撑着毫无变化(点取消=点展开),残留的 true 还会
+               让第一个目录加完后表单赖着不走、并把右上角「＋ 添加」藏进 is-invisible。
+               按钮只在这个分支出现时,toggle 才等价于「关闭」。 -->
+          <n-button v-if="addFolderOpen" quaternary :disabled="busy" @click="toggleAddFolder">取消</n-button>
+          <n-button type="primary" attr-type="submit" :disabled="busy">添加</n-button>
+        </div>
+      </form>
+
+      <div v-if="status.folders.length === 0" class="empty">还没有共享目录 · 在上方添加第一个</div>
+      <div
+        v-for="f in status.folders"
+        :key="folderKey(f)"
+        class="item-card"
+        :class="{ 'is-linked': hoverFolderKey === folderKey(f) || (hoverDeviceId !== '' && f.devices.includes(hoverDeviceId)) }"
+        @mouseenter="onFolderEnter(f)"
+        @mouseleave="onCardLeave"
+      >
+        <!-- 状态悬浮标签:贴在卡片顶缘外侧,不占标题行空间(内联徽标会让标题与按钮
+             整行横移,切换时卡片内容左右跳)。多个共用一个容器 → 同时命中时并排而不打架;
+             容器 pointer-events:none 让空隙鼠标穿透到下方按钮,单个徽标可命中以显示
+             title 说明(「接收」没有专属操作按钮,只能靠徽标自身的 tooltip 解释)。
+             「冲突 N」做成按钮:徽标本身就是收件箱入口,点它直接处理。
+             「Git 仅发送/仅接收/双向」同理只靠 title 解释 —— 它没有专属按钮,开关在「编辑目录」里。 -->
+        <div v-if="f.receiveOnly || (f.gitSync && f.gitSync !== 'off') || f.paused || outsideNow(f) || conflictCountOf(f) > 0 || gitChangeCountOf(f) > 0 || gitUnpushedCountOf(f) > 0 || hasGitCommitFailure(f)" class="card-floats">
+          <span v-if="f.receiveOnly" class="float-badge receive-badge" title="接收模式:只拉不推,本机改动不会同步出去">接收</span>
+          <!-- Git 提交同步:模式文案与编辑弹窗的下拉框逐字一致,方向由文字给出;
+               双向额外铺一层淡底,一眼能从「只做一边」的两条里分出来;
+               目录不是 git 仓库(daemon 实时探测)时转警告态:淡底让位、尾挂警示三角 -->
+          <span
+            v-if="gitBadgeOf(f)"
+            class="float-badge git-badge"
+            :class="{ 'git-badge--full': f.gitSync === 'full' && f.gitRepo !== false, 'git-badge--warn': gitBadgeOf(f)!.warn }"
+            :title="gitBadgeOf(f)!.tip"
+          >
+            <svg viewBox="0 0 24 24" width="9" height="9" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+              <line x1="6" y1="3" x2="6" y2="15" />
+              <circle cx="18" cy="6" r="3" />
+              <circle cx="6" cy="18" r="3" />
+              <path d="M18 9a9 9 0 0 1-9 9" />
+            </svg>
+            {{ gitBadgeOf(f)!.label }}
+            <svg v-if="gitBadgeOf(f)!.warn" viewBox="0 0 24 24" width="9" height="9" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+              <path d="M12 3 2.5 20h19z" />
+              <line x1="12" y1="10" x2="12" y2="14" />
+              <line x1="12" y1="17" x2="12" y2="17.1" />
+            </svg>
+          </span>
+          <span v-if="f.paused" class="float-badge paused-badge" title="已暂停:不扫描、不广播、不接收;连接与配对照常">已暂停</span>
+          <span v-if="outsideNow(f)" class="float-badge paused-badge" :title="scheduleBadgeTip(f)">时段外</span>
+          <button
+            v-if="conflictCountOf(f) > 0"
+            type="button"
+            class="float-badge conflict-float"
+            :title="`${conflictCountOf(f)} 个冲突副本待处理:两边都改过同一文件,点开逐条选保留哪版`"
+            @click="openConflicts(f)"
+          >冲突 {{ conflictCountOf(f) }}</button>
+          <!-- Git 工作区改动:徽标是入口,点开树形清单,双击文件看与 HEAD 的对比 -->
+          <button
+            v-if="gitChangeCountOf(f) > 0"
+            type="button"
+            class="float-badge git-change-float"
+            :title="`${gitChangeCountOf(f)} 个文件有未提交改动:点击查看树形清单,双击文件可看与 HEAD 提交的对比`"
+            @click="openGitChanges(f)"
+          >改动 {{ gitChangeCountOf(f) }}</button>
+          <!-- Git 未推送:与「改动 N」相邻但不同色(青绿 vs 紫)—— 两个都是「本机的 git 状态
+               还没有外发」,一个未提交、一个未推送。徽标是入口(与「改动 N」同款):
+               点开「Git 推送」弹窗,查看该目录的未推送提交并推送;栏头「一键推送」是批量同款 -->
+          <button
+            v-if="gitUnpushedCountOf(f) > 0"
+            type="button"
+            class="float-badge git-unpushed-float"
+            :title="`${gitUnpushedCountOf(f)} 个提交未推送到远程:点击查看清单并推送;栏头「一键推送」可一并处理所有目录`"
+            @click="openGitPush(f)"
+          >未推送 {{ gitUnpushedCountOf(f) }}</button>
+          <!-- 自动提交失败:对端提交的内容已落地,但本机镜像提交没成功。徽标是入口:
+               点开看失败原因、删残留锁、立即重试。该错误不会再渲染下面的通用横幅 -->
+          <button
+            v-if="hasGitCommitFailure(f)"
+            type="button"
+            class="float-badge git-commit-fail-float"
+            title="自动提交失败:内容已同步到本机,但镜像提交没有成功(通知仍保留)。点击查看原因、删除残留锁或立即重试"
+            @click="openGitCommitError(f)"
+          >提交失败</button>
+        </div>
+
+        <div class="item-top">
+          <span class="avatar" aria-hidden="true">
+            <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
+              <path d="M3 7a2 2 0 0 1 2-2h4l2 2h8a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z" />
+            </svg>
+          </span>
+          <span class="item-title">{{ f.path }}</span>
+          <!-- 操作成组(.item-actions):窄屏下整组一起落到标题下一行,而不是逐个换行
+               留单个按钮孤零零占一行 —— 与设备卡同一套策略。
+               六个动作收成数据交给 ActionRail:收起只留一个「更多」占位图标,hover 卡片时摊开。 -->
+          <div class="item-actions">
+            <ActionRail
+              :actions="folderActions(f)"
+              :expanded="hoverFolderKey === folderKey(f) || railPinned === folderKey(f)"
+              label="目录操作"
+              @update:expanded="onRailExpand($event, folderKey(f))"
+            />
+          </div>
+        </div>
+
+        <!-- 目录 ID:跨机同步需两边配置同一 ID 才能对上 -->
+        <div class="fid-row">
+          <span class="fid-label">目录 ID</span>
+          <code class="fid-code break">{{ f.id ?? f.path }}</code>
+          <n-tooltip trigger="hover" :style="{ maxWidth: '280px' }">
+            <template #trigger>
+              <span class="icon-btn">
+                <n-button size="small" quaternary circle @click="copy(f.id ?? f.path)">
+                  <template #icon>
+                    <svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+                      <rect x="9" y="9" width="11" height="11" rx="2" />
+                      <path d="M5 15V5a2 2 0 0 1 2-2h10" />
+                    </svg>
+                  </template>
+                </n-button>
+              </span>
+            </template>
+            复制目录 ID
+          </n-tooltip>
+          <!-- 复制路径:标题行的路径在 hover 时会被 ActionRail 展开的浮层盖住,没法直接选中复制,
+               所以在这里(浮层覆盖区之外)给一个同款复制按钮,点一下即复制完整路径 -->
+          <n-tooltip trigger="hover" :style="{ maxWidth: '280px' }">
+            <template #trigger>
+              <span class="icon-btn">
+                <n-button size="small" quaternary circle @click="copy(f.path)">
+                  <template #icon>
+                    <svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+                      <path d="M3 7a2 2 0 0 1 2-2h4l2 2h8a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z" />
+                    </svg>
+                  </template>
+                </n-button>
+              </span>
+            </template>
+            复制目录路径
+          </n-tooltip>
+        </div>
+
+        <!-- 同步错误横幅:该目录最近一次同步失败的原因(扫描干净后自动消失)。
+             自动提交失败不在这里:它有自己的「提交失败」徽标 + 弹窗(原因全文、
+             删除残留锁、立即重试都在那边),横幅只会在卡上重复一段没法操作的长文。 -->
+        <div v-if="folderErrorOf(f) && !hasGitCommitFailure(f)" class="folder-error" :class="{ 'folder-error--identity': folderErrorOf(f)!.kind?.startsWith('identity') }" role="alert">
+          <svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" class="folder-error__icon">
             <path d="M12 3 2.5 20h19z" />
             <line x1="12" y1="10" x2="12" y2="14" />
             <line x1="12" y1="17" x2="12" y2="17.1" />
           </svg>
-        </span>
-        <span v-if="f.paused" class="float-badge paused-badge" title="已暂停:不扫描、不广播、不接收;连接与配对照常">已暂停</span>
-        <span v-if="outsideNow(f)" class="float-badge paused-badge" :title="scheduleBadgeTip(f)">时段外</span>
-        <button
-          v-if="conflictCountOf(f) > 0"
-          type="button"
-          class="float-badge conflict-float"
-          :title="`${conflictCountOf(f)} 个冲突副本待处理:两边都改过同一文件,点开逐条选保留哪版`"
-          @click="openConflicts(f)"
-        >冲突 {{ conflictCountOf(f) }}</button>
-        <!-- Git 工作区改动:徽标是入口,点开树形清单,双击文件看与 HEAD 的对比 -->
-        <button
-          v-if="gitChangeCountOf(f) > 0"
-          type="button"
-          class="float-badge git-change-float"
-          :title="`${gitChangeCountOf(f)} 个文件有未提交改动:点击查看树形清单,双击文件可看与 HEAD 提交的对比`"
-          @click="openGitChanges(f)"
-        >改动 {{ gitChangeCountOf(f) }}</button>
-        <!-- Git 未推送:与「改动 N」相邻但不同色(青绿 vs 紫)—— 两个都是「本机的 git 状态
-             还没有外发」,一个未提交、一个未推送。徽标是入口(与「改动 N」同款):
-             点开「Git 推送」弹窗,查看该目录的未推送提交并推送;栏头「一键推送」是批量同款 -->
-        <button
-          v-if="gitUnpushedCountOf(f) > 0"
-          type="button"
-          class="float-badge git-unpushed-float"
-          :title="`${gitUnpushedCountOf(f)} 个提交未推送到远程:点击查看清单并推送;栏头「一键推送」可一并处理所有目录`"
-          @click="openGitPush(f)"
-        >未推送 {{ gitUnpushedCountOf(f) }}</button>
-        <!-- 自动提交失败:对端提交的内容已落地,但本机镜像提交没成功。徽标是入口:
-             点开看失败原因、删残留锁、立即重试。该错误不会再渲染下面的通用横幅 -->
-        <button
-          v-if="hasGitCommitFailure(f)"
-          type="button"
-          class="float-badge git-commit-fail-float"
-          title="自动提交失败:内容已同步到本机,但镜像提交没有成功(通知仍保留)。点击查看原因、删除残留锁或立即重试"
-          @click="openGitCommitError(f)"
-        >提交失败</button>
-      </div>
-
-      <div class="item-top">
-        <span class="avatar" aria-hidden="true">
-          <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
-            <path d="M3 7a2 2 0 0 1 2-2h4l2 2h8a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z" />
-          </svg>
-        </span>
-        <span class="item-title">{{ f.path }}</span>
-        <!-- 操作成组(.item-actions):窄屏下整组一起落到标题下一行,而不是逐个换行
-             留单个按钮孤零零占一行 —— 与设备卡同一套策略。
-             六个动作收成数据交给 ActionRail:收起只留一个「更多」占位图标,hover 卡片时摊开。 -->
-        <div class="item-actions">
-          <ActionRail
-            :actions="folderActions(f)"
-            :expanded="hoverFolderKey === folderKey(f) || railPinned === folderKey(f)"
-            label="目录操作"
-            @update:expanded="onRailExpand($event, folderKey(f))"
-          />
-        </div>
-      </div>
-
-      <!-- 目录 ID:跨机同步需两边配置同一 ID 才能对上 -->
-      <div class="fid-row">
-        <span class="fid-label">目录 ID</span>
-        <code class="fid-code break">{{ f.id ?? f.path }}</code>
-        <n-tooltip trigger="hover" :style="{ maxWidth: '280px' }">
-          <template #trigger>
-            <span class="icon-btn">
-              <n-button size="small" quaternary circle @click="copy(f.id ?? f.path)">
-                <template #icon>
-                  <svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
-                    <rect x="9" y="9" width="11" height="11" rx="2" />
-                    <path d="M5 15V5a2 2 0 0 1 2-2h10" />
-                  </svg>
+          <div class="folder-error__body">
+            <div class="folder-error__msg break">{{ folderErrorOf(f)!.message }}</div>
+            <!-- 指纹对照:结构化字段渲染(旧值划掉、新值加粗),比正文里一串数字好找 -->
+            <div v-if="identityChangeRows(f).length" class="folder-error__change">
+              <span v-for="row in identityChangeRows(f)" :key="row.label" class="folder-error__change-row">
+                <span class="folder-error__change-label">{{ row.label }}</span>
+                <template v-if="row.same">
+                  <span class="folder-error__change-same">{{ row.to }}</span>
+                  <span class="folder-error__change-note">未变</span>
                 </template>
-              </n-button>
-            </span>
-          </template>
-          复制目录 ID
-        </n-tooltip>
-        <!-- 复制路径:标题行的路径在 hover 时会被 ActionRail 展开的浮层盖住,没法直接选中复制,
-             所以在这里(浮层覆盖区之外)给一个同款复制按钮,点一下即复制完整路径 -->
-        <n-tooltip trigger="hover" :style="{ maxWidth: '280px' }">
-          <template #trigger>
-            <span class="icon-btn">
-              <n-button size="small" quaternary circle @click="copy(f.path)">
-                <template #icon>
-                  <svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
-                    <path d="M3 7a2 2 0 0 1 2-2h4l2 2h8a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z" />
-                  </svg>
+                <template v-else-if="row.to === undefined">
+                  <span class="folder-error__change-old">{{ row.from }}</span>
+                  <span class="folder-error__change-arrow">→</span>
+                  <span class="folder-error__change-note">读不到</span>
                 </template>
-              </n-button>
-            </span>
-          </template>
-          复制目录路径
-        </n-tooltip>
-      </div>
-
-      <!-- 同步错误横幅:该目录最近一次同步失败的原因(扫描干净后自动消失)。
-           自动提交失败不在这里:它有自己的「提交失败」徽标 + 弹窗(原因全文、
-           删除残留锁、立即重试都在那边),横幅只会在卡上重复一段没法操作的长文。 -->
-      <div v-if="folderErrorOf(f) && !hasGitCommitFailure(f)" class="folder-error" :class="{ 'folder-error--identity': folderErrorOf(f)!.kind?.startsWith('identity') }" role="alert">
-        <svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" class="folder-error__icon">
-          <path d="M12 3 2.5 20h19z" />
-          <line x1="12" y1="10" x2="12" y2="14" />
-          <line x1="12" y1="17" x2="12" y2="17.1" />
-        </svg>
-        <div class="folder-error__body">
-          <div class="folder-error__msg break">{{ folderErrorOf(f)!.message }}</div>
-          <!-- 指纹对照:结构化字段渲染(旧值划掉、新值加粗),比正文里一串数字好找 -->
-          <div v-if="identityChangeRows(f).length" class="folder-error__change">
-            <span v-for="row in identityChangeRows(f)" :key="row.label" class="folder-error__change-row">
-              <span class="folder-error__change-label">{{ row.label }}</span>
-              <template v-if="row.same">
-                <span class="folder-error__change-same">{{ row.to }}</span>
-                <span class="folder-error__change-note">未变</span>
-              </template>
-              <template v-else-if="row.to === undefined">
-                <span class="folder-error__change-old">{{ row.from }}</span>
-                <span class="folder-error__change-arrow">→</span>
-                <span class="folder-error__change-note">读不到</span>
-              </template>
-              <template v-else>
-                <span class="folder-error__change-old">{{ row.from }}</span>
-                <span class="folder-error__change-arrow">→</span>
-                <span class="folder-error__change-new">{{ row.to }}</span>
-              </template>
-            </span>
-          </div>
-          <div class="folder-error__time">
-            {{ fmtTime(folderErrorOf(f)!.ts) }} ·
-            {{ folderErrorOf(f)!.kind === 'identity-missing' ? '接回正确的盘后下一轮扫描自动恢复' : folderErrorOf(f)!.kind?.startsWith('identity') ? '需人工确认,不会自动恢复' : folderErrorOf(f)!.kind === 'disk-space' ? '释放磁盘空间后自动恢复接收' : '下一轮扫描成功后自动清除' }}
-          </div>
-        </div>
-        <!-- 身份不符(非"目录读不到")才给轻量恢复入口:只更新指纹、不动索引;
-             missing 挂的可能是空目录/别的盘,绝不能一键确认,接回正确的盘自愈 -->
-        <n-button
-          v-if="folderErrorOf(f)!.kind === 'identity-changed' || folderErrorOf(f)!.kind === 'identity-remounted'"
-          size="tiny"
-          class="folder-error__adopt"
-          :disabled="busy"
-          @click="askReAdopt(f)"
-        >
-          <!-- 盾牌与栏头「批量重新采集身份」同款:一眼对上"这俩是一件事" -->
-          <template #icon>
-            <svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
-              <path d="M12 3l7 3v5c0 4.4-2.9 7.9-7 9.4C7.9 18.9 5 15.4 5 11V6l7-3z" />
-              <path d="M9 11.5l2 2 4-4" />
-            </svg>
-          </template>
-          重新采集身份
-        </n-button>
-      </div>
-
-      <!-- 按目录指派可同步的设备:卡片上只读展示,点「编辑」弹窗修改后显式保存 -->
-      <div class="fid-devices">
-        <div class="device-tags">
-          <n-tooltip v-for="d in f.devices" :key="d" trigger="hover" :style="{ maxWidth: '280px' }">
-            <template #trigger>
-              <span class="device-tag mono" :class="`is-${deviceTagStatus(f, d).key}`">{{ d }}</span>
-            </template>
-            {{ deviceTagTip(f, d) }}
-          </n-tooltip>
-          <span v-if="f.devices.length === 0" class="device-tag device-tag-empty">未指派设备</span>
-        </div>
-        <n-tooltip trigger="hover" :style="{ maxWidth: '280px' }">
-          <template #trigger>
-            <span class="icon-btn">
-              <n-button size="small" quaternary circle :disabled="busy" @click="openEditDevices(f)">
-                <template #icon>
-                  <svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
-                    <line x1="4" y1="8" x2="20" y2="8" />
-                    <circle cx="9" cy="8" r="2" />
-                    <line x1="4" y1="16" x2="20" y2="16" />
-                    <circle cx="15" cy="16" r="2" />
-                  </svg>
+                <template v-else>
+                  <span class="folder-error__change-old">{{ row.from }}</span>
+                  <span class="folder-error__change-arrow">→</span>
+                  <span class="folder-error__change-new">{{ row.to }}</span>
                 </template>
-              </n-button>
-            </span>
-          </template>
-          编辑设备指派
-        </n-tooltip>
-      </div>
-
-      <div v-if="progressOf(f)" class="item-progress">
-        <div class="progress-bar">
-          <div
-            class="progress-fill"
-            :class="{ 'is-flowing': isActive(progressOf(f)!) }"
-            :style="isActive(progressOf(f)!) ? '' : 'width:100%'"
-          ></div>
-        </div>
-        <div class="item-sub">{{ progressText(progressOf(f)!) }}</div>
-        <ul v-if="progressOf(f)!.files && progressOf(f)!.files!.length" class="xfer-files">
-          <li v-for="tf in visibleFiles(f)" :key="tf.path" class="xfer-file">
-            <span class="xfer-file__dir" :title="tf.direction === 'receive' ? '下载中' : '上传中'">{{ tf.direction === 'receive' ? '↓' : '↑' }}</span>
-            <span class="xfer-file__name" :title="tf.path">{{ basename(tf.path) }}</span>
-            <span class="xfer-file__pct">{{ filePercent(tf) }}%</span>
-            <!-- 「优先同步」:让对端把该文件的块插到其限速发送队列最前(幂等,仅接收方向可提) -->
-            <button
-              v-if="tf.direction === 'receive'"
-              class="xfer-file__prio"
-              :class="{ 'is-on': tf.priority }"
-              :title="tf.priority ? '已优先:对端正把它的块插队发送' : '优先同步:插队到对端发送队列最前'"
-              :aria-label="tf.priority ? '已优先同步' : '优先同步'"
-              @click="prioritizeFile(f, tf.path)"
-            >▲</button>
-            <div class="progress-bar xfer-file__bar">
-              <div class="progress-fill" :style="{ width: filePercent(tf) + '%' }"></div>
+              </span>
             </div>
-          </li>
-        </ul>
-        <!-- 超过 5 条才出现:收起时只展示前 5 条,避免长列表把卡片撑高、把并列的设备列甩出屏幕 -->
-        <n-button
-          v-if="progressOf(f)!.files && progressOf(f)!.files!.length > XFER_FILE_LIMIT"
-          size="tiny"
-          quaternary
-          class="xfer-more"
-          :aria-expanded="isXferExpanded(f)"
-          @click="toggleXferExpand(f)"
-        >
-          {{ isXferExpanded(f) ? '收起' : `查看全部 ${progressOf(f)!.files!.length} 个文件` }}
-          <span class="xfer-more__chev" :class="{ 'is-open': isXferExpanded(f) }" aria-hidden="true">
-            <svg viewBox="0 0 12 12" width="10" height="10" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round">
-              <path d="M2.5 4.5 6 8l3.5-3.5" />
-            </svg>
-          </span>
-        </n-button>
+            <div class="folder-error__time">
+              {{ fmtTime(folderErrorOf(f)!.ts) }} ·
+              {{ folderErrorOf(f)!.kind === 'identity-missing' ? '接回正确的盘后下一轮扫描自动恢复' : folderErrorOf(f)!.kind?.startsWith('identity') ? '需人工确认,不会自动恢复' : folderErrorOf(f)!.kind === 'disk-space' ? '释放磁盘空间后自动恢复接收' : '下一轮扫描成功后自动清除' }}
+            </div>
+          </div>
+          <!-- 身份不符(非"目录读不到")才给轻量恢复入口:只更新指纹、不动索引;
+               missing 挂的可能是空目录/别的盘,绝不能一键确认,接回正确的盘自愈 -->
+          <n-button
+            v-if="folderErrorOf(f)!.kind === 'identity-changed' || folderErrorOf(f)!.kind === 'identity-remounted'"
+            size="tiny"
+            class="folder-error__adopt"
+            :disabled="busy"
+            @click="askReAdopt(f)"
+          >
+            <!-- 盾牌与栏头「批量重新采集身份」同款:一眼对上"这俩是一件事" -->
+            <template #icon>
+              <svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+                <path d="M12 3l7 3v5c0 4.4-2.9 7.9-7 9.4C7.9 18.9 5 15.4 5 11V6l7-3z" />
+                <path d="M9 11.5l2 2 4-4" />
+              </svg>
+            </template>
+            重新采集身份
+          </n-button>
+        </div>
+
+        <!-- 按目录指派可同步的设备:卡片上只读展示,点「编辑」弹窗修改后显式保存 -->
+        <div class="fid-devices">
+          <div class="device-tags">
+            <n-tooltip v-for="d in f.devices" :key="d" trigger="hover" :style="{ maxWidth: '280px' }">
+              <template #trigger>
+                <span class="device-tag mono" :class="`is-${deviceTagStatus(f, d).key}`">{{ d }}</span>
+              </template>
+              {{ deviceTagTip(f, d) }}
+            </n-tooltip>
+            <span v-if="f.devices.length === 0" class="device-tag device-tag-empty">未指派设备</span>
+          </div>
+          <n-tooltip trigger="hover" :style="{ maxWidth: '280px' }">
+            <template #trigger>
+              <span class="icon-btn">
+                <n-button size="small" quaternary circle :disabled="busy" @click="openEditDevices(f)">
+                  <template #icon>
+                    <svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+                      <line x1="4" y1="8" x2="20" y2="8" />
+                      <circle cx="9" cy="8" r="2" />
+                      <line x1="4" y1="16" x2="20" y2="16" />
+                      <circle cx="15" cy="16" r="2" />
+                    </svg>
+                  </template>
+                </n-button>
+              </span>
+            </template>
+            编辑设备指派
+          </n-tooltip>
+        </div>
+
+        <div v-if="progressOf(f)" class="item-progress">
+          <div class="progress-bar">
+            <div
+              class="progress-fill"
+              :class="{ 'is-flowing': isActive(progressOf(f)!) }"
+              :style="isActive(progressOf(f)!) ? '' : 'width:100%'"
+            ></div>
+          </div>
+          <div class="item-sub">{{ progressText(progressOf(f)!) }}</div>
+          <ul v-if="progressOf(f)!.files && progressOf(f)!.files!.length" class="xfer-files">
+            <li v-for="tf in visibleFiles(f)" :key="tf.path" class="xfer-file">
+              <span class="xfer-file__dir" :title="tf.direction === 'receive' ? '下载中' : '上传中'">{{ tf.direction === 'receive' ? '↓' : '↑' }}</span>
+              <span class="xfer-file__name" :title="tf.path">{{ basename(tf.path) }}</span>
+              <span class="xfer-file__pct">{{ filePercent(tf) }}%</span>
+              <!-- 「优先同步」:让对端把该文件的块插到其限速发送队列最前(幂等,仅接收方向可提) -->
+              <button
+                v-if="tf.direction === 'receive'"
+                class="xfer-file__prio"
+                :class="{ 'is-on': tf.priority }"
+                :title="tf.priority ? '已优先:对端正把它的块插队发送' : '优先同步:插队到对端发送队列最前'"
+                :aria-label="tf.priority ? '已优先同步' : '优先同步'"
+                @click="prioritizeFile(f, tf.path)"
+              >▲</button>
+              <div class="progress-bar xfer-file__bar">
+                <div class="progress-fill" :style="{ width: filePercent(tf) + '%' }"></div>
+              </div>
+            </li>
+          </ul>
+          <!-- 超过 5 条才出现:收起时只展示前 5 条,避免长列表把卡片撑高、把并列的设备列甩出屏幕 -->
+          <n-button
+            v-if="progressOf(f)!.files && progressOf(f)!.files!.length > XFER_FILE_LIMIT"
+            size="tiny"
+            quaternary
+            class="xfer-more"
+            :aria-expanded="isXferExpanded(f)"
+            @click="toggleXferExpand(f)"
+          >
+            {{ isXferExpanded(f) ? '收起' : `查看全部 ${progressOf(f)!.files!.length} 个文件` }}
+            <span class="xfer-more__chev" :class="{ 'is-open': isXferExpanded(f) }" aria-hidden="true">
+              <svg viewBox="0 0 12 12" width="10" height="10" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round">
+                <path d="M2.5 4.5 6 8l3.5-3.5" />
+              </svg>
+            </span>
+          </n-button>
+        </div>
       </div>
     </div>
   </section>

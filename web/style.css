@@ -55,18 +55,37 @@ body {
   font-family: system-ui, -apple-system, "PingFang SC", "Microsoft YaHei", sans-serif;
   font-size: 14px;
   line-height: 1.6;
+  /* 与 .container 一样用 dvh:移动端 100vh 取的是「地址栏收起」的大视口,
+     状态页恰好按当前视口高排好后,body 会多出一截可滚的空白(外层滚动条又回来了)。 */
   min-height: 100vh;
+  min-height: 100dvh;
   -webkit-font-smoothing: antialiased;
 }
 
 #app {
   min-height: 100vh;
+  min-height: 100dvh;
 }
 
 .container {
   max-width: 1080px;
   margin: 0 auto;
-  padding: 28px 18px 56px;
+  padding: 28px 18px 24px;
+  /* 视口高的三行结构:顶栏/横幅/胶囊固定高度,主体(.layout)吃掉剩余高度,
+     主体内部两栏各自滚动 —— 于是外层没有滚动条,两栏滚动互不牵连。
+     页面高度恰好等于视口、内容又全部收在各栏滚动层里,文档就不会溢出;
+     dvh 跟随移动端地址栏收放,不支持的浏览器退回 vh。
+     高度锁在本页容器而不是 body:船队 / 文件管理器 / 回收站等页面仍靠文档滚动,
+     锁 body 会把它们的长列表整块裁掉。 */
+  height: 100vh;
+  height: 100dvh;
+  display: flex;
+  flex-direction: column;
+}
+
+/* 顶栏、横幅、概览胶囊等按内容高度(不参与压缩);只有主体让出空间给列表滚动 */
+.container > :not(.layout) {
+  flex: none;
 }
 
 h1 {
@@ -561,13 +580,21 @@ html[data-theme='dark'] .chip-menu__item--danger {
 
 /* 两栏收成单栏的断点:最初取 1060(821–1060px 两栏后每栏只有 380–500px,栏头一整排
    按钮放不下,wrap 后「＋ 添加」孤零零落到卡片缝隙)。栏头按钮收进 ActionRail 后
-   固有宽度大幅缩小,按用户要求把阈值再调小 200px → 860:861–1060px 的窗口恢复两栏。 */
+   固有宽度大幅缩小,按用户要求把阈值再调小 200px → 860:861–1060px 的窗口恢复两栏。
+   860 以下不再单列堆叠,而是由 StatusPage 的 tab 只显示一栏(见下方 layout--*)。 */
 .layout {
   display: grid;
   grid-template-columns: 1fr 1fr;
+  /* 单行吃掉容器剩余高度:栏内列表滚动需要确定的高度上限,行高必须由容器分配,
+     不能按内容撑开(grid-auto-rows 取 minmax(0, 1fr) 才允许行被压缩到 0)。 */
+  grid-auto-rows: minmax(0, 1fr);
   gap: 18px;
-  align-items: start;
+  align-items: stretch;
   position: relative;
+  flex: 1 1 auto;
+  /* 给两栏留一条底线:手机上一堆待确认邀请把头部撑高时,宁可外层重新出现
+     页面滚动条,也不要把两栏压成 0 高、列表彻底看不见。 */
+  min-height: 220px;
 }
 
 /* 宽屏下两栏之间加一道竖直分隔,强化左右区分(两栏布局的保底宽度是 861px) */
@@ -589,6 +616,18 @@ html[data-theme='dark'] .chip-menu__item--danger {
   .layout {
     grid-template-columns: 1fr;
   }
+
+  /* 小屏两栏改 tab:只显示选中的那一栏,另一栏 display:none。
+     不是卸载:组件实例还在,表单填一半、卡片展开状态都不会被切丢(滚动位置会归零 ——
+     盒子被丢弃后 scrollTop 不保留,切回时从列表顶部开始)。
+     双类提高特异度,不依赖文件顺序压过上面的单栏规则。 */
+  .layout.layout--folders .col--devices {
+    display: none;
+  }
+
+  .layout.layout--devices .col--folders {
+    display: none;
+  }
 }
 
 /* 左右两栏各自包一层淡色面板:左=共享目录(天青蓝)、右=设备(薄荷青),
@@ -599,6 +638,8 @@ html[data-theme='dark'] .chip-menu__item--danger {
   flex-direction: column;
   gap: 12px;
   min-width: 0;
+  /* 栏高度由 .layout 的行高分配:必须允许被压缩,否则栏内滚动层拿不到确定高度 */
+  min-height: 0;
   padding: 14px;
   border: 1px solid var(--border);
   border-radius: var(--radius);
@@ -624,7 +665,58 @@ html[data-theme='dark'] .chip-menu__item--danger {
   border-color: rgb(43 182 172 / 0.2);
 }
 
+/* 栏内列表的滚动层:栏头固定,滚动条只出现在列表内部(页面外层不再滚动)。
+   负外边距 + 等值内衬把滚动条贴到栏面板内壁,卡片仍与栏头左右对齐
+   (与弹窗 .modal-body 同一手法)。
+   上下各留 10px 再回拉 10px:目录卡悬浮徽标(.card-floats)外探卡顶 9px,
+   滚动层的裁剪边在首张卡上会把它切掉,这层头寸就是留给它的。 */
+.col-scroll {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  flex: 1 1 auto;
+  min-height: 0;
+  overflow-y: auto;
+  /* 滚到尽头不带动页面(移动端橡皮筋会露出背景) */
+  overscroll-behavior: contain;
+  margin: -10px -14px -14px;
+  padding: 10px 14px 14px;
+  scrollbar-width: thin;
+  /* Firefox 没有 ::-webkit-scrollbar,用标准属性给同款半透明滑块 */
+  scrollbar-color: rgb(127 140 170 / 0.35) transparent;
+}
+
+/* 细滚动条:通道透明、滑块半透明圆角,贴着栏内壁不抢视觉。
+   (macOS 覆盖式滚动条默认不常显;Windows/「始终显示滚动条」时走这套) */
+.col-scroll::-webkit-scrollbar {
+  width: 8px;
+}
+
+.col-scroll::-webkit-scrollbar-thumb {
+  border: 2px solid transparent;
+  border-radius: 999px;
+  background: rgb(127 140 170 / 0.35);
+  background-clip: padding-box;
+}
+
+.col-scroll::-webkit-scrollbar-thumb:hover {
+  background: rgb(127 140 170 / 0.55);
+  background-clip: padding-box;
+}
+
+.col-scroll::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+/* 滚动层里的卡片按内容高度排,绝不被压缩(列向 flex 默认允许 shrink,
+   不锁住的话内容超出时卡片会被压扁而不是触发滚动) */
+.col-scroll > * {
+  flex: none;
+}
+
+/* 栏头按内容高度,不参与压缩 */
 .col-head {
+  flex: none;
   display: flex;
   align-items: center;
   flex-wrap: wrap;
@@ -1550,7 +1642,7 @@ html[data-theme='dark'] .chip-menu__item--danger {
 
 @media (max-width: 600px) {
   .container {
-    padding: 18px 14px 44px;
+    padding: 18px 14px 14px;
   }
 
   .card {

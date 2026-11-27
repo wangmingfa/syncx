@@ -58,6 +58,12 @@ const props = defineProps<{ status: StatusData; message?: string }>();
 const core = useStatus(props);
 const { status, busy, isDev, controlPort, refreshStatus, post, copy } = core;
 
+/** 小屏两栏改 tab 后的当前栏;宽屏无 tab,该值不参与渲染(见模板 .layout--* 类)。 */
+const mobileCol = ref<'folders' | 'devices'>('folders');
+
+/** 收件箱待处理条数:设备栏在小屏被 tab 藏起来时,数量提示跟着「设备」tab 走。 */
+const inboxPending = computed(() => status.value.direct?.pending.length ?? 0);
+
 // 通用二次确认弹窗(移除目录 / 移除设备 / 升级 / 自更新共用)
 const { confirmState, askConfirm } = useConfirm(busy);
 
@@ -221,8 +227,30 @@ provide(StatusContextKey, {
     <!-- 待确认:对方推送的配对 / 目录共享邀请 -->
     <OffersPanel />
 
-    <!-- 主体:左右两栏(左=共享目录,右=设备) -->
-    <div class="layout">
+    <!-- 小屏:两栏改为左右切换(宽屏隐藏). 宽屏仍是并排两栏 -->
+    <div class="mobile-tabs" role="group" aria-label="共享目录与设备">
+      <button
+        type="button"
+        class="mobile-tab mobile-tab--folders"
+        :class="{ 'is-active': mobileCol === 'folders' }"
+        :aria-pressed="mobileCol === 'folders'"
+        @click="mobileCol = 'folders'"
+      >
+        共享目录<span v-if="status.powerGuard || status.paused" class="float-badge paused-badge mobile-tab__flag" :title="status.powerGuard ? `${status.powerGuard}:电源守卫已自动挂起所有目录同步` : '全局已暂停:所有目录不扫描、不广播、不接收'">{{ status.powerGuard ? '挂起' : '暂停' }}</span><span class="badge">{{ status.folders.length }}</span>
+      </button>
+      <button
+        type="button"
+        class="mobile-tab mobile-tab--devices"
+        :class="{ 'is-active': mobileCol === 'devices' }"
+        :aria-pressed="mobileCol === 'devices'"
+        @click="mobileCol = 'devices'"
+      >
+        设备<span v-if="inboxPending > 0" class="float-badge mobile-tab__flag mobile-tab__flag--inbox" :title="`收件箱有 ${inboxPending} 条待处理的直发内容`">收件 {{ inboxPending }}</span><span class="badge">{{ status.devices.length }}</span>
+      </button>
+    </div>
+
+    <!-- 主体:左右两栏(左=共享目录,右=设备);小屏按 tab 只展示其中一栏 -->
+    <div class="layout" :class="`layout--${mobileCol}`">
       <FolderList />
       <DeviceList />
     </div>
@@ -312,3 +340,67 @@ provide(StatusContextKey, {
     <DropOverlay @package="onPackageDrop" />
   </div>
 </template>
+
+<style scoped>
+/* 小屏 tab 条:宽屏两栏并排时整条隐藏(display:none),不占位。
+   颜色跟随两栏各自的强调色(左蓝 / 右青),一眼对上要切去哪一栏。 */
+.mobile-tabs {
+  display: none;
+  gap: 6px;
+  padding: 4px;
+  margin-bottom: 12px;
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  background: var(--card);
+  box-shadow: var(--shadow);
+  align-self: flex-start;
+  flex: none;
+}
+
+@media (max-width: 860px) {
+  .mobile-tabs {
+    display: inline-flex;
+  }
+}
+
+.mobile-tab {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 6px 14px;
+  border: 0;
+  border-radius: 999px;
+  background: transparent;
+  color: var(--muted);
+  font: inherit;
+  font-size: 13px;
+  font-weight: 600;
+  cursor: pointer;
+}
+
+.mobile-tab .badge {
+  min-width: 20px;
+  height: 18px;
+  font-size: 11px;
+  /* 计数徽标跟着 tab 的状态色走:未选中灰、选中各自栏的强调色 */
+  color: inherit;
+  background: color-mix(in srgb, currentColor 12%, transparent);
+}
+
+.mobile-tab--folders.is-active {
+  color: var(--accent);
+  background: var(--accent-soft);
+}
+
+.mobile-tab--devices.is-active {
+  color: var(--accent-2);
+  background: rgb(43 182 172 / 0.12);
+}
+
+/* 栏内徽标搬上 tab:全局暂停(橙,复用 .paused-badge 配色)与收件箱待处理(红)。
+   徽标本身不接管点击(点它照样冒泡到 tab 按钮),但保留 title 悬停说明。 */
+.mobile-tab__flag--inbox {
+  color: var(--offline);
+  border-color: color-mix(in srgb, var(--offline) 55%, transparent);
+}
+</style>

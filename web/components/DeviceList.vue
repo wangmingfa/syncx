@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { ref, computed } from 'vue';
+import { nextTick, ref, computed } from 'vue';
 import { NButton, NInput, NTooltip } from 'naive-ui';
 import OsIcon from './OsIcon.vue';
 import BackendIcon from './BackendIcon.vue';
@@ -36,6 +36,15 @@ const {
 
 // 本机配对二维码:展示给「对方」扫的,与添加表单并列,方便两台设备面对面操作
 const qrOpen = ref(false);
+
+/** 列表滚动层:栏头现在常驻,列表可能停在深处,此时点「＋ 添加」要把表单滚回视野。 */
+const scrollEl = ref<HTMLElement | null>(null);
+
+function openAddDevice(): void {
+  toggleAddDevice();
+  if (addDeviceOpen.value) void nextTick(() => scrollEl.value?.scrollTo({ top: 0 }));
+}
+
 // 待确认的入站文件数:收件箱入口上的徽标,提醒对方正在等你点「接收」
 const pendingDirect = computed(() => status.value.direct?.pending.length ?? 0);
 /**
@@ -102,179 +111,183 @@ function onDrop(e: DragEvent, deviceId: string, canSend: boolean): void {
       </div>
       <span class="col-head__actions">
         <n-button v-if="directSupported" size="small" quaternary class="inbox-toggle" :disabled="busy" title="查看收到的文本与文件" @click="direct.openInbox()">收件箱<span v-if="pendingDirect" class="inbox-badge">{{ pendingDirect }}</span></n-button>
-        <n-button v-if="status.devices.length > 0" class="add-toggle" :class="{ 'is-invisible': addDeviceOpen }" :disabled="busy" :tabindex="addDeviceOpen ? -1 : 0" @click="toggleAddDevice">＋ 添加</n-button>
+        <n-button v-if="status.devices.length > 0" class="add-toggle" :class="{ 'is-invisible': addDeviceOpen }" :disabled="busy" :tabindex="addDeviceOpen ? -1 : 0" @click="openAddDevice">＋ 添加</n-button>
       </span>
     </div>
 
-    <!-- 粘贴对方设备 ID 或 syncx:// 配对串即可配对(双方各加一次,mutual)。跨网段/无 mDNS 时填对方地址:ws://(前缀) + IP + :端口(默认 22000) -->
-    <form v-if="addDeviceOpen || status.devices.length === 0" class="add-device" @submit.prevent="addDevice">
-      <n-input v-model:value="newDeviceId" placeholder="粘贴对方设备 ID / syncx:// 配对串" />
-      <div class="addr-group">
-        <n-input v-model:value="newDeviceHost" placeholder="对方 IP" class="device-host">
-          <template #prefix>ws://</template>
-        </n-input>
-        <span class="addr-colon">:</span>
-        <n-input v-model:value="newDevicePort" placeholder="22000" class="device-port" />
-      </div>
-      <div class="add-form-actions">
-        <n-button quaternary :disabled="busy" title="弹出本机配对二维码,给对方扫" @click="qrOpen = true">
-          <template #icon>
-            <svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
-              <rect x="4" y="4" width="6" height="6" rx="1" />
-              <rect x="14" y="4" width="6" height="6" rx="1" />
-              <rect x="4" y="14" width="6" height="6" rx="1" />
-              <path d="M14 14h3v3h-3zM20 14v0M17 20h3v-3" />
-            </svg>
-          </template>
-          本机二维码
-        </n-button>
-        <!-- 与目录表单同一处修正:取消只在**用户自己点开**时渲染。显隐条件是
-             `addDeviceOpen || 设备列表为空`,而取消走 toggle —— 空列表时点它会把 false 翻成
-             true,画面被后半句撑着不动,残留的 true 还会让第一个设备加完后表单关不掉。 -->
-        <n-button v-if="addDeviceOpen" quaternary :disabled="busy" @click="toggleAddDevice">取消</n-button>
-        <n-button type="primary" attr-type="submit" :disabled="busy">添加</n-button>
-      </div>
-    </form>
+    <!-- 列表滚动区:栏头固定,滚动条收在这一层里(页面本身不再出外层滚动条) -->
+    <div ref="scrollEl" class="col-scroll">
 
-    <!-- 附近发现的设备:mDNS 扫到、但还没配对的邻居,一键添加(带学到的直连地址) -->
-    <div v-if="status.discovered?.length" class="discovered">
-      <div class="discovered-head">
-        <span>附近发现的设备</span>
-        <span class="badge">{{ status.discovered.length }}</span>
-      </div>
-      <div class="discovered-list">
-        <div v-for="d in status.discovered" :key="d.deviceId" class="discovered-item">
-          <span class="avatar online" aria-hidden="true">{{ monogram(d.deviceId) }}</span>
-          <span class="discovered-body">
-            <span class="discovered-line">
-              <span class="discovered-id mono" :title="`${d.deviceId} · ${d.host}:${d.port}`">{{ d.deviceId }}</span>
-              <span class="discovered-addr mono">{{ d.host }}</span>
+      <!-- 粘贴对方设备 ID 或 syncx:// 配对串即可配对(双方各加一次,mutual)。跨网段/无 mDNS 时填对方地址:ws://(前缀) + IP + :端口(默认 22000) -->
+      <form v-if="addDeviceOpen || status.devices.length === 0" class="add-device" @submit.prevent="addDevice">
+        <n-input v-model:value="newDeviceId" placeholder="粘贴对方设备 ID / syncx:// 配对串" />
+        <div class="addr-group">
+          <n-input v-model:value="newDeviceHost" placeholder="对方 IP" class="device-host">
+            <template #prefix>ws://</template>
+          </n-input>
+          <span class="addr-colon">:</span>
+          <n-input v-model:value="newDevicePort" placeholder="22000" class="device-port" />
+        </div>
+        <div class="add-form-actions">
+          <n-button quaternary :disabled="busy" title="弹出本机配对二维码,给对方扫" @click="qrOpen = true">
+            <template #icon>
+              <svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+                <rect x="4" y="4" width="6" height="6" rx="1" />
+                <rect x="14" y="4" width="6" height="6" rx="1" />
+                <rect x="4" y="14" width="6" height="6" rx="1" />
+                <path d="M14 14h3v3h-3zM20 14v0M17 20h3v-3" />
+              </svg>
+            </template>
+            本机二维码
+          </n-button>
+          <!-- 与目录表单同一处修正:取消只在**用户自己点开**时渲染。显隐条件是
+               `addDeviceOpen || 设备列表为空`,而取消走 toggle —— 空列表时点它会把 false 翻成
+               true,画面被后半句撑着不动,残留的 true 还会让第一个设备加完后表单关不掉。 -->
+          <n-button v-if="addDeviceOpen" quaternary :disabled="busy" @click="toggleAddDevice">取消</n-button>
+          <n-button type="primary" attr-type="submit" :disabled="busy">添加</n-button>
+        </div>
+      </form>
+
+      <!-- 附近发现的设备:mDNS 扫到、但还没配对的邻居,一键添加(带学到的直连地址) -->
+      <div v-if="status.discovered?.length" class="discovered">
+        <div class="discovered-head">
+          <span>附近发现的设备</span>
+          <span class="badge">{{ status.discovered.length }}</span>
+        </div>
+        <div class="discovered-list">
+          <div v-for="d in status.discovered" :key="d.deviceId" class="discovered-item">
+            <span class="avatar online" aria-hidden="true">{{ monogram(d.deviceId) }}</span>
+            <span class="discovered-body">
+              <span class="discovered-line">
+                <span class="discovered-id mono" :title="`${d.deviceId} · ${d.host}:${d.port}`">{{ d.deviceId }}</span>
+                <span class="discovered-addr mono">{{ d.host }}</span>
+              </span>
+              <!-- IP 单独一行:mDNS 学到的 host 是对端裸 hostname(不保证解析得了),
+                   而 IP 是它此刻实际发包用的地址,核对与手动填地址都靠这个 -->
+              <span
+                v-if="d.address"
+                class="discovered-sub mono"
+                :title="`发现到该设备发包使用的地址(数据面端口 ${d.port})`"
+              >{{ d.address }}</span>
             </span>
-            <!-- IP 单独一行:mDNS 学到的 host 是对端裸 hostname(不保证解析得了),
-                 而 IP 是它此刻实际发包用的地址,核对与手动填地址都靠这个 -->
-            <span
-              v-if="d.address"
-              class="discovered-sub mono"
-              :title="`发现到该设备发包使用的地址(数据面端口 ${d.port})`"
-            >{{ d.address }}</span>
-          </span>
-          <n-button size="tiny" type="primary" tertiary :disabled="busy" @click="addDiscovered(d)">添加</n-button>
+            <n-button size="tiny" type="primary" tertiary :disabled="busy" @click="addDiscovered(d)">添加</n-button>
+          </div>
         </div>
       </div>
-    </div>
 
-    <div v-if="status.devices.length === 0" class="empty">还没有设备 · 在上方粘贴对方设备 ID 添加</div>
-    <div
-      v-for="p in status.devices"
-      :key="p.deviceId"
-      class="item-card"
-      :class="{
-        'is-linked': hoverDevices.includes(p.deviceId) || hoverDeviceId === p.deviceId,
-        'is-drop-target': dragOverId === p.deviceId,
-      }"
-      @mouseenter="onDeviceEnter(p.deviceId)"
-      @mouseleave="onDeviceLeave()"
-      @dragenter="onDragEnter($event, p.deviceId, canSendTo(p))"
-      @dragover="onDragOver($event, canSendTo(p))"
-      @dragleave="onDragLeave($event, p.deviceId)"
-      @drop="onDrop($event, p.deviceId, canSendTo(p))"
-    >
-      <div class="item-top">
-        <span class="avatar" :class="p.online ? 'online' : 'offline'">
-          <!-- 对端宣告了平台就画系统图标;旧版本对端不发该字段(undefined)则保持字母头像,
-               不留空位。在线/离线仍由头像底色的 online/offline 表达,图标只额外去个色。 -->
-          <OsIcon
-            v-if="p.platform"
-            :platform="p.platform"
-            :offline="!p.online"
-            :size="18"
-            :hint="`${osIconLabel(p.platform)} · ${p.deviceId}`"
-          />
-          <template v-else>{{ monogram(p.deviceId) }}</template>
-        </span>
-        <span class="item-title mono">{{ p.deviceId }}</span>
-        <span class="status-pill" :class="p.online ? 'pill-online' : 'pill-offline'">
-          {{ p.online ? '在线' : '离线' }}
-        </span>
-        <!-- 重连紧挨状态标签:动作跟着它要修的那种状态走,也省掉下方一整行 -->
-        <span class="item-actions">
-          <!-- 直发只发给在线且宣告 direct1 的对端;旧版本给禁用按钮 + 明确升级提示,
-               避免「点了没反应」被误判成功能坏了。本机后端不提供直发时整组不渲染。 -->
-          <template v-if="directSupported">
-            <n-button
-              v-if="direct.canDirect(p)"
-              size="small"
-              type="primary"
-              tertiary
-              class="btn-inline"
-              :disabled="busy"
-              title="发送文本或文件到对方收件箱；也可以把文件拖到这张卡片上"
-              @click="direct.openSend(p)"
-            >发送</n-button>
-            <n-tooltip v-else-if="p.online" :show-arrow="false" trigger="hover">
-              <template #trigger>
-                <n-button size="small" tertiary class="btn-inline" disabled>发送</n-button>
-              </template>
-              对方版本不支持直发,请升级后再试
-            </n-tooltip>
-            <!-- 离线设备也能发:内容先在本机排队,等它上线自动投递(24 小时内有效)。 -->
-            <n-button
-              v-else
-              size="small"
-              type="primary"
-              tertiary
-              class="btn-inline"
-              :disabled="busy"
-              title="对方离线：内容会先在本机排队，等它上线自动投递（24 小时内有效）"
-              @click="direct.openSend(p)"
-            >发送</n-button>
-          </template>
-          <!-- 编辑只改对端 IP/端口,设备 ID 不变;与「移除」这类破坏性操作拉开 -->
-          <n-button size="small" tertiary class="btn-inline" :disabled="busy" @click="openEditDevice(p)">编辑</n-button>
-          <n-button
-            v-if="!p.online"
-            size="small"
-            tertiary
-            class="btn-inline"
-            :disabled="busy"
-            @click="reconnect(p.deviceId)"
-          >
-            重连
-          </n-button>
-          <n-button size="small" type="error" tertiary class="btn-inline" :disabled="busy" @click="askRemoveDevice(p.deviceId)">移除</n-button>
-        </span>
-      </div>
-      <div class="item-meta">
-        <span class="item-sub">共享 {{ deviceFolderCount(p.deviceId) }} 个目录</span>
-        <span class="item-addr">
-          <span class="addr-label">版本</span><span class="addr-value mono">{{ p.version ?? '未知' }}</span>
-        </span>
-        <!-- 后端标识:对端宣告了 runtime 才渲染。旧版本对端不发该字段(undefined),
-             此时整块不出现 —— 留一个「后端 未知」的空位只会占据本已紧张的一行。 -->
-        <span v-if="p.runtime" class="item-addr backend-tag">
-          <span class="addr-label">后端</span>
-          <span class="backend-tag__value">
-            <BackendIcon :runtime="p.runtime" :offline="!p.online" :size="13" :hint="`${backendIconLabel(p.runtime)} 后端 · ${p.deviceId}`" />
-            <span class="addr-value mono">{{ backendIconLabel(p.runtime) }}</span>
+      <div v-if="status.devices.length === 0" class="empty">还没有设备 · 在上方粘贴对方设备 ID 添加</div>
+      <div
+        v-for="p in status.devices"
+        :key="p.deviceId"
+        class="item-card"
+        :class="{
+          'is-linked': hoverDevices.includes(p.deviceId) || hoverDeviceId === p.deviceId,
+          'is-drop-target': dragOverId === p.deviceId,
+        }"
+        @mouseenter="onDeviceEnter(p.deviceId)"
+        @mouseleave="onDeviceLeave()"
+        @dragenter="onDragEnter($event, p.deviceId, canSendTo(p))"
+        @dragover="onDragOver($event, canSendTo(p))"
+        @dragleave="onDragLeave($event, p.deviceId)"
+        @drop="onDrop($event, p.deviceId, canSendTo(p))"
+      >
+        <div class="item-top">
+          <span class="avatar" :class="p.online ? 'online' : 'offline'">
+            <!-- 对端宣告了平台就画系统图标;旧版本对端不发该字段(undefined)则保持字母头像,
+                 不留空位。在线/离线仍由头像底色的 online/offline 表达,图标只额外去个色。 -->
+            <OsIcon
+              v-if="p.platform"
+              :platform="p.platform"
+              :offline="!p.online"
+              :size="18"
+              :hint="`${osIconLabel(p.platform)} · ${p.deviceId}`"
+            />
+            <template v-else>{{ monogram(p.deviceId) }}</template>
           </span>
-        </span>
-      </div>
-      <!-- 地址行:优先用配置里持久化的地址(编辑弹窗也是这个来源),没有才回退到当前会话地址。
-           反向发现会把入站握手学到的端口写进会话地址,否则卡片端口会和编辑框对不上。
-           两者都没有时才退回只显示 hostname(旧版对端/从未记录地址)。 -->
-      <div v-if="p.url || p.address || p.hostname" class="item-addr">
-        <span class="addr-label">{{ p.url || p.address ? '地址' : '主机名' }}</span><span class="addr-value mono">{{ deviceAddrLine(p) }}</span>
-      </div>
-      <div v-if="p.online && p.canUpgrade" class="actions">
-        <n-button size="small" type="warning" :disabled="busy" class="btn-upgrade" @click="askUpgrade(p)">
-          <template #icon>
-            <svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
-              <path d="M12 19V5" />
-              <path d="m5 12 7-7 7 7" />
-            </svg>
-          </template>
-          升级到 {{ p.version }}
-        </n-button>
+          <span class="item-title mono">{{ p.deviceId }}</span>
+          <span class="status-pill" :class="p.online ? 'pill-online' : 'pill-offline'">
+            {{ p.online ? '在线' : '离线' }}
+          </span>
+          <!-- 重连紧挨状态标签:动作跟着它要修的那种状态走,也省掉下方一整行 -->
+          <span class="item-actions">
+            <!-- 直发只发给在线且宣告 direct1 的对端;旧版本给禁用按钮 + 明确升级提示,
+                 避免「点了没反应」被误判成功能坏了。本机后端不提供直发时整组不渲染。 -->
+            <template v-if="directSupported">
+              <n-button
+                v-if="direct.canDirect(p)"
+                size="small"
+                type="primary"
+                tertiary
+                class="btn-inline"
+                :disabled="busy"
+                title="发送文本或文件到对方收件箱；也可以把文件拖到这张卡片上"
+                @click="direct.openSend(p)"
+              >发送</n-button>
+              <n-tooltip v-else-if="p.online" :show-arrow="false" trigger="hover">
+                <template #trigger>
+                  <n-button size="small" tertiary class="btn-inline" disabled>发送</n-button>
+                </template>
+                对方版本不支持直发,请升级后再试
+              </n-tooltip>
+              <!-- 离线设备也能发:内容先在本机排队,等它上线自动投递(24 小时内有效)。 -->
+              <n-button
+                v-else
+                size="small"
+                type="primary"
+                tertiary
+                class="btn-inline"
+                :disabled="busy"
+                title="对方离线：内容会先在本机排队，等它上线自动投递（24 小时内有效）"
+                @click="direct.openSend(p)"
+              >发送</n-button>
+            </template>
+            <!-- 编辑只改对端 IP/端口,设备 ID 不变;与「移除」这类破坏性操作拉开 -->
+            <n-button size="small" tertiary class="btn-inline" :disabled="busy" @click="openEditDevice(p)">编辑</n-button>
+            <n-button
+              v-if="!p.online"
+              size="small"
+              tertiary
+              class="btn-inline"
+              :disabled="busy"
+              @click="reconnect(p.deviceId)"
+            >
+              重连
+            </n-button>
+            <n-button size="small" type="error" tertiary class="btn-inline" :disabled="busy" @click="askRemoveDevice(p.deviceId)">移除</n-button>
+          </span>
+        </div>
+        <div class="item-meta">
+          <span class="item-sub">共享 {{ deviceFolderCount(p.deviceId) }} 个目录</span>
+          <span class="item-addr">
+            <span class="addr-label">版本</span><span class="addr-value mono">{{ p.version ?? '未知' }}</span>
+          </span>
+          <!-- 后端标识:对端宣告了 runtime 才渲染。旧版本对端不发该字段(undefined),
+               此时整块不出现 —— 留一个「后端 未知」的空位只会占据本已紧张的一行。 -->
+          <span v-if="p.runtime" class="item-addr backend-tag">
+            <span class="addr-label">后端</span>
+            <span class="backend-tag__value">
+              <BackendIcon :runtime="p.runtime" :offline="!p.online" :size="13" :hint="`${backendIconLabel(p.runtime)} 后端 · ${p.deviceId}`" />
+              <span class="addr-value mono">{{ backendIconLabel(p.runtime) }}</span>
+            </span>
+          </span>
+        </div>
+        <!-- 地址行:优先用配置里持久化的地址(编辑弹窗也是这个来源),没有才回退到当前会话地址。
+             反向发现会把入站握手学到的端口写进会话地址,否则卡片端口会和编辑框对不上。
+             两者都没有时才退回只显示 hostname(旧版对端/从未记录地址)。 -->
+        <div v-if="p.url || p.address || p.hostname" class="item-addr">
+          <span class="addr-label">{{ p.url || p.address ? '地址' : '主机名' }}</span><span class="addr-value mono">{{ deviceAddrLine(p) }}</span>
+        </div>
+        <div v-if="p.online && p.canUpgrade" class="actions">
+          <n-button size="small" type="warning" :disabled="busy" class="btn-upgrade" @click="askUpgrade(p)">
+            <template #icon>
+              <svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+                <path d="M12 19V5" />
+                <path d="m5 12 7-7 7 7" />
+              </svg>
+            </template>
+            升级到 {{ p.version }}
+          </n-button>
+        </div>
       </div>
     </div>
 
