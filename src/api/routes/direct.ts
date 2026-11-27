@@ -6,13 +6,14 @@
  */
 import { createHash, randomBytes } from 'node:crypto';
 import type { IncomingMessage, ServerResponse } from 'node:http';
-import { join } from 'node:path';
-import { createWriteStream, mkdirSync, readFileSync, readdirSync, rmSync, statSync, writeFileSync } from 'node:fs';
+import { basename, isAbsolute, join, resolve, sep } from 'node:path';
+import { createReadStream, createWriteStream, mkdirSync, readFileSync, readdirSync, realpathSync, rmSync, statSync, writeFileSync } from 'node:fs';
 import { Transform } from 'node:stream';
 import { pipeline } from 'node:stream/promises';
 import type { ControlServerDeps } from '../deps.js';
 import { pathname, readBody, sendJson } from '../helpers.js';
 import { DIRECT_MAX_FILE_BYTES, type DirectSendAck } from '../../direct.js';
+import { DISK_GUARD_MIN_FREE_BYTES, freeBytesAt } from '../../disk.js';
 import { writeZip, ZIP_MAX_BYTES } from '../../zip.js';
 
 /** 写暂存文件:超出预期大小立刻失败,收尾核对字节数与 sha256。 */
@@ -121,7 +122,8 @@ function zipArchiveName(raw: unknown): string {
 function fmtBytes(n: number): string {
   if (n < 1024) return `${n} B`;
   if (n < 1024 * 1024) return `${(n / 1024).toFixed(1)} KB`;
-  return `${(n / 1024 / 1024).toFixed(1)} MB`;
+  if (n < 1024 * 1024 * 1024) return `${(n / 1024 / 1024).toFixed(1)} MB`;
+  return `${(n / 1024 / 1024 / 1024).toFixed(1)} GB`;
 }
 
 /** 兼容旧的单设备 deviceId 与新的多设备 deviceIds,去重并保持传入顺序。 */
@@ -166,6 +168,69 @@ function sendBatch(res: ServerResponse, ids: string[], results: DirectSendResult
   sendJson(res, 200, { ...(first?.id ? { id: first.id } : {}), ids, results });
 }
 
+/**
+ * 「按本机路径发送」的路径解析:浏览器给的是 daemon 所在机器的绝对路径,
+ * 与另存目录同一原则 —— 一律由 daemon 侧判定,绝不读浏览器的任何信息。
+ *
+ * 只放行普通文件;解析后的真实路径落在 daemon 数据目录内一律拒绝:配对密钥、
+ * 离线队列台账都在那里,没有理由被当成待发文件传出去。读任意文件再外发本身
+ * 与「另存到任意目录」同级,调用方必须先过提权门。
+ */
+function resolveSendFile(
+  input: unknown,
+  configDir?: string,
+): { path: string; name: string; size: number; mtimeMs: number } {
+  if (typeof input !== 'string' || !input.trim()) throw new Error('需要文件路径');
+  const raw = input.trim();
+  if (!isAbsolute(raw)) throw new Error('请填写绝对路径（指 daemon 所在机器）');
+  let real: string;
+  let st: ReturnType<typeof statSync>;
+  try {
+    real = realpathSync(raw);
+    st = statSync(real);
+  } catch {
+    throw new Error('文件不存在或不可读');
+  }
+  if (!st.isFile()) throw new Error('只支持普通文件');
+  if (st.size <= 0) throw new Error('空文件没有内容可发');
+  if (st.size > DIRECT_MAX_FILE_BYTES) {
+    throw new Error(`文件大小必须在 1 字节 ~ ${fmtBytes(DIRECT_MAX_FILE_BYTES)} 之间`);
+  }
+  if (configDir) {
+    let root: string;
+    try {
+      root = realpathSync(configDir);
+    } catch {
+      root = resolve(configDir);
+    }
+    if (real === root || real.startsWith(root.endsWith(sep) ? root : `${root}${sep}`)) {
+      throw new Error('不能发送 daemon 数据目录里的文件');
+    }
+  }
+  return { path: real, name: basename(real), size: st.size, mtimeMs: st.mtimeMs };
+}
+
+/** 流式算指纹:10GB 级别不允许把正文读进内存。 */
+async function hashSendFile(path: string, size: number): Promise<string> {
+  return new Promise((done, reject) => {
+    const hash = createHash('sha256');
+    let read = 0;
+    const stream = createReadStream(path);
+    stream.on('data', (chunk: Buffer) => {
+      read += chunk.length;
+      hash.update(chunk);
+    });
+    stream.on('error', reject);
+    stream.on('end', () => {
+      if (read !== size) {
+        reject(new Error('文件在读取过程中发生变化，请重试'));
+        return;
+      }
+      done(hash.digest('hex'));
+    });
+  });
+}
+
 /** 直发域:未命中返回 false,交给后续路由处理。 */
 export async function tryDirectRoutes(
   req: IncomingMessage,
@@ -196,19 +261,24 @@ export async function tryDirectRoutes(
       sendJson(res, 404, { error: '收件箱条目不存在' });
       return true;
     }
+    // 正文按路径流式发送:此前是整份 readFile 进内存再回,10GB 上限下会直接把 daemon 撑爆。
     if (found.item.kind === 'text') {
-      res.writeHead(200, { 'Content-Type': 'text/plain; charset=utf-8', 'Cache-Control': 'no-store' });
-      res.end(found.data);
-      return true;
+      res.writeHead(200, { 'Content-Type': 'text/plain; charset=utf-8', 'Content-Length': String(found.size), 'Cache-Control': 'no-store' });
+    } else {
+      const name = encodeURIComponent(found.item.name).replace(/['()]/g, (c) => `%${c.charCodeAt(0).toString(16).toUpperCase()}`);
+      res.writeHead(200, {
+        'Content-Type': 'application/octet-stream',
+        'Content-Disposition': `attachment; filename*=UTF-8''${name}`,
+        'Content-Length': String(found.size),
+        'Cache-Control': 'no-store',
+      });
     }
-    const name = encodeURIComponent(found.item.name).replace(/['()]/g, (c) => `%${c.charCodeAt(0).toString(16).toUpperCase()}`);
-    res.writeHead(200, {
-      'Content-Type': 'application/octet-stream',
-      'Content-Disposition': `attachment; filename*=UTF-8''${name}`,
-      'Content-Length': String(found.data.length),
-      'Cache-Control': 'no-store',
-    });
-    res.end(found.data);
+    const stream = createReadStream(found.path);
+    stream.on('error', () => res.destroy());
+    // 客户端中途取消(浏览器取消下载、前端预检拿到头就断开)时把句柄放掉,
+    // 否则 10GB 的流会一直占着 fd 等 GC。
+    res.on('close', () => stream.destroy());
+    stream.pipe(res);
     return true;
   }
 
@@ -309,6 +379,49 @@ export async function tryDirectRoutes(
     return true;
   }
 
+  // POST /api/direct/send-path : 按 daemon 本机路径直接投送(跳过浏览器上传)
+  if (req.method === 'POST' && path === '/api/direct/send-path') {
+    try {
+      const body = JSON.parse(await readBody(req)) as { path?: unknown; deviceId?: unknown; deviceIds?: unknown; batch?: unknown };
+      // 能读任意文件再外发 = 显式的数据外泄通道:和另存目录同一条提权门。
+      if (!elevated) {
+        sendJson(res, 403, { error: '按本机路径发送需要验证:请用控制令牌或密码完成验证' });
+        return true;
+      }
+      const ids = parseTargets(body.deviceId, body.deviceIds);
+      if (!ids.length || ids.length > DIRECT_MAX_TARGETS) {
+        sendJson(res, 400, { error: '需要 1 ~ 20 台目标设备' });
+        return true;
+      }
+      const batch = typeof body.batch === 'string' ? body.batch.trim() : '';
+      if (batch && !ZIP_BATCH_RE.test(batch)) {
+        sendJson(res, 400, { error: '批次号格式不正确' });
+        return true;
+      }
+      const found = resolveSendFile(body.path, deps.configDir);
+      const sha256 = await hashSendFile(found.path, found.size);
+      // 哈希期间被改写/截断/删掉:指纹已经对不上内容,别把坏账发给对方。
+      let after: ReturnType<typeof statSync> | undefined;
+      try {
+        after = statSync(found.path);
+      } catch {
+        /* 文件在读取后被删掉了,按「发生变化」处理 */
+      }
+      if (!after || after.size !== found.size || after.mtimeMs !== found.mtimeMs) {
+        sendJson(res, 409, { error: '文件在读取过程中发生变化，请重试' });
+        return true;
+      }
+      // external = 文件仍归用户:direct 服务只读不删;离线目标会按「需要对方在线」拒掉。
+      const file = { name: found.name, sourcePath: found.path, size: found.size, sha256, external: true };
+      const results = dispatch(ids, (deviceId) => direct.sendFile(deviceId, file, batch || undefined));
+      reissueElevation(res);
+      sendBatch(res, ids, results);
+    } catch (e) {
+      fail(res, e);
+    }
+    return true;
+  }
+
   // POST /api/direct/file?deviceIds=&name=&size=&batch= : 流式暂存一次 + 发起多设备文件直发
   // 带 `zip=<batch>` 时只暂存、不投送,等 POST /api/direct/zip 打包后一次性发。
   if (req.method === 'POST' && path === '/api/direct/file') {
@@ -322,7 +435,7 @@ export async function tryDirectRoutes(
     // 早退时把请求体读空再回:客户端还在写一个几十 MB 的文件,直接回包会让它收到
     // ECONNRESET 而不是这条中文原因。
     if (!name || !Number.isInteger(size) || size <= 0 || size > DIRECT_MAX_FILE_BYTES) {
-      sendJson(res, 400, { error: '文件参数不正确（名字、大小必填，单文件不超过 100MB）' });
+      sendJson(res, 400, { error: '文件参数不正确（名字、大小必填，单文件不超过 10 GB）' });
       req.resume();
       return true;
     }
@@ -345,6 +458,14 @@ export async function tryDirectRoutes(
     // 免得最小 deps / 目录被手工清掉时上传直接 ENOENT。
     const stagingDir = join(deps.configDir, 'inbox', '.tmp');
     mkdirSync(stagingDir, { recursive: true });
+    // 暂存要写满整份文件(10GB 级别):先量盘再收,别让浏览器传半小时才 ENOSPC。
+    // statfs 不可用时 freeBytesAt 返回 undefined,按「无意见」放行。
+    const free = freeBytesAt(stagingDir);
+    if (free !== undefined && free < size + DISK_GUARD_MIN_FREE_BYTES) {
+      sendJson(res, 507, { error: `磁盘可用空间不足(需要约 ${fmtBytes(size + DISK_GUARD_MIN_FREE_BYTES)} 空闲)` });
+      req.resume();
+      return true;
+    }
     let staging: string | undefined;
     try {
       if (zipBatch) {

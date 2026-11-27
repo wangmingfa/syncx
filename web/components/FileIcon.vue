@@ -239,6 +239,39 @@ const kind = computed(() => props.kind ?? fileIconKind(props.name ?? ''));
       <path d="M6 10.6h4" stroke-width="2.4" />
     </svg>
 
+    <!-- 磁盘映像(dmg / iso):光盘 —— 外圆 + 中心孔。
+         与 media 的「圆 + 实心三角」靠中心孔区分:三角是实心的,孔是空心的。 -->
+    <svg v-else-if="kind === 'disk'" class="cmp-svg cmp-svg--file" viewBox="0 0 16 16">
+      <circle cx="8" cy="8" r="5.4" />
+      <circle cx="8" cy="8" r="1.4" />
+    </svg>
+
+    <!-- 安装包 / 可执行(exe / pkg / apk …):下箭头落入托盘(通用「装到本机」隐喻) -->
+    <svg v-else-if="kind === 'package'" class="cmp-svg cmp-svg--file" viewBox="0 0 16 16">
+      <path d="M8 2.4v5.6" />
+      <path d="M5.8 6 8 8.2 10.2 6" />
+      <path d="M2.9 9.8v2.3a1.6 1.6 0 0 0 1.6 1.6h7a1.6 1.6 0 0 0 1.6-1.6V9.8" />
+    </svg>
+
+    <!-- 演示文稿(ppt / pptx / key):投影幕布 + 支架 -->
+    <svg v-else-if="kind === 'slides'" class="cmp-svg cmp-svg--file" viewBox="0 0 16 16">
+      <rect x="2.7" y="2.8" width="10.6" height="7" rx="1.2" />
+      <path d="M8 9.8v2.6" />
+      <path d="M5.8 13.6 8 12.4l2.2 1.2" />
+    </svg>
+
+    <!-- 字体(ttf / otf / woff2):字母 A -->
+    <svg v-else-if="kind === 'font'" class="cmp-svg cmp-svg--file" viewBox="0 0 16 16">
+      <path d="M4.3 12.8 8 3.4l3.7 9.4" />
+      <path d="M5.7 9.1h4.6" />
+    </svg>
+
+    <!-- 电子书(epub / mobi):翻开的书 + 书脊 -->
+    <svg v-else-if="kind === 'ebook'" class="cmp-svg cmp-svg--file" viewBox="0 0 16 16">
+      <path d="M8 4.3C6.8 3.3 4.9 3 3 3.2v9c1.9-.2 3.8.1 5 1.1 1.2-1 3.1-1.3 5-1.1v-9c-1.9-.2-3.8.1-5 1.1Z" />
+      <path d="M8 4.3v9" />
+    </svg>
+
     <!-- 文本消息:对话气泡 + 两行字。用于直发收件箱里的「文本」条目 —— 那里没有文件名,
          借用 doc 的折角页会和普通 .txt 混成一片,气泡才是「一句话」的通用隐喻。
          与 file 系同用 12px 视框(气泡几乎占满 16 格,按 13px 画会比旁边的文件图标大一圈)。 -->

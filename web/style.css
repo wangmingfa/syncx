@@ -3207,6 +3207,12 @@ html[data-theme='dark'] .conflict-state-diff {
 .cmp-icon--media { color: #c0488a; }
 .cmp-icon--sheet { color: #2f9e6f; }
 .cmp-icon--pdf { color: #c0504d; }
+/* 常见二进制 / 办公 / 字体:色相各自错开,形状(光盘/托盘/幕布/A/书)再拉开距离 */
+.cmp-icon--disk { color: #5f8199; }
+.cmp-icon--package { color: #b5651d; }
+.cmp-icon--slides { color: #cf4b2a; }
+.cmp-icon--font { color: #7f6a52; }
+.cmp-icon--ebook { color: #4f7a5a; }
 .cmp-icon--file { color: var(--muted); }
 /* 直发收件箱专用的两枚:文本消息取灰蓝(和 doc 同族但不撞 code/ts 的蓝),
    一批文件沿用 doc 的灰蓝再压暗一档 —— 两者都不与具体语言色抢注意力。 */

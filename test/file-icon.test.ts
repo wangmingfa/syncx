@@ -97,6 +97,33 @@ describe('fileIconKind:非代码文件', () => {
     expect(fileIconKind('book.pdf')).toBe('pdf');
   });
 
+  it('常用二进制 / 办公 / 字体各有其类', () => {
+    // 直发场景里最常见的就是这些二进制:以前全落成通用折角页
+    for (const n of ['MOSS1.5.28-arm64.dmg', 'installer.iso', 'disk.img']) {
+      expect(fileIconKind(n)).toBe('disk');
+    }
+    for (const n of ['setup.exe', 'app.msi', 'Tool.pkg', 'a.deb', 'b.rpm', 'app.apk', 'x.ipa']) {
+      expect(fileIconKind(n)).toBe('package');
+    }
+    for (const n of ['deck.pptx', 'old.ppt', 'show.odp']) {
+      expect(fileIconKind(n)).toBe('slides');
+    }
+    // .key 更常见的是私钥 / 证书,不能当 Keynote 幻灯片
+    expect(fileIconKind('server.key')).toBe('file');
+    for (const n of ['font.ttf', 'font.otf', 'font.woff2', 'font.eot']) {
+      expect(fileIconKind(n)).toBe('font');
+    }
+    for (const n of ['book.epub', 'book.mobi', 'book.azw3']) {
+      expect(fileIconKind(n)).toBe('ebook');
+    }
+    for (const n of ['spec.docx', 'old.doc', 'a.odt', 'b.rtf', 'c.pages']) {
+      expect(fileIconKind(n)).toBe('doc');
+    }
+    expect(fileIconKind('IMG_0001.HEIC')).toBe('image');
+    expect(fileIconKind('voice.opus')).toBe('media');
+    expect(fileIconKind('clip.m4v')).toBe('media');
+  });
+
   it('无扩展名 / 未知扩展名归 file', () => {
     expect(fileIconKind('weird.xyz')).toBe('file');
     expect(fileIconKind('Makefile.unknown')).toBe('file');

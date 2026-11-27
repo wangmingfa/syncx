@@ -8,7 +8,7 @@ import type { AddressInfo } from 'node:net';
 import { request } from 'node:http';
 import { CAP_DIRECT1, PEER_CAPS } from '../src/handshake.js';
 import { decodeBinaryFrame, encodeBinaryFrame } from '../src/net/wire.js';
-import { createDirectService, DIRECT_CHUNK_BYTES, DIRECT_MAX_QUEUED, DIRECT_RESUME_TTL_MS, type DirectControlMessage, type DirectService, type DirectTransport } from '../src/direct.js';
+import { createDirectService, DIRECT_CHUNK_BYTES, DIRECT_MAX_FILE_BYTES, DIRECT_MAX_QUEUED, DIRECT_RESUME_TTL_MS, inboxUsedBytes, type DirectControlMessage, type DirectFileItem, type DirectService, type DirectTransport } from '../src/direct.js';
 import { resolveDirectSaveDir } from '../src/direct-save-path.js';
 import { signSession, sessionSecret } from '../src/auth.js';
 import { ELEVATE_COOKIE } from '../src/api/helpers.js';
@@ -116,6 +116,32 @@ describe('device direct transfer', () => {
     a.handleControl({ kind: 'direct-result', id: idC, fromDeviceId: '', ok: true }, 'C', tx);
     expect(existsSync(source)).toBe(false);
     a.close();
+  });
+
+  it('本机路径发送:external 文件传完不删,离线直接拒绝', () => {
+    const a = createDirectService({ configDir: tmp() });
+    const b = createDirectService({ configDir: tmp() });
+    const { txA, txB } = pair(a, b);
+    // 用户自己的文件:放在 syncx 数据目录之外,daemon 只借来读。
+    const source = join(tmp(), 'user-owned.bin');
+    const data = Buffer.from('path mode payload');
+    writeFileSync(source, data);
+    const file = {
+      name: 'user-owned.bin',
+      sourcePath: source,
+      size: data.length,
+      sha256: createHash('sha256').update(data).digest('hex'),
+      external: true,
+    };
+    // 离线目标不排队:路径在 24 小时后可能已经不存在或被改写。
+    expect(() => a.sendFile('B', file)).toThrow('需要对方在线');
+    const id = a.sendFile('B', file, txA).id;
+    b.reply(id, true, txB);
+    expect(a.snapshot().transfers.find((t) => t.id === id)?.state).toBe('done');
+    expect(existsSync(source)).toBe(true);
+    expect(readFileSync(source).equals(data)).toBe(true);
+    a.close();
+    b.close();
   });
 
   it('拒绝:不收字节,发送方标记为失败', () => {
@@ -280,6 +306,94 @@ describe('device direct transfer', () => {
     const badBatch = await post(`/api/direct/file?deviceId=AAAA&name=x.bin&size=${data.length}&batch=${encodeURIComponent('坏 批次')}`, data);
     expect(badBatch.status).toBe(400);
     expect(JSON.parse(badBatch.text).error).toContain('批次号');
+    server.close();
+  });
+
+  it('HTTP:本机路径发送要提权,拒绝相对路径与数据目录,成功时文件归用户不删', async () => {
+    let captured: { name: string; size: number; sha256: string; sourcePath: string; external?: boolean } | undefined;
+    const configDir = tmp();
+    const server = createControlServer({
+      token: 'secret',
+      configDir,
+      getStatus: () => ({}),
+      direct: {
+        snapshot: () => ({ inbox: [], pending: [], transfers: [], unread: 0, zip: false }),
+        content: async () => undefined,
+        remove: async () => true,
+        markInboxRead: () => 0,
+        reply: () => true,
+        replyBatch: () => 0,
+        sendText: () => ({ id: 'dt-x', queued: false }),
+        sendFile: (deviceId, file) => {
+          captured = file;
+          return { id: `df-${deviceId}`, queued: false };
+        },
+        cancelQueued: () => true,
+      },
+    });
+    server.listen(0, '127.0.0.1');
+    await once(server, 'listening');
+    const port = (server.address() as AddressInfo).port;
+    const post = (body: object, cookie?: string): Promise<{ status: number; text: string }> =>
+      new Promise((resolve, reject) => {
+        const payload = JSON.stringify(body);
+        const req = request(
+          {
+            host: '127.0.0.1', port, path: '/api/direct/send-path', method: 'POST',
+            headers: {
+              Authorization: 'Bearer secret', 'Content-Type': 'application/json',
+              ...(cookie ? { Cookie: cookie } : {}),
+            },
+          },
+          (res) => {
+            let text = '';
+            res.setEncoding('utf8');
+            res.on('data', (c) => { text += c; });
+            res.on('end', () => resolve({ status: res.statusCode ?? 0, text }));
+          },
+        );
+        req.on('error', reject);
+        req.end(payload);
+      });
+    const cookie = `${ELEVATE_COOKIE}=${signSession(
+      { via: 'elevate', sub: 'su', exp: Date.now() + 600_000 },
+      sessionSecret('secret|elevate'),
+    )}`;
+    const data = Buffer.from('path route payload');
+    const source = join(tmp(), '发给对端.txt');
+    writeFileSync(source, data);
+
+    // 读任意文件再外发与另存同级:没过提权门一律 403。
+    const denied = await post({ path: source, deviceId: 'AAAA' });
+    expect(denied.status).toBe(403);
+    expect(captured).toBeUndefined();
+
+    const relative = await post({ path: 'rel/file.txt', deviceId: 'AAAA' }, cookie);
+    expect(relative.status).toBe(400);
+    expect(JSON.parse(relative.text).error).toContain('绝对路径');
+
+    const inside = join(configDir, 'index.json');
+    writeFileSync(inside, '{}');
+    const blocked = await post({ path: inside, deviceId: 'AAAA' }, cookie);
+    expect(blocked.status).toBe(400);
+    expect(JSON.parse(blocked.text).error).toContain('数据目录');
+
+    const missing = await post({ path: join(configDir, 'nope.bin'), deviceId: 'AAAA' }, cookie);
+    expect(missing.status).toBe(400);
+
+    const ok = await post({ path: source, deviceIds: ['AAAA', 'BBBB'], batch: 'db-path1' }, cookie);
+    expect(ok.status, ok.text).toBe(200);
+    expect(JSON.parse(ok.text).results).toMatchObject([
+      { deviceId: 'AAAA', id: 'df-AAAA' },
+      { deviceId: 'BBBB', id: 'df-BBBB' },
+    ]);
+    expect(captured?.name).toBe('发给对端.txt');
+    expect(captured?.size).toBe(data.length);
+    expect(captured?.sha256).toBe(createHash('sha256').update(data).digest('hex'));
+    // 关键:标记 external,服务层据此只读不删;路径按真实路径规范化。
+    expect(captured?.external).toBe(true);
+    expect(captured?.sourcePath).toBe(realpathSync(source));
+    expect(existsSync(source)).toBe(true);
     server.close();
   });
 
@@ -893,6 +1007,75 @@ describe('device direct transfer', () => {
     expect(a.snapshot().transfers.find((t) => t.id === ack.id)).toMatchObject({ state: 'queued', kind: 'text' });
     const queueFile = join(configDir, 'inbox', 'queue.json');
     expect(JSON.parse(readFileSync(queueFile, 'utf8'))).toMatchObject([{ id: ack.id, text: '半路断线的文本' }]);
+    a.close();
+  });
+
+  it('离线排队:超过排队上限的单文件直接拒绝,提示需对方在线', () => {
+    const a = createDirectService({ configDir: tmp() });
+    const source = join(tmp(), 'big.bin');
+    writeFileSync(source, '');
+    // 设备离线(无 tx)时,10GB 级文件不能进暂存区等 24 小时
+    expect(() => a.sendFile('B', {
+      name: 'big.bin',
+      sourcePath: source,
+      size: 2 * 1024 * 1024 * 1024,
+      sha256: 'a'.repeat(64),
+    }, undefined)).toThrow(/需要对方在线/);
+    expect(a.snapshot().transfers).toHaveLength(0);
+    a.close();
+  });
+
+  it('收件箱配额只算本机留存:另存到用户目录的回执不占额度', () => {
+    const file = (over: Partial<DirectFileItem> = {}): DirectFileItem => ({
+      kind: 'file',
+      id: 'df-q1',
+      from: 'A',
+      createdAt: 1,
+      name: 'a.bin',
+      size: 8 * 1024 ** 3,
+      sha256: '0'.repeat(64),
+      path: '/tmp/a.bin',
+      ...over,
+    });
+    expect(inboxUsedBytes([file()])).toBe(8 * 1024 ** 3);
+    // 10GB 级别文件「另存到用户目录」后,收件箱只剩回执,不该永久占掉额度
+    expect(inboxUsedBytes([file({ external: true })])).toBe(0);
+    expect(inboxUsedBytes([
+      file({ external: true }),
+      { kind: 'text', id: 'dt-q1', from: 'A', createdAt: 1, size: 5, preview: 'x', path: '/tmp/t.txt' },
+    ])).toBe(5);
+  });
+
+  it('收件箱正文返回路径:文本与文件都从磁盘流式读,不再整份进内存', async () => {
+    const a = createDirectService({ configDir: tmp() });
+    const b = createDirectService({ configDir: tmp() });
+    const { txA, txB } = pair(a, b);
+    const data = Buffer.alloc(4096, 0x5a);
+    const source = join(tmp(), 'doc.bin');
+    writeFileSync(source, data);
+    const textId = a.sendText('B', '看这里', txA).id;
+    const id = a.sendFile('B', {
+      name: 'doc.bin',
+      sourcePath: source,
+      size: data.length,
+      sha256: createHash('sha256').update(data).digest('hex'),
+    }, txA).id;
+    b.reply(id, true, txB);
+    const found = await b.content(id);
+    expect(found?.size).toBe(data.length);
+    expect(readFileSync(found!.path).equals(data)).toBe(true);
+    const textFound = await b.content(textId);
+    expect(textFound?.size).toBe(Buffer.byteLength('看这里', 'utf8'));
+    expect(readFileSync(textFound!.path, 'utf8')).toBe('看这里');
+    expect(await b.content('df-missing')).toBeUndefined();
+    a.close();
+    b.close();
+  });
+
+  it('快照声明单文件上限:前端据此做即时拦截与文案,Node 后端是 10GB', () => {
+    const a = createDirectService({ configDir: tmp() });
+    expect(a.snapshot().maxFileBytes).toBe(DIRECT_MAX_FILE_BYTES);
+    expect(DIRECT_MAX_FILE_BYTES).toBe(10 * 1024 * 1024 * 1024);
     a.close();
   });
 

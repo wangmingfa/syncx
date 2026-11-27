@@ -47,6 +47,16 @@ export type FileIconKind =
   | 'media'
   | 'sheet'
   | 'pdf'
+  /** 磁盘映像:dmg / iso / img(光盘) */
+  | 'disk'
+  /** 安装包 / 可执行:exe / msi / pkg / deb / rpm / apk */
+  | 'package'
+  /** 演示文稿:ppt / pptx / odp */
+  | 'slides'
+  /** 字体:ttf / otf / woff2 */
+  | 'font'
+  /** 电子书:epub / mobi */
+  | 'ebook'
   | 'file'
   // —— 直发收件箱专有(不来自扩展名,由调用方显式指定)
   /** 一段文本消息:气泡 + 两行字 */
@@ -88,10 +98,12 @@ const EXT_KIND: Record<string, FileIconKind> = {
   // —— 文档 / 纯文本（.mbt.md 这类复合后缀也按最后一个后缀算,正好是 markdown）
   md: 'markdown', markdown: 'markdown', mdx: 'markdown',
   txt: 'doc', rst: 'doc', log: 'doc',
+  doc: 'doc', docx: 'doc', odt: 'doc', rtf: 'doc', pages: 'doc',
 
   // —— 图片
   png: 'image', jpg: 'image', jpeg: 'image', gif: 'image', svg: 'image',
   webp: 'image', ico: 'image', bmp: 'image', avif: 'image', tiff: 'image',
+  heic: 'image', heif: 'image',
 
   // —— 压缩包
   zip: 'archive', tar: 'archive', gz: 'archive', tgz: 'archive',
@@ -99,13 +111,22 @@ const EXT_KIND: Record<string, FileIconKind> = {
 
   // —— 音视频
   mp3: 'media', wav: 'media', flac: 'media', ogg: 'media', m4a: 'media', aac: 'media',
-  mp4: 'media', mov: 'media', mkv: 'media', webm: 'media', avi: 'media',
+  opus: 'media', mp4: 'media', mov: 'media', m4v: 'media', mkv: 'media',
+  webm: 'media', avi: 'media',
 
   // —— 表格
   csv: 'sheet', tsv: 'sheet', xls: 'sheet', xlsx: 'sheet', ods: 'sheet',
 
   // —— PDF
   pdf: 'pdf',
+
+  // —— 磁盘映像 / 安装包 / 演示文稿 / 字体 / 电子书
+  dmg: 'disk', iso: 'disk', img: 'disk', vhd: 'disk', vmdk: 'disk',
+  exe: 'package', msi: 'package', pkg: 'package', deb: 'package', rpm: 'package',
+  apk: 'package', ipa: 'package', appimage: 'package', snap: 'package',
+  ppt: 'slides', pptx: 'slides', odp: 'slides',
+  ttf: 'font', otf: 'font', woff: 'font', woff2: 'font', eot: 'font',
+  epub: 'ebook', mobi: 'ebook', azw3: 'ebook',
 };
 
 /** 无扩展名的常见文件名(小写整名匹配)。 */

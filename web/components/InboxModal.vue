@@ -1,7 +1,7 @@
 <script setup lang="ts">
-import { computed, ref, watch } from 'vue';
+import { computed, onBeforeUnmount, ref, watch } from 'vue';
 import { NButton, NInput } from 'naive-ui';
-import type { DirectItem, DirectPending, StatusData } from '../types';
+import type { DirectItem, DirectPending, DirectTransfer, StatusData } from '../types';
 import type { DirectApi } from '../composables/useDirect';
 import { ensureElevated, elevated } from '../utils/elevation';
 import ModalShell from './ModalShell.vue';
@@ -34,6 +34,92 @@ function isExternal(item: DirectItem): boolean {
 }
 function savedPath(item: DirectItem): string {
   return item.kind === 'file' ? (item.path ?? '') : '';
+}
+
+/**
+ * 实时速度 / 剩余时间:Node 后端在传输中按 1s 节流推进度帧(src/direct.ts 的
+ * DIRECT_PROGRESS_NOTIFY_MS),单帧只有 bytesDone、没有速率字段。这里逐帧采样,
+ * 取最近 4 秒窗口的平均速率:1s 采样留 4 帧,既跟手又不会被单帧抖动带偏。
+ * 作废阈值取 6 秒:Rust/MoonBit 的进度帧仍是状态中枢 5s 兜底节奏,卡太紧会在
+ * 每个周期末尾闪断一次;超过 6 秒没有新进度(对端掉线/卡死)才隐藏,不给冻住的 ETA。
+ */
+const SPEED_WINDOW_MS = 4000;
+const SPEED_STALE_MS = 6000;
+const speedSamples = new Map<string, { t: number; bytes: number }[]>();
+/** 秒针:只用来让「多久没动」随时间自然作废,数值本身仍由状态帧驱动刷新。 */
+const clock = ref(Date.now());
+
+watch(
+  () => props.status.direct?.transfers,
+  (list) => {
+    const now = Date.now();
+    const live = new Set<string>();
+    for (const t of list ?? []) {
+      if (t.state !== 'transferring') continue;
+      live.add(t.id);
+      let arr = speedSamples.get(t.id);
+      if (!arr) {
+        arr = [];
+        speedSamples.set(t.id, arr);
+      }
+      const last = arr[arr.length - 1];
+      if (!last || last.bytes !== t.bytesDone) arr.push({ t: now, bytes: t.bytesDone });
+      while (arr.length > 2 && now - arr[0].t > SPEED_WINDOW_MS) arr.shift();
+    }
+    for (const id of [...speedSamples.keys()]) if (!live.has(id)) speedSamples.delete(id);
+  },
+  { immediate: true },
+);
+
+let ticker: number | undefined;
+function stopTicker(): void {
+  if (ticker !== undefined) {
+    window.clearInterval(ticker);
+    ticker = undefined;
+  }
+}
+watch(
+  () => props.open,
+  (open) => {
+    stopTicker();
+    if (!open) return;
+    clock.value = Date.now();
+    ticker = window.setInterval(() => {
+      clock.value = Date.now();
+    }, 1000);
+  },
+  { immediate: true },
+);
+onBeforeUnmount(stopTicker);
+
+function speedOf(t: DirectTransfer): number | null {
+  const arr = speedSamples.get(t.id);
+  if (!arr || arr.length < 2) return null;
+  const last = arr[arr.length - 1];
+  if (clock.value - last.t > SPEED_STALE_MS) return null;
+  const dt = (last.t - arr[0].t) / 1000;
+  if (dt <= 0) return null;
+  const bytes = last.bytes - arr[0].bytes;
+  return bytes > 0 ? bytes / dt : null;
+}
+
+function fmtDuration(sec: number): string {
+  const s = Math.max(1, Math.round(sec));
+  if (s < 60) return `${s} 秒`;
+  const m = Math.floor(s / 60);
+  if (m < 60) return s % 60 ? `${m} 分 ${s % 60} 秒` : `${m} 分`;
+  const h = Math.floor(m / 60);
+  return m % 60 ? `${h} 小时 ${m % 60} 分` : `${h} 小时`;
+}
+
+/** 传输中卡片副标题的尾段:「12.3 MB/s · 剩余 3 分 20 秒」;样本不足时返回 null。 */
+function rateLabel(t: DirectTransfer): string | null {
+  if (t.state !== 'transferring') return null;
+  const speed = speedOf(t);
+  if (speed === null) return null;
+  const head = `${props.direct.formatBytes(speed)}/s`;
+  const remain = t.size - t.bytesDone;
+  return remain <= 0 ? head : `${head} · 剩余 ${fmtDuration(remain / speed)}`;
 }
 
 /**
@@ -174,7 +260,7 @@ watch(
           </span>
           <span class="inbox-state" :class="`is-${t.state}`">{{ stateLabel(t.state) }}</span>
         </div>
-        <div class="inbox-sub">{{ t.direction === 'send' ? '发往' : '来自' }} {{ t.deviceId }} · {{ direct.formatBytes(t.bytesDone) }} / {{ direct.formatBytes(t.size) }}</div>
+        <div class="inbox-sub">{{ t.direction === 'send' ? '发往' : '来自' }} {{ t.deviceId }} · {{ direct.formatBytes(t.bytesDone) }} / {{ direct.formatBytes(t.size) }}<template v-if="rateLabel(t)"> · {{ rateLabel(t) }}</template></div>
         <div class="inbar"><span :style="{ width: `${percent(t.bytesDone, t.size)}%` }" /></div>
         <!-- 排队项可以撤:内容还在本机暂存区,没发出去也不占对方任何东西。 -->
         <div v-if="t.direction === 'send' && t.state === 'queued'" class="inbox-actions">

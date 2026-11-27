@@ -119,6 +119,12 @@ export function createControlServer(deps: ControlServerDeps): Server {
     })();
   });
 
+  // 整包请求时限:Node 默认 300s,而直发/文件上传在慢速 LAN 或手机上很容易超过
+  // (10GB @ 20MB/s 要 8.5 分钟),超时会被无声地 408 掐断。控制口只对已登录的
+  // 本机/局域网会话开放,上传路由各自还有「按声明大小」的硬上限,这里直接关掉
+  // 整包时限;头部时限(headersTimeout)保持默认,慢速攻击面不扩大。
+  server.requestTimeout = 0;
+
   // WebSocket 升级:/api/events 是状态推送(status-hub),/api/terminal 是浏览器内
   // 终端(简易 shell 通道),其余路径一律断开 —— 放着不管会让连接永久挂起。
   // 鉴权失败回一个 401 响应再断开 —— 客户端能据此区分「没登录」与「网络不通」,

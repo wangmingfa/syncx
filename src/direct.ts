@@ -18,6 +18,7 @@ import { createHash, randomBytes } from 'node:crypto';
 import { closeSync, existsSync, mkdirSync, openSync, readFileSync, readSync, renameSync, rmSync, statSync, writeFileSync, writeSync } from 'node:fs';
 import { promises as fs } from 'node:fs';
 import { join } from 'node:path';
+import { DISK_GUARD_MIN_FREE_BYTES, freeBytesAt } from './disk.js';
 import type { ControlMessage } from './net/wire.js';
 
 export type DirectControlMessage = Extract<ControlMessage, { kind: `direct-${string}` }>;
@@ -57,6 +58,23 @@ export interface DirectFileItem {
 }
 
 export type DirectItem = DirectTextItem | DirectFileItem;
+
+/**
+ * 收件箱实占字节:只算本机留存的条目。external(另存到用户目录)的文件只是回执,
+ * 字节在用户盘上,删回执也不会删文件 —— 把它计进配额会让「收了一个 10GB 文件另存」
+ * 永久吃掉 10GB 额度,之后连小文件都收不进来。
+ */
+export function inboxUsedBytes(list: readonly DirectItem[]): number {
+  return list.reduce((sum, i) => sum + (i.kind === 'file' && i.external ? 0 : i.size), 0);
+}
+
+/** 错误文案里的字节数:10GB 级别的值不能只写 MB。 */
+function fmtBytes(n: number): string {
+  if (n < 1024) return `${n} B`;
+  if (n < 1024 * 1024) return `${(n / 1024).toFixed(1)} KB`;
+  if (n < 1024 * 1024 * 1024) return `${(n / 1024 / 1024).toFixed(1)} MB`;
+  return `${(n / 1024 / 1024 / 1024).toFixed(1)} GB`;
+}
 
 /** 一份等用户确认的入站文件提议(状态快照只给元数据,不含字节)。 */
 export interface DirectPending {
@@ -101,6 +119,16 @@ export interface DirectSnapshot {
    * 按 runtime 猜(Rust 与 MoonBit 各自报自己的)。
    */
   zip: boolean;
+  /**
+   * 单文件上限(字节)。前端据此做即时拦截与文案,后端仍会复核。
+   * 老后端(以及尚未跟进 10GB 的 Rust/MoonBit)不发这个字段 → 前端按 100MB 兜底。
+   */
+  maxFileBytes?: number;
+  /**
+   * 本后端是否支持「网页填 daemon 本机路径,直接读盘投送」(跳过浏览器上传)。
+   * 该操作能读任意文件,调用时必须已过提权门;未声明 = 前端不显示这个入口。
+   */
+  sendByPath?: boolean;
 }
 
 export interface DirectServiceDeps {
@@ -130,7 +158,8 @@ export interface DirectSendAck {
  */
 export interface DirectApi {
   snapshot(): DirectSnapshot;
-  content(id: string): Promise<{ item: DirectItem; data: Buffer } | undefined>;
+  /** 条目的落盘位置与大小:路由拿路径流式发送,不把正文整读进内存(10GB 上限)。 */
+  content(id: string): Promise<{ item: DirectItem; path: string; size: number } | undefined>;
   remove(id: string): Promise<boolean>;
   /** 把所有未读条目标成已读;返回改动的条数。 */
   markInboxRead(): number;
@@ -138,7 +167,11 @@ export interface DirectApi {
   reply(id: string, accept: boolean, reason?: string, saveDir?: string): boolean;
   sendText(deviceId: string, text: string): DirectSendAck;
   /** batchId 把同一次多文件投送的几条提议串起来(缺省 = 各算各的)。 */
-  sendFile(deviceId: string, file: { name: string; sourcePath: string; size: number; sha256: string }, batchId?: string): DirectSendAck;
+  sendFile(
+    deviceId: string,
+    file: { name: string; sourcePath: string; size: number; sha256: string; external?: boolean },
+    batchId?: string,
+  ): DirectSendAck;
   /** 按组一次性确认/拒绝:返回处理的条数(0 = 该组已不存在)。 */
   replyBatch(batchId: string, accept: boolean, reason?: string, saveDir?: string): number;
   /** 取消一条还在排队的投送(暂存文件一并回收);不是排队态返回 false。 */
@@ -151,10 +184,18 @@ export const DIRECT_CHUNK_BYTES = 256 * 1024;
 const DIRECT_WINDOW = 4;
 /** 文本上限(64KB UTF-8 字节,不是字符数)。 */
 export const DIRECT_MAX_TEXT_BYTES = 64 * 1024;
-/** 单文件上限 100MB:超过请走共享目录(那是为大数据量设计的路径)。 */
-export const DIRECT_MAX_FILE_BYTES = 100 * 1024 * 1024;
-/** 收件箱软配额:超出后拒绝新入站,避免把 daemon 数据目录撑爆。 */
-const DIRECT_INBOX_QUOTA_BYTES = 512 * 1024 * 1024;
+/**
+ * 单文件上限 10GB(2026-11 放开,沿用同一套分片协议:256KB 一片 = 40960 片,
+ * 账本与进度都还能用普通 number)。内存不随文件大小涨:发送在途窗口 4 片、
+ * 接收乱序缓存 32 片,正文始终流式读写。
+ */
+export const DIRECT_MAX_FILE_BYTES = 10 * 1024 * 1024 * 1024;
+/**
+ * 收件箱软配额:超出后拒绝新入站,避免把 daemon 数据目录撑爆。
+ * 必须 ≥ 单文件上限,否则最大文件永远进不来;12GB = 一个 10GB 文件 + 2GB 余量。
+ * 只统计本机留存的条目 —— 另存到用户目录的 external 回执字节不在 inbox 里,不计。
+ */
+const DIRECT_INBOX_QUOTA_BYTES = 12 * 1024 * 1024 * 1024;
 /** 提议等待用户确认的时限(2 分钟,允许对方起身去点)。 */
 const DIRECT_OFFER_TIMEOUT_MS = 120_000;
 /** 分片重传间隔:超过 5s 没确认就重发该片。 */
@@ -163,6 +204,12 @@ const DIRECT_RETRY_MS = 5_000;
 const DIRECT_MAX_RETRIES = 3;
 /** 完全收不到确认的硬超时(30s)。 */
 const DIRECT_STALL_TIMEOUT_MS = 30_000;
+/**
+ * 传输中进度推送的节流间隔。状态中枢本身「有变化才推 + 兜底 5s 一帧」:光靠兜底,
+ * Web 端只能拿到 5s 粒度的进度,算不出跟手的速度;而每片 256KB 都推一次全量状态
+ * 又太贵(每次都要重算目录统计)。取 1s:Web 端逐帧采样即可得到 1s 分辨率的速率。
+ */
+const DIRECT_PROGRESS_NOTIFY_MS = 1_000;
 /** 乱序分片缓存上限(32 片 = 8MB);超出的片丢弃,发送方会重传。 */
 const MAX_BUFFERED_CHUNKS = 32;
 /** 已结束的传输记录在快照里保留多久(给 UI 足够时间看到结果)。 */
@@ -182,7 +229,11 @@ const DIRECT_RESUME_RETRY_MS = 3_000;
 export const DIRECT_QUEUE_TTL_MS = 24 * 60 * 60 * 1000;
 /** 队列条数上限:防止误点「全选」把几十台离线设备的文件都拖进暂存区。 */
 export const DIRECT_MAX_QUEUED = 20;
-/** 队列文件总量上限(收件箱配额同量级),超出后拒绝新入队。 */
+/**
+ * 队列文件总量上限(收件箱配额同量级),超出后拒绝新入队。
+ * 也是「离线可排队的单文件上限」:超过这个数的文件必须对方在线才能发 ——
+ * 排队 = 把整份副本留在暂存区最长 24 小时,10GB 级别的文件不能这么放。
+ */
 export const DIRECT_QUEUE_MAX_BYTES = 512 * 1024 * 1024;
 /** 排队项探测通道的间隔:会话事件与入队可能擦肩而过,定时器兜一层。 */
 const DIRECT_QUEUE_PROBE_MS = 5_000;
@@ -219,6 +270,11 @@ interface OutgoingTransfer {
   batchId?: string;
   /** 文件专用:分期中的本地暂存文件、指纹、分片账本。 */
   sourcePath?: string;
+  /**
+   * 文件属于用户(网页填 daemon 本机路径直接发送):daemon 只借引用读取,
+   * 传输结束/失败/过期都不得删除,也不进离线队列。
+   */
+  external?: boolean;
   fd?: number;
   sha256?: string;
   totalChunks?: number;
@@ -270,18 +326,22 @@ function isSafeId(id: string): boolean {
 export interface DirectService {
   /** 当前状态快照(收件箱元数据 + 待确认 + 在途),供 status 下发。 */
   snapshot(): DirectSnapshot;
-  /** 取一条收件箱内容;文件返回原始字节,文本返回 UTF-8 字节。 */
-  content(id: string): Promise<{ item: DirectItem; data: Buffer } | undefined>;
+  /** 取一条收件箱内容:返回正文所在路径,由调用方流式读取。 */
+  content(id: string): Promise<{ item: DirectItem; path: string; size: number } | undefined>;
   /** 删除一条收件箱记录(连同正文;不可逆)。 */
   remove(id: string): Promise<boolean>;
   /** 把所有未读条目标成已读(打开收件箱即视为看过);返回改动的条数。 */
   markInboxRead(): number;
   /** 发起文本直发;没有 tx(目标离线)时进队列,等它上线自动投递。 */
   sendText(deviceId: string, text: string, tx?: DirectTransport): DirectSendAck;
-  /** 发起文件直发;sourcePath 是已落在**非共享暂存区**的完整文件。没有 tx 时进队列。 */
+  /**
+   * 发起文件直发;sourcePath 是已落在**非共享暂存区**的完整文件。
+   * external = 文件属于用户(external 路径发送):daemon 只读不删,也不允许离线排队。
+   * 没有 tx 时进队列。
+   */
   sendFile(
     deviceId: string,
-    file: { name: string; sourcePath: string; size: number; sha256: string },
+    file: { name: string; sourcePath: string; size: number; sha256: string; external?: boolean },
     tx?: DirectTransport,
     batchId?: string,
   ): DirectSendAck;
@@ -479,6 +539,8 @@ export function createDirectService(deps: DirectServiceDeps): DirectService {
     bytesDone: number;
     pausedAt: number;
     batchId?: string;
+    /** 用户本机文件:重启后续传照旧读它,过期清理时不得删。 */
+    external?: boolean;
   }
 
   /** 跨重启续传台账的一条入站记录:半截文件按 id 命名(`.tmp/in-<id>`),路径不必存。 */
@@ -562,6 +624,7 @@ export function createDirectService(deps: DirectServiceDeps): DirectService {
         // 续传窗口从「最后一次确认它还活着」算起,而不是从用户点发送算起。
         pausedAt: o.pausedAt ?? Date.now(),
         ...(o.batchId ? { batchId: o.batchId } : {}),
+        ...(o.external ? { external: true } : {}),
       });
     }
     const ins: ResumeInRecord[] = [];
@@ -607,7 +670,8 @@ export function createDirectService(deps: DirectServiceDeps): DirectService {
       const fresh = now - r.pausedAt <= DIRECT_RESUME_TTL_MS;
       const usable = fresh && r.bytesDone < r.size && existsSync(r.sourcePath);
       if (!usable) {
-        deadSources.push(r.sourcePath);
+        // 用户本机文件只在台账里借用,过期清理不碰它。
+        if (!r.external) deadSources.push(r.sourcePath);
         continue;
       }
       const acked = Math.floor(r.bytesDone / DIRECT_CHUNK_BYTES);
@@ -632,9 +696,11 @@ export function createDirectService(deps: DirectServiceDeps): DirectService {
         inflight: new Map(),
         lastProgressAt: now,
         ...(r.batchId ? { batchId: r.batchId } : {}),
+        ...(r.external ? { external: true } : {}),
       };
       outgoing.set(out.id, out);
-      if (out.sourcePath) sourceRefs.set(out.sourcePath, (sourceRefs.get(out.sourcePath) ?? 0) + 1);
+      // external 路径不登记引用计数:它不属于 daemon 的暂存区。
+      if (out.sourcePath && !out.external) sourceRefs.set(out.sourcePath, (sourceRefs.get(out.sourcePath) ?? 0) + 1);
     }
     for (const path of deadSources) {
       if (sourceRefs.has(path)) continue; // 还有存活条目在用它(群发暂存共用)
@@ -688,6 +754,16 @@ export function createDirectService(deps: DirectServiceDeps): DirectService {
     deps.onChange?.();
   }
 
+  /** 上次因进度推进而推状态的时间(节流窗口见 DIRECT_PROGRESS_NOTIFY_MS)。 */
+  let lastProgressNotifyAt = 0;
+  /** 进度推进时推一帧状态(节流);收尾/取消/失败等一次性事件仍走 notify() 立即推。 */
+  function notifyProgress(): void {
+    const now = Date.now();
+    if (now - lastProgressNotifyAt < DIRECT_PROGRESS_NOTIFY_MS) return;
+    lastProgressNotifyAt = now;
+    notify();
+  }
+
   function sendControl(tx: DirectTransport, to: string, message: DirectControlMessage): boolean {
     return tx.control(to, message);
   }
@@ -712,6 +788,8 @@ export function createDirectService(deps: DirectServiceDeps): DirectService {
     const path = out.sourcePath;
     if (!path) return;
     out.sourcePath = undefined;
+    // 用户自己的文件:借来读一遍就还,绝不删(sourceRefs 里也从未登记)。
+    if (out.external) return;
     const left = (sourceRefs.get(path) ?? 1) - 1;
     if (left > 0) {
       sourceRefs.set(path, left);
@@ -931,7 +1009,7 @@ export function createDirectService(deps: DirectServiceDeps): DirectService {
     }
     const bytes = queued.reduce((sum, o) => sum + (o.kind === 'file' ? o.size : 0), 0);
     if (bytes + extraBytes > DIRECT_QUEUE_MAX_BYTES) {
-      throw new Error('离线排队的文件总量已满(512 MB),请等设备上线或先取消一些');
+      throw new Error(`离线排队的文件总量已满(${fmtBytes(DIRECT_QUEUE_MAX_BYTES)}),请等设备上线或先取消一些`);
     }
   }
 
@@ -964,6 +1042,7 @@ export function createDirectService(deps: DirectServiceDeps): DirectService {
 
   function writeSequential(inc: IncomingTransfer, tx: DirectTransport): void {
     if (inc.fd === undefined || inc.hash === undefined) return;
+    const before = inc.bytesDone;
     while (inc.buffered.has(inc.nextSeq)) {
       const body = inc.buffered.get(inc.nextSeq)!;
       inc.buffered.delete(inc.nextSeq);
@@ -989,6 +1068,7 @@ export function createDirectService(deps: DirectServiceDeps): DirectService {
     // 未收齐才回累积 ack。最后一片必须只回 direct-result:
     // ack 会让发送方在同一个调用栈里继续 pump,而本函数尚未 digest —— 重入会二次消费哈希。
     if (inc.bytesDone !== inc.size) {
+      if (inc.bytesDone !== before) notifyProgress();
       sendControl(tx, inc.from, { kind: 'direct-ack', id: inc.id, fromDeviceId: '', seq: inc.nextSeq });
       return;
     }
@@ -1065,7 +1145,8 @@ export function createDirectService(deps: DirectServiceDeps): DirectService {
       lastProgressAt: now,
     };
     outgoing.set(out.id, out);
-    if (out.sourcePath) {
+    // external 的路径归用户所有:不登记引用计数,否则最后 release 会把它当暂存删掉。
+    if (out.sourcePath && !out.external) {
       sourceRefs.set(out.sourcePath, (sourceRefs.get(out.sourcePath) ?? 0) + 1);
     }
     // 只保留最近若干条,免得状态快照无限增长。排队项不能被顺手挤掉 ——
@@ -1201,6 +1282,20 @@ export function createDirectService(deps: DirectServiceDeps): DirectService {
       notify();
       return true;
     }
+    // 确认时刻再量一次盘:提议可能已躺了几分钟,期间别的东西可能把盘写满。
+    const free = freeBytesAt(tmpDir);
+    if (free !== undefined && free < inc.size + DISK_GUARD_MIN_FREE_BYTES) {
+      tx.control(inc.from, {
+        kind: 'direct-result',
+        id: inc.id,
+        fromDeviceId: '',
+        ok: false,
+        error: `本机磁盘可用空间不足(需约 ${fmtBytes(inc.size + DISK_GUARD_MIN_FREE_BYTES)} 空闲)`,
+      });
+      cleanupIncoming(inc);
+      notify();
+      return true;
+    }
     // 只在真正开始接收时记下另存目录;拒绝路径完全不碰用户文件系统。
     inc.saveDir = saveDir;
     inc.state = 'transferring';
@@ -1262,6 +1357,8 @@ export function createDirectService(deps: DirectServiceDeps): DirectService {
         ],
         // 能力声明:Node 后端有 zip 打包(ADR-0028 第 16 条)。
         zip: true,
+        maxFileBytes: DIRECT_MAX_FILE_BYTES,
+        sendByPath: true,
       };
     },
 
@@ -1269,7 +1366,9 @@ export function createDirectService(deps: DirectServiceDeps): DirectService {
       const item = items.find((i) => i.id === id);
       if (!item) return undefined;
       try {
-        return { item: { ...item }, data: await fs.readFile(item.path) };
+        const st = await fs.stat(item.path);
+        if (!st.isFile()) return undefined;
+        return { item: { ...item }, path: item.path, size: st.size };
       } catch {
         return undefined;
       }
@@ -1321,9 +1420,17 @@ export function createDirectService(deps: DirectServiceDeps): DirectService {
 
     sendFile(deviceId, file, tx, batchId) {
       if (file.size <= 0 || file.size > DIRECT_MAX_FILE_BYTES) {
-        throw new Error(`文件大小必须在 1 ~ ${DIRECT_MAX_FILE_BYTES} 字节之间`);
+        throw new Error(`文件大小必须在 1 字节 ~ ${fmtBytes(DIRECT_MAX_FILE_BYTES)} 之间`);
       }
       if (!/^[a-f0-9]{64}$/.test(file.sha256)) throw new Error('文件指纹格式不正确');
+      // 用户本机的文件不归 daemon 管:离线排队要在 24 小时后才读它,期间路径可能
+      // 被删除、被改写、甚至换了一块盘 —— 与其排到超时,不如当场要求对方在线。
+      if (file.external && !tx) throw new Error('按本机路径发送需要对方在线');
+      // 排队会把整份副本留在暂存区最长 24 小时:大文件只在对方在线时发,
+      // 直接报明白原因,别让用户看到含混的「队列已满」。
+      if (!tx && file.size > DIRECT_QUEUE_MAX_BYTES) {
+        throw new Error(`超过 ${fmtBytes(DIRECT_QUEUE_MAX_BYTES)} 的文件需要对方在线才能发送`);
+      }
       if (!tx) checkQueueRoom(file.size);
       const out = newOutgoing({
         id: directId('df'),
@@ -1333,6 +1440,7 @@ export function createDirectService(deps: DirectServiceDeps): DirectService {
         size: file.size,
         sourcePath: file.sourcePath,
         sha256: file.sha256,
+        ...(file.external ? { external: true } : {}),
         totalChunks: Math.ceil(file.size / DIRECT_CHUNK_BYTES),
         ...(batchId && isSafeId(batchId) ? { batchId } : {}),
       }, !tx);
@@ -1371,9 +1479,22 @@ export function createDirectService(deps: DirectServiceDeps): DirectService {
           }
           if (!Number.isFinite(message.size) || message.size <= 0 || message.size > DIRECT_MAX_FILE_BYTES) return;
           if (!/^[a-f0-9]{64}$/.test(message.sha256 ?? '')) return;
-          const used = items.reduce((sum, i) => sum + i.size, 0);
+          const used = inboxUsedBytes(items);
           if (used + message.size > DIRECT_INBOX_QUOTA_BYTES) {
             tx.control(from, { kind: 'direct-result', id: message.id, fromDeviceId: '', ok: false, error: '本机收件箱空间不足' });
+            return;
+          }
+          // 单文件已到 10GB 级别:确认收下之前先量盘,别等到用户点了「接收」才报 ENOSPC。
+          // statfs 失败(平台不支持)时 freeBytesAt 返回 undefined,此时放行 —— 守卫不能比没有更糟。
+          const free = freeBytesAt(tmpDir);
+          if (free !== undefined && free < message.size + DISK_GUARD_MIN_FREE_BYTES) {
+            tx.control(from, {
+              kind: 'direct-result',
+              id: message.id,
+              fromDeviceId: '',
+              ok: false,
+              error: `本机磁盘可用空间不足(需约 ${fmtBytes(message.size + DISK_GUARD_MIN_FREE_BYTES)} 空闲)`,
+            });
             return;
           }
           const batchId = typeof message.batchId === 'string' && isSafeId(message.batchId) ? message.batchId : undefined;
@@ -1445,6 +1566,7 @@ export function createDirectService(deps: DirectServiceDeps): DirectService {
           out.acked = message.seq;
           out.bytesDone = Math.min(out.size, message.seq * DIRECT_CHUNK_BYTES);
           out.lastProgressAt = Date.now();
+          notifyProgress();
           for (const seq of [...out.inflight.keys()]) {
             if (seq < message.seq) out.inflight.delete(seq);
           }

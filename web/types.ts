@@ -160,6 +160,10 @@ export interface DirectData {
   unread?: number;
   /** 本后端是否支持把多个文件打包成一个 zip(缺省 = 不支持,前端不显示勾选)。 */
   zip?: boolean;
+  /** 本后端的单文件上限(字节;缺省 = 旧后端,按 100MB 兜底)。 */
+  maxFileBytes?: number;
+  /** 本后端是否支持「填 daemon 本机路径直接发送」(缺省 = 不支持,前端不显示入口)。 */
+  sendByPath?: boolean;
 }
 
 export interface OfferInfo {

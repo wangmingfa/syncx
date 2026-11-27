@@ -54,6 +54,15 @@ export interface DirectApi {
    * 默认关 —— 接收方通常要的是原始文件,打包只在「几十个小文件想一次性搬走」时更省事。
    */
   zipMode: Ref<boolean>;
+  /** 当前后端的单文件上限(字节):由 status.direct.maxFileBytes 声明,缺省 100MB(旧后端)。 */
+  maxFileBytes: ComputedRef<number>;
+  /** 当前后端是否支持「填 daemon 本机路径直接发送」(缺省 false,不显示入口)。 */
+  sendByPath: ComputedRef<boolean>;
+  /**
+   * 按 daemon 本机路径直接发送(文件归用户,后端只读不删)。
+   * 能读任意文件再外发,调用方必须先过提权门。
+   */
+  sendPath: (deviceIds: string[], path: string) => Promise<boolean>;
   /** 把选择/拖入的文件加入队列;空文件与超限文件跳过并提示。 */
   addFiles: (files: File[]) => void;
   removeFile: (key: string) => void;
@@ -83,8 +92,11 @@ export interface DirectApi {
   formatBytes: (n: number) => string;
 }
 
-/** 与后端 DIRECT_MAX_FILE_BYTES 对齐;前端只做即时拦截,后端仍会复核。 */
-const MAX_FILE_BYTES = 100 * 1024 * 1024;
+/**
+ * 老后端的单文件上限:Rust/MoonBit 与旧版本都还没放开 10GB,也不发 maxFileBytes,
+ * 这时按 100MB 兜底。前端只做即时拦截,后端仍会复核。
+ */
+const FALLBACK_MAX_FILE_BYTES = 100 * 1024 * 1024;
 /** 一次最多 20 个文件:与多设备上限一致,避免误拖整个目录把 daemon 打满。 */
 const MAX_FILES = 20;
 
@@ -111,6 +123,13 @@ export function useDirect(deps: CoreDeps & { copy: (text: string) => Promise<voi
   const sending = ref(false);
   const transfers = computed(() => deps.status.value.direct?.transfers ?? []);
   const unread = computed(() => deps.status.value.direct?.unread ?? 0);
+  /** 单文件上限按后端声明走:Node 已放开到 10GB,旧后端不发该字段则退回 100MB。 */
+  const maxFileBytes = computed(() => {
+    const declared = deps.status.value.direct?.maxFileBytes;
+    return typeof declared === 'number' && declared > 0 ? declared : FALLBACK_MAX_FILE_BYTES;
+  });
+  /** 能力位按后端声明:未声明 = 入口整块不渲染(旧后端与 Rust/MoonBit 现状)。 */
+  const sendByPath = computed(() => deps.status.value.direct?.sendByPath === true);
   let fileSeq = 0;
 
   /**
@@ -178,7 +197,7 @@ export function useDirect(deps: CoreDeps & { copy: (text: string) => Promise<voi
     const before = fileDrafts.value.length;
     let skipped = 0;
     for (const file of files) {
-      if (!file || file.size === 0 || file.size > MAX_FILE_BYTES) {
+      if (!file || file.size === 0 || file.size > maxFileBytes.value) {
         skipped++;
         continue;
       }
@@ -188,7 +207,7 @@ export function useDirect(deps: CoreDeps & { copy: (text: string) => Promise<voi
       }
       fileDrafts.value.push({ key: `f${Date.now()}-${fileSeq++}`, file, state: 'pending' });
     }
-    if (skipped) showToast(`已跳过 ${skipped} 个文件（空文件、超过 100 MB 或超过 ${MAX_FILES} 个）`, 'alert');
+    if (skipped) showToast(`已跳过 ${skipped} 个文件（空文件、超过 ${formatBytes(maxFileBytes.value)} 或超过 ${MAX_FILES} 个）`, 'alert');
     if (fileDrafts.value.length > before) showToast(`已加入 ${fileDrafts.value.length - before} 个文件`);
   }
 
@@ -313,7 +332,7 @@ export function useDirect(deps: CoreDeps & { copy: (text: string) => Promise<voi
 
   /**
    * 打包发送:逐个暂存 → 让 daemon 打成 zip → 一次性投送。
-   * 包体超过单文件上限(100MB)由后端拒绝,这里只如实转述原因。
+   * 包体超过打包上限(后端 ZIP_MAX_BYTES,100MB)由后端拒绝,这里只如实转述原因。
    */
   async function sendAsZip(queue: SendFileItem[], ids: string[], batch: string): Promise<boolean> {
     let staged = 0;
@@ -428,6 +447,44 @@ export function useDirect(deps: CoreDeps & { copy: (text: string) => Promise<voi
     }
   }
 
+  /**
+   * 按 daemon 本机路径直接发送:后端读盘、算指纹、投送,不再经过浏览器上传。
+   * 文件归用户,后端只读不删;对方离线会被后端拒掉(路径随时可能被删/改,不排队)。
+   * 提权门由调用方负责 —— 这个能力能把任意文件读出去。
+   */
+  async function sendPath(deviceIds: string[], path: string): Promise<boolean> {
+    if (sending.value) return false;
+    const ids = [...new Set(deviceIds.filter(Boolean))];
+    const input = path.trim();
+    if (!ids.length || !input) return false;
+    sending.value = true;
+    try {
+      const res = await apiPost<DirectBatchResponse>('/api/direct/send-path', { path: input, deviceIds: ids });
+      const results = outcomes(res, ids);
+      const failed = results.filter((r) => r.error);
+      const sent = results.filter((r) => r.id).length;
+      if (failed.length) {
+        const reason = failed.map((r) => `${r.deviceId}：${r.error}`).join('；');
+        showToast(sent ? `已受理 ${sent} 台，失败：${reason}` : `按路径发送失败：${reason}`, 'alert');
+        // 重试只该打向失败的目标,别把已受理的再发一遍。
+        if (sent) selectedDevices.value = failed.map((r) => r.deviceId);
+        await deps.refreshStatus();
+        return false;
+      }
+      showToast(`已按本机路径发给 ${sent} 台设备，等待对方确认`);
+      sendTarget.value = null;
+      selectedDevices.value = [];
+      await deps.refreshStatus();
+      return true;
+    } catch (e) {
+      showToast(errText(e, '按路径发送失败'), 'alert');
+      await deps.refreshStatus();
+      return false;
+    } finally {
+      sending.value = false;
+    }
+  }
+
   async function reply(id: string, accept: boolean, saveTo?: string): Promise<boolean> {
     try {
       await apiPost('/api/direct/reply', {
@@ -529,22 +586,27 @@ export function useDirect(deps: CoreDeps & { copy: (text: string) => Promise<voi
     }
   }
 
+  /**
+   * 收件箱下载:直接导航到正文地址,由浏览器流式落盘。
+   * 旧做法是 fetch 成 blob 再转 objectURL —— 10GB 的文件会整份读进渲染进程内存。
+   * 先发一次请求只确认条目还在(拿到响应头就取消 body),免得把 404 的 JSON 存成文件。
+   */
   async function downloadItem(item: DirectItem): Promise<void> {
+    const url = `/api/direct/inbox/${encodeURIComponent(item.id)}/content`;
     try {
-      const res = await fetch(`/api/direct/inbox/${encodeURIComponent(item.id)}/content`);
-      if (!res.ok) throw new Error('读取失败');
-      const blob = await res.blob();
-      const url = URL.createObjectURL(blob);
-      const a = document.createElement('a');
-      a.href = url;
-      a.download = item.kind === 'file' ? item.name : `${item.id}.txt`;
-      document.body.appendChild(a);
-      a.click();
-      a.remove();
-      setTimeout(() => URL.revokeObjectURL(url), 0);
+      const res = await fetch(url);
+      if (!res.ok) throw new Error(`下载失败 (${res.status})`);
+      await res.body?.cancel();
     } catch (e) {
       showToast(errText(e, '下载失败'), 'alert');
+      return;
     }
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = item.kind === 'file' ? item.name : `${item.id}.txt`;
+    document.body.appendChild(a);
+    a.click();
+    a.remove();
   }
 
   return {
@@ -561,6 +623,9 @@ export function useDirect(deps: CoreDeps & { copy: (text: string) => Promise<voi
     textDraft,
     fileDrafts,
     zipMode,
+    maxFileBytes,
+    sendByPath,
+    sendPath,
     addFiles,
     removeFile,
     transfers,

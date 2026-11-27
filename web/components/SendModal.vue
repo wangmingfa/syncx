@@ -4,6 +4,8 @@ import { NButton, NCheckbox, NInput } from 'naive-ui';
 import type { DeviceInfo } from '../types';
 import type { DirectApi, SendFileItem } from '../composables/useDirect';
 import { deviceAddrLine, pastedImageName } from '../utils/format';
+import { claimSendDrops } from '../composables/directDropTarget';
+import { ensureElevated } from '../utils/elevation';
 import OsIcon from './OsIcon.vue';
 import ModalShell from './ModalShell.vue';
 
@@ -20,6 +22,8 @@ const emit = defineEmits<{ close: [] }>();
 
 const tab = ref<'text' | 'file'>('text');
 const fileInput = ref<HTMLInputElement | null>(null);
+/** 文件页签里的「本机路径」输入:daemon 直接读盘投送,不经过浏览器上传。 */
+const pathDraft = ref('');
 const targetSummary = computed(() => {
   const ids = props.direct.selectedDevices.value;
   if (ids.length === 1) return ids[0] ?? props.device?.deviceId ?? '';
@@ -71,7 +75,10 @@ watch(
   () => props.open,
   (open) => {
     // 拖文件到设备卡时会预填队列,此时直接落在文件页,省得用户再点一次。
-    if (open) tab.value = props.direct.fileDrafts.value.length ? 'file' : 'text';
+    if (open) {
+      tab.value = props.direct.fileDrafts.value.length ? 'file' : 'text';
+      pathDraft.value = '';
+    }
   },
 );
 
@@ -105,29 +112,98 @@ function pasteImages(data: DataTransfer | null): number {
   return files.length;
 }
 
+/** 本弹窗是不是最上层:提权门/收件箱叠在上面时,粘贴与拖入都不该被这里截走。 */
+function isTopmost(): boolean {
+  const overlays = document.querySelectorAll('.modal-overlay');
+  return !!overlays[overlays.length - 1]?.querySelector('.send-modal');
+}
+
 /**
  * 监听挂在整个文档上,而不是弹窗 DOM:刚打开弹窗时焦点可能还停在设备卡的「发送」按钮上,
- * 这时 Ctrl+V 的 target 在弹窗之外,挂 `.modal` 收不到。只处理「本弹窗是最上层」的情形 ——
- * 收件箱、提权门叠在上面时,那里的粘贴不该被这里截走。
+ * 这时 Ctrl+V 的 target 在弹窗之外,挂 `.modal` 收不到。
  */
 function onPaste(e: ClipboardEvent): void {
   if (props.direct.sending.value) return;
-  const overlays = document.querySelectorAll('.modal-overlay');
-  if (!overlays[overlays.length - 1]?.querySelector('.send-modal')) return;
+  if (!isTopmost()) return;
   if (!pasteImages(e.clipboardData)) return;
   // 已经接住了:别让浏览器再往 textarea 里塞占位字符。
   e.preventDefault();
 }
 
+/**
+ * 弹窗打开期间整页拖入的**文件**都归这里:加入发送队列并切到「文件」页签。
+ * 页面级升级遮罩靠 claimSendDrops 让路 —— 否则拖个文件进来先弹「仅支持 .tgz 安装包」,
+ * 松手又什么都不做,和「这个弹窗就是用来发文件的」预期正好相反。
+ * 与粘贴同理挂在 window 上:焦点在弹窗内或弹窗外都接得住。
+ */
+const dropActive = ref(false);
+
+function isFileDrag(e: DragEvent): boolean {
+  return Array.from(e.dataTransfer?.types ?? []).includes('Files');
+}
+
+function onWindowDragOver(e: DragEvent): void {
+  if (!isFileDrag(e)) return;
+  // 必须 preventDefault:不认领的话浏览器判定这里不接受投放,drop 根本不会派发
+  e.preventDefault();
+  const ok = !props.direct.sending.value && isTopmost();
+  dropActive.value = ok;
+  if (e.dataTransfer) e.dataTransfer.dropEffect = ok ? 'copy' : 'none';
+}
+
+function onWindowDrop(e: DragEvent): void {
+  if (!isFileDrag(e)) return;
+  e.preventDefault();
+  dropActive.value = false;
+  if (props.direct.sending.value) return;
+  // 提权门叠在上面时这一投不归这里(但依旧 preventDefault,别让浏览器直接打开文件)。
+  if (!isTopmost()) return;
+  const files = Array.from(e.dataTransfer?.files ?? []);
+  if (!files.length) return;
+  props.direct.addFiles(files);
+  tab.value = 'file';
+}
+
+function onWindowDragLeave(e: DragEvent): void {
+  // relatedTarget 还在页面内 = 只是在子元素之间挪动,别把提示收起
+  if (e.relatedTarget) return;
+  dropActive.value = false;
+}
+
+function clearDrag(): void {
+  dropActive.value = false;
+}
+
+function attachWindowHooks(): void {
+  document.addEventListener('paste', onPaste);
+  window.addEventListener('dragover', onWindowDragOver);
+  window.addEventListener('drop', onWindowDrop);
+  window.addEventListener('dragleave', onWindowDragLeave);
+  window.addEventListener('dragend', clearDrag);
+}
+
+function detachWindowHooks(): void {
+  document.removeEventListener('paste', onPaste);
+  window.removeEventListener('dragover', onWindowDragOver);
+  window.removeEventListener('drop', onWindowDrop);
+  window.removeEventListener('dragleave', onWindowDragLeave);
+  window.removeEventListener('dragend', clearDrag);
+  clearDrag();
+}
+
 watch(
   () => props.open && !!props.device,
   (visible) => {
-    if (visible) document.addEventListener('paste', onPaste);
-    else document.removeEventListener('paste', onPaste);
+    claimSendDrops(visible);
+    if (visible) attachWindowHooks();
+    else detachWindowHooks();
   },
   { immediate: true },
 );
-onBeforeUnmount(() => document.removeEventListener('paste', onPaste));
+onBeforeUnmount(() => {
+  claimSendDrops(false);
+  detachWindowHooks();
+});
 
 function submit(): void {
   if (props.direct.sending.value) return;
@@ -135,6 +211,20 @@ function submit(): void {
   if (!ids.length) return;
   if (tab.value === 'text') void props.direct.sendText(ids);
   else void props.direct.sendFile(ids);
+}
+
+/**
+ * 按路径发送:路径指 daemon 所在机器,后端会读它 —— 这是「把任意文件读出去」的
+ * 能力,和另存到任意目录同一条提权门。验证通过后自动接续本次发送。
+ */
+function submitPath(): void {
+  if (props.direct.sending.value) return;
+  const path = pathDraft.value.trim();
+  const ids = [...props.direct.selectedDevices.value];
+  if (!path || !ids.length) return;
+  void ensureElevated('读取本机文件并按路径直发', () => {
+    void props.direct.sendPath(ids, path);
+  });
 }
 </script>
 
@@ -148,6 +238,8 @@ function submit(): void {
     :close-disabled="direct.sending.value"
     @close="emit('close')"
   >
+    <!-- 拖动中的提示:说明这一投会进发送队列,不是升级安装包 -->
+    <div v-if="dropActive" class="send-drop-hint">松开鼠标，把文件加入发送队列</div>
     <div class="send-target">对方收到后会进入它的「收件箱」，不会写进任何共享目录；离线设备会先在本机排队，上线后自动发送（24 小时内有效）。</div>
     <div class="send-targets">
       <div class="send-targets-head">
@@ -208,7 +300,7 @@ function submit(): void {
     </div>
 
     <div v-else class="send-pane">
-      <span class="field__label">选择文件（可多选，也可把文件拖到设备卡上）</span>
+      <span class="field__label">选择文件（可多选；也可以把文件直接拖进这个窗口）</span>
       <input ref="fileInput" class="send-file-input" type="file" multiple :disabled="direct.sending.value" @change="pickFile" />
       <n-button quaternary :disabled="direct.sending.value" @click="fileInput?.click()">选择文件…</n-button>
       <div v-if="direct.fileDrafts.value.length" class="send-file-list">
@@ -235,7 +327,24 @@ function submit(): void {
         :disabled="direct.sending.value"
       >打包成一个压缩包发送</n-checkbox>
       <p v-if="zipSupported && direct.zipMode.value && direct.fileDrafts.value.length > 1" class="form-hint">对方只收到一个 .zip；只打包不压缩，包体上限 100 MB。</p>
-      <p class="form-hint">单文件最大 100 MB、一次最多 20 个；也可以直接粘贴截图。对方需要点「接收」才会开始传输，文件落在其收件箱而非共享目录。</p>
+      <p class="form-hint">单文件最大 {{ direct.formatBytes(direct.maxFileBytes.value) }}、一次最多 20 个；也可以直接粘贴截图。对方需要点「接收」才会开始传输，文件落在其收件箱而非共享目录。</p>
+      <!-- 大文件不必先上传:daemon 直接读本机路径。能力按后端声明出现;
+           读任意文件属敏感操作,发送前过一次提权门。 -->
+      <div v-if="direct.sendByPath.value" class="send-path">
+        <span class="field__label">或填 daemon 所在机器的文件路径，直接读盘发送</span>
+        <div class="send-path__row">
+          <div class="send-path__input">
+            <n-input
+              v-model:value="pathDraft"
+              placeholder="/Users/me/big.iso（绝对路径）"
+              :disabled="direct.sending.value"
+              @keyup.enter="submitPath"
+            />
+          </div>
+          <n-button :disabled="direct.sending.value || !pathDraft.trim() || !direct.selectedDevices.value.length" @click="submitPath">按路径发送</n-button>
+        </div>
+        <p class="form-hint">路径指运行 daemon 的这台机器（不一定是你要发送的那台）。文件只读不改、不占收件箱磁盘；对方必须在线，离线不排队。</p>
+      </div>
     </div>
 
     <template #footer>
@@ -248,6 +357,20 @@ function submit(): void {
 </template>
 
 <style scoped>
+/*
+ * 拖动提示:虚线框压在内容顶部,颜色随主题走。
+ * 发送中不亮(dropActive 为 false),此时 dropEffect 是 none,拖进来也不会入队。
+ */
+.send-drop-hint {
+  margin-bottom: 12px;
+  padding: 10px 12px;
+  border: 1px dashed var(--accent, #4f7cff);
+  border-radius: 8px;
+  background: var(--accent-soft, rgba(79, 124, 255, 0.1));
+  color: var(--accent, #4f7cff);
+  font-size: 12px;
+  text-align: center;
+}
 .send-target {
   margin-bottom: 12px;
   color: var(--muted-strong);
@@ -369,6 +492,23 @@ function submit(): void {
 .send-zip {
   margin-top: 6px;
   font-size: 12px;
+}
+/* 按路径发送:与「选文件」是同一件事的两种入口,用虚线隔开,不抢主流程的视觉重量。 */
+.send-path {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding-top: 10px;
+  border-top: 1px dashed var(--border);
+}
+.send-path__row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+.send-path__input {
+  flex: 1 1 auto;
+  min-width: 0;
 }
 .send-file-row {
   display: flex;
