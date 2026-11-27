@@ -4396,7 +4396,23 @@ export class SyncSessionManager {
     // 连接方在握手 kx 中广播了监听端口:结合源 IP 拼出反向地址并交给 startSyncSession
     // 记录到 outboundPeerUrls,使本机也能主动重连对端(只填一方地址即可双向重连)
     const learnedUrl = learnPeerUrl(socket, listenPort);
-    if (learnedUrl && remoteDeviceId !== this.identity.deviceId) {
+    // 用户在 knownDevices 里配的地址是唯一可信的可达地址:kx 宣告的只是对端**自己的**
+    // 监听端口,NAT/端口转发后的对端宣告的是内部端口(2026-11-27 fedora 虚拟机实测:
+    // 局域网只能经宿主 12222 转发到达,对端宣告的 22000 外面不通)。拿它覆盖配置地址
+    // 会让重连拨向不可达端口,还会把这条不可达地址写进 config.peers。
+    const configuredAddress =
+      remoteDeviceId === this.identity.deviceId
+        ? undefined
+        : loadConfig(this.configPath).knownDevices.find((d) => d.id === remoteDeviceId)?.address;
+    let sessionUrl = learnedUrl;
+    if (configuredAddress) {
+      sessionUrl = configuredAddress;
+      if (learnedUrl && learnedUrl !== configuredAddress) {
+        this.logger.info(
+          `keep configured address ${configuredAddress} for ${remoteDeviceId}; ignored announced ${learnedUrl} (reverse discovery)`,
+        );
+      }
+    } else if (learnedUrl && remoteDeviceId !== this.identity.deviceId) {
       // 自拨防护:对端报的可达地址其实就是本机自己的 peer 端口(同一台机同一实例 —— 例如
       // 上一版把自拨学到的地址写进了 peers,之后每次启动都自己连自己)。这种地址不写配置,
       // 免得 peers 里多一条永远自指的条目。同机**不同端口**的另一实例不受影响(见 isSelfPeerUrl)。
@@ -4422,7 +4438,7 @@ export class SyncSessionManager {
         this.logger.info(`learned peer ${remoteDeviceId} reachable at ${learnedUrl} (reverse discovery)`);
       }
     }
-    this.startSyncSession(socket, remoteDeviceId, key, learnedUrl, undefined, caps);
+    this.startSyncSession(socket, remoteDeviceId, key, sessionUrl, undefined, caps);
   }
 
   /* ==================== 目录清单宣告与状态查询 ==================== */

@@ -118,12 +118,14 @@ function startDaemon(
   peers: string[],
   peerDeviceIds: string[],
   extraEnv: Record<string, string> = {},
+  extraConfig: Record<string, unknown> = {},
 ): ChildProcess {
   writeFileSync(
     setup.configPath,
     JSON.stringify({
       sharedFolders: [{ id: 'main', path: setup.share, devices: peerDeviceIds }],
       peers,
+      ...extraConfig,
     }),
   );
 
@@ -1066,6 +1068,53 @@ describe('learned peer address bookkeeping (stale replacement + self identity)',
       await waitFor(() => logOf(a).includes(`dropped stale ws://127.0.0.1:${b1.peerPort}`));
       await waitFor(() => peersOf(a).some((p) => p.endsWith(`:${b2.peerPort}`)));
       expect(peersOf(a).some((p) => p.endsWith(`:${b1.peerPort}`))).toBe(false);
+
+      c2.kill('SIGTERM');
+      await stopChildren();
+      rmDir(a.dir);
+      rmDir(b1.dir);
+      rmDir(b2.dir);
+    },
+    60000,
+  );
+
+  it(
+    'keeps the user-configured address when an inbound peer announces a different port (NAT/port-forward)',
+    async () => {
+      // 场景:对端在 NAT 后面,局域网只能经宿主端口转发到达,对端在 kx 里宣告的却是它
+      // 自己的监听端口(内部端口)。宣告值不能覆盖用户在 knownDevices 里配的地址,也不能
+      // 写进 peers —— 否则重启/重连会去拨一个外面不通的端口(2026-11-27 fedora 虚拟机实测:
+      // 主拨 12222,入站学到 22000)。
+      const b1 = await setupDaemon('b1', []);
+      const b2 = await setupDaemon('b2', []);
+      const a = await setupDaemon('a', []);
+      // 同一身份换端口 = 同一台设备从「另一个源端口」入站(模拟对端宣告内部端口)
+      copyFileSync(join(b1.dir, 'device.key'), join(b2.dir, 'device.key'));
+      const configured = `ws://127.0.0.1:${b1.peerPort}`;
+
+      // 先起 b1,让 a 启动时的主拨一定能成功(配置地址在用)
+      const c1 = startDaemon(b1, [`ws://127.0.0.1:${a.peerPort}`], [a.deviceId]);
+      await waitForDaemonReady(b1);
+      startDaemon(a, [configured], [b1.deviceId], {}, {
+        knownDevices: [{ id: b1.deviceId, address: configured }],
+      });
+      await waitForDaemonReady(a);
+      await waitFor(() => logOf(a).includes(`connected to configured peer ${b1.deviceId}`));
+
+      c1.kill('SIGTERM');
+      await new Promise((r) => c1.once('exit', () => r(null)));
+
+      // 同身份对端换端口入站:宣告地址与配置地址不同 → 配置优先,宣告值既不采纳也不落盘
+      const c2 = startDaemon(b2, [`ws://127.0.0.1:${a.peerPort}`], [a.deviceId]);
+      await waitFor(() => logOf(a).includes('keep configured address'));
+      expect(peersOf(a)).toEqual([configured]);
+      expect(peersOf(a).some((p) => p.endsWith(`:${b2.peerPort}`))).toBe(false);
+      const known = (
+        JSON.parse(readFileSync(a.configPath, 'utf8')) as {
+          knownDevices: Array<{ id: string; address?: string }>;
+        }
+      ).knownDevices;
+      expect(known.find((d) => d.id === b1.deviceId)?.address).toBe(configured);
 
       c2.kill('SIGTERM');
       await stopChildren();

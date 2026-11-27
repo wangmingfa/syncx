@@ -4,6 +4,7 @@ import { NButton, NCheckbox, NCheckboxGroup, NSelect } from 'naive-ui';
 import type { ConflictPolicy, DeviceInfo, FolderInfo, GitSyncMode, Schedule } from '../types';
 import ModalShell from './ModalShell.vue';
 import ScheduleRuleEditor from './ScheduleRuleEditor.vue';
+import { deviceAddrLine } from '../utils/format';
 
 const props = defineProps<{
   open: boolean;
@@ -59,14 +60,6 @@ watch(
 function onSave(): void {
   if (props.busy || !props.folder) return;
   emit('save', { path: path.value, devices: [...selected.value], gitignore: gitignore.value, schedule: schedule.value ?? null, gitSync: gitSync.value, conflictPolicy: conflictPolicy.value, onDemand: onDemand.value, gitStripCoAuthored: gitStripCoAuthored.value });
-}
-
-// 地址(host:port)与主机名合并成一行,在设备 ID 之外提供可辨认的信息;两者都可能缺失。
-// 在线用会话地址,离线回退到持久化地址,保证离线的设备也能看到 IP:端口。
-function deviceAddrLine(p: DeviceInfo): string {
-  const raw = p.url ?? p.address;
-  const addr = raw ? (raw.startsWith('ws://') ? raw.slice(5) : raw) : '';
-  return [addr, p.hostname].filter(Boolean).join(' · ');
 }
 </script>
 
