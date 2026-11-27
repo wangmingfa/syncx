@@ -3,7 +3,8 @@ import { computed, onBeforeUnmount, ref, watch } from 'vue';
 import { NButton, NCheckbox, NInput } from 'naive-ui';
 import type { DeviceInfo } from '../types';
 import type { DirectApi, SendFileItem } from '../composables/useDirect';
-import { pastedImageName } from '../utils/format';
+import { deviceAddrLine, pastedImageName } from '../utils/format';
+import OsIcon from './OsIcon.vue';
 import ModalShell from './ModalShell.vue';
 
 /** 给在线设备直发文本或文件:两页签共用底部动作区,避免两个弹窗反复开关。 */
@@ -165,8 +166,12 @@ function submit(): void {
           class="send-target-row"
           @update:checked="direct.toggleTarget(d.deviceId)"
         >
+          <!-- 每行尽量答全「发给谁、往哪儿发」:系统图标认平台,地址行与设备卡同源
+               (deviceAddrLine:配置地址优先、回退会话地址,再拼主机名)。旧版对端没有
+               platform / 地址时对应块整块不渲染,不留空位。 -->
+          <OsIcon v-if="d.platform" :platform="d.platform" :offline="!d.online" :size="13" class="send-target-os" />
           <span class="send-target-id">{{ d.deviceId }}</span>
-          <span v-if="d.hostname" class="send-target-host">{{ d.hostname }}</span>
+          <span v-if="deviceAddrLine(d)" class="send-target-addr" :title="deviceAddrLine(d)">{{ deviceAddrLine(d) }}</span>
           <span v-if="!d.online" class="send-target-offline">离线·排队</span>
         </n-checkbox>
       </div>
@@ -290,10 +295,18 @@ function submit(): void {
   font-family: var(--mono, ui-monospace, monospace);
   font-size: 11px;
 }
-.send-target-host {
+/* 系统图标跟在勾选框后面:离线自动去色减淡(OsIcon 内建),与设备卡同语义 */
+.send-target-os {
+  margin-left: 4px;
+}
+.send-target-addr {
   margin-left: 6px;
+  /* 长地址优先省略,把行宽留给 deviceId 与「离线·排队」标记 */
+  flex: 0 1 auto;
+  min-width: 0;
   overflow: hidden;
   color: var(--muted-strong);
+  font-family: var(--mono, ui-monospace, monospace);
   font-size: 11px;
   text-overflow: ellipsis;
   white-space: nowrap;
